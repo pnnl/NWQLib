@@ -1,0 +1,131 @@
+# NWQLib repository ignore rules
+#
+# Keep source code, docs, examples, tests, notebooks, and intentional
+# scientific reference data trackable. Ignore local environments, caches,
+# build products, credentials, and generated run artifacts.
+
+# Paper copies are kept outside the repository. Public citations live in docs/references.md.
+docs/References/
+
+## Operating system files
+.DS_Store
+.DS_Store?
+._*
+.Spotlight-V100
+.Trashes
+Thumbs.db
+ehthumbs.db
+Desktop.ini
+
+## Editors and IDEs
+.idea/
+.vscode/*
+!.vscode/extensions.json
+!.vscode/launch.json
+!.vscode/tasks.json
+*.swp
+*.swo
+*~
+
+## Python bytecode and caches
+__pycache__/
+*.py[cod]
+*$py.class
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+.pyre/
+.hypothesis/
+.nox/
+.tox/
+
+## Coverage and profiling
+.coverage
+.coverage.*
+coverage.xml
+htmlcov/
+*.prof
+*.profraw
+
+## Packaging and build outputs
+build/
+dist/
+*.egg-info/
+.eggs/
+pip-wheel-metadata/
+wheelhouse/
+site/
+docs/_build/
+
+## Local Python and Conda environments
+.venv/
+venv/
+env/
+ENV/
+.envrc
+.conda/
+conda-meta/
+
+## Dependency and tool caches
+.cache/
+.pip-cache/
+.uv-cache/
+.jupyter_cache/
+__pypackages__/
+
+## Jupyter and notebook temporary files
+.ipynb_checkpoints/
+*/.ipynb_checkpoints/
+**/.ipynb_checkpoints/
+.virtual_documents/
+
+## Local configuration, secrets, and cloud credentials
+.env
+.env.*
+!.env.example
+!.env.template
+*.pem
+*.key
+*.token
+*.credential
+*.credentials
+qiskit-ibm.json
+.qiskit/
+.qiskitrc
+
+## Logs and scheduler output
+*.log
+*.out
+*.err
+slurm-*.out
+slurm-*.err
+
+## Local generated artifacts
+/artifacts/
+/outputs/
+/results/
+/runs/
+/scratch/
+/tmp/
+/tmp_*/
+
+## Scientific scratch files
+# Do not ignore scientific data formats globally. Files such as .npy, .npz,
+# .mat, .qasm, .json, and .csv may be intentional reference or provenance data.
+*.tmp
+*.bak
+
+## MATLAB and native-extension byproducts
+*.asv
+*.m~
+*.mex*
+slprj/
+
+## Compiled/native build byproducts
+*.so
+*.dylib
+*.dll
+*.o
+*.a
+*.gcda
+*.gcno
