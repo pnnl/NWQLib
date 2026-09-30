@@ -77,9 +77,9 @@ The [Nexus guide](docs/nexus.md#costs-timeout-and-qualification) documents its p
 
 For questions, bug reports or collaboration, contact Muqing Zheng (muqing.zheng@pnnl.gov).
 
-\* Corresponding author. Affiliations are those at the time of contribution.
+Affiliations are those at the time of contribution.
 
- - Muqing Zheng\*, Pacific Northwest National Laboratory
+ - Muqing Zheng, Pacific Northwest National Laboratory
  - Chenxu Liu, Pacific Northwest National Laboratory
  - Zhixin Song, Pacific Northwest National Laboratory and Georgia Institute of Technology
  - Zeguan Wu, Pacific Northwest National Laboratory and University of Pittsburgh
