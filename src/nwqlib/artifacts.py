@@ -313,28 +313,37 @@ def probability_readout(values, indices=None, *, width):
 
 
 class ArtifactManifest(Record):
-    """Exact data identity and its producing acquisition.
+    """The description of a saved array: what it is, where it came from and its content hash.
 
-    acquisition names the (run, attempt, acquisition, slot) that produced the
-    array. A manifest cannot provide an array. A readout array's manifest has
-    the preparation receipt as its construction and the readout declaration
-    as its producer.
+    A Result names its arrays by their manifests, for example
+    `LCHSAnalysis.artifact`, and `result.data.artifact(manifest)` returns
+    the array's handle. A manifest gives no access to the array itself. The
+    manifest of a readout array names the preparation record as its
+    construction and the readout declaration in `producer_id`. The fields
+    below are read-only.
 
     Attributes:
-        plan_id: Original selected Plan identity.
-        realization_id: Actual experiment-argument realization identity.
-        construction_id: Selected construction producing the output, or for
-            a readout array the preparation receipt of its acquisition.
-        producer_id: Actual kernel or readout declaration.
-        output: Requested array shape, basis and physical/phase frame
-            (``ArrayOutput``), or the readout-array component
-            (``ReadoutArray``).
-        acquisition: Original (run, attempt, acquisition, slot) that produced the array.
-        source: Scientific/software provenance of the producer.
-        digest: Digest of the exact published numerical bytes, not a proof of scientific correctness.
-        data_bytes: Actual payload bytes, matching the output shape and dtype.
-        encoding: complex128-le-c, float64-le-c or uint64-le-c byte ordering
-            used for persistence, the one that the output dtype selects.
+        plan_id: Content hash of the Plan.
+        realization_id: Content hash of the concrete parameter values of the
+            experiment.
+        construction_id: Content hash of the construction that produced the
+            output, or for a readout array the preparation record of its
+            measurement.
+        producer_id: Content hash of the host computation or readout
+            declaration that produced the array.
+        output: The array's shape, basis and normalization and phase
+            convention (`ArrayOutput`), or the component of a readout array
+            (`ReadoutArray`).
+        acquisition: The `(run, attempt, measurement, slot)` that produced
+            the array.
+        source: The code and method that produced the array (`Source`).
+        digest: Content hash of the saved numerical bytes. It does not prove
+            that the values are scientifically correct.
+        data_bytes: Size of the array data in bytes, which matches the
+            output's shape and dtype.
+        encoding: Byte order of the saved data, `"complex128-le-c"`,
+            `"float64-le-c"` or `"uint64-le-c"`, as the output's dtype
+            selects.
     """
 
     schema_version: Literal[4] = 4
@@ -374,13 +383,18 @@ class UnavailableOutput(Record):
 
 @dataclass(frozen=True, eq=False, init=False, slots=True)
 class ArtifactHandle:
-    """An immutable array and its provenance; descriptions alone give no access.
+    """A saved array with its manifest.
 
-    A handle of a restored inventory holds its store and reads its array
-    through the store on first access (``ArtifactStore.get``).
+    `result.data.artifact(manifest)`, `run.hydrate(manifest)` and
+    `result.data.artifacts` give handles, and `handle.array` reads the
+    values as a read-only NumPy array. A handle cannot be built directly. A
+    handle of a reopened Run or loaded Result reads its array from the saved
+    data on first access. The fields below are read-only.
 
     Attributes:
-        manifest: Immutable payload identity, output frame and original acquisition.
+        manifest: The array's
+            [`ArtifactManifest`][nwqlib.artifacts.ArtifactManifest]: content
+            hash, output convention and the measurement that produced it.
     """
 
     manifest: ArtifactManifest
@@ -392,7 +406,14 @@ class ArtifactHandle:
 
     @property
     def array(self):
-        """Return the same read-only data without copying or computation, hydrating it once from its store."""
+        """The array, as a read-only NumPy array.
+
+        Reading it copies and computes nothing. A saved array is read once
+        from the saved data, at the first access.
+
+        Raises:
+            ValueError: If the array data is not available.
+        """
         if self._array is None and self._store is not None:
             self._store.get(self.manifest)
         if self._array is None:
@@ -401,7 +422,7 @@ class ArtifactHandle:
 
     @property
     def available(self):
-        """Whether the array is held or its store can read it, without reading it."""
+        """Whether the array's values can be read, checked without reading them."""
         return self._array is not None or (self._store is not None and self._store.available(self.manifest))
 
 

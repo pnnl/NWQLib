@@ -27,14 +27,21 @@ from nwqlib.subroutines.qiskit_compat import controlled
 
 @dataclass(frozen=True, kw_only=True)
 class CoherentQPECircuit:
-    """Coherent phase-estimation circuit without measurement.
+    """A coherent phase-estimation circuit, without measurement, and its register sizes.
 
-    Args:
-        circuit: Circuit on ``phase`` then ``system`` registers.
-        num_phase_qubits: Number of phase-estimation qubits.
+    [`build_coherent_qpe_circuit`][nwqlib.subroutines.qpe.coherent.build_coherent_qpe_circuit]
+    returns it. The circuit is `circuit`. The fields below are read-only.
+
+    Attributes:
+        circuit: Circuit on the `phase` register followed by the `system`
+            register.
+        num_phase_qubits: Number m of phase-estimation qubits.
         num_system_qubits: Number of target-system qubits.
-        powers: Controlled unitary powers used in the QPE ladder.
-        bit_order: Integer convention for the phase register.
+        powers: Exponents `2**q` of the controlled powers `U^(2**q)`, in
+            phase-qubit order `q = 0, ..., m - 1`.
+        bit_order: Integer convention for the phase register,
+            `"little_endian_phase_integer"`: phase qubit 0 holds the least
+            significant bit.
     """
 
     circuit: QuantumCircuit
@@ -66,7 +73,7 @@ def build_coherent_qpe_circuit(
     max_work: int = 1_000_000_000,
     max_bytes: int = DEFAULT_MAX_BYTES,
 ) -> CoherentQPECircuit:
-    """Build coherent QPE for a dense unitary target.
+    """Build the coherent phase-estimation circuit of a dense unitary, without measurement.
 
     The circuit is the QFT-based phase estimation of Cleve, Ekert,
     Macchiavello and Mosca, "Quantum algorithms revisited", Proc. R. Soc.
@@ -103,40 +110,65 @@ def build_coherent_qpe_circuit(
 
     Powers are formed by repeated squaring of the dense matrix, m - 1
     products in total. The 1e-8 unitarity check is an absolute input
-    admission tolerance, not an accuracy statement. Each squaring can double
+    tolerance, not an accuracy statement. Each squaring can double
     the unitarity defect, so the powers skip Qiskit's own constructor check
     of ``U^dagger U`` (``numpy.allclose`` with the identity, atol 1e-8 and
     rtol 1e-5), which would reject high powers of an admitted input.
-    ``qiskit_compat.controlled`` synthesizes the unitary polar factor of
-    each controlled power to binary64 rounding from its controlled matrix on
-    n + 1 qubits, for n system qubits, so the realized power differs from
-    the computed one by the order of its unitarity defect. That takes at
-    most ``(25/96) 4**(n+1) - 2**(n+1) + 4/3`` CX for n >= 2 and order
-    ``8**(n+1)`` classical arithmetic per power.
+    The unitary polar factor of each controlled power is synthesized to
+    binary64 rounding from its controlled matrix on n + 1 qubits, for n
+    system qubits (see
+    [Controlled dense unitaries](../../development/dense_synthesis.md#controlled-dense-unitaries)),
+    so the realized power differs from the computed one by the order of its
+    unitarity defect. That takes at most
+    `(25/96) 4**(n+1) - 2**(n+1) + 4/3` CX for n >= 2 and order
+    `8**(n+1)` classical arithmetic per power.
 
     Before the unitarity check, the work of the check and the m - 1
-    squarings, D**3 units each for dimension D, plus m times the work of
-    ``_dense_synthesis.controlled_synthesis_size`` on n + 1 qubits is
-    compared with ``max_work``. The bytes of six D-square complex128
-    arrays, as for the dense QPE powers of ``algorithms/qpe/powers.py``,
-    plus the working bytes of one synthesis and the kept bytes of all m
-    are compared with ``max_bytes``. The default work limit is the QPE
-    Methods' ``max_work``.
+    squarings, `D**3` units each for dimension D, plus m times the work of
+    one exact controlled synthesis on n + 1 qubits is compared with
+    `max_work`. The bytes of six D-square complex128 arrays, as for the
+    dense powers of the QPE Methods, plus the working bytes of one
+    synthesis and the kept bytes of all m are compared with `max_bytes`.
+    The default work limit is the QPE Methods' `max_work`.
 
     Args:
-        unitary: Dense unitary matrix.
-        num_phase_qubits: Number of qubits used for phase estimation.
-        name: Circuit name.
-        max_work: Limit on the work of the unitarity check, the powers and
-            their exact controlled synthesis.
-        max_bytes: Limit on the bytes of the power arrays and of the
-            syntheses.
+        unitary (array_like): Dense unitary matrix of power-of-two
+            dimension D, unitary to the absolute tolerance 1e-8.
+        num_phase_qubits (int): Number m of qubits used for phase
+            estimation.
+        name (str): Default `"coherent_qpe"`. Circuit name.
+        max_work (int): Default `1_000_000_000`. Limit on the work of the
+            unitarity check, the powers and their exact controlled
+            synthesis.
+        max_bytes (int): Default 10 GB (decimal, `10_000_000_000` bytes).
+            Limit on the bytes of the power arrays and of the syntheses.
 
     Returns:
-        CoherentQPECircuit with no measurements.
+        qpe (CoherentQPECircuit): The circuit, with no measurements, in
+            `qpe.circuit`.
 
     Raises:
-        ValueError: If dimensions or qubit counts are invalid.
+        ValueError: If dimensions or qubit counts are invalid, if the
+            matrix is not unitary to 1e-8, or if the powers and their
+            synthesis exceed `max_work` or `max_bytes`.
+
+    Examples:
+        With `U = diag(1, exp(2 pi i 5/8))` and the system qubit in the
+        eigenvector `|1>`, three phase qubits read the integer
+        `2**3 * 5/8 = 5` with probability 1:
+
+        >>> import numpy as np
+        >>> from qiskit import QuantumCircuit
+        >>> from qiskit.quantum_info import Statevector
+        >>> from nwqlib.subroutines.qpe import build_coherent_qpe_circuit
+        >>> U = np.diag([1.0, np.exp(2j * np.pi * 5 / 8)])
+        >>> qpe = build_coherent_qpe_circuit(U, num_phase_qubits=3)
+        >>> circuit = QuantumCircuit(4)
+        >>> _ = circuit.x(3)
+        >>> circuit = circuit.compose(qpe.circuit)
+        >>> probabilities = Statevector(circuit).probabilities([0, 1, 2])
+        >>> print(int(np.argmax(probabilities)), round(probabilities.max(), 10))
+        5 1.0
     """
 
     num_phase_qubits = integer(num_phase_qubits, "num_phase_qubits", 1)

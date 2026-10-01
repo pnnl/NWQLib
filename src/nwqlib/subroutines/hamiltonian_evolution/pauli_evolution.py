@@ -81,14 +81,14 @@ def _mcphase_cx(support_size: int) -> int:
 
 
 def structured_number_projector_provider(support_size: int) -> dict[str, Any]:
-    """Resolve the lowest-cost kept exact nonzero structured-phase provider.
+    """Choose the cheaper of two exact circuits for a number-projector phase on s qubits, and return its CX count.
 
-    The diagonal provider is ``append_control_diagonal_phases`` with one
+    The diagonal provider is NWQLib's phase-diagonal synthesis with one
     nonzero phase, ``2**s - 2`` CX on s qubits by the Theorem 7 recursion of
     Shende, Bullock and Markov, quant-ph/0406176v5 (p. 10), whose
     multiplexed Rz with k select bits costs ``2**k`` CX by the count after
-    their Theorem 8 (p. 11). The other provider is Qiskit's MCPhase
-    (``_mcphase_cx``). The cheaper one is
+    their Theorem 8 (p. 11). The other provider is Qiskit's MCPhase, whose
+    CX count follows the gate's definition in the pinned Qiskit version. The cheaper one is
     selected, and a tie selects MCPhase. The diagonal is cheaper for s = 4
     to 7 (14 against 20 CX at s = 4), and MCPhase is cheaper again from
     s = 8 (220 against 254 CX), because its count grows quadratically in s
@@ -132,7 +132,8 @@ def wrapped_projector_phase(angle: float, support_size: int, cache: dict | None 
     """Return the absolute wrapped phase of a projector on support_size qubits.
 
     With s=support_size, the calculation uses the same 2**s phase array and
-    NumPy operations as native projector lowering: phases=(0,...,0,-angle), followed by
+    NumPy operations as the circuit construction of
+    `append_number_projector_phase`: phases=(0,...,0,-angle), followed by
     numpy.angle(numpy.exp(1j*phases)). The final entry is reproduced bit for
     bit. Range selection accepts an exactly zero wrapped phase and requires
     a nonzero phase to remain normal after its power-of-two scaling.
@@ -157,7 +158,7 @@ def wrapped_projector_phase(angle: float, support_size: int, cache: dict | None 
     NumPy bookkeeping. Potential compilation admits this as a successive phase
     and clears its cache after step compilation. The one-hot rotation census
     admits its own cache and miss beside its source records, accumulating
-    population and caller-held buffers through resources._admitted_onehot_population.
+    population and caller-held buffers through the QHD one-hot resource count.
     """
     import numpy as np
 
@@ -285,13 +286,24 @@ def apply_pauli_rotation(
     *,
     control: int | None = None,
 ) -> None:
-    """Apply ``exp(-i angle * P / 2)``, optionally controlled on a separate qubit.
+    """Append the Pauli rotation `exp(-i angle P / 2)` to a circuit, optionally controlled on a separate qubit.
 
     The general case maps each X to Z with H and each Y to Z with S^dagger
     then H, collects the parity of the support onto its last qubit with a CX
     ladder, applies RZ(angle), and undoes the ladder and the basis change.
-    RZ(angle) = exp(-i*angle*Z/2) carries no extra global phase, so replacing
+    `RZ(angle) = exp(-i*angle*Z/2)` carries no extra global phase, so replacing
     it by CRZ gives exactly the controlled rotation.
+
+    Args:
+        circuit (QuantumCircuit): Circuit to append to, in place.
+        pauli_label (str): Compact label of `P`, such as `"x0z2"`.
+        angle (float): Rotation angle.
+        control (int | None): Default `None`. Index of a control qubit that
+            is not in the support of `P`.
+
+    Raises:
+        ValueError: If the control qubit is in the support or outside the
+            circuit.
     """
 
     ops = parse_pauli_label(pauli_label)
@@ -379,7 +391,26 @@ def append_pauli_evolution_block(
     evolution_synthesis: PauliEvolutionSynthesis = "lie_trotter",
     evolution_synthesis_options: Mapping[str, Any] | None = None,
 ) -> None:
-    """Append one Pauli-evolution block to ``circuit``."""
+    """Append the circuit of one Pauli-evolution block to `circuit`, in place.
+
+    A `"number_projector"` block uses its exact phase circuit, an exact
+    `c (XX + YY)` `"kinetic"` block one `XXPlusYYGate`, and any other block
+    one Qiskit `PauliEvolutionGate` on all qubits of the circuit.
+
+    Args:
+        circuit (QuantumCircuit): Circuit to append to.
+        block (PauliEvolutionBlock | Mapping): The block, or a mapping with
+            the same fields.
+        evolution_synthesis (str): Default `"lie_trotter"`. Product formula
+            of the `PauliEvolutionGate`: `"lie_trotter"` (Qiskit
+            `LieTrotter`) or `"suzuki_trotter"` (Qiskit `SuzukiTrotter`).
+        evolution_synthesis_options (Mapping | None): Default `None`.
+            Keyword arguments passed to that Qiskit synthesis class.
+
+    Raises:
+        ValueError: If a `"number_projector"` block lacks `support` or
+            `angle`, or the synthesis name is not supported.
+    """
 
     from qiskit.circuit.library import PauliEvolutionGate, XXPlusYYGate
 
@@ -415,7 +446,41 @@ def build_pauli_evolution_circuit(
     evolution_synthesis: PauliEvolutionSynthesis = "lie_trotter",
     evolution_synthesis_options: Mapping[str, Any] | None = None,
 ) -> QuantumCircuit:
-    """Build a Qiskit circuit from Pauli-evolution blocks."""
+    """Build a Qiskit circuit that applies Pauli-evolution blocks in order.
+
+    Args:
+        blocks (Sequence[PauliEvolutionBlock | Mapping]): Blocks in the
+            order they act.
+        num_qubits (int): Number of circuit qubits.
+        evolution_synthesis (str): Default `"lie_trotter"`. Product formula
+            for blocks of the default kind, as for
+            `append_pauli_evolution_block`.
+        evolution_synthesis_options (Mapping | None): Default `None`.
+            Keyword arguments of that Qiskit synthesis class.
+
+    Returns:
+        circuit (QuantumCircuit): The circuit on `num_qubits` qubits.
+
+    Examples:
+        `0.5 Z_0` and `0.3 X_1` commute, so one Lie-Trotter step of length
+        0.7 equals `exp(-0.7i (0.5 Z_0 + 0.3 X_1))`:
+
+        >>> import numpy as np
+        >>> from scipy.linalg import expm
+        >>> from qiskit.quantum_info import Operator
+        >>> from nwqlib.subroutines.hamiltonian_evolution import (
+        ...     PauliEvolutionBlock, PauliEvolutionTerm,
+        ...     build_pauli_evolution_circuit, sparse_pauli_op_from_terms)
+        >>> terms = (PauliEvolutionTerm(pauli="z0", coefficient=0.5),
+        ...          PauliEvolutionTerm(pauli="x1", coefficient=0.3))
+        >>> block = PauliEvolutionBlock(terms=terms, time_step=0.7)
+        >>> circuit = build_pauli_evolution_circuit([block], num_qubits=2)
+        >>> H = Operator(sparse_pauli_op_from_terms(
+        ...     [{"pauli": "z0", "coefficient": 0.5},
+        ...      {"pauli": "x1", "coefficient": 0.3}], 2)).data
+        >>> print(np.allclose(Operator(circuit).data, expm(-0.7j * H)))
+        True
+    """
 
     from qiskit import QuantumCircuit
 

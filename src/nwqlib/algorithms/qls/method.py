@@ -190,29 +190,160 @@ def _admit(problem, method, output, execution, shots):
 
 
 class QLS(Method):
-    """Immutable inverse/shortcut configuration, separate from the original A,b.
+    """Quantum linear-system (QLS) method for `A x = b` given by `LinearSystem`.
 
-    Construction tolerances do not certify total physical solution error.
-    Known-work caps include the exact synthesis of a dense dilation, or of
-    the dense unitaries in a supplied encoding or RHS circuit, that the
-    construction controls, and Qiskit's control of the synthesized gates
-    (``host_planning._admit_query_synthesis``). They exclude undocumented
-    vendor workspace.
+    Build it with keyword arguments and pass it as `method=`, for example
+    `solve(LinearSystem(A=A, b=b), method=QLS())`. Every argument is
+    optional. The result is a
+    [`QLSAnalysis`][nwqlib.algorithms.qls.primary_records.QLSAnalysis]
+    whose `x`, for the default `Solution` output, is the physical solution
+    in the original coordinates, including scale and phase, in the
+    problem's `unit`.
+
+    The default `solver="qsvt_inverse"` applies an odd Chebyshev polynomial
+    P to `A/alpha`, through a Hermitian dilation when A is not Hermitian, by
+    quantum singular value transformation (QSVT, Gilyén et al.,
+    arXiv:1806.01838v1, Theorem 17, in the conventions of Martyn et al.,
+    arXiv:2105.02859v5). Here alpha is the normalization of the block
+    encoding of A, and the polynomial domain parameter `polynomial_kappa` is
+    at least 1.01 and at least the encoded gap parameter `kappa_be`, which
+    is `max(1, alpha/sigma_min(A))` or the supplied `kappa`. All three are
+    recorded in `plan.reconstruction`. P approximates
+    `1/(polynomial_kappa x)` with
+    `|polynomial_kappa x P(x) - 1| <= epsilon_inv` for
+    `1/polynomial_kappa <= |x| <= 1`. NWQLib fits P and evaluates this bound
+    in binary64 on an affine Chebyshev grid (Ehlich and Zeller,
+    doi:10.1007/BF01111276, Satz 2), and checks its degree against the
+    degree bound of Childs, Kothari and Somma (arXiv:1511.02306v2, Lemmas
+    17-19). Physical recovery multiplies the success branch of the circuit,
+    or of the classical model, by `||b|| polynomial_kappa s / alpha`, with s
+    the polynomial's rescale.
+    The two shortcut solvers implement Dalzell's kernel-reflection method
+    (arXiv:2406.12086v2, Algorithm 1) and return only the unit direction of
+    x, modulo global phase.
+
+    `epsilon_inv` sets the polynomial approximation. It does not bound the
+    total error of x, which also depends on the spectral assumptions, the
+    phase fit, the circuit execution and sampling. Vector outputs
+    (`Solution`, `StateVector`) need exact amplitude readout, so they take
+    no `shots`, and `Samples` needs positive `shots` with quantum execution.
+    `execution="classical"` evaluates the chosen polynomial model on the
+    host. It needs a dense A, a vector, product or occupation b and, for an
+    observable output, a dense observable, and it takes no `shots`.
+    `result.analyze()` takes no settings, so another polynomial needs a new
+    Plan. `result.verify(checks=...)` takes a
+    [`QLSVerification`][nwqlib.algorithms.qls.verification.QLSVerification].
+    The [QLS guide](../../algorithms/qls.md) explains physical outputs,
+    normalization, spectral assumptions and the shortcut restrictions, and
+    its source map gives every equation and its code.
+
+    Examples:
+        The exact solution of this system is `(25/28, 5/28)`, about
+        `(0.8929, 0.1786)`. `epsilon_inv=0.01` sets the inverse polynomial,
+        not a bound on the difference.
+
+        >>> import numpy as np
+        >>> from nwqlib import LinearSystem, solve
+        >>> from nwqlib.algorithms.qls import QLS
+        >>> problem = LinearSystem(A=[[1.1, .1], [.1, .9]], b=[1., .25])
+        >>> result = solve(problem, method=QLS(), seed=7)
+        >>> print(np.round(result.x, 4))
+        [0.8966+0.j 0.1813+0.j]
 
     Attributes:
-        solver: ``qsvt_inverse`` reconstructs physical output; ``shortcut_native_svp`` and ``shortcut_dilation`` supply the supported unit-direction outputs.
-        epsilon_inv: Positive polynomial construction target below one, in the selected inverse/shortcut metric. For ``qsvt_inverse`` it bounds ``|polynomial_kappa * x * P(x) - 1|`` over the polynomial domain. For the shortcuts it is ``sqrt(2)`` times the kernel-reflection parameter ``eta``.
-        alpha: Positive supplied block-encoding normalization premise, or ``auto`` for selected derivation.
-        kappa: Supplied condition bound at least one, or ``auto`` for selected derivation; supplied premises do not force an extra SVD.
-        block_encoding_implementation: ``auto``, ``pauli_lcu``, ``multiplexed_pauli``, ``banded`` or ``dense_dilation``; applicability follows the actual input.
-        encoding: Optional supplied block encoding with its declared original-operator association.
-        dense_control_route: ``gatewise``, ``whole_matrix`` or ``auto`` route by which a controlled query controls a dense-dilation encoding (``_dense_synthesis.select_dense_control_route``). ``gatewise`` synthesizes the dilation and lets Qiskit control each synthesized gate, ``whole_matrix`` synthesizes the controlled dilation, and ``auto`` takes the whole-matrix route for one control and the gate-wise route for more. A supplied encoding and a supplied RHS circuit are controlled gate-wise on every route.
-        encoded_solution_norm_estimate: Shortcut norm premise at least one; ``grid``, ``noisy_binary_search`` and ``linear_kappa_sequence`` select explicit classical probability models. Quantum shortcut requires a numeric value; None is unspecified and invalid for a shortcut.
-        max_degree: Maximum selected polynomial degree before coefficient/phase work.
-        max_qsp_evaluations: Maximum residual evaluations for phase recovery.
-        max_work: Cap on counted classical selection, scalar and array work. It caps each planning phase separately, for example spectral selection, dense completion, encoding construction, the polynomial fit and the comparisons of sampled Pauli grouping. The exact projected reductions of one Run are charged together against it.
-        max_bytes: Cap on known numerical-array workspace bytes.
-        max_admission_steps: Admission ceiling of the quantum Program, its ``AdmissionLimits.max_steps``: the kept field slots and the admission work through Program validation, preparation and native lowering. Planning checks the largest of these for the selected Programs (``quantum._check_admission``) and a complete measured refusal names a value that admits them. The resource fold of the Program may use up to 24 times this value. The default, 1,000,000, is ten times the shared ``AdmissionLimits`` default, because the admission work of a sampled Program grows with the number of its distinct measured registers. Raising it admits a larger metadata check and fold. It changes neither the selected polynomial nor any quantum work.
+        solver: Default `"qsvt_inverse"`, which recovers the physical
+            solution. `"shortcut_native_svp"` (Dalzell's kernel reflection
+            on the right singular vectors of the augmented matrix `G_t`,
+            Dalzell Eqs. (8)-(11)) and `"shortcut_dilation"` (an even
+            polynomial on the Hermitian dilation of `G_t`) give only a unit
+            `StateVector` modulo global phase, a `NormalizedExpectation` or
+            `Samples`, and need `encoded_solution_norm_estimate`.
+        epsilon_inv: Default `0.01`, strictly between 0 and 1. Polynomial
+            construction target. For `"qsvt_inverse"` it bounds
+            `|polynomial_kappa x P(x) - 1|` on the polynomial domain
+            `1/polynomial_kappa <= |x| <= 1`. When every eigenvalue of a
+            Hermitian `A/alpha`, or every singular value through the
+            dilation, lies in that domain, the vector y after the polynomial
+            step satisfies
+            `||y - (polynomial_kappa A/alpha)^-1 b|| <= epsilon_inv ||(polynomial_kappa A/alpha)^-1 b||`.
+            For the shortcuts it is `sqrt(2)` times the kernel-reflection
+            parameter `eta`. It does not bound the total error of the
+            physical output.
+        alpha: Default `"auto"`, which takes the normalization of the chosen
+            block encoding, for Pauli input the coefficient 1-norm. A
+            positive number is the caller's assumption. Supplied `alpha` and
+            `kappa` do not force an extra spectral computation. When planning
+            computes the original singular endpoints anyway, an assumption
+            that misses them by more than a relative window of `1e-12` is
+            refused.
+        kappa: Default `"auto"`, which uses `kappa_be = alpha/sigma_min(A)`
+            from the original singular endpoints, at least 1. A number at
+            least 1 is the caller's bound on `kappa_be`, the encoded gap
+            parameter, which is not the condition number
+            `sigma_max/sigma_min`. Pauli A, and a non-dense A with a
+            supplied `encoding`, need a number at least
+            `alpha/sigma_min(A)`, because QLS computes no singular values
+            for them. The polynomial domain parameter `polynomial_kappa` is
+            at least `kappa_be` and at least 1.01.
+        block_encoding_implementation: Default `"auto"`, which chooses among
+            the banded, Pauli and dense encodings that apply to the input.
+            `"pauli_lcu"`, `"multiplexed_pauli"`, `"banded"` and
+            `"dense_dilation"` request one family, which the input must
+            support.
+        encoding: Default `None`. A supplied block encoding of the original
+            A, with its declared operator. Its projected equation and error
+            are the caller's assumptions, not checked by a dense test.
+        dense_control_route: Default `"auto"`. How a controlled query
+            controls a dense-dilation encoding. `"gatewise"` synthesizes the
+            dilation and lets Qiskit control each synthesized gate,
+            `"whole_matrix"` synthesizes the controlled dilation, and
+            `"auto"` takes the whole-matrix route for one control and the
+            gate-wise route for more. With the default limits, `"auto"`
+            accepts a controlled dense dilation of at most 64 padded
+            coordinates. A supplied encoding and a supplied RHS circuit are
+            controlled gate-wise on every route.
+        encoded_solution_norm_estimate: Default `None`. Dalzell's norm
+            parameter t of a shortcut, a number with
+            `1 <= t <= polynomial_kappa`, which quantum shortcuts require.
+            Classical shortcuts also accept `"grid"`,
+            `"noisy_binary_search"` or `"linear_kappa_sequence"` (Dalzell
+            Secs. 5.1-5.3), which evaluate the classical probability model
+            of that search. t is not the recovered physical norm.
+            `"qsvt_inverse"` refuses any value.
+        max_degree: Default `256`. Upper limit on the polynomial degree,
+            checked before coefficient and phase work.
+        max_qsp_evaluations: Default `20_000`. Upper limit on the residual
+            evaluations of the QSP phase solver.
+        max_work: Default `1e9` (`1_000_000_000`). Upper limit on the
+            counted classical work, applied separately to each planning
+            phase, for example spectral selection, dense completion,
+            encoding construction, the polynomial fit and the grouping of
+            sampled Pauli terms. It includes the exact synthesis of a dense
+            dilation, or of the dense unitaries in a supplied encoding or
+            RHS circuit, that a controlled query needs, and Qiskit's control
+            of the synthesized gates. The exact scalar readouts of one Run
+            count together against it. Work units are operation counts, not
+            timings.
+        max_bytes: Default 10 GB (decimal, `10_000_000_000` bytes). Upper
+            limit on the known bytes of numerical arrays, including those
+            syntheses. It excludes undocumented vendor workspace. Each exact
+            scalar readout must fit it before the circuits run.
+        max_admission_steps: Default `1_000_000`, ten times the shared
+            default, because the planning work of a sampled `Program` grows
+            with the number of its distinct measured registers. Upper limit
+            on the planning work of checking the quantum `Program` (NWQLib's
+            description of a circuit as named steps), counting its stored
+            fields and the work of validation, preparation and circuit
+            building. A refusal with a complete count names a value that
+            passes. Summing the Program's resource counts may use up to 24
+            times this value. Raising it changes neither the polynomial nor
+            any quantum operation. See the
+            [planning work limit](../../development/program_checks.md#planning-work-limit).
+
+    Raises:
+        ValueError: If `encoded_solution_norm_estimate` is set with
+            `"qsvt_inverse"`.
+        TypeError: If `encoding` is not a selected block encoding.
     """
 
     result_type: ClassVar[type] = QLSAnalysis

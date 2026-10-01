@@ -61,15 +61,60 @@ BINARY_SOURCE = Source(name="binary_inference", version="1",
 
 
 class BinaryInferenceOptions(Record):
-    """Selected inference, independently of acquisition and physical accuracy.
+    """Statistical model that turns measured binary counts into estimates and intervals.
+
+    Build it with keyword arguments, for example
+    `BinaryInferenceOptions(method="hoeffding", sampling_model="iid_bernoulli")`,
+    and pass it as `ExpectationMethod(inference=...)` or to
+    `result.analyze(inference=...)`. Every argument is optional, and the
+    default returns empirical points without an interval. It applies to
+    measured counts, so any other choice needs positive shots. It changes
+    neither what is measured nor the physical accuracy, and its intervals
+    describe sampling under the stated model only.
+
+    Below, a population has n0 zero and n1 one outcomes, `n = n0 + n1`,
+    delta is `failure_probability`, and `alpha = delta/F` is its share for
+    each of the F predeclared settings, so that all F intervals hold jointly
+    with probability at least `1 - delta`.
 
     Attributes:
-        method: ``point``, fixed-time ``hoeffding``, union-bound ``anytime_hoeffding`` or ``beta`` posterior inference.
-        failure_probability: Family failure probability, divided equally across the predeclared science and calibration settings.
-        sampling_model: Explicit unverified model premise. ``unknown`` keeps empirical values but supplies no interval, and ``constant_conditional_mean`` does not supply the Beta likelihood.
-        independent_populations: Additional premise for variance composition across settings and for a product Beta model.
-        prior_alpha: Positive finite Beta shape for p=P(bit=0), added to the zero count.
-        prior_beta: Positive finite Beta shape added to the one count.
+        method: Default `"point"`, the empirical mean and variance without an
+            interval. `"hoeffding"` gives a fixed-time interval of radius
+            `sqrt(2*log(2/alpha)/n)` (Hoeffding (1963),
+            doi:10.1080/01621459.1963.10500830, Theorem 1, Eq. (2.3), p. 15,
+            rescaled to outcomes in [-1, 1] and made two-sided as in
+            Eq. (1.4), p. 13). `"anytime_hoeffding"` gives the same radius at
+            `alpha_n = alpha/(n*(n + 1))` for every n, a union bound over n.
+            `"beta"` gives the posterior `Beta(prior_alpha + n0, prior_beta + n1)`
+            of `p = P(bit = 0)`, mapped to `2*p - 1`, with an equal-tail
+            interval whose credibility is not frequentist coverage. That
+            interval is unavailable when the shape total exceeds `5e11`, and
+            the posterior mean and variance remain
+            ([Engineering constants](../../ENGINEERING_CONSTANTS.md#binary-inference-representation)).
+        failure_probability: Default `0.05`, strictly between 0 and 1. Family
+            failure probability delta, divided equally across the
+            predeclared science and calibration settings.
+        sampling_model: Default `"unknown"`. Assumed model of the shots, which
+            NWQLib does not verify: `"iid_bernoulli"`,
+            `"constant_conditional_mean"` or `"unknown"`. `"unknown"` keeps
+            the empirical values and gives no interval.
+            `"constant_conditional_mean"` does not supply the Beta likelihood.
+        independent_populations: Default `False`. `True` declares the measured
+            groups, or with mitigation the science and calibration settings,
+            statistically independent. The variance sum across settings and a
+            product Beta model need this assumption, which NWQLib does not
+            deduce from the data.
+        prior_alpha: Default `1.0`, positive. Beta prior shape for
+            `p = P(bit = 0)`, added to the zero count n0.
+        prior_beta: Default `1.0`, positive. Beta prior shape added to the one
+            count n1.
+
+    Raises:
+        ValueError: If `method="beta"` is combined with
+            `sampling_model="constant_conditional_mean"`, or if a method other
+            than `"point"` has a `failure_probability` whose complement
+            `1 - failure_probability` is not representable strictly between 0
+            and 1.
     """
 
     method: Literal["point", "hoeffding", "anytime_hoeffding", "beta"] = "point"
@@ -89,14 +134,34 @@ class BinaryInferenceOptions(Record):
 
 
 class BinaryReadoutMitigation(Record):
-    """Two explicitly acquired calibration populations per actual parity pivot.
+    """Readout calibration that corrects each measured parity with a fitted single-bit channel.
 
-    Channel stationarity, spectator transfer and calibration preparation
-    remain unverified premises.
+    Build it with keyword arguments, for example
+    `BinaryReadoutMitigation(calibration_shots=512)`, and pass it as
+    `ExpectationMethod(mitigation=...)` together with positive shots.
+    `calibration_shots` is the only required argument. Each non-identity
+    term is then measured by its own parity circuit, which collects the
+    term's parity on its pivot, the highest-index qubit on which the term
+    acts. Each pivot gets two calibration circuits, which prepare 0 and 1.
+    For K terms and P distinct pivots, a complete run uses `K + 2*P`
+    circuits and `K*shots + 2*P*calibration_shots` shots.
+
+    The model `z = a*mu + b` maps the parity mean mu to the observed pivot
+    mean z. The calibration means z0 and z1 give `a = (z0 - z1)/2` and
+    `b = (z0 + z1)/2`, and the corrected mean is `mu = (z - b)/a`. The model
+    assumes a stationary readout channel, transfer of the calibration to the
+    science circuits and correct calibration preparation, which NWQLib does
+    not verify. Mitigation excludes Beta inference.
 
     Attributes:
-        calibration_shots: Shots of each zero and each one calibration experiment.
-        minimum_contrast: Lower limit on abs((z0-z1)/2), below which correction is unavailable. A negative usable contrast is legal. The default 0.05 is a caller-adjustable conditioning threshold (ENGINEERING_CONSTANTS "Binary inference representation").
+        calibration_shots: Required. Positive number of shots, at most
+            `2**53 - 1`, of each zero and each one calibration circuit.
+        minimum_contrast: Default `0.05`, in (0, 1]. Lower limit on
+            `abs(a) = abs(z0 - z1)/2`. Below it the correction, and therefore
+            the result's `value`, is unavailable. A negative contrast of
+            larger magnitude is accepted. The default is an adjustable
+            conditioning threshold
+            ([Engineering constants](../../ENGINEERING_CONSTANTS.md#binary-inference-representation)).
     """
 
     calibration_shots: Annotated[BinaryCount, Field(gt=0)]
@@ -142,12 +207,29 @@ class BinaryPopulation(Record):
 
 
 class BinaryInterval(Record):
-    """Conditional interval/set, separate from empirical variance and raw point.
+    """Interval for one binary mean, separate from its empirical variance and its point estimate.
 
-    kind distinguishes endpoint coverage, time-uniform coverage and posterior
-    credibility. probability is the selected family probability. status can be
-    empty after a justified physical parameter-set intersection; this is not
-    missing data. Binary64 evaluation is not a certified numerical enclosure.
+    `BinaryEstimate.interval` and `BinaryCorrection.interval` hold it.
+    Binary64 evaluation is not a certified numerical enclosure. The fields
+    below are read-only.
+
+    Attributes:
+        kind: `"fixed_time"` (Hoeffding endpoint coverage),
+            `"time_uniform"` (anytime Hoeffding coverage) or `"bayesian"`
+            (Beta posterior credibility), from the inference method.
+        probability: Family probability `1 - delta`, with `delta` the
+            options' `failure_probability`, strictly between 0 and 1.
+        status: `"conditional"` with both endpoints, `"unavailable"`, or
+            `"empty"` after a justified intersection with the physical
+            parameter set, which is not missing data.
+        lower: Lower endpoint, `None` unless `status` is `"conditional"`.
+        upper: Upper endpoint, `None` unless `status` is `"conditional"`.
+        reason: Text recorded with the interval, including why it is
+            unavailable or empty.
+        assumptions: The assumptions the interval depends on.
+        family_size: Number F of predeclared settings, positive. Each
+            interval is evaluated at `alpha = delta/F`, so all F hold jointly
+            with probability at least `1 - delta`.
     """
 
     kind: Literal["fixed_time", "time_uniform", "bayesian"]
@@ -170,12 +252,30 @@ class BinaryInterval(Record):
 
 
 class BinaryEstimate(Record):
-    """Stored count-derived quantities, with posterior and empirical roles split.
+    """Quantities derived from the counts of one binary setting, with the empirical and posterior roles kept apart.
 
-    raw_mean and empirical_variance describe the sample mean. point is that mean
-    unless a selected, representable Beta posterior supplies its own mean.
-    posterior_variance concerns 2p-1 under that posterior, not sampling variance.
-    A missing selected interval keeps its actual kind and unavailable reason.
+    `ExpectationStatistics.populations` holds one per measured label or
+    setting, as the [Expectation
+    guide](../../algorithms/expectation.md) describes. The fields below are
+    read-only.
+
+    Attributes:
+        population: The counted data: `zeros` (n0) and `ones` (n1) of the
+            distinct counted sources, with their identifiers.
+        options_id: Content hash of the `BinaryInferenceOptions` used.
+        source: The `Source` of the binary inference.
+        raw_mean: Sample mean `z = (n0 - n1)/n` in [-1, 1], `None` when
+            `n = 0`.
+        empirical_variance: Exact rational sample-mean variance
+            `4*n0*n1/(n**2*(n - 1))`, `None` for `n <= 1`.
+        point: The Beta posterior mean of `2p - 1` for `beta` inference,
+            `None` when its assumptions fail, and `raw_mean` otherwise.
+        posterior_variance: Beta posterior variance of `2p - 1`, which is
+            not a sampling variance.
+        interval: The [`BinaryInterval`][nwqlib.evidence.binary.BinaryInterval]
+            of the selected inference, `None` for point inference. A
+            missing interval keeps its kind and the reason.
+        unavailable: Reasons for quantities that could not be formed.
     """
 
     population: BinaryPopulation
@@ -215,12 +315,32 @@ class BinaryEstimate(Record):
 
 
 class BinaryCorrection(Record):
-    """Affine calibration point and local derivatives on shared actual data.
+    """Readout-corrected mean of one science term from the affine calibration model, with its local derivatives.
 
-    point is a signed finite-sample estimator, not a physical probability or a
-    bounded Pauli mean. derivatives are with respect to z, z0, z1; their use in
-    variance is a delta-method approximation. interval_image preserves the box
-    image before intersection with the physical mean domain [-1,1].
+    `ExpectationStatistics.corrections` holds one per science term when
+    readout mitigation is used. The model is `z = a*mu + b` with
+    `a = (z0 - z1)/2` and `b = (z0 + z1)/2`, where z0 and z1 are the
+    calibration means ([Expectation guide](../../algorithms/expectation.md)).
+    The fields below are read-only.
+
+    Attributes:
+        science_id: Content hash of the science setting's counted population.
+        zero_id: Content hash of the zero-state calibration population.
+        one_id: Content hash of the one-state calibration population.
+        options_id: Content hash of the options used.
+        contrast: The contrast a, in [-1, 1], or `None`.
+        offset: The offset b, in [-1, 1], or `None`.
+        point: The corrected mean mu, a signed finite-sample estimator, not
+            a physical probability or a bounded Pauli mean. It can lie
+            outside [-1, 1].
+        derivatives: The Jacobian of `point` in `(z, z0, z1)`. Its use in a
+            variance is a delta-method approximation.
+        interval_image: Image of the calibration box before intersection
+            with the physical mean domain [-1, 1].
+        interval: That intersection, a
+            [`BinaryInterval`][nwqlib.evidence.binary.BinaryInterval].
+        unavailable: Reasons for quantities that could not be formed.
+        assumptions: The assumptions of the correction.
     """
 
     science_id: ContentID

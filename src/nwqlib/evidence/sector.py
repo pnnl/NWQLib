@@ -15,16 +15,33 @@ _SOURCE = Source(name="stored_number_sector", version="1",
 
 
 class NumberSectorOptions(Record):
-    """Select a Hamming-weight sector of the actual complete measured population.
+    """Options of the number-sector check: the fraction of measured shots outside Hamming weight N.
 
-    The observed fraction outside this sector differs from mean particle number.
-    Zero observed leakage does not prove a pure state's sector membership.
+    Build it with keyword arguments, for example
+    `NumberSectorOptions(name="number", particles=1, tolerance=0.01)`, and
+    pass it to `result.verify(checks=...)` or
+    [`verify_number_sector`][nwqlib.evidence.sector.verify_number_sector].
+    `name`, `particles` and `tolerance` are required. The checked value is
+    the fraction of stored complete-register shots whose bitstring does not
+    have exactly N ones, on `[0, 1]`, against `tolerance`. It needs a Result
+    that stores complete computational-register counts, such as QHD with the
+    one-hot encoding ([verification
+    guide](../verification.md#measured-number-sector-leakage)).
+
+    This observed fraction differs from the mean particle number, and zero
+    observed leakage does not prove that a pure state lies in the sector.
+    The guide gives a counterexample for the mean.
 
     Attributes:
-        name: Prefix of the check name.
-        particles: Hamming weight N of the selected sector.
-        tolerance: Threshold on the observed fraction outside N, in [0,1].
-        source: Implementation source of the count reducer.
+        name: Required. Prefix of the check name, which is
+            `name + ".number_sector_leakage"`.
+        particles: Required. Hamming weight N of the sector, at most the
+            measured register width.
+        tolerance: Required. Threshold on the observed fraction outside N,
+            in `[0, 1]`.
+
+    Raises:
+        ValueError: If `tolerance` exceeds 1.
     """
 
     name: Text
@@ -83,12 +100,33 @@ def _exact_count_sum(counts):
 
 
 def verify_number_sector(result, *, options: NumberSectorOptions, max_integer_bits=DEFAULT_MAX_INTEGER_BITS):
-    """Read actual selected count bins without rerunning analysis or native work.
+    """Run the number-sector check on a Result's stored counts, running no analysis or circuit again.
 
-    The particle number of an outcome is the set-bit count of its index in
-    the observation reader's layout, over all words for a register wider
-    than 64 bits. ``total`` and ``outside`` are exact integer sums of the
-    counts, and the published value ``outside/total`` uses exact arithmetic.
+    `result.verify(checks=options)` calls this for QHD. The particle number
+    of an outcome is the number of set bits of its index, over all words
+    for a register wider than 64 bits. The total and the outside count are
+    exact integer sums of the counts, and the value `outside/total` is
+    exact.
+
+    Args:
+        result (Result): A Result that stores complete computational-register
+            counts, with its Plan.
+        options (NumberSectorOptions): The sector and tolerance.
+        max_integer_bits (int): Bit limit of the exact arithmetic. Default
+            4096.
+
+    Returns:
+        verification (tuple): `(receipt, facts)`: the `VerificationReceipt`
+            of this computation, and a one-element tuple with the leakage
+            fraction as a [`FramedFact`][nwqlib.evidence.error_model.FramedFact]
+            that cites it. The fact is unknown when no shots were counted.
+
+    Raises:
+        TypeError: If `options` is not a `NumberSectorOptions`.
+        ValueError: If the Result supplies no complete-register counts,
+            `particles` exceeds the register width, or the stored counts are
+            not unconditional counts of the whole register that sum to the
+            returned shots.
     """
     import numpy as np
 

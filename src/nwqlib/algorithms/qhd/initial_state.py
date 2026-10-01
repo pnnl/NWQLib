@@ -84,77 +84,77 @@ def _normalized(values):
 
 
 class UniformState(Record):
-    """Equal amplitude on every valid grid point.
+    """Uniform initial state: equal amplitude on every valid grid point.
 
-    Each variable has amplitude ``1/sqrt(K)`` on each of its K grid points,
-    so the restricted state has ``1/sqrt(K**d)`` on every grid tuple. This is
-    the uniform superposition of Leng et al., arXiv:2303.01471v1, Algorithm 1
-    step 3, and the initial state that Wu et al., arXiv:2605.12066v1,
-    Sec. VI, state for their simulations. On the Dirichlet grids it has a
-    component outside the kinetic ground state (``KineticGroundState``),
-    which docs/algorithms/qhd.md ("Initial states and preparation") discusses.
+    Pass it as `QHD(initial_state=UniformState())`. It takes no arguments. Each variable
+    has amplitude `1/sqrt(K)` on each of its K grid points, so the state has
+    `1/sqrt(K**d)` on every grid tuple. This is the uniform superposition of Leng et
+    al., arXiv:2303.01471v1, Algorithm 1 step 3, and the initial state that Wu et al.,
+    arXiv:2605.12066v1, Sec. VI, state for their simulations. On the Dirichlet grids it
+    has a component outside the kinetic ground state
+    ([`KineticGroundState`][nwqlib.algorithms.qhd.initial_state.KineticGroundState]),
+    which the guide's
+    [initial states](../../algorithms/qhd.md#initial-states-and-preparation) section
+    discusses.
 
     Attributes:
-        kind: Initial-state identifier, always ``"uniform"``.
+        kind: Default `"uniform"`, the only accepted value. Initial-state identifier.
     """
 
     kind: Literal["uniform"] = "uniform"
 
     def variable_amplitudes(self, grid: OneHotGrid) -> tuple[np.ndarray, ...]:
-        """Return ``1/sqrt(K)`` on the K points of each variable.
+        """Return `1/sqrt(K)` on the K points of each variable.
 
-        Each entry is one correctly rounded square root and one division, so
-        it errs by at most 2u. The classical start vector does not use these
-        vectors, because ``restricted_state`` forms the equal product entry
-        ``1/sqrt(K**d)`` directly.
+        Each entry is one correctly rounded square root and one division, so it errs by at
+        most 2u, with `u = 2**-53`. The classical start vector does not use these vectors.
+        It fills the equal product entry `1/sqrt(K**d)` directly.
         """
         k = grid.num_grid_points
         return tuple(np.full(k, 1.0 / math.sqrt(k)) for _ in range(grid.num_variables))
 
 
 class KineticGroundState(Record):
-    """Per variable the ground state of the Method's kinetic operator, the default initial state.
+    """Ground state of each variable's kinetic operator, the default initial state of QHD.
 
-    The comment at the ``QHD.initial_state`` field (``method.py``) gives
-    the reasons for that default and its limits.
+    Pass it as `QHD(initial_state=KineticGroundState())`, which is the default. It takes
+    no arguments. The row "QHD Method defaults" of the
+    [engineering constants](../../ENGINEERING_CONSTANTS.md#safety-factors-and-workflow-defaults)
+    gives the reasons for this default and its limits.
 
-    On both Dirichlet grids the restricted kinetic operator of one variable
-    is ``T/h**2`` with the K-by-K tridiagonal matrix T of diagonal 1 and
-    off-diagonals -1/2 (``theory.restricted_kinetic_sparse``). The interior
-    grid and the grid with boundary points differ only in the spacing h, so
-    they share the eigenvectors of T. For ``v_i = sin(r pi (i + 1)/(K + 1))``,
-    i = 0..K-1 and r = 1..K, the identity
-    ``sin(a - b) + sin(a + b) = 2 sin(a) cos(b)`` gives
-    ``(T v)_i = v_i - (v_(i-1) + v_(i+1))/2 = (1 - cos(r pi/(K + 1))) v_i``,
-    where the missing neighbors ``v_(-1) = sin(0)`` and ``v_K = sin(r pi)``
-    vanish as the stencil requires. The eigenvalues
-    ``2 sin(r pi/(2 (K + 1)))**2/h**2`` increase with r, so r = 1 is the
-    ground state, ``sin(pi (i + 1)/(K + 1))`` with every entry positive and
-    energy ``2 sin(pi/(2 (K + 1)))**2/h**2``. The kinetic operator of d
-    variables is the sum of the one-variable operators on separate tensor
-    factors, so its ground state is the product of these vectors and its
-    energy the sum of theirs. The relation is standard linear algebra,
-    derived here in full. On the grid with boundary points the vector does
-    not vanish at the box endpoints, because that grid's missing neighbors
+    On both Dirichlet grids the kinetic operator of one variable, restricted to the
+    grid, is `T/h**2` with the K-by-K tridiagonal matrix T of diagonal 1 and
+    off-diagonals -1/2. The interior grid and the grid with boundary points differ only
+    in the spacing h, so they share the eigenvectors of T. For
+    `v_i = sin(r pi (i + 1)/(K + 1))`, i = 0..K-1 and r = 1..K, the identity
+    `sin(a - b) + sin(a + b) = 2 sin(a) cos(b)` gives
+    `(T v)_i = v_i - (v_(i-1) + v_(i+1))/2 = (1 - cos(r pi/(K + 1))) v_i`, where the
+    missing neighbors `v_(-1) = sin(0)` and `v_K = sin(r pi)` vanish as the stencil
+    requires. The eigenvalues `2 sin(r pi/(2 (K + 1)))**2/h**2` increase with r, so r =
+    1 is the ground state, `sin(pi (i + 1)/(K + 1))` with every entry positive and
+    energy `2 sin(pi/(2 (K + 1)))**2/h**2`. The kinetic operator of d variables is the
+    sum of the one-variable operators on separate tensor factors, so its ground state is
+    the product of these vectors and its energy the sum of theirs. The relation is
+    standard linear algebra, derived here in full. On the grid with boundary points the
+    vector does not vanish at the box endpoints, because that grid's missing neighbors
     lie outside the box.
 
-    On the periodic grid the operator is ``C/h**2`` with the circulant
-    ``C = I - (S + S^T)/2`` and the cyclic shift S. The Fourier vectors
-    ``f_j = exp(2 pi i r j/K)`` satisfy ``(C f)_j = (1 - cos(2 pi r/K)) f_j``,
-    so the eigenvalues ``2 sin(pi r/K)**2/h**2``, r = 0..K-1, are zero only
-    for r = 0, whose eigenvector is the constant vector. The ground state is
-    therefore the uniform state with energy zero, and this record then
-    prepares exactly what ``UniformState`` prepares (``restricted_state``).
-    The spectral kinetic model (``QHD.kinetic_model="spectral"``), which the
-    Method admits on the periodic grid only, has the same Fourier
-    eigenvectors with eigenvalues ``2 pi**2 q**2/L**2`` for the signed
-    frequency index q and period ``L = K h``
-    (``split_step.kinetic_eigenvalues``). They also vanish only for q = 0, so
-    the uniform state is the ground state under both periodic kinetic
-    models.
+    On the periodic grid the operator is `C/h**2` with the circulant
+    `C = I - (S + S^T)/2` and the cyclic shift S. The Fourier vectors
+    `f_j = exp(2 pi i r j/K)` satisfy `(C f)_j = (1 - cos(2 pi r/K)) f_j`, so the
+    eigenvalues `2 sin(pi r/K)**2/h**2`, r = 0..K-1, are zero only for r = 0, whose
+    eigenvector is the constant vector. The ground state is therefore the uniform state
+    with energy zero, and this record then prepares exactly what
+    [`UniformState`][nwqlib.algorithms.qhd.initial_state.UniformState] prepares. The
+    spectral kinetic model (`QHD.kinetic_model="spectral"`), which the Method accepts on
+    the periodic grid only, has the same Fourier eigenvectors with eigenvalues
+    `2 pi**2 q**2/L**2` for the signed frequency index q and period `L = K h`. They also
+    vanish only for q = 0, so the uniform state is the ground state under both periodic
+    kinetic models.
 
     Attributes:
-        kind: Initial-state identifier, always ``"kinetic_ground"``.
+        kind: Default `"kinetic_ground"`, the only accepted value. Initial-state
+            identifier.
     """
 
     kind: Literal["kinetic_ground"] = "kinetic_ground"
@@ -162,17 +162,15 @@ class KineticGroundState(Record):
     def variable_amplitudes(self, grid: OneHotGrid) -> tuple[np.ndarray, ...]:
         """Return the normalized ground-state vector of each variable's kinetic operator.
 
-        On the periodic grid it is the uniform vector (``UniformState``). On
-        the Dirichlet grids it is ``sin(pi (i + 1)/(K + 1))``.
-        ``sin(pi - theta) = sin(theta)`` lets entry i use the angle
-        ``theta_i = pi m_i/(K + 1)`` with ``m_i = min(i + 1, K - i)``, so
-        ``0 < theta_i <= pi/2``. The computed angle has relative error at most
-        3u (``math.pi``, the product with the integer m_i and the division by
-        the integer K + 1). A relative angle error eta changes ``sin(theta)``
-        by the relative amount ``theta cot(theta) eta``, and
-        ``0 <= theta cot(theta) < 1`` on ``(0, pi/2]``, so with the one-ulp
-        sine each entry errs by at most 5u. ``variable_errors`` adds the 3u
-        of ``_normalized``.
+        On the periodic grid it is the uniform vector (``UniformState``). On the Dirichlet
+        grids it is ``sin(pi (i + 1)/(K + 1))``. ``sin(pi - theta) = sin(theta)`` lets entry
+        i use the angle ``theta_i = pi m_i/(K + 1)`` with ``m_i = min(i + 1, K - i)``, so
+        ``0 < theta_i <= pi/2``. The computed angle has relative error at most 3u
+        (``math.pi``, the product with the integer m_i and the division by the integer K +
+        1). A relative angle error eta changes ``sin(theta)`` by the relative amount
+        ``theta cot(theta) eta``, and ``0 <= theta cot(theta) < 1`` on ``(0, pi/2]``, so
+        with the one-ulp sine each entry errs by at most 5u, with ``u = 2**-53``.
+        ``variable_errors`` adds the 3u of the normalization.
         """
         if grid.boundary == "periodic":
             return UniformState().variable_amplitudes(grid)
@@ -183,9 +181,8 @@ class KineticGroundState(Record):
     def variable_errors(self, grid: OneHotGrid) -> tuple[float, ...]:
         """Return the first-order 2-norm error of each vector in units of u.
 
-        It is 8 on the Dirichlet grids (5 per entry, 3 normalizing) and 2 on
-        the periodic grid, where each entry ``1/sqrt(K)`` takes one square
-        root and one division.
+        It is 8 on the Dirichlet grids (5 per entry, 3 normalizing) and 2 on the periodic
+        grid, where each entry ``1/sqrt(K)`` takes one square root and one division.
         """
         return (2.0 if grid.boundary == "periodic" else 8.0,) * grid.num_variables
 
@@ -293,53 +290,59 @@ def _gaussian_beta(values, shifted, enclosures):
 
 
 class GaussianState(Record):
-    """Normalized ``prod_j exp(-(x_j - c_j)**2/(2 sigma_j**2))`` on the grid points, a warm start.
+    """Gaussian warm start `prod_j exp(-(x_j - c_j)**2/(2 sigma_j**2))`, normalized on the grid points.
 
-    The center c is a point in the coordinates of the Problem that the Plan
-    solves, and the widths sigma_j are in the units of each of its
-    variables. For ``solve`` these are the original coordinates. Box
-    refinement plans each level's own problem with the QHD configuration's
-    state, and its default search model solves in the unit coordinates
-    ``u = (x - a)/L`` of each level box ``[a, a + L]``, so there c and sigma
-    are unit coordinates (``refinement.refine_box``). The center may lie
-    outside the box. The amplitude of a grid tuple is the product of the
-    per-variable factors at its coordinates (``OneHotGrid.grid_value``), and
-    the state is that product normalized over the valid grid points. Leng et
-    al., arXiv:2303.01471v1, Algorithm 1 step 3, name a Gaussian state
-    as one choice of initial state, and the code behind the refinement
-    results of Wu et al., arXiv:2605.12066v1, starts every refinement level
-    after the first from this amplitude, centered at the best point found so
-    far (``refinement_records.BoxRefinement.level_initial_state``). The
-    amplitude, not the probability, has width sigma, so the continuous
-    probability density, proportional to ``exp(-(x_j - c_j)**2/sigma_j**2)``,
-    has standard deviation ``sigma_j/sqrt(2)`` along variable j. A
-    Gaussian contains several momentum components of the kinetic operator,
-    so it does not avoid the time-discretization dependence that the kinetic
-    ground state avoids (docs/algorithms/qhd.md, "Initial states and
-    preparation"). On the periodic grid the distance is the chart
-    difference ``|x_ji - c_j|`` of the coordinates in ``[lower, upper)``, not
-    the distance on the circle, so the amplitudes do not continue across the
-    wrap link. For a center near one end of the period, the points near the
-    other end, which are its neighbors through that link, get the amplitudes
-    of their chart distance. A minimum-image variant is open work
-    (docs/ROADMAP.md, "QHD core models").
+    Build it with keyword arguments, for example
+    `GaussianState(center=(0.5, -0.2), widths=(0.3, 0.3))`, and pass it as
+    `QHD(initial_state=...)`. `center` and `widths` are both required, with one entry
+    per Problem variable. The center c is a point in the coordinates of the Problem that
+    the Plan solves, and the widths sigma_j are in the units of each of its variables.
+    For `solve` these are the original coordinates. Box refinement plans each level's
+    own problem with the QHD configuration's state, and its default search model solves
+    in the unit coordinates `u = (x - a)/L` of each level box `[a, a + L]`, so there c
+    and sigma are unit coordinates. The center may lie outside the box. The amplitude of
+    a grid tuple is the product of the per-variable factors at its grid coordinates, and
+    the state is that product normalized over the valid grid points.
 
-    Every finite center and every finite positive width is accepted. Each
-    variable's exponents ``z_ji = (x_ji - c_j)**2/(2 sigma_j**2)`` are shifted
-    by their minimum before exponentiation, so the largest amplitude is
-    exactly 1 before normalization and the state never underflows to zero.
-    The construction error bound (``variable_errors``) is finite for every
-    input. It grows with the exponents, about 10u times the exponent per
-    entry, and ``restricted_state_error`` caps the total by the distance of
-    two nonnegative vectors of norm about one, about sqrt(2).
+    Leng et al., arXiv:2303.01471v1, Algorithm 1 step 3, name a Gaussian state as one
+    choice of initial state, and the code behind the refinement results of Wu et al.,
+    arXiv:2605.12066v1, starts every refinement level after the first from this
+    amplitude, centered at the best point found so far
+    (`BoxRefinement(level_initial_state="best_point_gaussian")`). The amplitude, not the
+    probability, has width sigma, so the continuous probability density, proportional to
+    `exp(-(x_j - c_j)**2/sigma_j**2)`, has standard deviation `sigma_j/sqrt(2)` along
+    variable j. A Gaussian contains several momentum components of the kinetic operator,
+    so it does not avoid the time-discretization dependence that the kinetic ground
+    state avoids
+    ([initial states](../../algorithms/qhd.md#initial-states-and-preparation)). On the
+    periodic grid the distance is the chart difference `|x_ji - c_j|` of the coordinates
+    in `[lower, upper)`, not the distance on the circle, so the amplitudes do not
+    continue across the wrap link. For a center near one end of the period, the points
+    near the other end, which are its neighbors through that link, get the amplitudes of
+    their chart distance. A minimum-image variant is open work
+    ([Limitations and open work](../../ROADMAP.md#qhd-core-models)).
+
+    Every finite center and every finite positive width is accepted. Each variable's
+    exponents `z_ji = (x_ji - c_j)**2/(2 sigma_j**2)` are shifted by their minimum
+    before exponentiation, so the largest amplitude is exactly 1 before normalization
+    and the state never underflows to zero. The construction error bound of the
+    classical start vector is finite for every input. It grows with the exponents, about
+    10u times the exponent per entry, with `u = 2**-53`, and it is capped by the
+    distance of two nonnegative vectors of norm about one, about sqrt(2). The
+    per-variable bound of `variable_errors` is infinite where the exponents give no
+    bound.
 
     Attributes:
-        kind: Initial-state identifier, always ``"gaussian"``.
-        center: Finite center coordinate of each variable, in the Problem's
-            variable order and the coordinates of the solved Problem, which
-            are unit coordinates for a search-model refinement level.
-        widths: Positive finite width sigma of each variable, in the same
+        kind: Default `"gaussian"`, the only accepted value. Initial-state identifier.
+        center: Required. Finite center coordinate of each variable, in the Problem's
+            variable order and the coordinates of the solved Problem, which are unit
+            coordinates for a search-model refinement level.
+        widths: Required. Positive finite width sigma of each variable, in the same
             coordinates.
+
+    Raises:
+        ValueError: If `center` is empty or `center` and `widths` differ in length.
+            Planning also raises when they do not have one entry per Problem variable.
     """
 
     kind: Literal["gaussian"] = "gaussian"
@@ -463,18 +466,24 @@ class GaussianState(Record):
         return rows
 
     def variable_amplitudes(self, grid: OneHotGrid) -> tuple[np.ndarray, ...]:
-        """Return the normalized Gaussian factor of each variable on its grid points (``_variables``)."""
+        """Return the normalized Gaussian factor of each variable on its grid points.
+
+        Each variable's exponents are shifted by their minimum before exponentiation, so the
+        largest entry is exactly 1 before normalization.
+        """
         return tuple(_normalized(values) for values, _ in self._variables(grid))
 
     def variable_errors(self, grid: OneHotGrid) -> tuple[float, ...]:
-        """Return a finite 2-norm error bound, in units of u, of each normalized vector against its exact direction.
+        """Return a 2-norm error bound, in units of u, of each normalized vector against its exact direction.
 
-        It is the direction bound of ``_variables`` plus the rounding of
-        ``_normalized``, ``3u/(1 - 2u) + sqrt(K) 2**-1074``, evaluated upward
-        with ``_OUTWARD``. The subnormal allowance is representable, and its
-        addition to the far larger terms rounds like every other operation
-        that ``_OUTWARD`` counts. It is infinite where ``_variables`` gives no
-        bound.
+        It is the direction bound of the computed amplitudes against the exact Gaussian
+        vector plus the rounding of the normalization, `3u/(1 - 2u) + sqrt(K) 2**-1074`,
+        evaluated upward with the factor `1 + 2**-40`. Here `u = 2**-53`. The subnormal
+        allowance is representable, and its addition to the far larger terms rounds like
+        every other operation that the factor `1 + 2**-40` counts. The bound is infinite
+        where the direction bound is, namely when some exponents overflow and the smallest
+        exponent exceeds `2**1020`, or when the smallest exponent itself overflows and the
+        grid points nearest the center are tied or nearly tied.
         """
         return self._errors(self._variables(grid), grid)
 

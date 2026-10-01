@@ -228,21 +228,28 @@ def _unit_mean(start, width, numerator_power):
 
 
 class QuadraticSchedule(Record):
-    """Weights ``a(t) = 1/(1 + gamma t**2)`` and ``b(t) = 1 + gamma t**2``.
+    """Quadratic schedule `a(t) = 1/(1 + gamma t**2)`, `b(t) = 1 + gamma t**2`, the QHD default.
 
-    This is the default schedule of ``QHD.schedule``. Kushnir, Leng, Peng,
-    Fan and Wu give ``phi_t = -log(1 + gamma t**2)`` and
-    ``chi_t = log(1 + gamma t**2)`` as an example in Sec. 2.1 of QHDOPT,
-    arXiv:2409.03121v1, and report that schedules of this form work well
-    for many test problems.
-    For ``gamma > 0`` the ratio ``a/b = (1 + gamma t**2)**-2`` tends to zero,
-    the condition after Eq. (1) of arXiv:2303.01471v1. ``gamma = 0`` gives the
-    time-independent model ``a = b = 1``. A decaying ratio does not by itself
-    establish convergence on a finite grid or in a finite time.
+    Build it as `QuadraticSchedule(gamma=0.3)` and pass it as `QHD(schedule=...)`.
+    `gamma` is the only argument and is optional. Kushnir, Leng, Peng, Fan and Wu give
+    `phi_t = -log(1 + gamma t**2)` and `chi_t = log(1 + gamma t**2)` as an example in
+    Sec. 2.1 of QHDOPT, arXiv:2409.03121v1, and report that schedules of this form work
+    well for many test problems. For `gamma > 0` the ratio `a/b = (1 + gamma t**2)**-2`
+    tends to zero, the condition after Eq. (1) of Leng et al., arXiv:2303.01471v1.
+    `gamma = 0` gives the time-independent model `a = b = 1`. A decaying ratio does not
+    by itself establish convergence on a finite grid or in a finite time. The guide's
+    [schedules](../../algorithms/qhd.md#schedules-and-coefficient-rule) section compares
+    the three schedules.
+
+    The methods give the point values, interval integrals and derivative bounds that
+    planning and
+    [`evolution_bound`][nwqlib.algorithms.qhd.evolution_bounds.evolution_bound] use,
+    with their rounding in units of `u = 2**-53`.
 
     Attributes:
-        kind: Formula identifier, always ``"quadratic"``.
-        gamma: Nonnegative finite rate, in inverse squared time units.
+        kind: Default `"quadratic"`, the only accepted value. Formula identifier.
+        gamma: Default `0.3`, an illustrative working point and not an accuracy choice.
+            Nonnegative finite rate, in inverse squared time units.
     """
 
     # One closed form for A and one for B per interval, the planning work of
@@ -257,23 +264,22 @@ class QuadraticSchedule(Record):
     gamma: Nonnegative = 0.3
 
     def kinetic_weight(self, t):
-        """Return ``a(t) = 1/(1 + gamma t**2)``, within 4u of the exact value.
+        """Return ``a(t) = 1/(1 + gamma t**2)`` with relative error at most 4u to first order.
 
-        It is the reciprocal of ``potential_weight``, one more rounding, and a
-        positive normal binary64 number (``validation._normal_range``), which
-        fails once ``b(t)`` exceeds about 4.5e307, and the refusal names a
-        shorter ``total_time`` as the remedy.
+        It is the reciprocal of ``potential_weight``, one more rounding, and must be a
+        positive normal binary64 number. That fails once ``b(t)`` exceeds about 4.5e307, and
+        the refusal names a shorter ``total_time`` as the remedy.
         """
         b = self.potential_weight(t)
         return _admitted(1.0 / b, f"the kinetic schedule weight a({t!r})", lambda: "Choose a shorter total_time",
                          lambda: 1 / Fraction(b))
 
     def potential_weight(self, t):
-        """Return ``b(t) = 1 + gamma t**2``, within 3u of the exact value, or raise when it overflows.
+        """Return ``b(t) = 1 + gamma t**2`` with relative error at most 3u to first order, or raise when it overflows.
 
-        ``(gamma t) t`` has two roundings and adding the positive 1 a third,
-        so b is at least 1 and fails the range only by overflowing, for which
-        the refusal names a shorter ``total_time``.
+        ``(gamma t) t`` has two roundings and adding the positive 1 a third, so b is at
+        least 1 and fails the range only by overflowing, for which the refusal names a
+        shorter ``total_time``.
         """
         t = _time(t)
         return _admitted(1.0 + self.gamma * t * t, f"the potential schedule weight b({t!r})",
@@ -284,23 +290,21 @@ class QuadraticSchedule(Record):
 
         The primitive of ``1/(1 + gamma t**2)`` is ``atan(k t)/k``. For
         ``x = k t1 >= y = k t0 >= 0`` the angle difference identity
-        ``atan(x) - atan(y) = atan((x - y)/(1 + x y))`` holds with a
-        difference in ``[0, pi/2)``, so with ``h = t1 - t0`` and
-        ``d = 1 + gamma t0 t1 > 0`` it is ``atan(z)``, ``z = k h/d``. Hence
-        ``A = (h/d) atanc(z)`` with ``atanc(z) = atan(z)/z``, and
-        ``atanc(z) = 1`` for ``z <= 2**-27`` (``_ATANC_ONE_BELOW``). Keeping h
-        as a factor preserves a short interval whose two angles round to the
-        same value. d has relative error at most 3u and z at most 7u.
-        ``d log atanc/d log z = z/((1 + z**2) atan z) - 1`` lies in
-        ``[-1, 0]``, and atan and the division add 3u, so atanc contributes
-        10u, and with h, d and the scaled product the value stays below 20u.
-        When d or ``k h`` overflows, the exponent-scaled branch carries both
-        as mantissa and exponent and forms the angle as ``atan2(k h, d)`` on
-        operands scaled by one common power of two, and it returns ``h/d``
-        when the exponents show ``z <= _ATANC_ONE_BELOW``. Its bound is 32u,
-        which also covers a product ``gamma t0`` that underflows before its
-        multiplication by a very large t1 (the lost term changes d by less
-        than 4u).
+        ``atan(x) - atan(y) = atan((x - y)/(1 + x y))`` holds with a difference in
+        ``[0, pi/2)``, so with ``h = t1 - t0`` and ``d = 1 + gamma t0 t1 > 0`` it is
+        ``atan(z)``, ``z = k h/d``. Hence ``A = (h/d) atanc(z)`` with
+        ``atanc(z) = atan(z)/z``. For ``z <= 2**-27`` the code replaces atanc(z) by 1, an
+        approximation with relative error at most ``z**2/3 <= u/6``. Keeping h as a
+        factor preserves a short interval whose two angles round to the same value. d has
+        relative error at most 3u and z at most 7u.
+        ``d log atanc/d log z = z/((1 + z**2) atan z) - 1`` lies in ``[-1, 0]``, and atan
+        and the division add 3u, so atanc contributes 10u, and with h, d and the scaled
+        product the value stays below 20u. When d or ``k h`` overflows, the exponent-scaled
+        branch carries both as mantissa and exponent and forms the angle as
+        ``atan2(k h, d)`` on operands scaled by one common power of two, and it returns
+        ``h/d`` when the exponents show ``z <= 2**-27``. Its bound is 32u, which also covers
+        a product ``gamma t0`` that underflows before its multiplication by a very large t1
+        (the lost term changes d by less than 4u).
         """
         t0, t1 = _interval(t0, t1)
         h, gamma = t1 - t0, self.gamma
@@ -338,11 +342,11 @@ class QuadraticSchedule(Record):
         """Return ``B = (t1 - t0) + gamma (t1**3 - t0**3)/3``.
 
         With ``h = t1 - t0`` and ``q = t0/t1`` the cubic difference factors as
-        ``gamma h t1**2 (1 + q + q**2)/3``, positive like h. The sensitivity
-        of ``1 + q + q**2`` to q is at most 2, so the polynomial carries at
-        most 5u, and with the mantissa operations and the positive ``fsum``
-        the relative error stays below 16u. A q or q**2 that underflows is
-        negligible against the constant 1 of the polynomial.
+        ``gamma h t1**2 (1 + q + q**2)/3``, positive like h. The sensitivity of
+        ``1 + q + q**2`` to q is at most 2, so the polynomial carries at most 5u, and with
+        the mantissa operations and the positive ``fsum`` the relative error stays below
+        16u. A q or q**2 that underflows is negligible against the constant 1 of the
+        polynomial.
         """
         t0, t1 = _interval(t0, t1)
         h = t1 - t0
@@ -363,9 +367,8 @@ class QuadraticSchedule(Record):
     def exact_weights(self, t):
         """Return ``(a(t), b(t))`` as exact rationals for an exact rational ``t >= 0``.
 
-        ``evolution_bounds._coefficient_term`` compares the stored midpoint
-        weights with these exact values, so its coefficient residual needs no
-        roundoff estimate under the midpoint rule.
+        The coefficient residual of ``evolution_bound`` compares the stored midpoint weights
+        with these exact values, so under the midpoint rule it needs no roundoff estimate.
         """
         b = 1 + Fraction(self.gamma) * t * t
         return 1 / b, b
@@ -373,11 +376,12 @@ class QuadraticSchedule(Record):
     def exact_integrals(self, lower, upper):
         """Return ``(A, B)`` over ``[l, r]`` as exact rationals, with A None where it is not rational.
 
-        ``B = (r - l) + gamma (r**3 - l**3)/3`` is rational, and so is
-        ``A = r - l`` for gamma = 0. For gamma > 0, A is an arctangent
-        difference and None. ``evolution_bounds._coefficient_term`` compares
-        the stored step averages with the rational integrals exactly and uses
-        ``kinetic_integral_roundoff`` where A is None.
+        ``B = (r - l) + gamma (r**3 - l**3)/3`` is rational, and so is ``A = r - l`` for
+        gamma = 0. For gamma > 0, A is an arctangent difference and None. The coefficient
+        residual of ``evolution_bound`` compares the exact product of the stored step
+        duration and a stored step average with its integral exactly where that integral
+        is rational. Where A is None it uses the first-order relative error constant
+        of ``kinetic_integral``, 32 over the whole finite binary64 range.
         """
         gamma = Fraction(self.gamma)
         potential = (upper - lower) + gamma * (upper**3 - lower**3) / 3
@@ -386,20 +390,19 @@ class QuadraticSchedule(Record):
     def derivative_bounds(self, lower, upper):
         """Return exact bounds ``(a*, b*, A1, A2, B1, B2)`` on ``|a|, |b|`` and their first two derivatives over ``[l, r]``.
 
-        ``lower`` and ``upper`` are exact rationals (``fractions.Fraction``)
-        with ``0 <= l < r``, and gamma is read as the exact rational of its
-        binary64 value. With ``D = 1 + gamma l**2``, ``a = 1/(1 + gamma t**2)``
-        decreases and ``b = 1 + gamma t**2`` increases on ``t >= 0``, so
-        ``a* = a(l) = 1/D`` and ``b* = b(r)``. From
-        ``a' = -2 gamma t/(1 + gamma t**2)**2`` and
-        ``a'' = 2 gamma (3 gamma t**2 - 1)/(1 + gamma t**2)**3``, bounding each
-        numerator at r and each denominator at l gives ``A1 = 2 gamma r/D**2``
-        and ``|a''| <= 2 gamma (1 + 3 gamma r**2)/D**3``, which
+        ``lower`` and ``upper`` are exact rationals (``fractions.Fraction``) with
+        ``0 <= l < r``, and gamma is read as the exact rational of its binary64 value. With
+        ``D = 1 + gamma l**2``, ``a = 1/(1 + gamma t**2)`` decreases and
+        ``b = 1 + gamma t**2`` increases on ``t >= 0``, so ``a* = a(l) = 1/D`` and
+        ``b* = b(r)``. From ``a' = -2 gamma t/(1 + gamma t**2)**2`` and
+        ``a'' = 2 gamma (3 gamma t**2 - 1)/(1 + gamma t**2)**3``, bounding each numerator at
+        r and each denominator at l gives ``A1 = 2 gamma r/D**2`` and
+        ``|a''| <= 2 gamma (1 + 3 gamma r**2)/D**3``, which
         ``A2 = 2 gamma/D**2 + 8 gamma**2 r**2/D**3`` covers because D >= 1.
         ``b' = 2 gamma t`` and ``b'' = 2 gamma`` give ``B1 = 2 gamma r`` and
-        ``B2 = 2 gamma``. These are analytic bounds over the whole interval,
-        not sampled maxima, and ``evolution_bound`` uses them in the
-        time-ordering and midpoint-quadrature bounds.
+        ``B2 = 2 gamma``. These are analytic bounds over the whole interval, not sampled
+        maxima, and ``evolution_bound`` uses them in the time-ordering and
+        midpoint-quadrature bounds.
         """
         gamma = Fraction(self.gamma)
         d = 1 + gamma * lower * lower
@@ -409,28 +412,33 @@ class QuadraticSchedule(Record):
 
 
 class CubicSchedule(Record):
-    """Weights ``a(t) = 2/(s + t**3)`` and ``b(t) = 2 t**3``.
+    """Cubic schedule `a(t) = 2/(s + t**3)`, `b(t) = 2 t**3` of Leng et al., Eq. (C.4).
 
-    This is Eq. (C.4) of Leng et al., arXiv:2303.01471v1, p. 32, whose two
-    weights follow the ODE model of Nesterov's accelerated gradient method,
-    with s removing the singularity of ``2/t**3`` at t = 0. Liu et al.,
-    arXiv:2607.16996v1, Eq. (92), write it with ``s = 1`` and call it QHD-C,
-    but their code runs the shifted form (``ShiftedCubicSchedule``) under
-    that name, and with
-    ``s = 1`` only that form reproduces the Rz counts of their Table II
-    (docs/algorithms/qhd.md, "Circuit synthesis").
-    s is a model parameter. Leng et al. set it to their time step, but here it
-    stays fixed when the step count changes, because changing s changes the
-    Hamiltonian. For the classical Hamiltonian ``a |p|**2/2 + b f(x)``,
-    Hamilton's equations ``x' = a p`` and ``p' = -b grad f`` give
-    ``x'' = (a'/a) x' - a b grad f``, so the damping is ``-a'/a`` and the
-    gradient factor ``a b``. Here they are ``3 t**2/(s + t**3)`` and
-    ``4 t**3/(s + t**3)``, which tends to 4, and they differ from those of
-    ``ShiftedCubicSchedule``.
+    Build it as `CubicSchedule(s=...)` and pass it as `QHD(schedule=...)`. `s` is
+    required and has no default, because it is a model parameter that the caller
+    chooses. This is Eq. (C.4) of Leng et al., arXiv:2303.01471v1, p. 32, whose two
+    weights follow the ODE model of Nesterov's accelerated gradient method, with s
+    removing the singularity of `2/t**3` at t = 0. Liu et al., arXiv:2607.16996v1, Eq.
+    (92), write it with `s = 1` and call it QHD-C, but their code runs the shifted form
+    ([`ShiftedCubicSchedule`][nwqlib.algorithms.qhd.schedules.ShiftedCubicSchedule])
+    under that name, and with `s = 1` only that form reproduces the Rz counts of their
+    Table II ([circuit synthesis](../../algorithms/qhd.md#circuit-synthesis)). s is a
+    model parameter. Leng et al. set it to their time step, but here it stays fixed when
+    the step count changes, because changing s changes the Hamiltonian. For the
+    classical Hamiltonian `a |p|**2/2 + b f(x)`, Hamilton's equations `x' = a p` and
+    `p' = -b grad f` give `x'' = (a'/a) x' - a b grad f`, so the damping is `-a'/a` and
+    the gradient factor `a b`. Here they are `3 t**2/(s + t**3)` and
+    `4 t**3/(s + t**3)`, which tends to 4, and they differ from those of
+    `ShiftedCubicSchedule`.
+
+    The methods give the point values, interval integrals and derivative bounds that
+    planning and
+    [`evolution_bound`][nwqlib.algorithms.qhd.evolution_bounds.evolution_bound] use,
+    with their rounding in units of `u = 2**-53`.
 
     Attributes:
-        kind: Formula identifier, always ``"cubic"``.
-        s: Positive finite regularization, in cubed time units.
+        kind: Default `"cubic"`, the only accepted value. Formula identifier.
+        s: Required. Positive finite regularization, in cubed time units.
     """
 
     # At most 128 integrand evaluations for A (64 Gauss nodes on each side of
@@ -442,15 +450,14 @@ class CubicSchedule(Record):
     s: Positive
 
     def kinetic_weight(self, t):
-        """Return ``a(t) = 2/(s + t**3)``, within 4u of the exact value, or raise outside the normal range.
+        """Return ``a(t) = 2/(s + t**3)`` with relative error at most 4u to first order, or raise outside the normal range.
 
-        ``t**3`` as ``(t t) t`` has two roundings, the positive sum one and
-        the division one. a is positive for every t, so a result that is zero
-        or subnormal, such as ``a(1e103)`` with s = 1 whose exact value is
-        about 2e-309, lies outside the normal binary64 range and raises
-        (``validation._normal_range``). A lower-range refusal recommends
-        reducing s and/or total_time, since both may need to change.
-        An upper-range refusal recommends a larger s (``_admitted``).
+        ``t**3`` as ``(t t) t`` has two roundings, the positive sum one and the division
+        one. a is positive for every t, so a result that is zero or subnormal, such as
+        ``a(1e103)`` with s = 1 whose exact value is about 2e-309, lies outside the normal
+        binary64 range and raises. A lower-range refusal recommends reducing s and/or
+        total_time, since both may need to change. An upper-range refusal recommends a
+        larger s.
         """
         t = _time(t)
         value = 2.0 / (self.s + t * t * t)
@@ -459,11 +466,11 @@ class CubicSchedule(Record):
             "Reduce s and/or total_time"))
 
     def potential_weight(self, t):
-        """Return ``b(t) = 2 t**3``, within 2u of the exact value, or raise outside the normal range.
+        """Return ``b(t) = 2 t**3`` with relative error at most 2u to first order, or raise outside the normal range.
 
-        Doubling is exact, and ``(2 t t) t`` has two roundings. b is zero only
-        at t = 0, so another zero or a subnormal value raises
-        (``validation._normal_range``, ``_potential_remedy``).
+        Doubling is exact, and ``(2 t t) t`` has two roundings. b is zero only at t = 0, so
+        another zero or a subnormal value raises. The refusal names fewer steps or a longer
+        ``total_time`` below the range, and a shorter ``total_time`` above it.
         """
         t = _time(t)
         value = 2.0 * t * t * t
@@ -474,33 +481,28 @@ class CubicSchedule(Record):
         """Return ``A = ∫ 2/(s + t**3) dt`` over ``[t0, t1]`` by positive Gauss-Legendre quadrature.
 
         The partial-fraction primitive in ``y = t/s**(1/3)``,
-        ``log(1 + y)/3 - log(y**2 - y + 1)/6 + atan((2 y - 1)/sqrt(3))/sqrt(3)``,
-        cancels catastrophically for large y, where its terms are much larger
-        than the integral, of order ``h/y**3``. The quadrature therefore works
-        on positive integrands only. ``r = cbrt(s)`` defines the nearby exact
-        ``s' = r**3`` within 6u of s, and ``|d log a/d log s| <= 1`` turns that
-        into at most 6u in A. The interval is split at r. On a segment below
-        r of length h starting at t0, ``y = t/r`` gives
-        ``2/(s' + t**3) dt = (2/r**2) dy/(1 + y**3)``, and with
-        ``y = t0/r + (h/r) q`` this is
-        ``A_low = (2 h/r**3) mean_q 1/(1 + y**3)``. On a segment ``[l, v]``
-        above r of length h, ``x = r/t`` maps it to ``[r/v, r/l]``, whose
-        length ``(r/l)(h/v)`` is formed without subtracting ``r/l - r/v``, and
-        ``dt = -r dx/x**2`` gives
+        ``log(1 + y)/3 - log(y**2 - y + 1)/6 + atan((2 y - 1)/sqrt(3))/sqrt(3)``, cancels
+        catastrophically for large y, where its terms are much larger than the integral, of
+        order ``h/y**3``. The quadrature therefore works on positive integrands only.
+        ``r = cbrt(s)`` defines the nearby exact ``s' = r**3`` within 6u of s, and
+        ``|d log a/d log s| <= 1`` turns that into at most 6u in A. The interval is split at
+        r. On a segment below r of length h starting at t0, ``y = t/r`` gives
+        ``2/(s' + t**3) dt = (2/r**2) dy/(1 + y**3)``, and with ``y = t0/r + (h/r) q`` this
+        is ``A_low = (2 h/r**3) mean_q 1/(1 + y**3)``. On a segment ``[l, v]`` above r of
+        length h, ``x = r/t`` maps it to ``[r/v, r/l]``, whose length ``(r/l)(h/v)`` is
+        formed without subtracting ``r/l - r/v``, and ``dt = -r dx/x**2`` gives
         ``2/(s' + t**3) dt = -(2/r**2) x dx/(1 + x**3)``, so
-        ``A_high = (2 h/(r l v)) mean_q x/(1 + x**3)`` with
-        ``x = r/v + (r/l)(h/v) q``. Both means are over q in [0, 1]
-        (``_unit_mean``), which carry at most 31u. The mantissa operations,
-        the segment subtraction, the 6u change of s and the sum of the two
-        positive parts add at most 14u, so the first-order relative error is
-        at most 45u, which the stated 48u covers. Each interval costs 64 or
-        128 integrand evaluations, however close its endpoints or small s.
-        Outside ``kinetic_integral_range`` (s in [1e-8, 1e8], t <= 1e4) a
-        transformed coordinate can underflow only where the tail it describes
-        is itself below the smallest subnormal 2**-1074 or negligible in a
-        bounded mean. For example ``r/l < 2**-1022`` needs
-        ``l > 2**663`` even for the smallest s, and the whole remaining tail
-        is then at most ``∫_l^∞ 2/t**3 dt = 1/l**2 < 2**-1326``.
+        ``A_high = (2 h/(r l v)) mean_q x/(1 + x**3)`` with ``x = r/v + (r/l)(h/v) q``. Both
+        means are over q in [0, 1], each by the 16-point Gauss-Legendre rule on four equal
+        panels, and carry at most 31u. The mantissa operations, the segment subtraction, the
+        6u change of s and the sum of the two positive parts add at most 14u, so the
+        first-order relative error is at most 45u, which the bound of 48u covers. Each
+        interval costs 64 or 128 integrand evaluations, however close its endpoints or small
+        s. Outside s in [1e-8, 1e8] and t <= 1e4 a transformed coordinate can underflow only
+        where the tail it describes is itself below the smallest subnormal 2**-1074 or
+        negligible in a bounded mean. For example ``r/l < 2**-1022`` needs ``l > 2**663``
+        even for the smallest s, and the whole remaining tail is then at most
+        ``∫_l^∞ 2/t**3 dt = 1/l**2 < 2**-1326``.
         """
         t0, t1 = _interval(t0, t1)
         r = cbrt(self.s)
@@ -519,7 +521,12 @@ class CubicSchedule(Record):
         return fsum(parts)
 
     def potential_integral(self, t0, t1):
-        """Return ``B = (t1**4 - t0**4)/2`` (``_cubic_potential_integral``)."""
+        """Return ``B = (t1**4 - t0**4)/2``, with C = 16 in the error relation of the module docstring.
+
+        With ``h = t1 - t0`` and ``q = t0/t1`` it is formed as
+        ``B = h t1**3 (1 + q)(1 + q**2)/2``, a product of positive factors, so no difference
+        of fourth powers is formed. The relative error stays below 16u.
+        """
         return _cubic_potential_integral(t0, t1)
 
     # Relative error constant C of the computed kinetic integral A, valid on
@@ -532,7 +539,8 @@ class CubicSchedule(Record):
     def exact_weights(self, t):
         """Return ``(a(t), b(t))`` as exact rationals for an exact rational ``t >= 0``.
 
-        ``QuadraticSchedule.exact_weights`` states the use.
+        The coefficient residual of ``evolution_bound`` compares the stored midpoint weights
+        with these exact values.
         """
         cube = t**3
         return 2 / (Fraction(self.s) + cube), 2 * cube
@@ -540,25 +548,27 @@ class CubicSchedule(Record):
     def exact_integrals(self, lower, upper):
         """Return ``(A, B)`` over ``[l, r]`` as exact rationals, with A None because it is not rational.
 
-        ``B = (r**4 - l**4)/2``. A mixes a logarithm and an arctangent
-        (``QuadraticSchedule.exact_integrals`` states the use).
+        ``B = (r**4 - l**4)/2``. A mixes a logarithm and an arctangent. The coefficient
+        residual of ``evolution_bound`` compares the exact product of the stored step
+        duration and the stored potential step average with the rational integral B
+        exactly, and for A it uses the first-order relative error constant of
+        ``kinetic_integral``, 48 on s in [1e-8, 1e8] and 0 <= t <= 1e4.
         """
         return None, (upper**4 - lower**4) / 2
 
     def derivative_bounds(self, lower, upper):
         """Return exact bounds ``(a*, b*, A1, A2, B1, B2)`` on ``|a|, |b|`` and their first two derivatives over ``[l, r]``.
 
-        ``lower`` and ``upper`` are exact rationals with ``0 <= l < r``, and s
-        is the exact rational of its binary64 value. With ``D = s + l**3``,
-        ``a = 2/(s + t**3)`` decreases and ``b = 2 t**3`` increases, so
-        ``a* = 2/D`` and ``b* = 2 r**3``. ``a' = -6 t**2/(s + t**3)**2`` gives
-        ``A1 = 6 r**2/D**2``. ``a'' = 12 t (2 t**3 - s)/(s + t**3)**3`` has
+        ``lower`` and ``upper`` are exact rationals with ``0 <= l < r``, and s is the exact
+        rational of its binary64 value. With ``D = s + l**3``, ``a = 2/(s + t**3)``
+        decreases and ``b = 2 t**3`` increases, so ``a* = 2/D`` and ``b* = 2 r**3``.
+        ``a' = -6 t**2/(s + t**3)**2`` gives ``A1 = 6 r**2/D**2``.
+        ``a'' = 12 t (2 t**3 - s)/(s + t**3)**3`` has
         ``|a''| <= 12 t/(s + t**3)**2 + 12 t**4/(s + t**3)**3``, since
-        ``|2 t**3 - s| <= (s + t**3) + t**3``, which
-        ``A2 = 12 r/D**2 + 36 r**4/D**3`` covers. ``b' = 6 t**2`` and
-        ``b'' = 12 t`` give ``B1 = 6 r**2`` and ``B2 = 12 r``. Numerators are
-        bounded at r and denominators at l (``QuadraticSchedule.derivative_bounds``
-        states the use).
+        ``|2 t**3 - s| <= (s + t**3) + t**3``, which ``A2 = 12 r/D**2 + 36 r**4/D**3``
+        covers. ``b' = 6 t**2`` and ``b'' = 12 t`` give ``B1 = 6 r**2`` and ``B2 = 12 r``.
+        Numerators are bounded at r and denominators at l. ``evolution_bound`` uses these
+        analytic bounds in the time-ordering and midpoint-quadrature bounds.
         """
         s = Fraction(self.s)
         d = s + lower ** 3
@@ -567,27 +577,33 @@ class CubicSchedule(Record):
 
 
 class ShiftedCubicSchedule(Record):
-    """Weights ``a(t) = (2/(s + t))**3`` and ``b(t) = 2 t**3``.
+    """Shifted cubic schedule `a(t) = (2/(s + t))**3`, `b(t) = 2 t**3` of Wu et al., Eq. (15).
 
-    This is Eq. (15) of Wu et al., arXiv:2605.12066v1, Sec. VI, the schedule
-    of their published results, offered for replication. The paper calls s a
-    small regularization parameter, and the code behind its results sets
-    ``s = T/N_t = 2e-4`` for ``T = 10`` and the paper's ``N_t = 50,000``
-    time steps. That code uses N_t as the number of time points, so its
-    step ``T/(N_t - 1)`` is close to s but not equal. The paper presents
-    the schedule as the QHD-C schedule of Leng et al., arXiv:2303.01471v1,
-    but its dynamics differ from Leng's Eq. (C.4), which is
-    ``CubicSchedule``. The damping ``-a'/a`` and gradient factor ``a b``
-    (``CubicSchedule`` derives them) are ``3/(s + t)`` and
-    ``16 t**3/(s + t)**3``, which tends to 16 instead of 4. Liu et al.,
-    arXiv:2607.16996v1, run this form under the name QHD-C in their code,
-    and with ``s = 1`` only this form reproduces the Rz counts of their
-    Table II (docs/algorithms/qhd.md, "Circuit synthesis"). As for the cubic
+    Build it as `ShiftedCubicSchedule(s=...)` and pass it as `QHD(schedule=...)`. `s` is
+    required and has no default, because it is a model parameter that the caller
+    chooses. This is Eq. (15) of Wu et al., arXiv:2605.12066v1, Sec. VI, the schedule of
+    their published results, offered for replication. The paper calls s a small
+    regularization parameter, and the code behind its results sets `s = T/N_t = 2e-4`
+    for `T = 10` and the paper's `N_t = 50,000` time steps. That code uses N_t as the
+    number of time points, so its step `T/(N_t - 1)` is close to s but not equal. The
+    paper presents the schedule as the QHD-C schedule of Leng et al.,
+    arXiv:2303.01471v1, but its dynamics differ from Leng's Eq. (C.4), which is
+    [`CubicSchedule`][nwqlib.algorithms.qhd.schedules.CubicSchedule]. The damping
+    `-a'/a` and gradient factor `a b` (`CubicSchedule` derives them) are `3/(s + t)` and
+    `16 t**3/(s + t)**3`, which tends to 16 instead of 4. Liu et al.,
+    arXiv:2607.16996v1, run this form under the name QHD-C in their code, and with
+    `s = 1` only this form reproduces the Rz counts of their Table II
+    ([circuit synthesis](../../algorithms/qhd.md#circuit-synthesis)). As for the cubic
     form, s stays fixed when the step count changes.
 
+    The methods give the point values, interval integrals and derivative bounds that
+    planning and
+    [`evolution_bound`][nwqlib.algorithms.qhd.evolution_bounds.evolution_bound] use,
+    with their rounding in units of `u = 2**-53`.
+
     Attributes:
-        kind: Formula identifier, always ``"shifted_cubic"``.
-        s: Positive finite time shift, in time units.
+        kind: Default `"shifted_cubic"`, the only accepted value. Formula identifier.
+        s: Required. Positive finite time shift, in time units.
     """
 
     # One closed form each for A and B per interval, the planning work of the
@@ -598,14 +614,12 @@ class ShiftedCubicSchedule(Record):
     s: Positive
 
     def kinetic_weight(self, t):
-        """Return ``a(t) = (2/(s + t))**3``, within 8u of the exact value, or raise outside the normal range.
+        """Return ``a(t) = (2/(s + t))**3`` with relative error at most 8u to first order, or raise outside the normal range.
 
-        ``x = 2/(s + t)`` has two roundings, which cubing triples, and the two
-        products add two more. a is positive for every t, so a result that is
-        zero or subnormal raises (``validation._normal_range``). A
-        lower-range refusal recommends reducing s and/or total_time,
-        since both may need to change. An upper-range refusal recommends
-        a larger s (``_admitted``).
+        ``x = 2/(s + t)`` has two roundings, which cubing triples, and the two products add
+        two more. a is positive for every t, so a result that is zero or subnormal raises. A
+        lower-range refusal recommends reducing s and/or total_time, since both may need to
+        change. An upper-range refusal recommends a larger s.
         """
         t = _time(t)
         x = 2.0 / (self.s + t)
@@ -614,11 +628,11 @@ class ShiftedCubicSchedule(Record):
             "Reduce s and/or total_time"))
 
     def potential_weight(self, t):
-        """Return ``b(t) = 2 t**3``, within 2u of the exact value, or raise outside the normal range.
+        """Return ``b(t) = 2 t**3`` with relative error at most 2u to first order, or raise outside the normal range.
 
-        Doubling is exact, and ``(2 t t) t`` has two roundings. b is zero only
-        at t = 0, so another zero or a subnormal value raises
-        (``validation._normal_range``, ``_potential_remedy``).
+        Doubling is exact, and ``(2 t t) t`` has two roundings. b is zero only at t = 0, so
+        another zero or a subnormal value raises. The refusal names fewer steps or a longer
+        ``total_time`` below the range, and a shorter ``total_time`` above it.
         """
         t = _time(t)
         value = 2.0 * t * t * t
@@ -628,15 +642,13 @@ class ShiftedCubicSchedule(Record):
     def kinetic_integral(self, t0, t1):
         """Return ``A = 4 ((s + t0)**-2 - (s + t1)**-2)``.
 
-        With ``x0 = s + t0`` and ``x1 = s + t1``, whose exact difference is
-        ``h = t1 - t0`` even when the rounded sums are equal,
-        ``A = 4 h (1 + x0/x1)/(x0**2 x1)``, with no difference of inverse
-        squares. The logarithmic sensitivities to x0 and x1 are at most 2 and
-        3/2, so the two rounded sums contribute 3.5u, and the relative error
-        stays below 16u. On ``[0, s]``, A is exactly ``3/s**2``. When
-        ``s + t1`` overflows, s exceeds ``2**969`` and the whole integral is
-        at most ``4/s**2 < 2**-1936``, below the subnormal range, so the
-        result is zero.
+        With ``x0 = s + t0`` and ``x1 = s + t1``, whose exact difference is ``h = t1 - t0``
+        even when the rounded sums are equal, ``A = 4 h (1 + x0/x1)/(x0**2 x1)``, with no
+        difference of inverse squares. The logarithmic sensitivities to x0 and x1 are at
+        most 2 and 3/2, so the two rounded sums contribute 3.5u, and the relative error
+        stays below 16u. On ``[0, s]``, A is exactly ``3/s**2``. When ``s + t1`` overflows,
+        s exceeds ``2**969`` and the whole integral is at most ``4/s**2 < 2**-1936``, below
+        the subnormal range, so the result is zero.
         """
         t0, t1 = _interval(t0, t1)
         h, x0, x1 = t1 - t0, self.s + t0, self.s + t1
@@ -646,22 +658,29 @@ class ShiftedCubicSchedule(Record):
         return _scaled_product((4.0, h, 1.0 + x0 / x1), (x0, x0, x1))
 
     def potential_integral(self, t0, t1):
-        """Return ``B = (t1**4 - t0**4)/2`` (``_cubic_potential_integral``)."""
+        """Return ``B = (t1**4 - t0**4)/2``, with C = 16 in the error relation of the module docstring.
+
+        With ``h = t1 - t0`` and ``q = t0/t1`` it is formed as
+        ``B = h t1**3 (1 + q)(1 + q**2)/2``, a product of positive factors, so no difference
+        of fourth powers is formed. The relative error stays below 16u.
+        """
         return _cubic_potential_integral(t0, t1)
 
     def exact_weights(self, t):
         """Return ``(a(t), b(t))`` as exact rationals for an exact rational ``t >= 0``.
 
-        ``QuadraticSchedule.exact_weights`` states the use.
+        The coefficient residual of ``evolution_bound`` compares the stored midpoint weights
+        with these exact values.
         """
         return 8 / (Fraction(self.s) + t) ** 3, 2 * t**3
 
     def exact_integrals(self, lower, upper):
         """Return ``(A, B)`` over ``[l, r]`` as exact rationals.
 
-        ``A = 4 ((s + l)**-2 - (s + r)**-2)`` and ``B = (r**4 - l**4)/2``, both
-        rational, so the exact subtraction has no cancellation error
-        (``QuadraticSchedule.exact_integrals`` states the use).
+        ``A = 4 ((s + l)**-2 - (s + r)**-2)`` and ``B = (r**4 - l**4)/2``, both rational, so
+        the exact subtraction has no cancellation error. The coefficient residual of
+        ``evolution_bound`` compares the exact product of the stored step duration and each
+        stored step average with these integrals exactly.
         """
         s = Fraction(self.s)
         return 4 * (1 / (s + lower) ** 2 - 1 / (s + upper) ** 2), (upper**4 - lower**4) / 2
@@ -669,13 +688,12 @@ class ShiftedCubicSchedule(Record):
     def derivative_bounds(self, lower, upper):
         """Return exact bounds ``(a*, b*, A1, A2, B1, B2)`` on ``|a|, |b|`` and their first two derivatives over ``[l, r]``.
 
-        ``lower`` and ``upper`` are exact rationals with ``0 <= l < r``, and s
-        is the exact rational of its binary64 value.
-        ``a = 8/(s + t)**3`` decreases with ``a' = -24/(s + t)**4`` and
-        ``a'' = 96/(s + t)**5``, so ``a* = 8/(s + l)**3``,
+        ``lower`` and ``upper`` are exact rationals with ``0 <= l < r``, and s is the exact
+        rational of its binary64 value. ``a = 8/(s + t)**3`` decreases with
+        ``a' = -24/(s + t)**4`` and ``a'' = 96/(s + t)**5``, so ``a* = 8/(s + l)**3``,
         ``A1 = 24/(s + l)**4`` and ``A2 = 96/(s + l)**5``. ``b = 2 t**3`` gives
-        ``b* = 2 r**3``, ``B1 = 6 r**2`` and ``B2 = 12 r``
-        (``QuadraticSchedule.derivative_bounds`` states the use).
+        ``b* = 2 r**3``, ``B1 = 6 r**2`` and ``B2 = 12 r``. ``evolution_bound`` uses these
+        analytic bounds in the time-ordering and midpoint-quadrature bounds.
         """
         shifted = Fraction(self.s) + lower
         return (8 / shifted ** 3, 2 * upper ** 3, 24 / shifted ** 4, 96 / shifted ** 5,

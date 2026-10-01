@@ -3,7 +3,7 @@
 #
 # Four hydrogen atoms in a row, 2 Å apart, form a strongly correlated molecule, whose ground-state energy is the smallest eigenvalue of an 8-qubit Pauli-sum Hamiltonian. ADAPT-GCIM computes it in a small basis of many-electron states, optimizing no angle, and the notebook compares it with the exact energy.
 #
-# Install with `python -m pip install -e ".[aer,notebook,chemistry]"` from the repository root · circuits of at most 8 simulated qubits · about 25 s on a laptop.
+# Install with `python -m pip install "nwqlib[aer,notebook,chemistry]"`. To work on NWQLib itself, run `python -m pip install -e ".[aer,notebook,chemistry]"` in a clone of the repository instead. The notebook simulates circuits of at most 8 qubits and runs in about 19 s on an Apple M3 Max with 36 GiB of memory (Python 3.12.14, Qiskit 2.5.2, Aer 0.17.2).
 #
 # > **How to read this notebook.** The next cells compute the energy and show it with its cost.
 # >
@@ -141,7 +141,7 @@ def krylov_dimension(hamiltonian, occupations, *, rtol=1e-10, max_vectors=64):
 
 
 def show_card(result, exact, references, molecule, host_cost, circuit_cost, seconds):
-    """Show the result card: the answer against the exact energy, the cost of both ledgers, the figure and steps."""
+    """Show the result card: the answer against the exact energy, the quantum and classical cost, the figure and steps."""
     errors = np.array([MILLIHARTREE * (step.energy - exact) for step in result.history])
     closest = min(references, key=lambda name: abs(references[name] - exact))
     gap = MILLIHARTREE * (references[closest] - exact)
@@ -158,7 +158,7 @@ def show_card(result, exact, references, molecule, host_cost, circuit_cost, seco
         f"{pair_circuits(len(result.pencil.overlap))} circuits with exact readout and no shots, "
         f"{'CX gates not predicted (no gate-count formula for these circuits)' if cx is None else f'{cx:,} CX gates'}. "
         f"Classical: peak memory {format_bytes(amount(host_cost, 'known_memory', 'host'))} of known buffers, stated "
-        f"before the run, host work {result.data.trace.host_work_reserved:,} units (a planning quantity, not "
+        f"before the run, classical work {result.data.trace.host_work_reserved:,} units (a planning quantity, not "
         f"seconds), {seconds:.1f} s on this computer, chemistry setup included.</p>"))
     fig, ax = plt.subplots(figsize=(8, 3.8), layout="constrained")
     iterations = [step.iteration for step in result.history]
@@ -189,7 +189,7 @@ from nwqlib import estimate, plan
 
 references = {name: molecule.reference_panel[key] for name, key in
               (("Hartree–Fock", "e_hf"), ("MP2", "e_mp2"), ("CCSD", "e_ccsd"))}  # classical methods, for comparison
-host_cost = estimate(result.plan)  # the classical ledger of this run, stated before it ran
+host_cost = estimate(result.plan)  # the classical cost of this run, stated before it ran
 circuit_plan = plan(problem, method=molecule.adapt_method(pool=POOL, theta=THETA, max_iterations=MAX_ITERATIONS),
                     execution="quantum", seed=7)  # planned as circuits, not run
 circuit_cost = estimate(circuit_plan)
@@ -205,7 +205,7 @@ show_card(result, E_FCI, references, molecule, host_cost, circuit_cost, seconds)
 # - **Input.** A Qiskit `SparsePauliOp`, or a dense or sparse matrix for exact evaluation. The chemistry helper builds the Pauli sum from a geometry with PySCF and OpenFermion.
 # - **Initial state.** The methods start from a state with a sizable overlap with the ground state, here the Hartree–Fock state.
 # - **Output.** `result.eigenvalue`, in the unit of the `Eigenproblem`, the smallest eigenvalue of a projected problem.
-# - **Size.** Exact evaluation holds state vectors of the full Hamiltonian on the host. As circuits, the Aer simulator accepts 20 qubits by default (Section 4).
+# - **Size.** Exact evaluation holds state vectors of the full Hamiltonian in classical memory. As circuits, the Aer simulator accepts 20 qubits by default (Section 4).
 #
 # The cell plans QCELS, another eigenvalue method of this family (Go deeper D), on the dense 256 × 256 matrix of the chain. With `max_work` set to 100,000,000 for this demonstration (the default is 1,000,000,000), planning refuses it before any evaluation. The remedy is the default `max_work`, and the solve takes under a second.
 
@@ -243,7 +243,7 @@ show_table([
 #
 # ## 2. What it costs
 #
-# **As circuits, the quantum ledger counts circuits, qubits and shots. The classical ledger counts memory, work and time on this computer.** No gate-count formula covers these circuits, so CX gates, depth and T gates are not predicted.
+# **As circuits, the quantum cost is circuits, qubits and shots. The classical cost is memory, work and time on this computer.** No gate-count formula covers these circuits, so CX gates, depth and T gates are not predicted.
 #
 # The card cell planned the chain as circuits without running them.
 #
@@ -264,7 +264,7 @@ show_table([
     *[(label, "not predicted", "No gate-count formula for these circuits")
       for label, metric in (("CX gates", "cx"), ("Depth", "logical_depth"), ("T gates", "t"))
       if amount(circuit_cost, metric) is None],
-], headers=("Quantum ledger, the chain as circuits", "Count", "Source"))
+], headers=("Quantum cost, the chain as circuits", "Count", "Source"))
 
 # %%
 trace = result.data.trace
@@ -272,11 +272,11 @@ show_table([
     ("Peak memory", format_bytes(amount(host_cost, "known_memory", "host")), "Not measured"),
     ("Work [units, a planning quantity, not seconds]",
      f"{amount(host_cost, 'construction_work'):,} for construction, upper bound. The evaluation is checked one "
-     f"query at a time", f"{trace.host_work_reserved:,} reserved for the evaluation"),
+     f"query at a time", f"{trace.host_work_reserved:,} counted for the evaluation"),
     ("Stored run data", "Not predicted", format_bytes(trace.data_bytes)),
     ("Time on this computer", "Not predicted", f"{seconds:.1f} s for the chemistry setup and the solve, "
-     f"{sum(event.timing.seconds for event in trace.events):.2f} s of it in its {len(trace.events)} host evaluations"),
-], headers=("Classical ledger", "Before the run", "Recorded by the run"))
+     f"{sum(event.timing.seconds for event in trace.events):.2f} s of it in its {len(trace.events)} classical evaluations"),
+], headers=("Classical cost", "Before the run", "Recorded by the run"))
 
 # %% [markdown]
 # - **Peak memory** counts the known buffers of the evaluation: the cached state vectors, the action tables and the Hamiltonian. Python, PySCF and the rest of the process add to it.
@@ -316,7 +316,7 @@ show_table([(step.iteration, "Hartree–Fock state" if step.iteration == 0 else 
 #
 # ## 4. How large can I go?
 #
-# **On a laptop, the simulator, the circuit limit and the work caps set the size. Beyond them, `plan` and `estimate` still give the cost.** The table lists the limits this run had and the chain's use of them.
+# **The local simulator, the circuit limit and the work caps set the size. Beyond them, `plan` and `estimate` still give the cost.** The table lists the limits this run had and the chain's use of them.
 #
 # [Planning at scale](resource_estimation_at_scale.ipynb) plans a fixed GCiM trial basis at 80 to 100 qubits, sizes no simulator holds.
 
@@ -347,7 +347,7 @@ show_table([
 #
 # The cell below is the eigenvalue workflow without the chemistry helper. It writes H₂ at 0.74 Å in the STO-3G basis as 15 Pauli strings and compares Lanczos and ADAPT-GCIM with exact diagonalization. Replace `my_H` and `my_initial_state` with your own.
 #
-# - **Another molecule.** Change `GEOMETRY`, `BASIS` and `ACTIVE_SPACE` in the first cell and run the notebook again. For example, `"Li 0 0 0; H 0 0 1.6"` with `ACTIVE_SPACE = (2, 5)` is a 10-qubit LiH problem, and eight iterations take under a minute on a laptop.
+# - **Another molecule.** Change `GEOMETRY`, `BASIS` and `ACTIVE_SPACE` in the first cell and run the notebook again. For example, `"Li 0 0 0; H 0 0 1.6"` with `ACTIVE_SPACE = (2, 5)` is a 10-qubit LiH problem.
 # - **Active space.** When it leaves orbitals out, CASCI is exact only within it, while MP2 and CCSD use all orbitals.
 # - **Hamiltonian.** A Qiskit `SparsePauliOp`, in which qubit 0 is the rightmost character of each label. The 15 coefficients are the Jordan–Wigner coefficients rounded to eight decimals, in the spin-orbital order of `build_gcim_chemistry_problem`. A dense or sparse matrix works for exact evaluation ([Supply inputs](../docs/inputs.md)).
 # - **Initial state.** `ingest_occupation("1100", num_qubits=4)` prepares the basis state with qubits 0 and 1 occupied, listing qubit 0 first. A product state, a vector or a Qiskit circuit also works.
@@ -384,7 +384,7 @@ print(f"exact diagonalization {my_exact:.6f} Ha, error of Lanczos {my_lanczos.ei
 # ## 7. What NWQLib adds
 #
 # - **Planning beyond simulation.** `plan` and `estimate` work at sizes no simulator holds ([Planning at scale](resource_estimation_at_scale.ipynb)).
-# - **The law behind every number.** The circuit counts follow the pair rule of Appendix A, which Go deeper B checks against executed circuits. [Mathematics](../docs/mathematics.md) gives the resource formulas, and the resource notebook compares them with compiled circuits at small sizes.
+# - **The formula behind every number.** The circuit counts follow the pair rule of Appendix A, which Go deeper B checks against executed circuits. [Mathematics](../docs/mathematics.md) gives the resource formulas, and the resource notebook compares them with compiled circuits at small sizes.
 # - **One argument switches the method.** `method=Lanczos(...)` or `method=QCELS(...)` in the same `solve` call replaces ADAPT-GCIM (Go deeper D).
 # - **Reanalysis without new evaluation.** The result stores every matrix element, so `result.analyze` solves again with another overlap cutoff (Go deeper C).
 # - **Saved and reloaded.** A saved result reloads with its matrix elements, and its numbers can be recomputed (Appendix B).
@@ -440,7 +440,7 @@ show_table([
 #
 # ### B. The same algorithm as quantum circuits
 #
-# **Do quantum circuits give the same energies as the exact evaluation, and how many circuits does ADAPT-GCIM need?** The cell builds H₂ at 0.74 Å with the chemistry helper and runs ADAPT-GCIM once as circuits and once with exact evaluation, about 2 s.
+# **Do quantum circuits give the same energies as the exact evaluation, and how many circuits does ADAPT-GCIM need?** The cell builds H₂ at 0.74 Å with the chemistry helper and runs ADAPT-GCIM once as circuits and once with exact evaluation, under a second.
 #
 # With exact outcome probabilities each pair of basis states $\psi_i,\psi_j$ is prepared once, as the joint state $(|0\rangle|\psi_i\rangle+|1\rangle|\psi_j\rangle)/\sqrt2$ of one ancilla qubit and the system. The simulator reduces the final state to the overlap $\langle\psi_i|\psi_j\rangle$ and to $\langle\psi_i|H_0|\psi_j\rangle$, where $H_0$ is $H$ without its identity term.
 #
@@ -473,7 +473,7 @@ show_table([
      f"Pair rule for {len(h2_circuits.pencil.overlap)} basis states: {pair_circuits(len(h2_circuits.pencil.overlap))}, "
      f"for any number of Pauli terms ({h2_terms} here)"),
     ("Qubits per circuit (at most)", h2.num_qubits + 1, f"{h2.num_qubits} system qubits and one ancilla"),
-    ("Native instructions per circuit (min / median / max)",
+    ("Instructions per prepared circuit (min / median / max)",
      (min(instructions), int(np.median(instructions)), max(instructions)),
      "Recorded when each circuit was prepared, before compilation for a device"),
 ])
@@ -487,7 +487,7 @@ show_table([
 #
 # ### C. When the energy becomes exact, and another overlap cutoff
 #
-# **Which directions does the final eigenvalue problem keep, and what changes with the overlap cutoff?** This section reads the stored result and solves four small eigenvalue problems, well under a second.
+# **Which directions does the final eigenvalue problem keep, and what changes with the overlap cutoff?** This section reads the stored result and solves four small eigenvalue problems, under a second.
 #
 # The basis states overlap strongly, so some eigenvalues of the overlap matrix $S$ are tiny. NWQLib drops the directions whose overlap eigenvalue falls below the cutoff, $10^{-12}$ by default, before it solves $Hc=ESc$.
 

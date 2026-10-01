@@ -38,17 +38,51 @@ def export_qasm(
     max_text_bytes: int = DEFAULT_MAX_BYTES,
     max_operations: int = 100_000,
 ) -> str | Path:
-    """Export text, or atomically write a file and return its Path.
+    """Return the OpenQASM 3 or 2 text of a Qiskit circuit, or write it to a file.
 
-    ``max_operations`` bounds the supplied top-level native instruction count
-    before export, as in native resource inspection. It does not bound expanded
-    gate definitions or compiler workspace. ``max_text_bytes`` bounds emitted
-    UTF-8 text. QASM3 streams text but still builds its full AST; QASM2's exporter
-    first builds its full string, so its text cap is a publication bound only.
-    Parent directories must already exist. A failed export preserves any prior
-    destination file. No transpilation or simulation is performed. The
-    ``max_operations`` default of 100,000 is registered in
-    docs/ENGINEERING_CONSTANTS.md ("Direct native output allowances").
+    Use it for any built Qiskit circuit, for example one from
+    `prepared.circuit(0)` or [`lower_qiskit`][nwqlib.blocks.lowering.lower_qiskit].
+    Without `path` it returns the text. With `path` it writes a temporary file in
+    the same directory and replaces the destination only after the export
+    succeeds, so a failed export leaves an earlier file unchanged. It does not
+    transpile or simulate. Qiskit's OpenQASM 3 exporter streams the text but still
+    builds a complete syntax tree, and its OpenQASM 2 exporter builds the whole
+    string first, so for OpenQASM 2 `max_text_bytes` limits only the returned or
+    written text. Neither limit bounds expanded gate definitions or Qiskit's
+    workspace.
+
+    Args:
+        circuit (qiskit.QuantumCircuit): The circuit to export.
+        format (str): `"qasm3"` or `"qasm2"`.
+        path (str | Path | None): A file path whose parent directory exists, or
+            `None` to return the text.
+        max_text_bytes (int): Default 10 GB (decimal, `10_000_000_000` bytes).
+            Positive limit on the UTF-8 bytes of the exported text.
+        max_operations (int): Positive limit on the top-level
+            instructions of `circuit`, checked before export.
+
+    Returns:
+        output (str | Path): The OpenQASM text, or the destination path when `path` is
+            given.
+
+    Raises:
+        ValueError: If `format` is not `"qasm2"` or `"qasm3"`, a limit is not a
+            positive integer, the circuit has more than `max_operations`
+            instructions, or the text exceeds `max_text_bytes`.
+        TypeError: If `circuit` is not a Qiskit `QuantumCircuit`.
+
+    Examples:
+        >>> from qiskit import QuantumCircuit
+        >>> from nwqlib.io import export_qasm
+        >>> bell = QuantumCircuit(2)
+        >>> _ = bell.h(0)
+        >>> _ = bell.cx(0, 1)
+        >>> print(export_qasm(bell))
+        OPENQASM 3.0;
+        include "stdgates.inc";
+        qubit[2] q;
+        h q[0];
+        cx q[0], q[1];
     """
     if format not in {"qasm2", "qasm3"}:
         raise ValueError('format must be either "qasm2" or "qasm3"')

@@ -2813,161 +2813,249 @@ def _error_model(problem, output, construction, *, compact, split, kinetic_model
 
 
 class QHD(Method):
-    """Finite box discretization and selected QHD product, not a global optimizer.
+    """Quantum Hamiltonian Descent (QHD) method for the minimum of an objective over a box.
 
-    The Method evolves ``H(t) = a(t) K + b(t) V``, the Hamiltonian of Leng et
-    al., arXiv:2303.01471v1, Eq. (1), with ``a = exp(phi_t)`` and
-    ``b = exp(chi_t)``, on a finite grid of the box, one step per time step,
-    and reads out grid points. Each step is a product formula on the circuit
-    routes and in the ``ir_product`` and ``split_step`` flavors, and a
-    numerical evaluation of the exponential of the step's Hamiltonian in the
-    default ``schrodinger`` flavor. The source module,
-    ``nwqlib.algorithms.qhd.method``, lists in its docstring where the
-    defaults depart from Leng et al.'s Algorithm 1 and why, and the QHD
-    guide's "Source map" gives the paper location of each step or marks it
-    as standard or NWQLib's own.
+    Build it with keyword arguments and pass it as `method=` with an `Optimization`, for
+    example `solve(problem, method=QHD(num_grid_points=4))`. Every argument is optional.
+    The result is a [`QHDAnalysis`][nwqlib.algorithms.qhd.records.QHDAnalysis]. Its
+    `candidate` is the best observed grid point and `objective` the objective there, in
+    the Problem's coordinates and unit, and `most_probable_coordinates` is the grid
+    point where the evolution concentrated probability. QHD is not a global optimizer.
+    Both points belong to a finite grid of the box, and no setting implies a continuous
+    global-optimization guarantee.
 
-    Known-work and byte caps do not control undocumented SymPy/SciPy/Qiskit costs.
+    The Method evolves `H(t) = a(t) K + b(t) V`, the Hamiltonian of Leng et al.,
+    arXiv:2303.01471v1, Eq. (1), with `a = exp(phi_t)` and `b = exp(chi_t)`, K the
+    kinetic operator `-Delta/2` on the grid and V the objective values, one step per
+    time step, and reads out grid points. Each step is a product formula on the circuit
+    routes and in the `ir_product` and `split_step` flavors, and a numerical evaluation
+    of the exponential of the step's Hamiltonian in the default `schrodinger` flavor.
+    The default quadratic schedule is the example of QHDOPT (Kushnir et al.,
+    arXiv:2409.03121v1, Sec. 2.1), and the one-hot encoding and the shifted-cubic
+    schedule come from Wu et al., arXiv:2605.12066v1. The rows and notes below say where
+    a setting departs from Leng et al.'s Algorithm 1. Its step 6 measures one grid
+    point, while QHD reports the best observed and the most probable point of the
+    observed population. The [QHD guide](../../algorithms/qhd.md) explains the grids,
+    schedules, initial states and readout, and its
+    [source map](../../algorithms/qhd.md#source-map) gives the paper location of each
+    step or marks it as standard or NWQLib's own.
+
+    `max_work` and `max_bytes` limit the work and bytes that planning counts. They do
+    not control undocumented SymPy, SciPy or Qiskit costs.
 
     Attributes:
-        num_grid_points: Grid points per variable, at least two, an even
-            number of at least 4 on the one-hot periodic grid and ``K = 2**b``
-            for the binary encoding. It is also the one-hot register width per
-            variable, and the binary encoding uses b qubits per variable.
-        encoding: ``"one_hot"`` (the default) places variable j on the K
-            qubits ``j K`` to ``j K + K - 1`` with one excitation, the
-            one-hot encoding of Wu et al., arXiv:2605.12066v1, Sec. IV.A,
-            with the occupation operators of their Eqs. (9)-(10).
-            ``"binary"`` places it on the b qubits ``j b`` to ``j b + b - 1``,
-            grid index ``n_j = sum_l 2**l n_(j,l)``, so every outcome is a
-            grid point, and applies the kinetic term as
-            ``F^dagger exp(-i alpha diag(E)) F`` with a QFT on each register
-            (``binary`` module), the register of Leng et al.'s Algorithm 1
-            and the form of their kinetic step, Eq. (E.4). It requires
-            ``boundary="periodic"``, whose kinetic operator the QFT
-            diagonalizes, and ``K = 2**b``, the register's state count.
-        binary_synthesis: ``binary.BinarySynthesis`` choices of the binary
-            circuit: the potential and kinetic phase diagonals, the QFT bit
-            reversal and the AQFT cutoff. The one-hot encoding requires the
-            default record.
-        num_steps: Positive number of finite evolution steps.
-        total_time: Positive total simulated time; per-step duration is total_time/num_steps.
-        schedule: Kinetic weight a(t) and potential weight b(t) of
-            ``H(t) = a(t) K + b(t) V``, one of ``QuadraticSchedule`` (the
-            default, gamma 0.3), ``CubicSchedule`` or ``ShiftedCubicSchedule``.
-            Its ``kind`` names the formula. A schedule parameter stays fixed
-            when ``num_steps`` changes, and no schedule carries a convergence
-            guarantee.
-        coefficient_rule: ``"midpoint"`` uses the point values ``a(t)`` and
-            ``b(t)`` at each step midpoint. ``"integrated"`` uses the step
-            averages of the interval integrals, so each step's kinetic and
-            potential exponents equal ``A`` and ``B`` over the step, the first
-            Magnus term. Leng et al.'s Eq. (E.3) and Algorithm 1 take the
-            left endpoint, which leaves the product first order in the step
-            even with symmetric placement, so no left-endpoint rule is
-            offered (QHD guide, "Split-step classical flavor").
-        trotter_order: First-order or symmetric second-order block order
-            (1 or 2), shared by circuit selection and the numerical
-            ``ir_product`` reference. The ``split_step`` flavor is always
-            symmetric. Order 1 uses the potential-then-kinetic ordering of
-            Leng et al.'s Algorithm 1. The one-hot kinetic factor is itself
-            approximated by a product over links in increasing order
-            (``kinetic.KineticCompiler``). Order 2, the default, uses the
-            symmetric composition of Strang, SIAM J. Numer. Anal. 5 (1968)
-            506-517, doi:10.1137/0705041, with a potential half on either
-            side of the kinetic factor and, for one-hot, an odd-half,
-            even-full, odd-half split inside that kinetic factor. Binary
-            kinetic factors use Fourier conjugation of their phase diagonal.
-        boundary: ``"dirichlet"`` (the default) or ``"periodic"`` boundary
-            condition of the finite-difference kinetic term. The Dirichlet
-            interior grid, the default, has the vanishing boundary values of
-            Leng et al.'s Eq. (F.4), and the endpoint grid keeps the endpoint
-            amplitudes, as their Eq. (F.9) does (``grid.OneHotGrid``). The
-            periodic grid, the mesh of their Eq. (E.1), is
-            ``x_i = lower + i (upper - lower)/K``, i = 0..K-1, with
-            ``upper`` identified with ``lower``, and adds the wrap link
-            between the points K-1 and 0 (``grid.OneHotGrid``). It requires no
-            boundary points, and with the one-hot encoding an even
-            ``num_grid_points`` of at least 4 (``_periodic_grid``).
-        include_boundary_points: Place the Dirichlet grid on both box
-            endpoints instead of the interior. Not available with the
-            periodic boundary.
-        kinetic_model: Kinetic operator K of each variable on its grid.
-            ``"finite_difference"`` (the default) is the three-point stencil
-            of ``-Delta/2`` from the central difference of Leng et al.'s Eqs.
-            (F.7) and (F.9), diagonal ``1/h**2`` and ``-1/(2 h**2)`` on each
-            link, with eigenvalues ``(2/h**2) sin(pi r/(2 (K + 1)))**2``,
-            r = 1..K, on both Dirichlet grids (each with its own h) and
-            ``(2/h**2) sin(pi k/K)**2``, k = 0..K-1, on the periodic grid.
-            ``"spectral"`` is the Fourier operator of ``-Delta/2`` that Leng
-            et al.'s Eq. (E.4) and Algorithm 1 apply, on the periodic grid
-            of period ``L = K h``, with eigenvalue
-            ``2 pi**2 q**2/L**2`` for the Fourier mode k whose signed index q
-            is k below ``ceil(K/2)`` and ``k - K`` from there on
-            (``split_step.kinetic_eigenvalues``). The two agree at low
-            momentum, ``0 <= E_sp - E_FD <= 2 pi**4 q**4 h**2/(3 L**4)``, and
-            differ by the factor ``pi**2/4`` at the Nyquist mode. The spectral
-            model requires the periodic boundary and a route that applies the
-            Fourier energies: the classical ``split_step`` flavor, or the
-            binary encoding's native circuit and ``ir_product`` flavor
-            (``binary.kinetic_table``). The one-hot circuit, the one-hot
-            ``ir_product`` flavor and the ``schrodinger`` flavor apply the
-            finite-difference stencil (``_kinetic_route``).
-        rotation_threshold: Nonnegative angle threshold in radians. Each
-            omission is a selected approximation, counted in the dropped-angle
-            ledger. On the one-hot encoding every compiled hopping or
-            number-projector block whose nonzero angle magnitude is below it
-            is omitted. On the binary encoding it removes only Walsh-string
-            ``Rz`` rotations (``binary.PhaseTable.synthesize``). The QFT
-            controlled phases and the angles of a dense phase diagonal stay,
-            and ``binary_synthesis.aqft_cutoff`` truncates the QFT instead.
-            The initial-state preparation is never pruned.
-        initial_state: State that every route starts from, a product of
-            nonnegative per-variable amplitude vectors:
-            ``KineticGroundState()`` (the default), ``UniformState()`` or
-            ``GaussianState(center=..., widths=...)``. Leng et al.'s
-            Algorithm 1, step 3, names the uniform and a Gaussian state. The
-            evidence for the default and its limits are in
-            ``docs/ENGINEERING_CONSTANTS.md``, row "QHD Method defaults".
-        initial_state_preparation: Native recipe for the initial state.
-            ``"structured"`` emits the library's structured circuit for
-            the Method's encoding and initial state, and the Plan records its
-            CX law. The one-hot chain uses computed rotation parameters and
-            can stop at its lower-range cutoff. The cutoff charge is recorded
-            per register in ``range_omissions.chains`` and included in the
-            ``state_preparation`` entry.
-            Each encoding supplies its own construction. On the
-            one-hot encoding it is the nonnegative amplitude chain of O(dK)
-            gates (``initial_state.append_amplitude_chain``), which for the
-            uniform state is the linear W-state chain. On the binary encoding
-            it is one H per qubit, with no CX, which prepares the uniform state
-            and the periodic kinetic ground state, the same state
-            (``initial_state.append_binary_initial_state``). Other states
-            need ``"qiskit_state_preparation"`` there.
-            ``"qiskit_state_preparation"`` appends one Qiskit
-            ``StatePreparation`` per register, of ``2**K`` one-hot or K binary
-            amplitudes, and
-            ``"none"`` selects a quantum resource-only construction without
-            preparation. Classical execution does not prepare a circuit and
-            rejects ``"none"``.
-        theory_flavor: Classical evolution of the K**d grid amplitudes.
-            ``schrodinger`` numerically evaluates each step's Hamiltonian
-            exponential with SciPy's ``expm_multiply``, whose work grows with
-            the step's kinetic and potential weights and the objective's
-            range. ``ir_product`` evaluates a numerical reference from the selected
-            blocks, applying each one-hot block's analytic restricted action at
-            its stored angle (``theory._run_ir_product``) and QFT operations with computed diagonal phase arrays
-            for binary encoding (``theory.run_binary_product``). ``split_step`` applies the symmetric
-            (Strang) product of half potential phases and the kinetic factor,
-            diagonal in the kinetic eigenbasis and evaluated numerically by
-            the selected transforms: orthonormal DST-I on the Dirichlet grids
-            and the FFT on the periodic grid
-            (``split_step``). Its work per step does not depend on the
-            schedule weights or the objective's range, and it adds a
-            splitting error that ``schrodinger`` does not have.
-        keep_state: Keep the selected final state array when the output/execution supports it.
-        max_bytes: Bound on known state, grid and numerical workspace bytes.
-        max_work: Cap on counted objective-table, product and classical evolution work.
+        num_grid_points: Default `2`. Grid points K per variable, at least 2. The
+            one-hot periodic grid needs an even K of at least 4, and the binary encoding
+            needs `K = 2**b`. K is also the one-hot register width per variable, and the
+            binary encoding uses b qubits per variable.
+        encoding: Default `"one_hot"`, the established circuit. How each variable's grid
+            index is stored in qubits: `"one_hot"`, K qubits with one excitation, or
+            `"binary"`, b qubits for `K = 2**b`, which requires `boundary="periodic"`.
+            The Encodings note below describes both registers.
+        binary_synthesis: Default `BinarySynthesis()`. Circuit choices of the binary
+            encoding: the potential and kinetic phase diagonals, the QFT bit reversal
+            and the AQFT cutoff
+            ([`BinarySynthesis`][nwqlib.algorithms.qhd.binary.BinarySynthesis]). The
+            one-hot encoding requires the default record.
+        num_steps: Default `1`. Positive number of evolution steps.
+        total_time: Default `1.0`. Positive total evolution time. Each step lasts
+            `total_time/num_steps`.
+        schedule: Default `QuadraticSchedule()`, with gamma 0.3. Kinetic weight a(t) and
+            potential weight b(t) of `H(t) = a(t) K + b(t) V`, one of
+            [`QuadraticSchedule`][nwqlib.algorithms.qhd.schedules.QuadraticSchedule],
+            [`CubicSchedule`][nwqlib.algorithms.qhd.schedules.CubicSchedule] or
+            [`ShiftedCubicSchedule`][nwqlib.algorithms.qhd.schedules.ShiftedCubicSchedule].
+            Its `kind` names the formula. A schedule parameter stays fixed when
+            `num_steps` changes, and no schedule carries a convergence guarantee.
+        coefficient_rule: Default `"midpoint"`. The weights each step uses:
+            `"midpoint"`, the point values `a(t)` and `b(t)` at the step midpoint, or
+            `"integrated"`, the step averages of their interval integrals. The Product
+            formula note below explains both.
+        trotter_order: Default `2`. Product-formula order, 1 or 2, shared by circuit
+            selection and the numerical `ir_product` reference. The `split_step` flavor
+            is always symmetric. The Product formula note below gives the factor order.
+        boundary: Default `"dirichlet"`, which accepts the default K = 2 with the
+            one-hot encoding. Boundary condition of the finite-difference kinetic term,
+            `"dirichlet"` or `"periodic"`. The periodic grid takes no boundary points,
+            and with the one-hot encoding it needs an even K of at least 4. The Grids
+            note below gives the grid points.
+        include_boundary_points: Default `False`. Place the Dirichlet grid on both box
+            endpoints instead of the interior. Not available with the periodic boundary.
+        kinetic_model: Default `"finite_difference"`, which every route applies. Kinetic
+            operator K of each variable: `"finite_difference"`, the three-point stencil
+            of `-Delta/2`, or `"spectral"`, the Fourier operator of `-Delta/2`. The
+            spectral model needs the periodic boundary and a route that applies Fourier
+            energies. The Kinetic models note below gives their eigenvalues and routes.
+        rotation_threshold: Default `0.0`, which keeps every computed nonzero angle.
+            Angle in radians, nonnegative, below which compiled rotations are omitted.
+            The initial-state preparation is never pruned. The Rotation threshold note
+            below says which rotations each encoding omits and how the Plan records
+            them.
+        initial_state: Default `KineticGroundState()`. State that every route starts
+            from, a product of nonnegative per-variable amplitude vectors:
+            [`KineticGroundState()`][nwqlib.algorithms.qhd.initial_state.KineticGroundState],
+            [`UniformState()`][nwqlib.algorithms.qhd.initial_state.UniformState] or
+            [`GaussianState(center=..., widths=...)`][nwqlib.algorithms.qhd.initial_state.GaussianState].
+            Leng et al.'s Algorithm 1, step 3, names the uniform and a Gaussian state.
+            The row "QHD Method defaults" of the
+            [engineering constants](../../ENGINEERING_CONSTANTS.md#safety-factors-and-workflow-defaults)
+            gives the evidence for the default and its limits.
+        initial_state_preparation: Default `"structured"`, the library's circuit for the
+            encoding and state, whose CX count the Plan records. How quantum execution
+            prepares the initial state. `"qiskit_state_preparation"` appends a Qiskit
+            `StatePreparation`, and `"none"` selects a resource-only construction, which
+            classical execution rejects. The State preparation note below describes
+            each.
+        theory_flavor: Default `"schrodinger"`. Classical evolution of the `K**d` grid
+            amplitudes under `execution="classical"`: `"schrodinger"`, the exponential
+            of each step's Hamiltonian, `"ir_product"`, a numerical reference of the
+            compiled product, or `"split_step"`, a symmetric split-step product. The
+            Classical flavors note below compares them.
+        keep_state: Default `False`. Keep the final state array when the output and
+            execution support it. It requires exact readout, without `shots`.
+        max_bytes: Default 10 GB (decimal, `10_000_000_000` bytes). Positive limit on
+            the known bytes of state, grid and numerical workspace that planning counts.
+            It does not bound the process memory.
+        max_work: Default `1_000_000_000`. Positive limit on the counted work of
+            objective tables, products and classical evolution, in planning work units,
+            the scalar and array operations that planning declares. A work unit is not a
+            measured CPU operation or a time. A refusal names the stage and the amount
+            to set ([cost](../../algorithms/qhd.md#cost-and-existing-evidence)).
+
+    Encodings:
+        `"one_hot"` places variable j on the K qubits `j K` to `j K + K - 1` with one
+        excitation, the one-hot encoding of Wu et al., arXiv:2605.12066v1, Sec. IV.A,
+        with the occupation operators of their Eqs. (9)-(10). The one-hot encoding is
+        the default as the established circuit.
+
+        `"binary"` places it on the b qubits `j b` to `j b + b - 1`, grid index
+        `n_j = sum_l 2**l n_(j,l)`, so every outcome is a grid point. This is the
+        register of Leng et al.'s Algorithm 1, and it applies the kinetic term as
+        `F^dagger exp(-i alpha diag(E)) F` with a QFT on each register, the form of
+        their kinetic step, Eq. (E.4). It requires `boundary="periodic"`, whose kinetic
+        operator the QFT diagonalizes, and `K = 2**b`, the register's state count.
+
+    Grids:
+        The Dirichlet interior grid, the default, has the vanishing boundary values of
+        Leng et al.'s Eq. (F.4), and the endpoint grid of `include_boundary_points=True`
+        keeps the endpoint amplitudes, as their Eq. (F.9) does. The periodic grid, the
+        mesh of their Eq. (E.1), is `x_i = lower + i (upper - lower)/K`, i = 0..K-1,
+        with `upper` identified with `lower`, and adds the wrap link between the points
+        K-1 and 0. It takes no boundary points, and with the one-hot encoding it needs
+        an even `num_grid_points` of at least 4. Dirichlet is the default because it
+        accepts the default K = 2 with the one-hot encoding.
+
+    Product formula:
+        `coefficient_rule="midpoint"` uses the point values `a(t)` and `b(t)` at each
+        step midpoint. `"integrated"` uses the step averages of the interval integrals,
+        so each step's kinetic and potential exponents equal `A` and `B` over the step,
+        the first Magnus term. Leng et al.'s Eq. (E.3) and Algorithm 1 take the left
+        endpoint, which leaves the product first order in the step even with symmetric
+        placement, so no left-endpoint rule is offered
+        ([Split-step classical evaluation](../../algorithms/qhd.md#split-step-classical-flavor)).
+
+        `trotter_order=1` uses the potential-then-kinetic ordering of Leng et al.'s
+        Algorithm 1. Order 2 uses the symmetric composition of Strang, SIAM J. Numer.
+        Anal. 5 (1968) 506-517, doi:10.1137/0705041, with a potential half on either
+        side of the kinetic factor. The one-hot kinetic factor is itself approximated by
+        a product over links, in increasing link order for order 1 and by an odd-half,
+        even-full, odd-half split for order 2. Binary kinetic factors use Fourier
+        conjugation of their phase diagonal.
+
+    Kinetic models:
+        `"finite_difference"` is the three-point stencil of `-Delta/2` from the central
+        difference of Leng et al.'s Eqs. (F.7) and (F.9), with diagonal `1/h**2` and
+        `-1/(2 h**2)` on each link. Its eigenvalues are
+        `(2/h**2) sin(pi r/(2 (K + 1)))**2`, r = 1..K, on both Dirichlet grids (each
+        with its own h), and `(2/h**2) sin(pi k/K)**2`, k = 0..K-1, on the periodic
+        grid.
+
+        `"spectral"` is the Fourier operator of `-Delta/2` that Leng et al.'s Eq. (E.4)
+        and Algorithm 1 apply, on the periodic grid of period `L = K h`. Its eigenvalue
+        is `2 pi**2 q**2/L**2` for the Fourier mode k whose signed index q is k below
+        `ceil(K/2)` and `k - K` from there on. The two models agree at low momentum,
+        `0 <= E_sp - E_FD <= 2 pi**4 q**4 h**2/(3 L**4)`, and differ by the factor
+        `pi**2/4` at the Nyquist mode.
+
+        The spectral model requires the periodic boundary and a route that applies the
+        Fourier energies: the classical `split_step` flavor, or the binary encoding's
+        quantum circuit and `ir_product` flavor. The one-hot circuit, the one-hot
+        `ir_product` flavor and the `schrodinger` flavor apply the finite-difference
+        stencil, and planning refuses the spectral model there. The finite-difference
+        model is the default because every route applies it.
+
+    Rotation threshold:
+        On the one-hot encoding every compiled hopping or number-projector block whose
+        nonzero angle magnitude is below `rotation_threshold` is omitted. On the binary
+        encoding it removes only Walsh-string `Rz` rotations. The QFT controlled phases
+        and the angles of a dense phase diagonal stay, and
+        `binary_synthesis.aqft_cutoff` truncates the QFT instead. The initial-state
+        preparation is never pruned. Each omission is an approximation, which the Plan
+        records with the dropped count and an operator-norm bound on its effect,
+        `pruning_error_bound`.
+
+    State preparation:
+        `initial_state_preparation="structured"` emits the library's structured circuit
+        for the encoding and initial state, and the Plan records its CX count as a
+        `ResourceLaw`. On the one-hot encoding it is the nonnegative amplitude chain of
+        O(dK) gates, which for the uniform state is the linear W-state chain. The chain
+        uses computed rotation parameters and can stop at its lower-range cutoff. The
+        error bound of the omitted links is recorded per register in
+        `range_omissions.chains` and included in the `state_preparation` error source.
+        On the binary encoding it is one H per qubit, with no CX, which prepares the
+        uniform state and the periodic kinetic ground state, the same state. Other
+        states need `"qiskit_state_preparation"` there.
+
+        `"qiskit_state_preparation"` appends one Qiskit `StatePreparation` per register,
+        of `2**K` one-hot or K binary amplitudes. `"none"` selects a quantum
+        resource-only construction without preparation. Classical execution prepares no
+        circuit and rejects `"none"`.
+
+    Classical flavors:
+        `"schrodinger"` numerically evaluates each step's Hamiltonian exponential with
+        SciPy's `expm_multiply`, whose work grows with the step's kinetic and potential
+        weights and the objective's range. `"ir_product"` evaluates a numerical
+        reference of the compiled product. It applies each one-hot block's analytic
+        restricted action at its stored angle, and for the binary encoding the QFT
+        operations with computed diagonal phase arrays. `"split_step"` applies the
+        symmetric (Strang) product of half potential phases and the kinetic factor,
+        diagonal in the kinetic eigenbasis and evaluated numerically by orthonormal
+        DST-I on the Dirichlet grids and the FFT on the periodic grid. Its work per step
+        depends on neither the schedule weights nor the objective's range, and it adds a
+        splitting error that `"schrodinger"` does not have.
+
+    Raises:
+        ValueError: If `boundary="periodic"` is combined with
+            `include_boundary_points=True`, or with the one-hot encoding and an odd
+            `num_grid_points` or one below 4. If `kinetic_model="spectral"` is used with
+            a Dirichlet boundary. If `encoding="binary"` is used without the periodic
+            boundary or with a `num_grid_points` that is not a power of two. If
+            `binary_synthesis` differs from its default with the one-hot encoding.
+
+    Examples:
+        The minimum of `(x - 0.2)**2 + (y + 0.2)**2` on `[-1, 1]**2` is 0 at (0.2,
+        -0.2), which is a point of the 4-point Dirichlet interior grid (-0.6, -0.2, 0.2,
+        0.6) of each axis. With exact readout on the default Aer simulator the candidate
+        is the point of least evaluated objective among the grid points with positive
+        probability, here that grid minimum. The evolution also puts the most
+        probability there.
+
+        >>> import sympy as sp
+        >>> from nwqlib import solve
+        >>> from nwqlib.problems import Optimization
+        >>> from nwqlib.algorithms.qhd import QHD
+        >>> x, y = sp.symbols("x y", real=True)
+        >>> problem = Optimization(objective=(x - 0.2)**2 + (y + 0.2)**2,
+        ...                        variables=(x, y),
+        ...                        bounds=((-1.0, 1.0), (-1.0, 1.0)))
+        >>> method = QHD(num_grid_points=4, num_steps=8, total_time=4.0)
+        >>> result = solve(problem, method=method, seed=7)
+        >>> print([round(v, 6) for v in result.candidate],
+        ...       round(result.objective, 12))
+        [0.2, -0.2] 0.0
+        >>> print([round(v, 6) for v in result.most_probable_coordinates],
+        ...       result.mode_status)
+        [0.2, -0.2] resolved
     """
 
     result_type: ClassVar[type] = QHDAnalysis
@@ -3519,49 +3607,43 @@ class QHD(Method):
         return chunks
 
     def plan(self, problem, *, output, execution, shots, rng):
-        """Select the finite grid, the ordered evolution schedule and the native or host readout.
+        """Choose the finite grid, the ordered evolution steps and the quantum or classical readout.
 
-        Planning checks the objective and the operation sizes, evaluates each
-        objective support table once, compiles the ordered step blocks when
-        native execution or the ``ir_product`` flavor needs them, and binds
-        either the compact native block or the classical kernel. It builds no
-        circuit and evolves no state.
+        `nwqlib.plan` and `solve` call it. Planning checks the objective and the operation
+        sizes, evaluates each objective support table once, compiles the ordered step blocks
+        when quantum execution or the `ir_product` flavor needs them, and binds either the
+        compact circuit block or the classical kernel. It builds no circuit and evolves no
+        state.
 
-        Binary byte admission. Compilation reserves its source records,
-        initial vectors, compiler term-list slots and model baseline.
-        After compilation releases the model, classical ir_product planning
-        also admits the run's model phase. For D=K**d, potential-table sizes
-        E_t and E_max=max(K,E_1,...,E_T), it requires
-        B_source + 48*D + 16*(sum(E_t)+K+E_max) + B_local bytes.
-        B_source is _binary_source_reservation's source allowance and
-        B_local is model + latest + max(build,use) from binary._model_reservation.
-        Both models use the same cutoff, swaps and potential-Walsh setting.
-        This admits the named run populations under the qualified object
-        allowances. Array identity encoding is a separate phase.
+        Binary byte check. Compilation reserves its source records, initial vectors,
+        compiler term lists and model baseline. After compilation releases the model,
+        classical `ir_product` planning also checks the run's model phase. For `D = K**d`,
+        potential-table sizes E_t and `E_max = max(K, E_1, ..., E_T)`, it requires
+        `B_source + 48*D + 16*(sum(E_t) + K + E_max) + B_local` bytes. B_source is the byte
+        allowance of the Plan's source records. B_local is the binary model's storage, plus
+        one current construction per table, plus the larger of its synthesis workspace and
+        its phase-application workspace. Both models use the same cutoff, swaps and
+        potential-Walsh setting. This checks the named run arrays under the object
+        allowances of the
+        [engineering constants](../../ENGINEERING_CONSTANTS.md#qhd-selected-operation-sizes).
+        Content hashing of the arrays is a separate phase.
 
-        Range admission. Planning completes the range admission of the
-        selected arithmetic (``validation._normal_range``), with or without a
-        kept state. The selected producers check, before pruning, their
-        nonzero durations, weights, coefficients, angles and identity products
-        (``schedules.step_weights``, ``kinetic.KineticCompiler``,
-        ``potential.PotentialCompiler``, ``compiler.QHDCompiler``,
-        ``binary.PhaseTable.synthesize``, ``binary.compile_binary_steps``), the
-        grid its coordinates (``OneHotGrid``) and the one-hot rotation census
-        its power-of-two scalings (``resources.rotation_population``). Stored
-        table values need only be finite. A data-dependent contribution whose
-        product would be nonzero and below ``2**-1022``, such as the far tail
-        of a narrow Gaussian well, is omitted and charged in the error ledger.
-        The structured one-hot chain likewise stops before a link whose
-        parameter would fall below that range, and its omitted links are
-        charged (``records.QHDRangeOmissions``). Kinetic terms outside the
-        range, and every overflow, are refused. Used half durations and projector
-        scalings are then exact and normal, and phase accumulators and
-        synthesized phases have finite intermediates. These conditions supply
-        the range premises of the phase and angle ledgers
-        (``circuit_errors``). They do not establish the accuracy assumptions
-        of scalar libraries, transforms or dense-diagonal lowering, and a kept
-        state has its own phase-accuracy admission. Positive error bounds may
-        be subnormal and are rounded upward.
+        Range check. Planning completes the range check of its arithmetic, with or without a
+        kept state. Before pruning it checks that the nonzero durations, weights,
+        coefficients, angles and identity products are normal binary64 numbers, that the
+        grid coordinates are distinct and increasing, and that the power-of-two scalings of
+        the one-hot rotation count are in range. Stored table values need only be finite. A
+        data-dependent contribution whose product would be nonzero and below `2**-1022`,
+        such as the far tail of a narrow Gaussian well, is omitted and counted in the
+        circuit's error sources. The structured one-hot chain likewise stops before a link
+        whose parameter would fall below that range, and its omitted links are counted there
+        too. Kinetic terms outside the range, and every overflow, are refused. Used half
+        durations and projector scalings are then exact and normal, and phase sums and
+        synthesized phases have finite intermediates. These conditions supply the range
+        assumptions of the phase and angle error bounds. They do not establish the accuracy
+        assumptions of scalar libraries, transforms or the circuit construction of dense
+        diagonals, and a kept state has its own phase-accuracy check. Positive error bounds
+        may be subnormal and are rounded upward.
         """
         if not isinstance(problem, Optimization) or not isinstance(output, OptimizationCandidate):
             raise ApplicabilityError("QHD requires an Optimization and OptimizationCandidate")

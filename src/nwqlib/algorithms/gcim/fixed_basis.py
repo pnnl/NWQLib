@@ -112,15 +112,35 @@ SAMPLED_PENCIL_ENCLOSURE_RTOL = 1e-8
 
 
 class FixedGCIMBasis(Record):
-    """Ordered identities and physical scales of the trial states, without their native data.
+    """Record that names a `FixedGCIM` trial basis as an `Eigenproblem` subspace.
 
-    Its ``reference`` is the identity a Problem's ``subspace`` must name to
-    request this exact trial basis.
+    Build it with keyword arguments from the preparation records of the
+    trial states, for example
+    `FixedGCIMBasis(preparations=tuple(state_input(v).preparation for v in basis))`
+    with `state_input` from `nwqlib.problems`. `preparations` is the only
+    required argument. It holds the ordered content hashes and physical
+    scales of the states, not their data. Pass its `reference` as
+    `Eigenproblem(subspace=...)` to request exactly this trial basis.
+    `FixedGCIM` then rejects a basis that differs from it.
 
     Attributes:
-        preparations: One preparation record per trial state, in basis order.
-        convention: Fixed statement that each state enters as its normalized
-            preparation column.
+        preparations: Required, nonempty. One preparation record per trial
+            state, in basis order.
+        convention: Default `"normalized prepared columns"`, the only
+            accepted value. Each state enters as its normalized preparation
+            column.
+
+    Examples:
+        >>> from nwqlib import Eigenproblem, solve
+        >>> from nwqlib.algorithms import FixedGCIM, FixedGCIMBasis
+        >>> from nwqlib.problems import state_input
+        >>> basis = ([1, 1], [1, 1j])
+        >>> preparations = tuple(state_input(v).preparation for v in basis)
+        >>> record = FixedGCIMBasis(preparations=preparations)
+        >>> problem = Eigenproblem(A=[[1, 0], [0, -1]], subspace=record.reference)
+        >>> result = solve(problem, method=FixedGCIM(basis=basis), seed=7)
+        >>> print(round(result.eigenvalue, 10))
+        -1.0
     """
 
     preparations: Annotated[tuple[StatePreparationSpec, ...], Field(min_length=1)]
@@ -128,6 +148,7 @@ class FixedGCIMBasis(Record):
 
     @property
     def reference(self):
+        """Reference to this basis by content hash, for `Eigenproblem(subspace=...)`."""
         return InputRef(
             identity=self.content_id, representation="fixed normalized GCiM basis", source=METHOD
         )
@@ -259,7 +280,7 @@ class FixedGCIMReconstruction(Record):
         groups: For a sampled Plan with nonidentity terms, the recorded
             deterministic first-fit qubit-wise-commuting partition of the
             nonidentity rows (``PauliTerms.group(strategy="qwc")``), fixed
-            before acquisition. Group zero supplies the overlap of each
+            before the measurements. Group zero supplies the overlap of each
             off-diagonal quadrature. Empty for exact and classical Plans.
     """
 
@@ -328,25 +349,28 @@ class FixedGCIMReconstruction(Record):
 
 
 class ScalarEstimate(Record):
-    """A sampled weighted group mean pooled from its count acquisitions.
+    """Pooled mean of one weighted group of Pauli terms in a sampled `FixedGCIM` run.
 
-    Each acquisition measures Y = sum_k c_k Z_k from shared shots. The value
-    is the population-weighted mean of its contribution means and need not lie
-    in [-1, 1]. chunk_mean_variances contains
-    (mean(Y**2) - mean(Y)**2)/(N - 1) for N > 1 and None for N = 1.
-    GroupMoment keeps the raw moments and flags a negative raw variance.
-    Independent acquisitions pool variance with squared population weights.
-    Overlap and physical-H covariance are recorded in the group and pair
-    statistics. These are sample-mean variance estimates, not a joint pencil
-    bound or a projected-eigenvalue confidence interval.
+    `FixedGCIMResult.estimates` holds one per group setting. Each count
+    measurement of the setting measures `Y = sum_k c_k Z_k` from shared
+    shots. `value` is the shot-weighted mean of the measurements' means and
+    need not lie in [-1, 1]. `chunk_mean_variances` contains
+    `(mean(Y**2) - mean(Y)**2)/(N - 1)` for N > 1 shots and None for N = 1.
+    The group moments in `FixedGCIMResult.group_moments` keep the raw
+    moments and flag a negative raw variance. Independent measurements pool
+    their variances with squared shot weights. The overlap and physical-H
+    covariance are recorded in the group and pair statistics. These are
+    sample-mean variance estimates, not a joint bound on the pencil or a
+    confidence interval for the projected eigenvalue. The fields below are
+    read-only.
 
     Attributes:
-        experiment: The group setting's experiment name.
-        value: Population-weighted mean of the contribution means of Y.
-        contribution_ids: Contributing count chunks.
-        weights: Fraction of the returned population of each chunk.
-        chunk_mean_variances: The sample-mean variance of Y of each chunk,
-            or None for a one-shot chunk.
+        experiment: Name of the group setting.
+        value: Shot-weighted mean of the measurements' means of Y.
+        contribution_ids: Content hashes of the contributing count data.
+        weights: Fraction of the returned shots in each contribution.
+        chunk_mean_variances: The sample-mean variance of Y of each
+            contribution, or None for a one-shot contribution.
         sampled_shots: Total returned shots.
     """
 
@@ -360,12 +384,12 @@ class ScalarEstimate(Record):
 
 
 class GroupMoment(Record):
-    """Moments of one independent counts acquisition.
+    """Moments of one independently measured counts histogram.
 
     Y is the coefficient-weighted group parity, including the ancilla sign
     on an off-diagonal pair. The optional X is that ancilla sign and is
     recorded only by group zero. Variances and covariance concern sample
-    means. A one-shot acquisition has unavailable variance. A negative raw
+    means. A one-shot measurement has unavailable variance. A negative raw
     variance is published with variance_negative=True and is never clipped.
     label_means preserves each term's first moment from the same histogram.
 
@@ -415,11 +439,11 @@ class SampledPairVariance(Record):
     """Independent real/imaginary sample-mean variances, including shared-shot covariance.
 
     Entries are (real, imaginary). A diagonal overlap is algebraic one,
-    with zero variance. None means a required acquisition has one shot.
+    with zero variance. None means a required measurement has one shot.
     Negative estimates stay raw and set variance_negative. These estimates
     are not simultaneous confidence bounds or a Ritz-value certificate.
 
-    Under independent acquisitions for different settings, each quadrature
+    Under independent measurements of different settings, each quadrature
     has ``V_H0 = sum_g V_(Y_g)`` and
     ``V_H = sum_g V_(Y_g) + c_I**2 V_X + 2 c_I C_(X,Y_0)``. The diagonal
     uses ``V_S = 0`` and covariance zero because its solved overlap is
@@ -450,11 +474,11 @@ class PairEstimate(Record):
     Each contribution is one ``block_matrix_elements`` reduction of the pair's
     phase-faithful joint state (or diagonal system state), with population
     one. Its two raw complex scalars are the offset-free Hamiltonian entry and
-    the overlap entry in the requested ``(left, right)`` orientation; a
+    the overlap entry in the requested ``(left, right)`` orientation. A
     diagonal pair's overlap is its raw squared norm, kept as evidence while
     assembly uses unit diagonal overlap. The individual Pauli-term
     transitions are not recorded and cannot be recovered from the weighted
-    payload, so a different Hamiltonian truncation needs a new acquisition.
+    payload, so a different Hamiltonian truncation needs new measurements.
 
     Attributes:
         experiment: The pair's experiment name.
@@ -464,21 +488,21 @@ class PairEstimate(Record):
         contribution_ids: Contributing reduction chunks.
         weights: Population fraction of each contribution.
         hamiltonian_bound: Outward error allowance for the acquired H0
-            entry under the producing receipts' state-error model, combined
-            with the host action, contraction and pooling bounds from
-            entry_bounds and pooled_bound. None when a producing receipt
+            entry under the state-error model of the producing preparation
+            records, combined with the classical action, contraction and
+            pooling bounds. None when a producing preparation record
             has an unresolved exclusion or no applicable state budget.
             When a supplied matrix is synthesized under control, this
             allowance also assumes the exact-to-rounding convention of
-            subroutines._dense_synthesis. It does not add an independently
-            certified synthesis residual.
+            [exact dense synthesis](../../development/dense_synthesis.md).
+            It does not add an independently certified synthesis residual.
         overlap_bound: The corresponding allowance for the acquired overlap,
             with state, contraction and pooling terms. The solved diagonal
             is algebraic one and contributes zero to the Gram allowance.
             When a supplied matrix is synthesized under control, this
             allowance also assumes the exact-to-rounding convention of
-            subroutines._dense_synthesis. It does not add an independently
-            certified synthesis residual.
+            [exact dense synthesis](../../development/dense_synthesis.md).
+            It does not add an independently certified synthesis residual.
     """
 
     experiment: Text
@@ -492,15 +516,16 @@ class PairEstimate(Record):
 
 
 class ProjectedPencil(Record):
-    """Acquired ``H`` and ``S`` of one trial basis and the diagnostics of their solve.
+    """Projected matrices H and S of one trial basis and the diagnostics of their solve.
 
-    The matrices are the raw acquired values completed by conjugation. No
-    averaging, diagonal jitter or positive-semidefinite repair is applied.
-    The solve keeps the overlap eigenvectors whose eigenvalues exceed
-    ``overlap_cutoff`` and diagonalizes ``H`` in that subspace (canonical
-    orthogonalization, Epperly, Lin and Nakatsukasa, arXiv:2110.07492v2,
-    Algorithm 1.1, and Zheng et al., arXiv:2312.07691v3, Appendix F,
-    Eqs. (F1)-(F3)). No full-space state residual is computed here.
+    `FixedGCIMResult.pencil` and `ADAPTResult.pencil` hold it. The matrices
+    are the measured values, completed by complex conjugation, without
+    averaging, diagonal jitter or positive-semidefinite repair. The solve
+    keeps the overlap eigenvectors whose eigenvalues exceed `overlap_cutoff`
+    and diagonalizes H in that subspace (canonical orthogonalization,
+    Epperly, Lin and Nakatsukasa, arXiv:2110.07492v2, Algorithm 1.1, and
+    Zheng et al., arXiv:2312.07691v3, Appendix F, Eqs. (F1)-(F3)). No
+    full-space state residual is computed. The fields below are read-only.
 
     Attributes:
         hamiltonian: Projected Hamiltonian ``H = H0 + c_I S`` of shape (m, m)
@@ -515,29 +540,30 @@ class ProjectedPencil(Record):
             pairs. Each column is an S-normalized coefficient vector.
         kept_rank: Number of overlap directions above ``overlap_cutoff``.
         overlap_cutoff: Absolute overlap-eigenvalue threshold used by this solve.
-        overlap_filter: ``deterministic_gram`` refuses a negative overlap mode beyond
-            roundoff. ``sampled_positive_subspace`` keeps only positive modes above
-            the cutoff of a sampled, possibly indefinite ``S``.
+        overlap_filter: `"deterministic_gram"` refuses a negative overlap mode
+            beyond roundoff. `"sampled_positive_subspace"` keeps only positive
+            modes above the cutoff of a sampled, possibly indefinite S.
         overlap_condition_number: Largest over smallest kept overlap eigenvalue.
-        projected_residual: ``norm2(Hc - ESc)`` for the lowest Ritz pair.
+        projected_residual: `norm2(Hc - ESc)` for the lowest Ritz pair.
         projected_backward_error: Dimensionless residual scaled by
-            ``(normF(H) + abs(E) normF(S)) norm2(c)``, on the physical pencil
-            (H, S) in the Problem's energy unit, with ``H = H0 + c_I S`` when
+            `(normF(H) + abs(E) normF(S)) norm2(c)`, on the physical pencil
+            (H, S) in the Problem's energy unit, with `H = H0 + c_I S` when
             the solve removed an identity coefficient c_I. Rescaling the
             energy unit leaves it unchanged, but adding an identity term to
-            the operator changes ``normF(H)`` and ``abs(E)`` and therefore
-            the value. Lanczos states its value on the normalized pencil
-            instead.
-        overlap_normalization_error: ``abs(c^dagger S c - 1)`` for the lowest Ritz pair.
+            the operator changes `normF(H)` and `abs(E)` and therefore the
+            value. Lanczos states its value on the normalized pencil instead.
+        overlap_normalization_error: `abs(c^dagger S c - 1)` for the lowest Ritz pair.
         failure_reason: Solver refusal code, or None when the solve completed.
-        sampled_enclosure: Outward-rounded processed Pauli L1 enclosure for sampled
-            quantum data, or None.
+        sampled_enclosure: For sampled quantum data, the outward-rounded
+            interval `[c - sum_k |c_k|, c + sum_k |c_k|]` that contains the
+            spectrum of the processed operator `c I + sum_k c_k P_k`, or None.
         sampled_enclosure_violation: Distance of the lowest Ritz value outside that
             enclosure, zero inside it, or None when unavailable.
         sampled_enclosure_passed: Whether the violation lies within
-            ``sampled_enclosure_rtol`` times the largest enclosure endpoint magnitude.
+            `sampled_enclosure_rtol` times the largest enclosure endpoint
+            magnitude.
         sampled_enclosure_rtol: Relative window used by that comparison.
-        sampled_failure: Solver refusal or ``ritz_outside_operator_enclosure``.
+        sampled_failure: Solver refusal or `"ritz_outside_operator_enclosure"`.
         processing: Fixed description of the processing applied to the raw pencil.
     """
 
@@ -567,11 +593,12 @@ class ProjectedPencil(Record):
 
     @property
     def coefficients(self):
-        """Lowest Ritz coordinates; remaining columns describe the processed subspace.
+        """Coefficient vector of the lowest Ritz pair, the first column of `coordinate_vectors`.
 
-        In these coordinates the processed pencil is diag(eigenvalues), I up
-        to the reported numerical solve/normalization errors. No second matrix
-        projection or reference eigensolve is performed for this report.
+        It is an empty tuple when no Ritz value exists. In the coordinates of
+        all columns, the kept pencil is `(diag(eigenvalues), I)` up to the
+        reported solve and normalization errors. Reading it performs no new
+        projection or eigensolve.
         """
         return tuple(row[0] for row in self.coordinate_vectors) if self.eigenvalues else ()
 
@@ -1486,31 +1513,43 @@ def read_groups(plan, data):
 
 
 class FixedGCIMResult(Result):
-    """Projected Ritz value of one fixed trial basis and the data that produced it.
+    """Smallest projected eigenvalue from a `FixedGCIM` run, with its projected matrices.
 
-    The result ties the reported value to its exact Plan, construction and
-    observation chunks, so a saved result can be reanalyzed at another overlap
-    cutoff without new acquisition. ``validate_plan`` rejects a value that
-    differs from its own pencil, a pencil built under another acquisition
-    policy, and any estimate formed from incomplete observations.
+    [`solve`][nwqlib.scientist.solve] returns it for a `FixedGCIM` method,
+    and `load_result` reopens a saved one. The answer is `eigenvalue`, the
+    lowest kept Ritz value of the projected pencil, in the unit of the
+    `Eigenproblem`. It is None when data are missing or the solve was
+    refused. It is a projected estimate, not a certified full-space ground
+    energy. `pencil` holds the projected matrices H and S and the solve
+    diagnostics. `print(result)` shows the value and its scope, and
+    `result.analyze(overlap_cutoff=...)` solves the same matrix elements at
+    another cutoff without new measurement. Whenever a Result is attached to
+    its Plan and data, as after loading or reanalysis, NWQLib rejects a value
+    that differs from its own pencil, a pencil built under another
+    measurement policy, and any estimate formed from incomplete data. The
+    fields below are read-only. The fields of
+    [`Result`][nwqlib.core.analysis.Result] are present too.
 
     Attributes:
-        eigenvalue: Lowest kept Ritz value in the problem's energy unit, or None when
-            data are missing or the solve was refused. It is not a certified
-            full-space ground energy.
-        missing: Experiment names with no returned observation. A nonempty tuple
-            means no pencil was solved.
-        pairs: Exact pair acquisitions: pooled ``H0_ij`` and ``S_ij`` with their
-            reductions and entry bounds. Empty for sampled and classical Plans.
-        estimates: For a sampled Plan, the pooled weighted group scalars with
-            their contributing chunks, weights and the estimated variance of
-            each chunk mean.
+        eigenvalue: Lowest kept Ritz value in the problem's energy unit, or
+            None when data are missing or the solve was refused. It is not a
+            certified full-space ground energy.
+        missing: Names of planned measurements with no returned data. A
+            nonempty tuple means no pencil was solved.
+        pairs: Exact pair measurements: pooled `H0_ij` and `S_ij` with their
+            reductions and entry error bounds. Empty for sampled and
+            classical Plans.
+        estimates: For a sampled Plan, the pooled weighted group means
+            ([`ScalarEstimate`][nwqlib.algorithms.gcim.fixed_basis.ScalarEstimate])
+            with their contributing count data, weights and the estimated
+            variance of each contribution's mean.
         group_moments: For a sampled Plan, the moments of every count
-            acquisition in acquisition order.
+            measurement, in measurement order.
         sampled_pair_variances: For a complete sampled pencil, the pooled
             sample-mean variances and overlap–H0 covariance of each pair.
-        pencil: Projected pencil and solver diagnostics, or None for partial data or
-            a scalar identity target.
+        pencil: The [`ProjectedPencil`][nwqlib.algorithms.gcim.fixed_basis.ProjectedPencil]
+            with the projected matrices and solve diagnostics, or None for
+            partial data or a scalar identity target.
         analysis_cutoff: Overlap-eigenvalue cutoff used by this analysis.
         target_identification: Fixed statement of what the value does not establish.
     """
@@ -1643,6 +1682,18 @@ class FixedGCIMResult(Result):
         )
 
     def projected_diagnostics(self):
+        """Return the stored Gram matrix and solve diagnostics for projected checks.
+
+        It reads the stored `pencil` and runs no new solve.
+        `result.verify(checks=ProjectedVerificationOptions(...))` uses it.
+
+        Returns:
+            diagnostics (ProjectedDiagnostics): Its `overlap`, `spectrum`,
+                `normalization` and `backward_error` are the pencil's
+                `overlap`, `overlap_eigenvalues`, `overlap_normalization_error`
+                and `projected_backward_error`, the last on the physical
+                pencil (H, S). All four are None when there is no pencil.
+        """
         from nwqlib.evidence.verification import ProjectedDiagnostics
 
         p = self.pencil
@@ -1723,55 +1774,99 @@ def solve_pencil(hamiltonian, overlap, *, cutoff, sampled, enclosure=None, ident
 
 
 class FixedGCIM(Method):
-    """Generator-coordinate eigenvalue estimate in a fixed, caller-supplied trial basis.
+    """Generator-coordinate (GCiM) method for the smallest eigenvalue in a fixed trial basis.
 
-    This is the discretized Hill-Wheeler problem ``H f = E S f`` of Zheng et
-    al., Phys. Rev. Research 5, 023200 (2023), Eq. (13), with
-    ``H_ij = <phi_i|A|phi_j>`` and ``S_ij = <phi_i|phi_j>`` (Eqs. (14)-(15),
-    arXiv:2212.09205v1 numbering). The trial states ``phi_i`` are the
-    normalized supplied preparations rather than the paper's states
-    ``exp(Gamma(Z_p))|Phi>`` at discretized generator coordinates ``Z_p``
-    (Eq. (10), discretized in Eq. (17)). The exact quantum plan acquires one
-    phase-faithful joint state per off-diagonal pair and one system state
-    per diagonal pair, reduced at acquisition by the registered
-    ``block_matrix_elements`` reduction (``pair_reducer``) to the offset-free
-    ``H0_ij`` and ``S_ij``, ``(M - D) + D`` acquisitions for M pairs with D
-    diagonal ones (``pencil.pair_count``). The sampled quantum plan prepares the
-    same joint state per off-diagonal pair and measures its ancilla in X and
-    Y together with each qubit-wise-commuting system group of the recorded
-    partition, and each diagonal pair's system state per group, with
-    ``shots`` per setting, ``2(M - D) max(1, G) + DG`` settings for G groups
-    (``sampled_settings``). Each count table supplies its group's weighted
-    Hamiltonian mean and, for group zero, the overlap and its covariance
-    with that mean. The classical plan computes
-    ``V^dagger (A - cI) V`` with ``c = trace(A)/d`` and ``V^dagger V``
-    directly. Both plans solve without the identity term and add c to the
-    Ritz values afterwards. Sampled positive-subspace Ritz values remain
-    raw estimates, and the processed Pauli enclosure diagnostic does not
-    certify their physical accuracy.
+    Build it with keyword arguments and pass it as `method=`, for example
+    `solve(Eigenproblem(A=matrix), method=FixedGCIM(basis=(phi_1, phi_2)))`.
+    `basis` is the only required argument. The result is a
+    [`FixedGCIMResult`][nwqlib.algorithms.gcim.fixed_basis.FixedGCIMResult]
+    whose `eigenvalue` is the lowest Ritz value of the projected problem
+    `H f = E S f`, with `H_ij = <phi_i|A|phi_j>` and `S_ij = <phi_i|phi_j>`
+    for the normalized trial states phi_i. This is the discretized
+    Hill-Wheeler problem of Zheng et al., Phys. Rev. Research 5, 023200
+    (2023), arXiv:2212.09205v1, Eq. (13), with matrix elements
+    Eqs. (14)-(15). The trial states are the supplied states, normalized,
+    instead of the paper's states `exp(Gamma(Z_p))|Phi>` at discretized
+    generator coordinates `Z_p` (Eq. (10), discretized in Eq. (17)). A
+    projected Ritz value does not certify the full-space ground energy.
+
+    The call chooses how H and S are obtained, for M basis pairs of which D
+    are diagonal:
+
+    - Default, exact quantum: one phase-faithful joint state per
+      off-diagonal pair and one system state per diagonal pair, each reduced
+      when it is measured to the offset-free `H0_ij` and `S_ij`, so
+      `(M - D) + D` measurements.
+    - `shots=n`: the same joint state per off-diagonal pair, with its
+      ancilla measured in X and Y together with each qubit-wise commuting
+      group of system terms, and each diagonal pair's system state per group,
+      so `2(M - D) max(1, G) + DG` settings for G groups, n shots each. Each
+      count table supplies its group's weighted Hamiltonian mean and, for
+      the first group, the overlap and its covariance with that mean.
+    - `execution="classical"`: `V^dagger (A - cI) V` and `V^dagger V`
+      computed directly, with `c = trace(A)/d`.
+
+    Every path solves without the identity term and adds c to the Ritz
+    values afterwards. Sampled Ritz values are raw estimates, and the
+    enclosure diagnostic in `result.pencil` does not certify their physical
+    accuracy. `overlap_cutoff` can be changed after the run with
+    `result.analyze(overlap_cutoff=...)`, which reuses the same matrix
+    elements. The [GCiM guide](../../algorithms/gcim.md) describes the matrix
+    elements, their error bounds and the solve.
 
     Attributes:
-        basis: Ordered nonempty state preparations spanning the trial subspace.
-        overlap_cutoff: Positive eigenvalue cutoff for the kept Gram subspace.
-            The default 1e-12 equals ``DEFAULT_OVERLAP_EIGENVALUE_CUTOFF``.
-        max_basis_size: Maximum admitted number of trial states before pair expansion.
-        max_experiments: Maximum selected acquisition population: exact pair
-            reductions, or grouped sampled settings.
-        max_bytes: Bound on known conversion, pair-table, grouped count-analysis and projected numerical workspace bytes,
-            and on each exact pair reduction's workspace, checked when that pair is prepared.
-        max_analysis_work: Bound on projected-matrix and eigensolve work,
-            QWC grouping comparisons, and each grouped count-analysis pass.
-            Sampled planning admits the worst-case pass for one acquisition
-            per setting before selecting its circuit blocks. Analysis checks
-            the actual stored populations again before histogram decoding.
-            The default, 10**9, is ten times the other work defaults because
-            that planning bound is conservative (docs/ENGINEERING_CONSTANTS.md,
-            row "Sampled FixedGCIM analysis admission"). The same default caps
-            the QWC grouping comparisons and the projected solve.
-        max_classical_products: Bound on selected classical operator/vector products and on the summed host work of exact pair reductions.
-        input_conversion: ``auto`` admits existing access; ``dense_pauli`` explicitly permits dense-to-Pauli conversion.
-        max_conversion_work: Work cap for explicitly selected operator conversion.
-        max_admission_steps: Admission ceiling of the Plan's Programs, their ``AdmissionLimits.max_steps``: the kept field slots and the structural and lifecycle work units of one admission check. The resource fold of a Program may use up to 24 times this value. The default, 1,000,000, is the QLS default, ten times the shared ``AdmissionLimits`` default. Raising it admits a larger metadata check and fold. It changes no selected quantum work.
+        basis: Required. Trial states phi_i, a nonempty tuple of states in a
+            form that `StateData` accepts. Each is normalized.
+        overlap_cutoff: Default `1e-12`, positive. Overlap eigenvectors with
+            eigenvalues above it are kept for the solve.
+        max_basis_size: Default `64`. Largest accepted number of trial
+            states, checked before pairs are formed.
+        max_experiments: Default `100_000`. Largest number of measurement
+            settings: exact pair reductions, or sampled group settings.
+        max_bytes: Default 10 GB (decimal, `10_000_000_000` bytes). Limit on
+            the known bytes of conversion, the pair table, the grouped count
+            analysis and the projected solve, and on each exact pair
+            reduction's workspace, checked when that pair is prepared.
+        max_analysis_work: Default `1_000_000_000`. Limit on the work of the
+            projected matrices and eigensolve, of the comparisons that form
+            qubit-wise commuting groups, and of each pass of the grouped count
+            analysis. Sampled planning checks the worst-case pass for one
+            measurement per setting before it builds circuits, and analysis
+            checks the stored counts again before decoding them. The default
+            is ten times the other work defaults because that planning bound
+            is conservative ([Engineering constants](../../ENGINEERING_CONSTANTS.md),
+            row "Sampled FixedGCIM analysis admission").
+        max_classical_products: Default `100_000_000`. Limit on classical
+            operator-vector products and on the summed classical work of the
+            exact pair reductions.
+        input_conversion: Default `"auto"`, which keeps the accepted input
+            access. `"dense_pauli"` permits explicit dense-to-Pauli
+            conversion.
+        max_conversion_work: Default `100_000_000`. Limit on the work of an
+            explicitly chosen operator conversion.
+        max_admission_steps: Default `1_000_000`. Limit on the planning work
+            of checking each circuit description that the method builds. It
+            caps both the number of stored fields of a description and the
+            work units of one structural check of it.
+            Summing a description's resource counts may use up to 24 times
+            this value. The default equals that of `QLS` and is ten times the
+            shared default of `100_000`. Raising it permits a larger check
+            and changes no quantum operation
+            ([planning work limit](../../development/program_checks.md#planning-work-limit)).
+
+    Examples:
+        `H = ZZ + 0.5*(XI + IX)` on two qubits has lowest eigenvalue
+        `-sqrt(2) = -1.4142135623...`, which this three-state basis
+        recovers on Aer with exact readout:
+
+        >>> from qiskit.quantum_info import SparsePauliOp
+        >>> from nwqlib import Eigenproblem, solve
+        >>> from nwqlib.algorithms import FixedGCIM
+        >>> H = SparsePauliOp.from_list([("ZZ", 1), ("XI", 0.5), ("IX", 0.5)])
+        >>> basis = ([1, 0, 0, 0], [0, 0, 0, 1], [0, 1, 1, 0])
+        >>> result = solve(Eigenproblem(A=H), method=FixedGCIM(basis=basis), seed=7)
+        >>> print(round(result.eigenvalue, 10))
+        -1.4142135624
     """
 
     schema_version: Literal[2] = 2

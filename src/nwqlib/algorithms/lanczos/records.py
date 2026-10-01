@@ -102,10 +102,17 @@ class LanczosReconstruction(Record):
 
 
 class MomentStatistics(Record):
-    """mean, second_moment and actual shots; None means a numerical marginal.
+    """Sample mean and second moment of one acquired Chebyshev moment, with its shots.
 
-    variance is the unbiased sample-mean variance
-    (second_moment-mean^2)/(shots-1), an empirical value only.
+    `LanczosResult.statistics` pairs each acquired degree with one. The
+    property `variance` is the unbiased sample-mean variance
+    `(second_moment - mean**2)/(shots - 1)`, an empirical value only, and
+    `None` without shots or for one shot. The fields below are read-only.
+
+    Attributes:
+        mean: Mean of the per-shot values of the moment.
+        second_moment: Mean of their squares.
+        shots: Shots behind the mean, or `None` for a numerical marginal.
     """
 
     mean: Real
@@ -120,45 +127,90 @@ class MomentStatistics(Record):
 
 
 class LanczosResult(Result):
-    """Projected scalar with original target intent and unresolved error sources.
+    """Projected estimate of the smallest eigenvalue from a `Lanczos` run.
 
-    Missing moments are None. Shared moments define correlated pencil entries;
-    moment_variances are empirical, never confidence bounds. Coordinates and
-    matrices belong to the Chebyshev basis, never the full Hilbert space.
+    [`solve`][nwqlib.scientist.solve] returns it for a `Lanczos` method, and
+    `load_result` reopens a saved one. The answer is `eigenvalue`, the lowest
+    physical Ritz value `center + alpha*x`, in the unit of the
+    `Eigenproblem`. Here `center` and `alpha` shift and scale `A` so that
+    `(A - center*I) / alpha` has its spectrum in [-1, 1] (Oumarou et al.,
+    arXiv:2603.15552v1, Section 2, Eqs. (1) and (4)), and x is the lowest
+    Ritz value of that rescaled operator. `eigenvalue` is `None` when no
+    Ritz value is available, and `failure` then gives the reason. The value
+    is a projected estimate with unresolved error sources, and it does not
+    establish the smallest full-space eigenvalue. `print(result)` shows it
+    with its cutoff and rank notes, and `result.analyze(...)` recomputes it
+    from the same moments with other `overlap_*` settings. The fields below
+    are read-only. The fields of [`Result`][nwqlib.core.analysis.Result] are
+    present too.
+
+    `result.plan.reconstruction` stores `center`, `alpha` and the trial
+    dimension m as `krylov_dimension`, so `overlap` and `hamiltonian` are m
+    by m, in raw Chebyshev coordinates of the trial basis rather than the
+    full Hilbert space. Missing moments are `None`. Moments shared by several
+    pencil entries make those entries correlated, and `moment_variances` are
+    empirical values, not confidence bounds.
 
     Attributes:
-        eigenvalue: Lowest physical Ritz value center+alpha*x, or None when unavailable.
+        eigenvalue: Lowest physical Ritz value `center + alpha*x` of the
+            pencil after the Gram eigenvalues at or below `cutoff` are
+            discarded, or `None` when unavailable.
         eigenvalues: Physical Ritz values of the kept pencil in ascending order.
         coefficients: S-normalized lowest Ritz vector in raw Chebyshev coordinates.
-        moments: mu_0..mu_(2m-1) used by the analysis, None where missing.
-        moment_variances: Empirical sample-mean variance per moment, 0 for known moments and None when unavailable.
-        hamiltonian: Physical projected matrix center*S+alpha*K, or None when not representable.
-        overlap: Raw Chebyshev Gram matrix S.
-        kept_rank: Number of overlap eigenvalues above the cutoff.
+        moments: `mu_0` to `mu_(2m-1)`, with `mu_k = <psi|T_k(K)|psi>` for the
+            normalized initial state, used by the analysis, `None` where
+            missing.
+        moment_variances: Empirical sample-mean variance per moment, 0 for
+            known moments and `None` when unavailable.
+        hamiltonian: Physical projected matrix `center*S + alpha*K_proj`,
+            where
+            `K_proj_ij = (mu_(i+j+1) + mu_|i+j-1| + mu_|i-j+1| + mu_|i-j-1|)/4`
+            is K projected onto the trial space, or `None` when not
+            representable.
+        overlap: Raw Chebyshev Gram matrix `S_ij = (mu_(i+j) + mu_|i-j|)/2`.
+            Its diagonal need not equal one.
+        kept_rank: Number of kept directions, the overlap eigenvalues above
+            the cutoff.
         projected_backward_error: Dimensionless backward error
-            ``||K c - x S c|| / ((||K||_F + |x| ||S||_F) ||c||)`` of the lowest
-            pair (x, c) of the normalized pencil (K, S) that the solve uses, with
-            ``K = (H - center S) / alpha`` and ``x = (E - center) / alpha``.
-            Adding ``c_I I`` to a Pauli input, or scaling it by a positive
-            factor, leaves K and this value unchanged in exact arithmetic. For
-            a matrix input the Gershgorin frame widens its enclosure by a
-            roundoff allowance proportional to ``|center|``, so an offset
-            ``c_I`` changes alpha and the value by a relative amount of order
-            ``eps |c_I| / alpha``. FixedGCIM and ADAPT state theirs on the
-            physical pencil (H, S) instead, so the two values are not
-            comparable.
-        overlap_normalization_error: Defect in c^dagger S c=1 for the returned coefficients.
+            `||K_proj c - x S c|| / ((||K_proj||_F + |x| ||S||_F) ||c||)` of
+            the lowest pair (x, c) of the normalized pencil (K_proj, S) that
+            the solve uses, with `K_proj = (H - center S) / alpha` and
+            `x = (E - center) / alpha`. Adding `c_I I` to a Pauli input, or
+            scaling it by a positive factor, leaves K_proj and this value
+            unchanged in exact arithmetic. For a matrix input the Gershgorin
+            enclosure that sets center and alpha is widened by a roundoff
+            allowance proportional to `|center|`, so an offset `c_I` changes
+            alpha and the value by a relative amount of order
+            `eps |c_I| / alpha`. FixedGCIM and ADAPT
+            state theirs on the physical pencil (H, S) instead, so the two
+            values are not comparable.
+        overlap_normalization_error: Defect in `c^dagger S c = 1` for the returned coefficients.
         overlap_spectrum: Eigenvalues of S before thresholding.
-        cutoff: Resolved overlap-eigenvalue cutoff.
-        cutoff_source: Rule that produced the cutoff.
-        gram_sampling_bound: Conditional Hoeffding bound (doi:10.1080/01621459.1963.10500830) for the Gram perturbation, independent of the selected cutoff policy.
-        empirical_gram_noise_frobenius_rms: Sample-variance estimate of the Gram noise scale, without a coverage claim.
+        cutoff: Overlap-eigenvalue cutoff that the analysis applied.
+        cutoff_source: Rule that set the cutoff.
+        gram_sampling_bound: `m*e` with `e = sqrt(2*log(2*r/delta)/n_min)`,
+            where m is `krylov_dimension`, r counts the sampled moments that
+            enter S, n_min is the smallest of their shot counts and delta is
+            `analysis_failure_probability`. With probability at least
+            `1 - delta` it bounds the spectral norm of the Gram sampling
+            error, provided the shots are independent outcomes in [-1, 1] and
+            the measurements are unbiased (Hoeffding (1963),
+            doi:10.1080/01621459.1963.10500830, Theorem 2, Eq. (2.6), p. 16,
+            made two-sided as in Eq. (1.4), p. 13, with a union bound over the
+            r moments). [Proposition 12](../../mathematics.md#r12) derives
+            `||Delta S||_2 <= ||Delta S||_F <= m*e` from the moment errors.
+            It is independent of the cutoff policy. It does not bound the
+            error of `eigenvalue`.
+        empirical_gram_noise_frobenius_rms: Estimate, from sample variances,
+            of the root-mean-square Frobenius norm of the same Gram sampling
+            error, without a coverage claim. It does not bound the error of
+            `eigenvalue`.
         failure: Reason no Ritz value is available, or None.
         missing: Moment degrees without data.
         statistics: Pooled per-degree moment statistics that entered the analysis.
         physical_scale: Physical scale of the supplied reference state.
-        subspace: Identity of the selected Chebyshev trial subspace.
-        selected_construction_ids: Selected construction of each contribution, aligned with contribution_ids.
+        subspace: Reference, by content hash, to the Chebyshev trial subspace that the Plan chose.
+        selected_construction_ids: Content hash of the circuit construction behind each entry of `contribution_ids`, in the same order.
         analysis_cutoff: Cutoff requested for this analysis, or None for the default rule.
         analysis_cutoff_policy: Empirical or confidence policy requested for this analysis.
         analysis_noise_multiplier: Empirical-noise multiplier used by this analysis.
@@ -199,7 +251,17 @@ class LanczosResult(Result):
     selected_construction_ids: tuple[ContentID, ...]
 
     def projected_diagnostics(self):
-        """Borrow existing projected coordinates without reconstruction or solve."""
+        """Return the stored Gram matrix and solve diagnostics for projected checks.
+
+        It reads stored fields and runs no reconstruction or solve.
+        `result.verify(checks=ProjectedVerificationOptions(...))` uses it.
+
+        Returns:
+            diagnostics (ProjectedDiagnostics): Its `overlap`, `spectrum`,
+                `normalization` and `backward_error` are this Result's
+                `overlap`, `overlap_spectrum`, `overlap_normalization_error`
+                and `projected_backward_error`, in raw Chebyshev coordinates.
+        """
         from nwqlib.evidence.verification import ProjectedDiagnostics
 
         return ProjectedDiagnostics(

@@ -45,13 +45,34 @@ def _limits(limits: tuple[Limit, ...], locations: tuple[str, ...] | None = None)
 
 
 class DeviceConfiguration(Record):
-    """The immutable hardware/runtime/build/precision domain of one profile.
+    """The machine a device profile describes: target, hardware, runtime, build, compiler and numerical precision.
 
-    name/version identify the stored specification. target is the actual common
-    BackendTarget. runtime is the intended PreparedArtifact.target Source, not
-    an observed preparation receipt; compiler is the corresponding intended
-    compiler Source. build preserves implementation/build configuration. None
-    precision/representation/compiler remains missing information.
+    Build it with keyword arguments and pass it as `configuration=` to
+    [`DeviceProfile`][nwqlib.backends.profiles.DeviceProfile]. `name`, `version`,
+    `target`, `hardware`, `runtime` and `build` are required. Its content hash
+    (`content_id`) is what an [`Allocation`][nwqlib.backends.profiles.Allocation]
+    and a [`ModelDomain`][nwqlib.backends.profiles.ModelDomain] name as their
+    `configuration_id`, so a time model can refer to the machine without referring
+    to the profile that contains it. An optional field left `None` stays unknown
+    in an assessment.
+
+    Attributes:
+        name: Required. Name of the stored specification.
+        version: Required. Version of the stored specification.
+        target: Required. The backend target the machine supports, the same
+            target record that backend adapters declare.
+        hardware: Required. Source describing the hardware.
+        runtime: Required. Source of the intended runtime. Its `name` must equal
+            `target.name`. It describes what preparation is expected to use, not an
+            observed preparation record.
+        build: Required. Source of the implementation and build configuration.
+        compiler: Default `None`. Source of the intended compiler.
+        precision: Default `None`. `"complex64"`, `"complex128"` or `"float64"`.
+        representation: Default `None`. `"statevector"`, `"density_matrix"`,
+            `"tensor"`, `"hardware"` or `"classical"`.
+
+    Raises:
+        ValueError: If `runtime.name` differs from `target.name`.
     """
 
     name: Text
@@ -73,13 +94,45 @@ class DeviceConfiguration(Record):
 
 
 class Allocation(Record):
-    """Actual resource grants to this workload, never a scheduler or device query.
+    """The resources granted to one workload: locations, their placement and their capacity limits.
 
-    configuration_id names the exact intended machine configuration. locations
-    use the selected Program/Workspace names; capacities are never pooled across
-    them. topology describes the supplied placement, and None is unknown.
-    limits reuse core.Limit; scope on a capacity stock is its one location.
-    recorded_at/valid_until and evidence describe the grant, not its consumption.
+    Build it with keyword arguments, for example
+    `Allocation(name=..., configuration_id=configuration.content_id, locations=("logical_device",), topology="single_device", limits=(...), recorded_at=..., valid_until=..., evidence=...)`,
+    and pass it as `allocation=` to `nwqlib.estimate`, `nwqlib.compare` or
+    [`assess`][nwqlib.backends.assessment.assess]. Every field is required. The
+    record states a grant that the caller supplies. NWQLib never queries a
+    scheduler or device for it, and it never configures ranks, threads or devices.
+    Capacities are never pooled across locations. For example, two 8-GiB devices
+    cannot hold a 10-GiB peak on one device. The
+    [device-domain section of the profiles guide](../profiles.md#device-and-physical-model-domains)
+    explains how capacities are compared.
+
+    Attributes:
+        name: Required. Name of the grant.
+        configuration_id: Required. `content_id` of the
+            [`DeviceConfiguration`][nwqlib.backends.profiles.DeviceConfiguration]
+            the grant is for. An assessment applies the grant's limits only when it
+            matches the profile's configuration.
+        locations: Required. Distinct names of the granted locations, the names
+            the Program's registers and workspaces use, such as
+            `"logical_device"`.
+        topology: Required. `"single_device"` (exactly one location),
+            `"independent_devices"`, `"distributed"`, or `None` when the placement
+            is unknown.
+        limits: Required. Capacity, consumption and deadline limits as `Limit`
+            records, at most one per stage, metric and scope. A limit of kind
+            `"capacity_stock"` names exactly one granted location as its `scope`.
+        recorded_at: Required. Time zone-aware time the grant was recorded,
+            stored in UTC.
+        valid_until: Required. Time zone-aware end of the grant's validity, not
+            before `recorded_at`.
+        evidence: Required. Evidence describing the grant, not its use.
+
+    Raises:
+        ValueError: If the locations are empty or repeated, `"single_device"`
+            has more than one location, two limits share a stage, metric and
+            scope, a `"capacity_stock"` limit names a location outside the grant, or
+            `valid_until` precedes `recorded_at`.
     """
 
     name: Text
@@ -104,18 +157,71 @@ class Allocation(Record):
 
 
 class ModelDomain(Record):
-    """Finite validation envelope for this model, including exact allocation.
+    """The workloads a time model is valid for: machine, allocation, readout, operation mix and size ranges.
 
-    configuration_id binds hardware, runtime/build, precision and the actual
-    target. allocation_id binds all granted locations/resources/topology.
-    selection_ids and primitive_gates describe the supported operation mix;
-    a missing inventory is not a wildcard. Logical operations are in basis and
-    the explicit synthesis/rotation_precision context. Scale intervals are
-    inclusive. No model is selected, fitted or extrapolated by this record.
-    max_resets, max_measurements, max_classical_work and max_adaptive_rounds
-    give inclusive finite [0, maximum] domains for the separate folded non-gate
-    populations. bindings restrict the law's actual parameter point; population
-    owns its readout population. Neither restriction belongs to Evidence.
+    Build it with keyword arguments and pass it as `domain=` to
+    [`TimeModel`][nwqlib.backends.profiles.TimeModel]. Every field except
+    `rotation_precision`, `synthesis` and `bindings` is required. An assessment
+    evaluates the model only for a workload inside every range and list here,
+    and reports the prediction as unavailable otherwise. The record selects,
+    fits and extrapolates nothing. An empty list of selections or gates supports
+    none, never any. Size ranges are inclusive, and `max_resets`,
+    `max_measurements`, `max_classical_work` and `max_adaptive_rounds` each give
+    the inclusive range from 0 to the maximum. A model calibrated without resets,
+    for example, does not apply once resets are added, even when the gate counts
+    match. The [time-model section of the profiles guide](../profiles.md#finite-time-models)
+    lists every domain check.
+
+    Attributes:
+        configuration_id: Required. `content_id` of the
+            [`DeviceConfiguration`][nwqlib.backends.profiles.DeviceConfiguration]:
+            hardware, runtime, build, precision and target.
+        allocation_id: Required. `content_id` of the
+            [`Allocation`][nwqlib.backends.profiles.Allocation]: every granted
+            location, limit and topology.
+        basis: Required. Gate basis in which logical operations are counted:
+            `"selected_logical"`, `"cx"`, `"clifford_t"` or `"toffoli"`.
+        rotation_precision: Default `None`. Positive rotation-synthesis precision
+            the operation counts assume.
+        synthesis: Default `None`. Source of the synthesis rule the operation
+            counts assume.
+        batch_schedule: Required. `"unspecified"` or `"serial"`.
+        acquisition: Required. `"direct_observation"` or `"measurement_batch"`.
+        runtime: Required. The runtime seed the model was measured with, as
+            `RuntimeOptions(seed=...)`, or `"seed_independent"`. A whole-Plan
+            forecast does not guess future seeds, so only a seed-independent model
+            applies there.
+        population: Required. Readout population, `"unconditional"` or
+            `"native_conditioned"`.
+        readouts: Required. Distinct supported readouts: `"pauli_expectation"`,
+            `"counts"`, `"probabilities"`, `"host_scalars"`, `"amplitudes"` or
+            `"estimated_observable"`.
+        selection_ids: Required. Distinct content hashes of the supported block
+            selections.
+        primitive_gates: Required. Distinct supported primitive gates: `"x"`,
+            `"h"`, `"z"`, `"sdg"`, `"cx"`, `"mc_z"` or `"phase"`.
+        min_qubits: Required. Smallest supported qubit count.
+        max_qubits: Required. Largest supported qubit count, at least
+            `min_qubits`.
+        min_operations: Required. Smallest supported logical operation count.
+        max_operations: Required. Largest supported logical operation count, at
+            least `min_operations`.
+        max_shots: Required. Largest supported shot count.
+        max_exact_evaluations: Required. Largest supported number of exact
+            evaluations.
+        max_readout_items: Required. Largest supported number of returned readout
+            items.
+        max_resets: Required. Largest supported reset count.
+        max_measurements: Required. Largest supported measurement count.
+        max_classical_work: Required. Largest supported classical work.
+        max_adaptive_rounds: Required. Largest supported number of adaptive
+            rounds.
+        bindings: Default `()`. Parameter values the model is restricted to, at
+            most one per parameter.
+
+    Raises:
+        ValueError: If a minimum exceeds its maximum, `rotation_precision` is not
+            positive, or a binding, readout, selection or gate is repeated.
     """
 
     configuration_id: ContentID
@@ -160,10 +266,26 @@ class ModelDomain(Record):
 
 
 class TimeCoefficient(Record):
-    """Nonnegative seconds per one named acquisition/work feature.
+    """One coefficient of a linear time model: seconds per invocation, shot, exact evaluation or logical operation.
 
-    unit keeps the source coefficient unit exactly; there is no conversion.
-    Zero coefficients explicitly omit a contribution, never an unknown feature.
+    Build it with keyword arguments, for example
+    `TimeCoefficient(feature="sampled_shots", seconds_per_unit=0.001, unit="s/shot")`,
+    and pass it in `coefficients=` of
+    [`TimeModel`][nwqlib.backends.profiles.TimeModel]. Every field is required.
+    The unit is kept exactly as supplied and never converted. A zero coefficient
+    states that the feature contributes nothing, which differs from leaving the
+    feature out.
+
+    Attributes:
+        feature: Required. `"invocations"`, `"sampled_shots"`,
+            `"exact_evaluations"` or `"logical_operations"`.
+        seconds_per_unit: Required. Nonnegative coefficient in `unit`.
+        unit: Required. The one unit of the feature: `"s/invocation"`,
+            `"s/shot"`, `"s/exact_evaluation"` or `"s/logical_operation"`
+            respectively.
+
+    Raises:
+        ValueError: If `unit` is not the unit of `feature`.
     """
 
     feature: TimeFeature
@@ -183,12 +305,34 @@ class TimeCoefficient(Record):
 
 
 class ModelUncertainty(Record):
-    """Supplied additive residual interval in seconds, not an inferred guarantee.
+    """The supplied uncertainty of a time model, as an additive interval in seconds around its prediction.
 
-    future_run_prediction describes future individual acquisitions;
-    sample_mean_confidence describes a mean and does not bound an individual run.
-    model_error_envelope keeps a stated engineering uncertainty without claiming
-    probabilistic coverage. Residuals are added to the central prediction.
+    Build it with keyword arguments, for example
+    `ModelUncertainty(kind="future_run_prediction", lower_residual_seconds=-0.25, upper_residual_seconds=0.5, coverage=0.9, source=...)`,
+    and pass it as `uncertainty=` to
+    [`TimeModel`][nwqlib.backends.profiles.TimeModel]. Every field except
+    `coverage` is required, and `coverage` is required for the two statistical
+    kinds. The residuals are added to the central prediction, so the example
+    gives the interval `[prediction - 0.25, prediction + 0.5]` seconds. The
+    interval keeps the meaning its source states and is never an execution
+    guarantee.
+
+    Attributes:
+        kind: Required. `"future_run_prediction"` concerns one future run.
+            `"sample_mean_confidence"` concerns a mean and does not bound an
+            individual run. `"model_error_envelope"` states an engineering
+            uncertainty without a probability.
+        lower_residual_seconds: Required. Zero or negative residual in seconds.
+        upper_residual_seconds: Required. Nonnegative residual in seconds.
+        coverage: Default `None`. Probability in (0, 1] that the interval holds,
+            required for `"future_run_prediction"` and `"sample_mean_confidence"`
+            and not allowed for `"model_error_envelope"`, because a coverage would
+            claim more than an engineering uncertainty supports.
+        source: Required. Source of the stated interval.
+
+    Raises:
+        ValueError: If `coverage` is missing for a statistical kind or given for
+            `"model_error_envelope"`.
     """
 
     kind: Literal["future_run_prediction", "sample_mean_confidence", "model_error_envelope"]
@@ -210,11 +354,19 @@ class ModelUncertainty(Record):
 
 
 class CalibrationReference(Record):
-    """Existing calibration provenance; references are inert and never fetched.
+    """Where a calibrated time model's coefficients came from: training data, validation data and validation errors.
 
-    training/validation name the supplied workloads, validation_errors preserves
-    the held-out error report. References name the actual data/procedure version;
-    a record parent link alone does not establish its training population.
+    Build it with keyword arguments and pass it as `calibration=` to
+    [`TimeModel`][nwqlib.backends.profiles.TimeModel]. Every field is required.
+    Each Source names the exact data or procedure version. NWQLib never opens or
+    fetches a referenced source. A link to a parent record alone does not
+    establish which workloads trained the model.
+
+    Attributes:
+        source: Required. Source of the calibration procedure.
+        training: Required. Source of the training workloads.
+        validation: Required. Source of the held-out validation workloads.
+        validation_errors: Required. Source of the held-out error report.
     """
 
     source: Source
@@ -224,19 +376,62 @@ class CalibrationReference(Record):
 
 
 class TimeModel(Record):
-    """One named, versioned scalar relation: sum coefficient * feature, in seconds.
+    """A named linear model of time in seconds, the sum of coefficient times feature count, for one scope.
 
-    The supported form ``acquisition_linear/1`` is defined in docs/profiles.md,
-    "Finite time models". A linear law over counted features can be evaluated
-    from the resource fold without executing anything, and its coefficients
-    keep explicit units.
+    Build it with keyword arguments and pass it in `models=` of
+    [`DeviceProfile`][nwqlib.backends.profiles.DeviceProfile]. Every field except
+    `form`, `calibration` and `uncertainty` is required. The one supported form,
+    `acquisition_linear/1`, is
 
-    form has one supported version; arbitrary expressions/plugins are rejected.
-    scope separates acquisition, overhead and native-call wall time. The last
-    includes native waiting/extraction, excluding preparation and publication.
-    These scopes overlap and must not be summed. None covers an entire run.
-    engineering parameters are explicit assumptions, not measured calibration.
-    calibrated parameters keep supplied calibration and uncertainty unchanged.
+    ```text
+    seconds = c_invocation * invocations + c_shot * sampled_shots
+            + c_exact * exact_evaluations + c_operation * logical_operations
+    ```
+
+    over the feature counts of the resource estimate, so it is evaluated without
+    running anything ([Finite time models](../profiles.md#finite-time-models)).
+    An engineering model states assumed coefficients and gives conditional
+    numbers under its assumptions. A calibrated model keeps its supplied
+    calibration sources and uncertainty unchanged. Neither kind collects
+    calibration data. An expired, future-dated or out-of-domain model gives an
+    unavailable prediction with its reason.
+
+    Attributes:
+        form: Default `"acquisition_linear/1"`, the only accepted value.
+            Arbitrary expressions and plugins are rejected.
+        name: Required. Model name, unique within the profile.
+        kind: Required. `"engineering"` for assumed coefficients or
+            `"calibrated"` for coefficients from a supplied calibration.
+        scope: Required. What the seconds cover: `"selected_acquisition"`,
+            `"acquisition_overhead"` or `"native_call_wall"`. The first two
+            exclude planning, compilation, queue delay, analysis and whole-run
+            cost. `"native_call_wall"` covers the synchronous backend call,
+            including waiting and result extraction, and excludes preparation and
+            saving. The scopes overlap, so their predictions must not be added,
+            and none covers a whole run.
+        coefficients: Required. One to four
+            [`TimeCoefficient`][nwqlib.backends.profiles.TimeCoefficient] records
+            with distinct features.
+        domain: Required. The [`ModelDomain`][nwqlib.backends.profiles.ModelDomain]
+            of workloads the model is valid for.
+        recorded_at: Required. Time zone-aware time the model was recorded,
+            stored in UTC.
+        valid_until: Required. Time zone-aware end of validity, not before
+            `recorded_at`.
+        evidence: Required. Evidence of kind `"numerical_estimate"` for an
+            engineering model or `"empirical_prediction"` for a calibrated one.
+        assumptions: Required. At least one stated assumption.
+        calibration: Default `None`. The
+            [`CalibrationReference`][nwqlib.backends.profiles.CalibrationReference],
+            required for a calibrated model and not allowed for an engineering one.
+        uncertainty: Default `None`. The
+            [`ModelUncertainty`][nwqlib.backends.profiles.ModelUncertainty],
+            required for a calibrated model.
+
+    Raises:
+        ValueError: If `valid_until` precedes `recorded_at`, a feature repeats,
+            `calibration` does not match `kind`, the evidence kind does not match
+            `kind`, or a calibrated model has no `uncertainty`.
     """
 
     form: Literal["acquisition_linear/1"] = "acquisition_linear/1"
@@ -275,12 +470,37 @@ class TimeModel(Record):
 
 
 class DeviceProfile(Record):
-    """Versioned stored configuration, advertised limits and supplied named models.
+    """A stored description of one machine: its configuration, advertised limits and named time models.
 
-    configuration has a separate identity so a coefficient can bind the machine
-    without a circular reference to its containing model/profile. New calibration
-    changes the Profile identity and never rewrites an earlier assessment.
-    evidence is the specification basis; it is not an execution receipt.
+    Build it with keyword arguments, for example
+    `DeviceProfile(configuration=..., recorded_at=..., valid_until=..., evidence=..., models=(model,))`,
+    and pass it as `profile=` to `nwqlib.estimate`, `nwqlib.compare` or
+    [`assess`][nwqlib.backends.assessment.assess]. `configuration`,
+    `recorded_at`, `valid_until` and `evidence` are required. The profile is data
+    the caller supplies. NWQLib never discovers a machine or refreshes a
+    profile. New calibration makes a new profile with a new content hash, so an
+    earlier assessment is never rewritten. The [profiles guide](../profiles.md)
+    explains the assessment, and the example under
+    [Forecast cost and feasibility](backends.md#forecast-cost-and-feasibility) builds a
+    small profile.
+
+    Attributes:
+        configuration: Required. The
+            [`DeviceConfiguration`][nwqlib.backends.profiles.DeviceConfiguration].
+        limits: Default `()`. Advertised limits as `Limit` records, at most one
+            per stage, metric and scope.
+        recorded_at: Required. Time zone-aware time the profile was recorded,
+            stored in UTC.
+        valid_until: Required. Time zone-aware end of validity, not before
+            `recorded_at`.
+        evidence: Required. The specification the profile rests on, not a record
+            of an execution.
+        models: Default `()`. [`TimeModel`][nwqlib.backends.profiles.TimeModel]
+            records with distinct names.
+
+    Raises:
+        ValueError: If `valid_until` precedes `recorded_at`, two limits share a
+            stage, metric and scope, or two models share a name.
     """
 
     configuration: DeviceConfiguration

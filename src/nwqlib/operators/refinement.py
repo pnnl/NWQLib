@@ -19,13 +19,16 @@ SOURCE = Source(name="structural_operator_facts", version="1",
 
 
 class RefinementOption(Record):
-    """A concrete available scan and its data/arithmetic growth.
+    """One bound computation available for an operator, with its cost.
+
+    `OperatorFactReport.options` lists them. The fields below are read-only.
 
     Attributes:
-        operation: ``certify_pauli_l1`` for Hermitian Pauli terms or ``certify_sparse_rows`` for Hermitian CSR/CSC storage.
-        access: The admitted input access the scan reads.
-        work_law: Text form of its scalar-operation law.
-        payload_law: Text form of its byte law.
+        operation: `"certify_pauli_l1"` for a Hermitian Pauli operator or
+            `"certify_sparse_rows"` for a Hermitian CSR or CSC matrix.
+        access: The stored data the computation reads.
+        work_law: Text form of its scalar-operation count.
+        payload_law: Text form of its byte count.
     """
 
     operation: Refinement
@@ -35,22 +38,26 @@ class RefinementOption(Record):
 
 
 class RefinementReceipt(Record):
-    """One actual scan, with input and output populations in an exact frame.
+    """Record of one bound computation: what it read and how much exact arithmetic it did.
 
-    scalar_operations is a derived arithmetic count, not measured CPU time.
-    input_bytes are the borrowed labels or compressed arrays; output_bytes
-    count exact numerator/denominator payloads. Neither quantity is process RSS.
+    `OperatorFactReport.receipts` holds one per computation. The byte counts
+    are logical sizes, not process memory, and `scalar_operations` is a
+    count derived from the data, not measured CPU time. The fields below are
+    read-only.
 
     Attributes:
-        acquisition_id: Fresh identity of this scan, so a repeated scan is a new acquisition.
-        manifest: Manifest of the scanned operator input.
+        acquisition_id: Random identifier of this computation. Repeating a
+            computation gives a new identifier, so it is never mistaken for
+            the earlier one.
+        manifest: Manifest of the operator that was read.
         unit: Unit of the operator's values.
-        scope: Evidence scope of the resulting facts.
-        operation: The scan that ran.
-        input_entries: Pauli terms or stored nonzero entries read.
-        input_bytes: Bytes of the labels or compressed arrays read.
-        scalar_operations: Derived count of exact scalar operations.
-        output_bytes: Bytes of the exact numerators and denominators produced.
+        scope: Scope of the resulting bounds.
+        operation: The computation that ran.
+        input_entries: Pauli terms or stored entries read.
+        input_bytes: Bytes of the Pauli labels or compressed arrays read.
+        scalar_operations: Exact scalar operations performed.
+        output_bytes: Bytes of the exact numerators and denominators
+            produced.
     """
 
     acquisition_id: Text
@@ -86,16 +93,43 @@ def _fraction(value):
 
 
 class OperatorFactReport(Record):
-    """Stored facts and scan receipts. Construction never acquires native data.
+    """Exact norm and spectral bounds of an operator, with the computations that produced them.
+
+    [`refine_operator_facts`][nwqlib.operators.refinement.refine_operator_facts]
+    returns it. Building or loading a report reads no numerical data. Each
+    entry of `facts` is a [`FramedFact`][nwqlib.evidence.error_model.FramedFact]
+    for one of these quantities of the full operator H, in its `unit`:
+
+    - `operator_norm_upper_bound`: an upper bound on the spectral norm of H
+    - `identity_coefficient`: the coefficient `c_I` of the identity, read
+      exactly
+    - `centered_norm_upper_bound`: an upper bound on the spectral norm of
+      `H - c_I I`
+    - `eigenvalue_lower_bound` and `eigenvalue_upper_bound`: an interval
+      containing every eigenvalue of H
+
+    A quantity is unknown until a computation produces it. A computed
+    identity coefficient is an exact read of the stored data (evidence kind
+    `proved_relation`), and the other quantities are certified bounds
+    (`certified_bound`). The fields below are read-only.
 
     Attributes:
-        manifest: Manifest of the operator input the facts describe.
+        manifest: Manifest of the operator the bounds describe.
         unit: Unit of the operator's values.
-        scope: Evidence scope of the facts.
-        facts: One FramedFact per structural quantity, unknown until a scan acquires it.
-        options: Scans available for this input, empty when none applies.
-        receipts: Receipts of every scan in this report's chain, in run order. A later scan's facts replace an earlier scan's facts for the same quantities.
-        reason: Why no scan is available, required exactly when options is empty.
+        scope: Scope of the bounds.
+        facts: One `FramedFact` per quantity above.
+        options: Computations available for this operator, empty when none
+            applies.
+        receipts: Records of every computation behind this report, in run
+            order. A later computation's values replace an earlier one's for
+            the same quantities.
+        reason: Why no computation is available, set exactly when `options`
+            is empty.
+
+    Raises:
+        ValueError: If a fact or record belongs to another operator, unit or
+            scope, a norm bound is negative, or the lower eigenvalue bound
+            exceeds the upper one.
     """
 
     manifest: InputManifest
@@ -329,10 +363,53 @@ def _report(operator, unit, scope, facts, receipts, *, parent_id=None):
 def refine_operator_facts(operator, *, unit: Unit, scope: Scope, max_bytes=DEFAULT_INPUT_BYTES,
                           refinements: tuple[Refinement, ...] = (),
                           previous: OperatorFactReport | None = None) -> OperatorFactReport:
-    """Run only explicitly selected scans; reuse unchanged acquired facts.
+    """Compute exact bounds on an operator's norm and spectrum, and return them in a report.
 
-    Selecting a scan again creates a new acquisition receipt. Empty refinements
-    use metadata only. No matvec, eigensolve, backend or dense conversion runs.
+    Only the computations named in `refinements` run:
+
+    - `"certify_pauli_l1"`, for a Hermitian Pauli operator
+      `H = c_I I + sum_{P != I} c_P P`. Every Pauli word has spectral norm
+      one, so the triangle inequality gives `||H|| <= sum_P |c_P|` and puts
+      the spectrum in `[c_I - sum_{P != I} |c_P|, c_I + sum_{P != I} |c_P|]`.
+      It also reads `c_I` and bounds `||H - c_I I||` by `sum_{P != I} |c_P|`.
+    - `"certify_sparse_rows"`, for a Hermitian CSR or CSC matrix A. By the
+      Gershgorin circle theorem every eigenvalue lies in some interval
+      `[a_ii - R_i, a_ii + R_i]` with `R_i = sum_{j != i} |a_ij|`. For a
+      Hermitian matrix the spectral norm equals the spectral radius, which
+      is at most the largest absolute row sum. The diagonal of an exactly
+      Hermitian matrix is real, and `|Re a| + |Im a| >= |a|` keeps the radius
+      rational.
+
+    The sums use exact fractions of the stored binary64 values, so the
+    bounds hold for the stored operator without rounding error. They bound
+    the operator, not the total error of a computed result. No
+    matrix-vector product, eigensolver, backend or dense conversion runs.
+    With empty `refinements` the report is built from metadata only.
+    Passing `previous` keeps its bounds and records, and a computation run
+    again gets a new record.
+
+    Args:
+        operator (OperatorInput): The operator.
+        unit (Unit): Unit of the operator's values.
+        scope (Scope): Scope of the bounds.
+        max_bytes (int): Limit on the bytes read and the exact integers kept
+            alive, checked before each computation. Default 10 GB (decimal,
+            `10_000_000_000`).
+        refinements (tuple[str, ...]): Distinct computations to run, each
+            available for this operator. Default `()`.
+        previous (OperatorFactReport | None): A report from an earlier call
+            with the same operator, unit and scope.
+
+    Returns:
+        report (OperatorFactReport): The bounds and the records of every
+            computation behind them.
+
+    Raises:
+        TypeError: If `operator` is not an `OperatorInput` or `previous` is
+            not an `OperatorFactReport`.
+        ValueError: If a computation is unavailable for this operator or
+            repeated in `refinements`, `previous` belongs to another
+            operator, unit or scope, or `max_bytes` is exceeded.
     """
     from .inputs import OperatorInput
 

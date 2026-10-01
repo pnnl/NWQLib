@@ -218,24 +218,62 @@ _SOURCE = Source(
 
 
 class EnergyShiftOptions(Record):
-    """Compare a saved baseline; an asserted relation stays an unresolved premise.
+    """Options of the energy-shift check, which compares an energy Result with a saved baseline for `H_target = H_baseline + c I`.
+
+    Build it with [`for_result`][nwqlib.evidence.energy_shift.EnergyShiftOptions.for_result]
+    from the baseline Result, for example
+    `EnergyShiftOptions.for_result(baseline, name="shift", shift=0.5,
+    tolerance=1e-10)`, and pass it to the target's
+    `result.verify(checks=...)` or
+    [`verify_energy_shift`][nwqlib.evidence.energy_shift.verify_energy_shift].
+    It applies to Lanczos and FixedGCIM Results.
+
+    The check reports `abs(E_target - E_baseline - c)` in the output unit,
+    on `[0, inf)`, against `tolerance`. With the trial space held fixed,
+    every Ritz value shifts by exactly c in exact arithmetic, so the value
+    is zero in exact arithmetic. The [verification
+    guide](../verification.md#two-result-energy-shift) derives this
+    (Kirby, Motta and Mezzacapo, arXiv:2208.00567v4, Eq. (14)) and states
+    what the value measures for exact, classical and sampled moments. This
+    comparison is NWQLib's own design.
+
+    Both Results must share the output frame and sector. With
+    `relation="pauli_table"` or `"matrix_entries"`, the check first
+    establishes `H_target - H_baseline = c I` exactly from the stored
+    binary64 operator tables, with absent entries meaning zero. It also
+    requires the same basis, unit, preparations and subspace rule and order,
+    so that the two trial spaces are the same. A valid operator relation
+    does not imply a zero discrepancy between independently rounded or
+    sampled Ritz values. With `relation="asserted"` the stated assumption stays
+    an open prerequisite, which keeps the check INCONCLUSIVE, and numerical
+    agreement does not prove it. Neither workload runs again.
 
     Attributes:
-        name: Prefix of the check name.
-        baseline: Energy endpoint of the saved baseline Result.
-        shift: Constant c in H_target=H_baseline+cI, in the output unit.
-        tolerance: Threshold on abs(E_target-E_baseline-c).
-        relation: How the operator relation is established: an exact ``pauli_table`` or ``matrix_entries`` comparison, or ``asserted``.
-        assertion: Stated premise of an asserted relation, kept as a check prerequisite.
-        source: Implementation source of the comparison.
+        name: Required. Prefix of the check name, which is
+            `name + ".energy_shift"`.
+        baseline: Required. Energy endpoint of the saved baseline Result.
+            `for_result` fills it.
+        shift: Required. The constant c in `H_target = H_baseline + c I`, in
+            the output unit.
+        tolerance: Required. Nonnegative threshold on
+            `abs(E_target - E_baseline - c)`.
+        relation: Default `"pauli_table"`, and `for_result` picks the table
+            kind of the baseline. How the operator relation is established:
+            `"pauli_table"` or `"matrix_entries"` for an exact comparison,
+            `"asserted"` for a stated assumption.
+        assertion: Default `None`. The stated assumption, set exactly when
+            `relation="asserted"`.
 
-    The CheckSpec of the last target Result is kept in the slot
-    ``_target_checks`` with that Result's identity, so
-    ``verify_energy_shift`` and a later ``Certificate.with_verification``
-    with the same options object build the target endpoint once. The slot
-    is not a field, so equality and identity never see it.
+    Raises:
+        ValueError: If `assertion` is set without `relation="asserted"` or
+            missing with it.
     """
 
+    # The CheckSpec of the last target Result is kept in the slot
+    # _target_checks with that Result's identity, so verify_energy_shift and
+    # a later Certificate.with_verification with the same options object
+    # build the target endpoint once. The slot is not a field, so equality
+    # and identity never see it.
     __slots__ = ("_target_checks",)
     name: Text
     baseline: EnergyEndpoint
@@ -255,7 +293,21 @@ class EnergyShiftOptions(Record):
 
     @classmethod
     def for_result(cls, result, **choices):
-        """Build options with ``result`` as the baseline and its table kind as the default relation."""
+        """Build options with `result` as the baseline and its operator table kind as the default relation.
+
+        Args:
+            result (Result): The baseline Lanczos or FixedGCIM Result, with
+                its Plan.
+            **choices (object): The other fields, `name`, `shift` and
+                `tolerance`, and optionally `relation` and `assertion`.
+
+        Returns:
+            options (EnergyShiftOptions): Options with the baseline's energy
+                endpoint.
+
+        Raises:
+            TypeError: If the Result has no saved energy endpoint.
+        """
         endpoint = _endpoint(result)
         choices.setdefault(
             "relation", "pauli_table" if endpoint.terms is not None else "matrix_entries"
@@ -573,11 +625,33 @@ def _matrix_relation(baseline, target, shift, *, max_bytes):
 def verify_energy_shift(
     result, *, options: EnergyShiftOptions, max_integer_bits=DEFAULT_MAX_INTEGER_BITS
 ):
-    """Compare actual saved endpoints without running either method again.
+    """Run the energy-shift check of a target Result against the baseline in `options`, running neither method again.
 
-    The target endpoint is read once and serves both the CheckSpec and the
-    relation. ``max_integer_bits`` bounds the exact arithmetic used to
-    report the energy discrepancy.
+    `result.verify(checks=options)` calls this for Lanczos and FixedGCIM.
+    The target's stored energy, operator table and preparations are read
+    once. The exact operator relation is checked first, and the discrepancy
+    `abs(E_target - E_baseline - c)` is computed in exact arithmetic.
+
+    Args:
+        result (Result): The target Lanczos or FixedGCIM Result, with its
+            Plan.
+        options (EnergyShiftOptions): The baseline, shift and tolerance.
+        max_integer_bits (int): Bit limit of the exact arithmetic. Default
+            4096.
+
+    Returns:
+        verification (tuple): `(receipt, facts)`: the `VerificationReceipt`
+            of this comparison, and a one-element tuple with the
+            discrepancy as a [`FramedFact`][nwqlib.evidence.error_model.FramedFact]
+            that cites it. The fact is unknown when either energy is
+            missing.
+
+    Raises:
+        TypeError: If `options` is not an `EnergyShiftOptions`, or the
+            Result has no saved energy endpoint.
+        ValueError: If the Results differ in frame or sector, basis, unit,
+            preparations or subspace rule, or the stored tables do not
+            establish the relation exactly.
     """
     if type(options) is not EnergyShiftOptions:
         raise TypeError("energy comparison requires concrete selected options")

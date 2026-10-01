@@ -1,39 +1,94 @@
-# Saved results and continuation
+# Save, load and reanalyze results
 
-A scientific `Result` contains its original `Plan` (the selected construction and its costs, computed by `plan` before any circuit exists) and actual RunData. Save those together:
+<a id="saved-results-and-continuation"></a>Save a completed `Result` to a folder, load it later without a backend, and reanalyze its saved measurements with new settings or assess them against a new tolerance, all without new measurements. To continue a run whose provider jobs are still pending, or one that was interrupted, see [Continue an interrupted run](run_archives.md).
+
+## Save, load and reanalyze
 
 ```python
 import nwqlib
+from nwqlib.algorithms import ExpectationMethod
+from nwqlib.evidence.binary import BinaryInferenceOptions
 
-path = result.save("completed-result")
+problem = nwqlib.Expectation(state=[1., 1.],
+                             observable=[[1., 0.], [0., -1.]])
+result = nwqlib.solve(problem, method=ExpectationMethod(), shots=256, seed=3)
+path = result.save("expectation-result")
+
 restored = nwqlib.load_result(path)
-revised = restored.analyze()
+hoeffding = BinaryInferenceOptions(
+    method="hoeffding", failure_probability=0.05,
+    sampling_model="iid_bernoulli", independent_populations=True,
+)
+revised = restored.analyze(inference=hoeffding)
+print(restored.value, revised.value)
+print(revised.facts[0].fact.value.value)
+print(revised.assess(absolute_tolerance=0.2, component="sampling").status)
 ```
 
-Here `result` is an already completed scientific Result. The new directory contains `result.json` plus its supporting payload files. The current JSON envelope is `{format, selection, data, result}`, with format `nwqlib.result/11`. It is distinct from the human-reading dictionary returned by `result.report()`. That report is not a loadable archive. The envelope's `selection` entry holds the Method name, the `Plan` identity and the record returned by the Method's archive hook. The built-in hooks put the `Plan` record in that record and hold or name the selected data there. LCHS, for example, saves its node tables, host actions and SELECT angle tables in their own JSON file with NPY arrays. A Run folder uses its separate `run.json` and journal format, described in [Run archives](run_archives.md).
+```text
+-0.03125 -0.03125
+0.16976268946757744
+INCONCLUSIVE
+```
 
-For a metadata-only read without loading Method code or numerical payloads:
+The exact expectation of Z in the state `(1, 1)/sqrt(2)` is 0, and 256 shots estimate it as -0.03125. The reanalysis applies Hoeffding's inequality (doi:10.1080/01621459.1963.10500830) to the same 256 shots and records a sampling radius of about 0.170 at failure probability 0.05 in `revised.facts`. The radius is below 0.2, but the assessment stays INCONCLUSIVE, because the radius is a numerical estimate under the declared sampling model and its binary64 evaluation is not a proven enclosure ([sampling error by method](verification.md#sampling-error-by-method)).
+
+- `result.save(path)` writes a new directory with `result.json` and its supporting files: the `Plan`, the Result, its observations, preparation records, execution trace and kept arrays. The destination must be a new directory whose parent already exists. Saving validates the association between the `Plan`, the construction, the observations, the preparation records and the physical submissions, including the unit bound of exact probabilities. A trajectory readout is saved with the observation of every declared point, and their collection in the preparation record's point order must be the one its completed attempt names.
+- `nwqlib.load_result(path)` reconstructs the configured Method and the `Plan` through their archive hooks, then loads the Result and its saved data. It needs no backend and does not call `plan`, `analyze`, backend compilation, an eigensolver or a reference computation.
+- `restored.analyze(...)` explicitly computes a new analysis from the saved data. It keeps the original measurements and settings unless the Method supports a named setting that can be changed after measurement, such as binary inference. It makes no new measurements.
+- `restored.assess(...)` applies a new stated accuracy criterion to the available evidence ([check against a tolerance](verification.md#check-against-a-tolerance)). Neither `analyze` nor `assess` turns missing assumptions, numerical estimates or conditional intervals into a proven total error bound.
+
+`result.report()` returns a dictionary for reading, which is not a loadable archive.
+
+## Read a saved result without loading it
+
+`read_report` reads the metadata of a saved Result without loading Method code or numerical payloads:
 
 ```python
 from nwqlib.saved_evidence import read_report
 
-metadata = read_report("completed-result")
+metadata = read_report("expectation-result")
+print(sorted(metadata))
 ```
 
-`load_result` reconstructs the configured Method and selected `Plan` through their explicit archive hooks, then loads the original concrete Result and its observations, preparation records, trace and kept arrays. Loading does not call `plan`, `analyze`, native compilation, an eigensolver or a reference computation. The saved input and numerical arrays use read-only NumPy mappings; keep the folder available while using them. Ordinary native entries use QPY; entries containing UCGate use the versioned NWQLIB-QPY-UC1 envelope around a QPY storage representation. See [UCGate compatibility](run_archives.md#qiskit-ucgate-compatibility). The archive is local execution data, not an authenticated scientific record.
+```text
+['data', 'format', 'metadata_validation', 'result', 'selection']
+```
 
-Saving a Result validates the association between the `Plan`, selected construction, observations, preparation records and physical submissions, including the unit bound of exact probabilities. A trajectory readout is saved with the observation of every declared point, and their collection in the preparation record's point order must be the one its completed attempt names. Loading checks the preparation records against the selected construction and the Result against its observations, but it does not repeat the joins of observations to their preparation records and attempts ([Saved folders are read-only](run_archives.md#saved-folders-are-read-only)). Validity checks do not replay inference or produce missing numerical evidence. Runtime dependency loading is explicit, and a saved `Source` never chooses arbitrary executable imports.
+Both `read_report` and `load_result` reject an invalid current-format file, a saved record whose recomputed content hash differs, and a Result that does not match its observations or its forecast, before loading Method code or binary payloads. The dictionary that `read_report` returns lists these checks under `metadata_validation`.
 
-The execution trace keeps the cumulative caps and immutable amendment history captured by that Result. Later Run extensions do not change this snapshot, including after either standalone Result or completed Run save/reopen. See [cap amendments](prepared_execution.md) for the counters and atomic publication rules.
+## Saved folders are read-only
 
-`restored.analyze(...)` explicitly computes a new analysis from existing data. It preserves the original measurements and settings unless the Method supports a named posthoc analysis setting, such as binary inference. It makes no new measurements. `restored.assess(...)` applies a new stated accuracy criterion to available scoped evidence. Neither action turns missing assumptions, numerical estimates or conditional intervals into a proven total error bound.
+Treat a saved Result or Run folder as read-only. These checks run on saved data:
 
-Method-owned Result context is saved only when an actual second action consumes it. For example, QPE verification may reuse its already-produced eigensystem and spectrum references. The Method provides an immutable mapping over those existing read-only arrays. Storage never computes additional references for possible future use. Full adaptive Run context remains a separate controller state.
+| Check | When |
+| --- | --- |
+| The format version, and the content hash of the `Plan` and of every record saved with its hash | Every load |
+| The header of every backend input array and every saved Result array against its declaration (shape, encoding, byte count and contiguity). The check reads no values. A mismatch is rejected, so a mismatched file is never read as data of the wrong shape | Every load |
+| Backend state and operator headers against their representation, dimensions and encoding. Real, complex, compact and sparse storage is kept without normalization, densification or re-ingestion | Every load |
+| The Method's archive hook. For example, the LCHS hook compares the recomputed content hashes of its saved `LCHSData` parameters and PREP tensors with the records the `Plan` chose, and it uses the periodic Strang payload as saved ([LCHS guide](algorithms/lchs.md#explicit-checks-and-saved-results)) | Every load |
+| The Result against its Method's `validate_plan`, the preparation records against the construction, and the Result against its observations | Every load |
+| A counts observation requests at most `2**63 - 1` shots, the int64 maximum of the weights that `ObservationChunk.histogram()` returns, and each of its counts and their exact total are at most its requested shots | When the observation is created and when it is loaded |
+| The joins of observations to their preparation records and attempts, including the unit bound of exact probabilities | When an observation is created and before a Result is saved. Loading does not repeat them |
+| QHD's observed masses against the roundoff window of their executions (`validate_analysis_masses`) | When QHD analyzes them, not when a Result is loaded |
+| The block order and byte count of a reopened Run's saved array | When the array is first read from the run log. Reopening registers each saved array without reading it |
 
-For pending jobs or interrupted controllers use `run.save(path)` and `nwqlib.load_run(path, backend=...)`; see [prepared execution](prepared_execution.md). A Run folder contains its selected `Plan`, current numerical/native caches and the SQLite execution journal. Reopening it uses one exclusive controller lock and restores the same RNG, limits, accumulated usage and provider locators. A completed Run returns its already saved Result. Cache checkpoints share unchanged arrays and native payloads, including after reopen; replaced cache files are removed after the new frontier commits.
+Loading does not detect:
 
-The standalone Result archive limit is 10 GB. Run storage follows `ExecutionLimits.max_data_bytes`. These bounds cover represented data and saved output, not all transient SDK/NumPy memory. They are charged when data are written, and loading a Result or Run does not charge its files again. Failed storage prevents further mutation until recovery. Closing a Run releases the controller lock but does not erase saved data or refund work.
+- Changed array values, sparse indices or digests of arrays and backend inputs. Values are not read and digests are not recomputed.
+- Edits to other saved data, such as the values of backend input arrays and of Result arrays, QPY circuit files, Method caches such as QPE spectra or ADAPT vectors, other saved construction data of the Methods, and the rows of `run.sqlite`. An edited value there can change a later solve, analysis, verification or continuation while the `Plan`'s content hash stays the same.
+- An edit made together with a recomputed hash. ADAPT's saved compiler rows carry a content hash of the accepted generator, route and blocks, checked when the `Plan` archive is loaded and when verification or continuation adopts a Result's or Run's rows. It is a consistency digest rather than an authentication, as are the content hashes of the records.
 
-Both `load_result` and the metadata-only `read_report` reject an invalid current-format envelope, a saved record whose recomputed identity differs, and a Result that does not match its observations or its forecast, before loading Method code or binary payloads. The dictionary that `read_report` returns lists these checks under `metadata_validation`. Native state/operator headers are checked against their actual representation, dimensions and encoding. This preserves real/complex, compact and sparse storage without normalization, densification or re-ingestion. Header checks do not check every value, sparse index or native-input digest.
+The folder is local execution data, not an authenticated scientific record. A missing trajectory point makes its dependent quantity incomplete, and loading and analysis never replay the shared prefix to supply it. Validity checks do not replay inference or produce missing numerical evidence. To change an input or a scientific setting, build a new Problem or Method and a new `Plan`.
 
-Standalone published arrays load as lazy read-only mmaps, so opening a large archive costs its metadata and array headers rather than a full read. The shape, little-endian encoding (`<c16` for complex128, `<f8` for float64 or `<u8` for uint64 outcome indices, as its manifest declares), byte count and contiguity of every published array are checked on every load against its manifest, and a mismatch rejects. That check reads no payload bytes, and it keeps a mismatched file from being read as data of the wrong shape. The array values are not read, and their digests are not recomputed. Native input arrays, Method caches and QPY files are also used as saved ([Saved folders are read-only](run_archives.md#saved-folders-are-read-only)). The metadata-only `read_report` never reads numerical payloads.
+## Storage and loading cost
+
+A saved Result has a 10 GB limit. It is a control on stored data, not on transient SDK or NumPy memory. Data count against it when they are written, and loading a Result does not count its files again. A failed write prevents further changes until recovery.
+
+Saved arrays load lazily as read-only memory maps, so opening a large archive costs its metadata and array headers rather than a full read. Keep the folder available while you use a loaded Result. Backend input arrays, Method caches and QPY circuit files are also used as saved ([circuit files](run_archives.md#qiskit-ucgate-compatibility)). Runtime dependency loading is explicit, and a saved `Source` never chooses arbitrary executable imports.
+
+The execution trace keeps the cumulative limits and the history of limit increases that the Result captured. Later increases on the Run do not change it, including after the Result or the completed Run is saved and reopened ([raise a limit during a run](prepared_execution.md#raise-a-limit-during-a-run)).
+
+A Method saves extra Result context only when a later action uses it. For example, QPE verification may reuse the eigensystem and spectrum references it already produced, which the Method provides as an immutable mapping over the saved read-only arrays. Saving never computes additional references for possible future use. The full iteration state of an adaptive Run stays in the Run folder ([Continue an interrupted run](run_archives.md)).
+
+[Saved formats](development/execution.md#saved-formats) describes the files of a saved Result.

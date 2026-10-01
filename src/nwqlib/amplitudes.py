@@ -167,7 +167,7 @@ class AmplitudeReadout(Record):
         # 16 bytes per native complex128 amplitude, plus the registered
         # 192-byte allowance per requested output entry (output.basis.dimension)
         # for the gather, normalization and physical-scaling buffers
-        # (ENGINEERING_CONSTANTS.md, "Numerical choices and representation sizes").
+        # (ENGINEERING_CONSTANTS.md, "Readout and completion allowances").
         payload = 16 * native + 192 * size
         if self.keep_masses and self.has_physical_projection:
             free = tuple(bit for bit in range(self.width) if bit not in dict(self.success))

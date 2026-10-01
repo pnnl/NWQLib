@@ -88,29 +88,36 @@ _REFINEMENT_ONLY = ("flat_objective", "unresolved_objective", "width_floor")
 
 
 class MultiplierBounds(Record):
-    """Safeguard box of Birgin and Martinez, doi:10.1137/1.9781611973365, Algorithm 4.1 Step 4.
+    """Safeguard box for the multipliers, Algorithm 4.1 Step 4 of Birgin and Martinez, doi:10.1137/1.9781611973365.
 
-    The next round uses ``clip(lambda+, equality_lower, equality_upper)`` for
-    every equality and ``min(mu+, inequality_upper)`` for every inequality,
-    where lambda+ and mu+ are the tentative multipliers of Eqs. (4.7)-(4.8).
-    The bounds are in normalized units, the units of the multipliers of the
-    scaled problem. Algorithm 4.1 requires ``lambda_min < lambda_max`` and
-    ``mu_max > 0``. Its Step 4 keeps the multipliers of every round bounded,
-    so that the shifts lambda-bar/rho and mu-bar/rho tend to zero when rho
-    grows (p. 35), and the book's convergence proofs use that boundedness,
-    for example the proof of Theorem 5.1 (pp. 41-42). The book's analysis of
-    the penalty in Chapter 7 also assumes that the true multipliers lie
+    Build it with keyword arguments, for example
+    `MultiplierBounds(equality_lower=-10.0, equality_upper=10.0, inequality_upper=10.0)`,
+    and pass it as `AugmentedLagrangian(multiplier_bounds=...)`. All three arguments are
+    required. The next round uses `clip(lambda+, equality_lower, equality_upper)` for
+    every equality and `min(mu+, inequality_upper)` for every inequality, where lambda+
+    and mu+ are the tentative multipliers of Eqs. (4.7)-(4.8). The bounds are in
+    normalized units, the units of the multipliers of the scaled problem.
+
+    Algorithm 4.1 requires `lambda_min < lambda_max` and `mu_max > 0`. Its Step 4 keeps
+    the multipliers of every round bounded, so that the shifts lambda-bar/rho and
+    mu-bar/rho tend to zero when rho grows (p. 35), and the book's convergence proofs
+    use that boundedness, for example the proof of Theorem 5.1 (pp. 41-42). The book's
+    analysis of the penalty in Chapter 7 also assumes that the true multipliers lie
     inside the bounds, away from lambda_min, lambda_max and mu_max,
-    ``lambda* in (lambda_min, lambda_max)`` and ``mu* in [0, mu_max)``
-    (Assumption 7.7, Sec. 7.5, p. 64), which no default can know. Without
-    that assumption the global convergence results of Chapter 6 still hold,
-    but the penalty may no longer stay bounded (p. 64).
+    `lambda* in (lambda_min, lambda_max)` and `mu* in [0, mu_max)` (Assumption 7.7, Sec.
+    7.5, p. 64), which no default can know. Without that assumption the global
+    convergence results of Chapter 6 still hold, but the penalty may no longer stay
+    bounded (p. 64).
 
     Attributes:
-        equality_lower: lambda_min, the lower bound of every equality multiplier.
-        equality_upper: lambda_max, greater than ``equality_lower``.
-        inequality_upper: mu_max, the positive upper bound of every
-            inequality multiplier. The lower bound is zero.
+        equality_lower: Required. lambda_min, the lower bound of every equality
+            multiplier.
+        equality_upper: Required. lambda_max, greater than `equality_lower`.
+        inequality_upper: Required. mu_max, the positive upper bound of every inequality
+            multiplier. The lower bound is zero.
+
+    Raises:
+        ValueError: If `equality_lower` is not below `equality_upper`.
     """
 
     equality_lower: Real
@@ -125,119 +132,136 @@ class MultiplierBounds(Record):
 
 
 class AugmentedLagrangian(Record):
-    """Options of ``solve_augmented_lagrangian``.
+    """Options of `solve_augmented_lagrangian`: penalty schedule, scales, tolerances, point rule and stopping test.
 
-    Every tolerance, the penalty measure and the complementarity test act on
-    the normalized quantities ``f/s_f``, ``h_i/s_{h_i}`` and ``g_j/s_{g_j}``.
-    The multipliers and their bounds are those of this scaled problem. The
-    defaults and their sources are registered in
-    docs/ENGINEERING_CONSTANTS.md ("QHD augmented-Lagrangian defaults").
+    Build it with keyword arguments, for example
+    `AugmentedLagrangian(max_iterations=20, objective_scale=10.0)`, and pass it as
+    `solve_augmented_lagrangian(..., options=...)`. Every argument is optional, but a
+    problem with equality constraints needs an explicit `feasibility_tolerance`. Every
+    tolerance, the penalty measure and the complementarity test act on the normalized
+    quantities `f/s_f`, `h_i/s_{h_i}` and `g_j/s_{g_j}`. The multipliers and their
+    bounds are those of this scaled problem. The defaults and their sources are
+    registered in the
+    [engineering constants](../../ENGINEERING_CONSTANTS.md#qhd-augmented-lagrangian-defaults).
 
     Attributes:
-        initial_penalty: rho of the first round, positive. Default 1 (Wu et
-            al. arXiv:2605.12066v1, Sec. VI.B).
-        penalty_growth: gamma > 1, the factor that increases rho. Default 2
-            (Wu et al., Sec. VI.B).
-        reduction_ratio: tau in (0, 1) of the penalty test, Birgin and
-            Martinez Eq. (4.9). Default 0.25, from the authors' prototype.
-            The book only requires 0 < tau < 1.
-        max_penalty: Upper bound of rho, at least ``initial_penalty``.
-            Default 1e9 (Wu et al., Sec. VI.B).
-        max_iterations: Largest number of inner QHD solves. Default 15 (Wu et
-            al., Sec. VI.B).
-        objective_scale: s_f > 0. The layer minimizes ``f/s_f``. Default 1,
-            which assumes a dimensionless objective.
-        equality_scales: s_{h_i} > 0 for every equality, in the problem's
-            order, or None for all ones.
-        inequality_scales: s_{g_j} > 0 for every inequality, in the problem's
-            order, or None for all ones.
-        feasibility_tolerance: epsilon_f of the normalized feasibility test
-            ``max(||h||_inf, ||g_+||_inf) <= epsilon_f``. None selects
-            ``DEFAULT_INEQUALITY_FEASIBILITY_TOLERANCE`` when the problem has
-            only inequalities and is an error when it has an equality.
-        complementarity_tolerance: epsilon_c of the normalized complementarity
-            test, or None for the resolved ``feasibility_tolerance``. The book
-            uses one tolerance for Eqs. (10.7) and (10.8).
-        multiplier_bounds: Safeguard of Algorithm 4.1 Step 4, or None. With
-            None the next round uses the tentative multipliers and the result
+        initial_penalty: Default `1.0`, from Wu et al., arXiv:2605.12066v1, Sec. VI.B.
+            Positive rho of the first round.
+        penalty_growth: Default `2.0`, from Wu et al., Sec. VI.B. The factor gamma > 1
+            that increases rho.
+        reduction_ratio: Default `0.25`, from the authors' prototype, strictly between 0
+            and 1. The tau of the penalty test, Birgin and Martinez Eq. (4.9). The book
+            only requires 0 < tau < 1.
+        max_penalty: Default `1e9`, from Wu et al., Sec. VI.B. Upper bound of rho, at
+            least `initial_penalty`.
+        max_iterations: Default `15`, from Wu et al., Sec. VI.B. Largest positive number
+            of rounds, each one inner QHD solve or one box refinement.
+        objective_scale: Default `1.0`, which assumes a dimensionless objective.
+            Positive s_f. The layer minimizes `f/s_f`.
+        equality_scales: Default `None`, which selects all ones. Positive s_{h_i} for
+            every equality, in the problem's order.
+        inequality_scales: Default `None`, which selects all ones. Positive s_{g_j} for
+            every inequality, in the problem's order.
+        feasibility_tolerance: Default `None`, which selects `1e-9` when the problem has
+            only inequalities and is an error when it has an equality. The nonnegative
+            epsilon_f of the normalized feasibility test
+            `max(||h||_inf, ||g_+||_inf) <= epsilon_f`. With equality constraints there
+            is no default, because the residual that a finite grid can reach depends on
+            the grid and the constraint.
+        complementarity_tolerance: Default `None`, which selects the resolved
+            `feasibility_tolerance`. The nonnegative epsilon_c of the normalized
+            complementarity test. The book uses one tolerance for Eqs. (10.7) and
+            (10.8).
+        multiplier_bounds: Default `None`. Safeguard of Algorithm 4.1 Step 4, a
+            [`MultiplierBounds`][nwqlib.algorithms.qhd.constrained_records.MultiplierBounds].
+            With None the next round uses the tentative multipliers and the result
             states that no safeguard was used.
-        equality_multipliers: Initial normalized lambda for every equality, or
-            None for zeros. Algorithm 4.1 starts the multipliers inside
-            ``multiplier_bounds``, so ``solve_augmented_lagrangian`` refuses
-            None for a problem with equalities when the bounds' equality
+        equality_multipliers: Default `None`, which starts every equality multiplier at
+            0. Initial normalized lambda for every equality. Algorithm 4.1 starts the
+            multipliers inside `multiplier_bounds`, so `solve_augmented_lagrangian`
+            refuses None for a problem with equalities when the bounds' equality
             interval excludes zero.
-        inequality_multipliers: Initial normalized mu >= 0 for every
-            inequality, or None for zeros.
-        absorb_bounds: Whether a one-variable linear inequality
-            ``a x_j + b <= 0`` tightens the box of x_j instead of entering the
-            effective objective, when its cut ``-b/a`` is a binary64 number
-            (``constrained._absorb``). A cut without one stays a constraint.
-            Absorption changes the grid and the dynamics, so it is off by
+        inequality_multipliers: Default `None`, which starts every inequality multiplier
+            at 0. Initial normalized mu >= 0 for every inequality.
+        absorb_bounds: Default `False`. Whether a one-variable linear inequality
+            `a x_j + b <= 0` tightens the box of x_j instead of entering the effective
+            objective, when its cut `-b/a` is a binary64 number. A cut without one stays
+            a constraint. Absorption changes the grid and the dynamics, so it is off by
             default.
-        inner_point: How each round reads its point from the inner QHD
-            result. The round compares its inner objective, L_k under the
-            PHR policy and L(x, s) with an inequality representation. A
-            physical level solves this objective, and a search-model level
-            solves its positive normalization. The point rules act in the
-            inner coordinates. best_observed chooses the least observed
-            table value. most_probable chooses a joint mode. mode_or_mean
-            compares the joint mode with the joint conditional mean using
-            the inner objective, with a tie going to the grid point.
-            Refinement compares recorded relative values of the inner
-            objective across levels and takes the earlier level on a tie.
-            The outer point is the projection onto the original variables,
-            and effective_value is the PHR value L_k evaluated at that
-            projection when a representation is present. ``most_probable``
-            is the point that Wu et al. Sec. V read, and ``mode_or_mean``
-            the rule of the code behind Wu et al.'s published results, whose
-            code takes the mean on an exact tie, where this rule keeps the
-            grid point. With box refinement
-            (``solve_augmented_lagrangian(refinement=...)``) the rule reads
-            every level, so it must equal ``BoxRefinement.point_rule``,
-            which applies it, and a run with two different rules is rejected
-            before any work (``constrained._refined_choice``).
-        termination: ``feasibility_and_complementarity`` stops when both
+        inner_point: Default `"most_probable"`. How each round reads its point from the
+            inner QHD result: `"most_probable"`, a joint mode, `"best_observed"`, the
+            least observed table value, or `"mode_or_mean"`, the joint mode or the
+            conditional mean, whichever has the smaller inner objective. With box
+            refinement it must equal `BoxRefinement.point_rule`. The Point rules note
+            below gives the details.
+        termination: Default `"feasibility_and_complementarity"`, which stops when both
             normalized tests of Algencan's Eqs. (10.7)-(10.8) hold, with status
-            ``feasible_complementary``. ``feasibility`` stops on feasibility
-            alone, with status ``feasible``, the rule of Wu et al.'s code,
-            which stops when the violation is strictly below the tolerance
-            while this test accepts equality.
-        penalty_update: ``on_insufficient_decrease`` applies the test of
-            Algorithm 4.1 Step 3, Eq. (4.9). ``every_iteration`` multiplies rho
-            by ``penalty_growth`` after every round, as Wu et al.'s code does.
-        stationarity: Whether each round reports the projected-gradient
-            diagnostic r_stat (``constrained._stationarity``). It
-            differentiates f, h and g symbolically and does not affect
-            stopping.
-        inequality_form: How each round represents its kept inequalities
-            in the inner problem (``constrained._round_problem``,
-            Proposition 54 of docs/mathematics.md). ``phr``, the default,
-            keeps the PHR term of every inequality, whose table spans all
-            of the inequality's variables. ``slack`` requests a slack
-            variable for each kept inequality with a positive cap after
-            eligible quadratic or constant branch tests. The normalized
-            slack term is ``mu_j (G_j + s_j) + (rho/2) (G_j + s_j)**2``. A
-            zero cap adds no axis and keeps PHR when the quadratic branch is
-            ineligible. Branch tests run only without refinement and with a
-            grid-point rule. The expansion has supports of at most two
-            variables when G_j is additively separable. In general, product
-            supports are contained in unions of the original supports, and
-            QHD admits the actual expanded supports before tabulating them.
-            ``auto`` keeps PHR without branch tests for classical execution
-            or a user GaussianState. Otherwise it applies the eligible
-            branch tests and considers slack conversions in constraint
-            order. It accepts an admitted trial when planned host work and
-            CX count are both no larger and at least one is smaller, or when
-            the current planning is refused and the trial is admitted with a
-            CX law. A missing CX law prevents the comparison. The comparison
-            study's quantum quality evidence for ``auto`` covers only the
-            QHD guide's ``n = 3``, ``K = 4`` cases with one affine
-            inequality, ``KineticGroundState``, joint-mode readout, no
-            refinement and exact noiseless readout under the study's fixed
-            schedule and outer settings. Classical execution uses a
-            restricted state that grows by K per slack. The outer update,
-            the stopping tests and the stationarity diagnostic stay those of
-            the PHR term at the round's point in the original coordinates.
+            `feasible_complementary`. `"feasibility"` stops on feasibility alone, with
+            status `feasible`, the rule of Wu et al.'s code, which stops when the
+            violation is strictly below the tolerance while this test accepts equality.
+            Neither stop certifies stationarity or optimality.
+        penalty_update: Default `"on_insufficient_decrease"`, which applies the test of
+            Algorithm 4.1 Step 3, Eq. (4.9). `"every_iteration"` multiplies rho by
+            `penalty_growth` after every round, as Wu et al.'s code does.
+        stationarity: Default `False`. Whether each round reports the projected-gradient
+            diagnostic r_stat. It differentiates f, h and g symbolically and does not
+            affect stopping.
+        inequality_form: Default `"phr"`. How each round represents its kept
+            inequalities in the inner problem
+            ([Proposition 54](../../mathematics.md#r54)): `"phr"`, the PHR term,
+            `"slack"`, a slack variable per inequality with a positive cap, or `"auto"`,
+            chosen by planned cost on the quantum route. The outer update and the
+            stopping tests are those of the PHR term in every case. The Inequality forms
+            note below gives the rules.
+
+    Point rules:
+        `"most_probable"` chooses a joint mode, the point that Wu et al. Sec. V read.
+        `"best_observed"` chooses the least observed table value. `"mode_or_mean"`
+        compares the joint mode with the joint conditional mean using the inner
+        objective, with a tie going to the grid point. This is the rule of the code
+        behind Wu et al.'s published results, whose code takes the mean on an exact tie.
+        The round compares its inner objective, L_k under the PHR policy and L(x, s)
+        with an inequality representation. A physical level solves this objective, and a
+        search-model level solves its positive normalization. The point rules act in the
+        inner coordinates. Refinement compares recorded relative values of the inner
+        objective across levels and takes the earlier level on a tie. The outer point is
+        the projection onto the original variables, and effective_value is the PHR value
+        L_k evaluated at that projection when a representation is present. With box
+        refinement (`solve_augmented_lagrangian(refinement=...)`) the rule reads every
+        level, so it must equal `BoxRefinement.point_rule`, which applies it, and a run
+        with two different rules is rejected before any work.
+
+    Inequality forms:
+        `"phr"`, the default, keeps the PHR term of every inequality, whose table spans
+        all of the inequality's variables. `"slack"` requests a slack variable for each
+        kept inequality with a positive cap after eligible quadratic or constant branch
+        tests. The normalized slack term is `mu_j (G_j + s_j) + (rho/2) (G_j + s_j)**2`.
+        A zero cap adds no axis and keeps PHR when the quadratic branch is ineligible.
+        Branch tests run only without refinement and with a grid-point rule. The
+        expansion has supports of at most two variables when G_j is additively
+        separable. In general, product supports are contained in unions of the original
+        supports, and QHD checks the expanded supports against its limits before
+        tabulating them.
+
+        `"auto"` keeps PHR without branch tests for classical execution or a user
+        GaussianState. Otherwise it applies the eligible branch tests and considers
+        slack conversions in constraint order. It accepts a trial that planning accepted
+        when planned host work and CX count are both no larger and at least one is
+        smaller, or when the current planning is refused and the trial is accepted with
+        a CX count. A missing CX count prevents the comparison. The comparison study's
+        quantum quality evidence for `"auto"` covers only the QHD guide's `n = 3`,
+        `K = 4` cases with one affine inequality, `KineticGroundState`, joint-mode
+        readout, no refinement and exact noiseless readout under the study's fixed
+        schedule and outer settings. Classical execution uses a restricted state that
+        grows by a factor K per slack.
+
+        The outer update, the stopping tests and the stationarity diagnostic stay those
+        of the PHR term at the round's point in the original coordinates.
+
+    Raises:
+        ValueError: If `max_penalty` is below `initial_penalty`, or the initial
+            multipliers lie outside `multiplier_bounds`, where Birgin-Martinez Algorithm
+            4.1 starts them.
     """
 
     initial_penalty: PositiveReal = 1.0
@@ -323,14 +347,16 @@ class AugmentedLagrangian(Record):
 
 
 class AbsorbedBound(Record):
-    """One inequality ``a x_j + b <= 0`` replaced by the box bound ``x_j <= -b/a`` or ``x_j >= -b/a``.
+    """One inequality `a x_j + b <= 0` replaced by the box bound `x_j <= -b/a` or `x_j >= -b/a`.
+
+    `AugmentedLagrangian(absorb_bounds=True)` produces it, and
+    `ConstraintPreprocessing.absorbed` lists it. The fields below are read-only.
 
     Attributes:
         inequality: Position of the inequality in the problem.
         variable: Position of x_j among the variables.
-        side: ``upper`` for a > 0 and ``lower`` for a < 0.
-        value: ``-b/a``, which bounds x_j and equals this binary64 number
-            exactly.
+        side: `upper` for a > 0 and `lower` for a < 0.
+        value: `-b/a`, which bounds x_j and equals this binary64 number exactly.
     """
 
     inequality: Count
@@ -342,24 +368,25 @@ class AbsorbedBound(Record):
 class ConstraintPreprocessing(Record):
     """The box and constraints that the rounds use, derived from the problem once, in original coordinates.
 
+    `AugmentedLagrangianRecord.preprocessing` holds it, and `plan_augmented_lagrangian`
+    returns it first. The fields below are read-only.
+
     Attributes:
         original_bounds: The problem's box.
-        bounds: The box after bound absorption, which every inner QHD Plan
-            and the stationarity diagnostic use for the original variables.
+        bounds: The box after bound absorption, which every inner QHD Plan and the
+            stationarity diagnostic use for the original variables.
         absorbed: Inequalities replaced by box bounds, in problem order.
         equalities: Problem positions of the equalities the rounds use (all).
-        inequalities: Problem positions of the inequalities the rounds use,
-            those not absorbed.
-        inequality_lower: For each entry of ``inequalities``, the lower bound
-            ell = ``(c0 + sum_A min T_A)/s_g`` of the normalized inequality
-            on the grid of ``bounds`` from its support tables, rounded
-            downward, or None outside the binary64 range
-            (``constrained._inequality_range``, Proposition 54 of
-            docs/mathematics.md). It bounds the tabulated representation on
-            that grid, not the continuous box or a refinement level's grid.
-        inequality_upper: The upper bound M = ``(c0 + sum_A max T_A)/s_g``
-            on the same grid, rounded upward, or None outside the binary64
-            range.
+        inequalities: Problem positions of the inequalities the rounds use, those not
+            absorbed.
+        inequality_lower: For each entry of `inequalities`, the lower bound ell =
+            `(c0 + sum_A min T_A)/s_g` of the normalized inequality on the grid of
+            `bounds` from its support tables, rounded downward, or None outside the
+            binary64 range ([Proposition 54](../../mathematics.md#r54)). It bounds the
+            tabulated representation on that grid, not the continuous box or a
+            refinement level's grid.
+        inequality_upper: The upper bound M = `(c0 + sum_A max T_A)/s_g` on the same
+            grid, rounded upward, or None outside the binary64 range.
     """
 
     original_bounds: tuple[tuple[Real, Real], ...]
@@ -394,42 +421,43 @@ def grid_convention(qhd):
 
 
 class SlackAxis(Record):
-    """The slack variable of one converted inequality in a round's inner problem, Proposition 54 of docs/mathematics.md.
+    """The slack variable of one converted inequality in a round's inner problem ([Proposition 54](../../mathematics.md#r54)).
 
-    The inequality ``g_j <= 0`` enters the round as
-    ``mu_j (G_j + s_j) + (rho/2) (G_j + s_j)**2`` with ``G_j = g_j/s_{g_j}``
-    and ``s_j in [0, upper]``, whose minimum over ``s_j >= 0`` is the PHR term
-    of ``_effective_objective`` whenever the box contains the minimizer
-    ``[-G_j - mu_j/rho]_+``. The slack has the units of the normalized G_j.
+    `InnerRepresentation.slacks` lists one per converted inequality. The fields below
+    are read-only. The inequality `g_j <= 0` enters the round as
+    `mu_j (G_j + s_j) + (rho/2) (G_j + s_j)**2` with `G_j = g_j/s_{g_j}` and
+    `s_j in [0, upper]`, whose minimum over `s_j >= 0` is the PHR term of the effective
+    objective L_k whenever the box contains the minimizer `[-G_j - mu_j/rho]_+`. The
+    slack has the units of the normalized G_j.
 
     Attributes:
         inequality: Problem position of the converted inequality.
         variable: Name of the slack variable in the inner problem.
-        cap: ``U_0 = [-ell_j]_+`` with ell_j the recorded lower bound of
-            ``ConstraintPreprocessing.inequality_lower``, positive. It
-            contains ``[-G_j - mu/rho]_+`` for every nonnegative multiplier
-            and positive penalty on the grid of the preprocessed box, for the
-            tabulated representation of G_j (scope ``grid``).
-        upper: The upper end U of the slack box ``[0, U]``: U_0 on a
-            Dirichlet grid, and on a periodic grid ``K/(K-1) U_0`` rounded
-            upward, so that the slack grid ``0, h, ..., U - h`` covers
-            ``[0, U_0]`` with ``U - h >= U_0``.
-        spacing: The slack grid's spacing h (``grid.OneHotGrid.spacing``).
-        error_bound: An upper bound, rounded upward, on the slack-grid
-            excess ``min_s phi_j(x, s) - P_j(G_j(x))`` over the grid points x
-            of the preprocessed box, for the round's entering multiplier and
-            penalty: ``r h + rho h**2/2`` with ``r = [mu + rho M_j]_+`` on the
-            Dirichlet interior grid, and ``rho h**2/8`` on the endpoint grid
-            and on the periodic grid with its margin. It assumes the exact
-            mesh of spacing h and the premises of the cap. Interpreting the
-            formula as a slack-grid excess bound requires the cap and
-            table-arithmetic premises and the node coverage used in
-            Proposition 54. The interior formula requires a first node no
-            larger than h and distance at most h from every required slack
-            to the grid. The endpoint and covered periodic formulas require
-            zero and distance at most h/2. Rounding the spacing and
-            coordinates can affect these conditions. This field supplies no
-            separate allowance for that effect.
+        cap: `U_0 = [-ell_j]_+` with ell_j the recorded lower bound of
+            `ConstraintPreprocessing.inequality_lower`, positive. It contains
+            `[-G_j - mu/rho]_+` for every nonnegative multiplier and positive penalty on
+            the grid of the preprocessed box, for the tabulated representation of G_j
+            (scope `grid`).
+        upper: The upper end U of the slack box `[0, U]`. It is U_0 on a Dirichlet grid,
+            and on a periodic grid `K/(K-1) U_0` rounded upward, so that the slack grid
+            `0, h, ..., U - h` covers `[0, U_0]` with `U - h >= U_0`.
+        spacing: The slack grid's spacing h.
+        error_bound: Upper bound, rounded upward, on the slack-grid excess
+            `min_s phi_j(x, s) - P_j(G_j(x))` over the grid points x of the preprocessed
+            box, for the round's entering multiplier and penalty. The Slack-grid bound
+            note below gives its formula and the conditions under which it is a bound.
+
+    Slack-grid bound:
+        `error_bound` is `r h + rho h**2/2` with `r = [mu + rho M_j]_+` on the Dirichlet
+        interior grid, and `rho h**2/8` on the endpoint grid and on the periodic grid
+        with its margin. It assumes the exact mesh of spacing h and the assumptions of
+        the cap. Interpreting the formula as a slack-grid excess bound requires the cap
+        and table-arithmetic assumptions and the node coverage used in Proposition 54.
+        The interior formula requires a first node no larger than h and distance at most
+        h from every required slack to the grid. The endpoint and covered periodic
+        formulas require zero and distance at most h/2. Rounding the spacing and
+        coordinates can affect these conditions. This field supplies no separate
+        allowance for that effect.
     """
 
     inequality: Count
@@ -441,25 +469,24 @@ class SlackAxis(Record):
 
 
 class FormTrial(Record):
-    """One trial conversion of automatic selection, ``AugmentedLagrangian.inequality_form="auto"``.
+    """One trial conversion of automatic selection, `AugmentedLagrangian(inequality_form="auto")`.
 
-    The current representation and the trial with one more slack variable
-    are compared by their planned host work, the admitted work of QHD's
-    symbolic and table stage (``QHD._admit_symbolic_work``) plus the
-    selected native construction's work, and by the CX law of that
-    construction (``constrained._planned_costs``).
+    `InnerRepresentation.trials` lists one per trial. The fields below are read-only.
+    The current representation and the trial with one more slack variable are compared
+    by their planned host work, the work that QHD's symbolic and table check counts plus
+    the chosen circuit construction's work, and by the CX count of that construction.
 
     Attributes:
         inequality: Problem position of the inequality the trial converts.
-        current_work: Planned host work of the current representation, or
-            None when its planning was refused.
-        current_cx: Its CX count per circuit, or None when its planning was
-            refused or the construction has no CX law.
+        current_work: Planned host work of the current representation, or None when its
+            planning was refused.
+        current_cx: Its CX count per circuit, or None when its planning was refused or
+            the construction has no CX count.
         trial_work: Planned host work of the trial, or None when refused.
-        trial_cx: CX count of the trial, or None as for ``current_cx``.
-        accepted: Whether the round keeps the trial: both counts no larger
-            and one strictly smaller, or the current planning refused and
-            the trial's admitted with a CX law. A missing CX law keeps the
+        trial_cx: CX count of the trial, or None as for `current_cx`.
+        accepted: Whether the round keeps the trial. It does when both counts are no
+            larger and one is strictly smaller, or when the current planning was refused
+            and the trial was accepted with a CX count. A missing CX count keeps the
             current representation.
         reason: Why the trial was accepted or kept out.
     """
@@ -483,53 +510,50 @@ class FormTrial(Record):
 class InnerRepresentation(Record):
     """How one round represents its kept inequalities in the inner problem that its QHD Plans solve.
 
-    The round's inner objective is ``L(x, s) = A(x) + sum_j T_j`` of
-    Proposition 54 of docs/mathematics.md, with the equality part A of
-    ``constrained._effective_objective`` and one term T_j per kept
-    inequality: the PHR term, the slack term
-    ``mu_j (G_j + s_j) + (rho/2) (G_j + s_j)**2``, the quadratic
-    ``mu_j G_j + (rho/2) G_j**2`` when ``ell_j + mu_j/rho >= 0`` or the
-    constant ``-mu_j**2/(2 rho)`` when ``M_j + mu_j/rho <= 0``. On the grid
-    of the preprocessed box the last two equal the PHR term for the
-    tabulated representation of G_j, and ``min_s L(x, s)`` is the PHR
-    objective L_k. The outer update, the stopping tests and the stationarity
-    diagnostic use the PHR term at the projected point x.
+    `ALIteration.representation` holds it under `inequality_form="slack"` or `"auto"`,
+    and `plan_augmented_lagrangian` returns round 0's. The fields below are read-only.
+    The round's inner objective is `L(x, s) = A(x) + sum_j T_j` of
+    [Proposition 54](../../mathematics.md#r54), with the equality part A of the
+    effective objective L_k and one term T_j per kept inequality. T_j is the PHR term,
+    the slack term `mu_j (G_j + s_j) + (rho/2) (G_j + s_j)**2`, the quadratic
+    `mu_j G_j + (rho/2) G_j**2` when `ell_j + mu_j/rho >= 0`, or the constant
+    `-mu_j**2/(2 rho)` when `M_j + mu_j/rho <= 0`. On the grid of the preprocessed box
+    the last two equal the PHR term for the tabulated representation of G_j, and
+    `min_s L(x, s)` is the PHR objective L_k. The outer update, the stopping tests and
+    the stationarity diagnostic use the PHR term at the projected point x.
 
     Attributes:
-        policy: ``AugmentedLagrangian.inequality_form``.
-        forms: One of ``phr``, ``slack``, ``quadratic`` and ``constant`` per
-            kept inequality, in the order of
-            ``ConstraintPreprocessing.inequalities``.
-        slacks: One SlackAxis per ``slack`` form, in the same order.
-        variables: Names of the inner problem's variables, the problem's
-            variables followed by the slack variables.
-        grid: The slack grid's convention, the Method's ``boundary`` and
-            ``include_boundary_points``: ``dirichlet_interior``,
-            ``dirichlet_endpoints`` or ``periodic``.
-        grid_points: Points of each slack grid, the Method's
-            ``num_grid_points``.
-        cap_scope: ``grid``: the caps and branch tests hold on the grid of
-            the preprocessed box, not on the continuous box or on the nested
-            grids of later refinement levels.
-        error_bound: The sum of the slacks' error bounds, rounded upward, a
-            bound on ``E_max`` of Proposition 54 for the round's multipliers
-            and penalty. Zero without slacks.
-        trials: The trial conversions of automatic selection, in constraint
-            order, empty for the other policies.
+        policy: `AugmentedLagrangian.inequality_form`.
+        forms: One of `phr`, `slack`, `quadratic` and `constant` per kept inequality, in
+            the order of `ConstraintPreprocessing.inequalities`.
+        slacks: One [`SlackAxis`][nwqlib.algorithms.qhd.constrained_records.SlackAxis]
+            per `slack` form, in the same order.
+        variables: Names of the inner problem's variables, the problem's variables
+            followed by the slack variables.
+        grid: The slack grid's convention, from the Method's `boundary` and
+            `include_boundary_points`: `dirichlet_interior`, `dirichlet_endpoints` or
+            `periodic`.
+        grid_points: Points of each slack grid, the Method's `num_grid_points`.
+        cap_scope: `grid`. The caps and branch tests hold on the grid of the
+            preprocessed box, not on the continuous box or on the nested grids of later
+            refinement levels.
+        error_bound: The sum of the slacks' error bounds, rounded upward, a bound on
+            `E_max` of Proposition 54 for the round's multipliers and penalty. Zero
+            without slacks.
+        trials: The trial conversions of automatic selection, in constraint order, empty
+            for the other policies.
         selection: Why the policy chose these forms.
-        table_evaluations: Objective-table grid tuples that QHD planning
-            evaluated for the candidates of automatic selection, each
-            planned candidate once, the current representation and every
-            trial, whether kept or discarded. Zero for the other policies and
-            when selection planned nothing. The round adds the candidates
-            that its Plans do not reuse to ``ALResources.table_evaluations``.
-            None when a candidate's planning raised after its tables were
-            admitted, so that its partial evaluations are unknown.
-        table_evaluations_unavailable: Why ``table_evaluations`` is None, or
-            None.
-        inner_objective: Identity of the inner objective, the SHA-256 of its
-            ``srepr``, the inner variables' ``srepr`` and the inner box
-            (``records.objective_reference``), which the inner Plans solve.
+        table_evaluations: Objective-table grid tuples that QHD planning evaluated for
+            the candidates of automatic selection, each planned candidate once, the
+            current representation and every trial, whether kept or discarded. Zero for
+            the other policies and when selection planned nothing. The round adds the
+            candidates that its Plans do not reuse to `ALResources.table_evaluations`.
+            None when a candidate's planning raised after its tables were accepted, so
+            that its partial evaluations are unknown.
+        table_evaluations_unavailable: Why `table_evaluations` is None, or None.
+        inner_objective: Content hash of the inner objective, the SHA-256 of its
+            `srepr`, the inner variables' `srepr` and the inner box, which the inner
+            Plans solve.
     """
 
     policy: Literal["phr", "slack", "auto"]
@@ -566,97 +590,90 @@ class InnerRepresentation(Record):
 
 
 class ALResources(Record):
-    """Resources of one round, or of a whole run, with acquisition kept apart from host work.
+    """Resources of one augmented-Lagrangian round, or of a whole run, with measurement kept apart from host work.
 
-    A count is None when it is unknown, and ``unavailable`` names each such
-    field with its reason. Unknown is never replaced by zero. A total sums
-    each count over the rounds, except ``width`` and
-    ``restricted_dimension``, which take the largest round, and is unknown
-    when any round's count is unknown. Acquisition counts are what the inner
-    Runs reserved, including failed and uncertain attempts, as
-    ``ExecutionTrace`` counts them. A round with box refinement counts every
-    level of its refinement, completed or stopping
-    (``refinement_records.BoxRefinementResult.resources``), and a count is
-    unknown when the refinement's is.
+    `ALIteration.resources` holds a round's, and `ConstrainedQHDResult.resources` the
+    run's totals. The fields below are read-only. A count is None when it is unknown,
+    and `unavailable` names each such field with its reason. Unknown is never replaced
+    by zero. A total sums each count over the rounds, except `width` and
+    `restricted_dimension`, which take the largest round, and is unknown when any
+    round's count is unknown. Measurement counts are what the inner Runs set aside,
+    including failed and uncertain attempts, as `ExecutionTrace` counts them. A round
+    with box refinement counts every level of its refinement, completed or stopping
+    (`BoxRefinementResult.resources`), and a count is unknown when the refinement's is.
 
-    The counts are the work of the algorithm, each counted once as in an
-    uninterrupted run, and not the host time spent across the calls of a
-    durable run (``constrained.resume_augmented_lagrangian``). A resumed run
-    reads the counts of its completed rounds and levels from their records,
-    and a Run that it continues keeps the counts of its own journal. Host
-    work that resume repeats, the layer's preprocessing and the unscaled
-    table stage of a reopened search-model level, is deterministic and not
+    The counts are the work of the algorithm, each counted once as in an uninterrupted
+    run, and not the host time spent across the calls of a saved run
+    (`resume_augmented_lagrangian`). A resumed run reads the counts of its completed
+    rounds and levels from their records, and a Run that it continues keeps the counts
+    of its own run log. Host work that resume repeats, the layer's preprocessing and the
+    unscaled table stage of a reopened search-model level, is deterministic and not
     counted again.
 
     Attributes:
-        width: Register width of the inner Plan, ``D K`` one-hot or ``D log2 K``
-            binary for its D variables, slack variables included, or of the
+        width: Register width of the inner Plan, `D K` one-hot or `D log2 K` binary for
+            its D variables, slack variables included, or of the refinement's completed
+            levels.
+        restricted_dimension: Valid grid size `K**D` of the inner Plan, or of the
             refinement's completed levels.
-        restricted_dimension: Valid grid size ``K**D`` of the inner Plan, or of
-            the refinement's completed levels.
-        cx: CX upper bound of the selected native construction
-            (``ResourceLaw`` with metric ``cx``) for the circuit that a round,
-            or a refinement level, prepared, summed over levels and rounds and
-            not multiplied by shots (``_outer.law_count``). A round or level
-            that prepared no circuit, including every round of classical
-            execution and one whose Run's creation raised before its journal
-            header (``_outer.HeaderlessRun``), contributes 0, and one whose
-            preparation raised after that header or whose preparation count
-            is unknown makes the value unknown.
-        arbitrary_rotations: Arbitrary rotations of the selected native
-            construction (``ResourceLaw`` with metric ``arbitrary_rotations``,
-            ``resources.rotation_law``, or for the binary encoding the upper
-            bound of ``method.QHD._select_binary_native``) for the circuit that
-            a round or level prepared, counted as ``cx`` is. A Run prepares
-            at most one circuit, so for quantum execution the value equals
-            the body total ``arbitrary_rotations`` of
-            ``resources.run_resources``, which also multiplies each circuit by
-            its shots and adds T estimates.
-        circuit_preparations: Native circuit preparations.
-        circuit_attempts: Native circuit acquisition attempts of every status.
-        completed_circuit_attempts: Those of them that completed with an
-            observation. The rest are reserved, uncertain or failed exposure.
-        shots: Reserved raw shots of every attempt.
+        cx: CX upper bound of the circuit that each round or refinement level prepared
+            (`ResourceLaw` with metric `cx`), summed over rounds and levels and not
+            multiplied by shots. The Circuit counts note below says when a round counts
+            0 and when the value is unknown.
+        arbitrary_rotations: Arbitrary rotations of the same circuits, counted as `cx`
+            is, an upper bound for the binary encoding. For quantum execution it equals
+            the body total `arbitrary_rotations` of
+            [`run_resources`][nwqlib.algorithms.qhd.resources.run_resources].
+        circuit_preparations: Circuit preparations.
+        circuit_attempts: Circuit attempts of every status.
+        completed_circuit_attempts: Those of them that completed with an observation.
+            The rest are attempts that are reserved, uncertain or failed.
+        shots: Raw shots set aside by every attempt.
         completed_shots: Raw shots of the completed attempts.
         data_bytes: Recorded Run data bytes.
-        table_evaluations: Objective-table grid tuples evaluated by QHD
-            planning, including automatic-selection candidates that were
-            discarded. An unrefined round counts its reused selected Plan
-            once. A refined round also counts every level's planning and
-            each search-model level's unscaled table stage. The count is
-            unavailable when a failed planning attempt's partial evaluations
-            are unknown. The candidates' count is
-            ``InnerRepresentation.table_evaluations``, and the level counts are
-            ``RefinementResources`` ``table_evaluations`` plus
-            ``support_evaluations``.
-        evolution_work: Host-kernel work that the inner Run charged before
-            the classical evolution, in QHD's work units.
-        construction_work: Native construction and host preparation work
-            that the inner Run charged.
-        synthesis_work: Exact dense synthesis work that the inner Run reserved.
-        layer_evaluations: Scalar expression evaluations by the AL layer
-            itself (f, h, g, their gradients and the mean-position value),
-            with refinement also the checks of f, h and g at every point that
-            a level compares (``constrained._level_check``).
-            A run's total also counts the support-table entries and any
-            original-expression numerical scans of the grid check before the
-            first round (``constrained._setup``).
-        layer_work: Their work, one unit per expression-tree node and per
-            coordinate of each evaluation, and in a run's total one unit per
-            monomial of the grid check's expansions.
-        refinement_evaluations: Evaluations of the round's inner objective by
-            box refinement at its level points
-            (``RefinementResources.objective_evaluations``), zero without
-            refinement. The refinement does not count their work.
-        joint_mass_reads: Joint-observation read charge of box refinement,
-            summed over its levels: decoded count and exact-bin entries once,
-            a kept-state dense grid once by the kept-state length, and that
-            length for each started streamed probability pass, one per joint
-            request and two for the paired split modes. These kept-state units
-            are full-state-equivalent charges, not measured memory traffic
-            (``RefinementResources.joint_mass_reads``), zero without
-            refinement.
-        unavailable: ``(field, reason)`` for every count that is None.
+        table_evaluations: Objective-table grid tuples evaluated by QHD planning,
+            including discarded automatic-selection candidates and, with refinement,
+            every level's planning. The Circuit counts note below gives what each round
+            adds and when the count is unavailable.
+        evolution_work: Classical-kernel work that the inner Run counted before the
+            classical evolution, in QHD's work units.
+        construction_work: Circuit construction and host preparation work that the inner
+            Run counted.
+        synthesis_work: Exact dense synthesis work that the inner Run set aside.
+        layer_evaluations: Scalar expression evaluations by the augmented-Lagrangian
+            layer itself (f, h, g, their gradients and the mean-position value), with
+            refinement also the checks of f, h and g at every point that a level
+            compares. A run's total also counts the support-table entries and any
+            original-expression numerical scans of the grid check before the first
+            round.
+        layer_work: Their work, one unit per expression-tree node and per coordinate of
+            each evaluation, and in a run's total one unit per monomial of the grid
+            check's expansions.
+        refinement_evaluations: Evaluations of the round's inner objective by box
+            refinement at its level points
+            (`RefinementResources.objective_evaluations`), zero without refinement. The
+            refinement does not count their work.
+        joint_mass_reads: Joint-observation read count of box refinement, summed over
+            its levels, zero without refinement (`RefinementResources.joint_mass_reads`
+            defines it).
+        unavailable: `(field, reason)` for every count that is None.
+
+    Circuit counts:
+        A round or level that prepared no circuit, including every round of classical
+        execution and one whose Run's creation raised before its run-log header,
+        contributes 0 to `cx` and `arbitrary_rotations`, and one whose preparation
+        raised after that header or whose preparation count is unknown makes the value
+        unknown. A Run prepares at most one circuit, so for quantum execution
+        `arbitrary_rotations` equals the body total of `run_resources`, which also
+        multiplies each circuit by its shots and adds T estimates.
+
+        `table_evaluations` includes automatic-selection candidates that were discarded.
+        An unrefined round counts its reused Plan once. A refined round also counts
+        every level's planning and each search-model level's unscaled table stage. The
+        count is unavailable when a failed planning attempt's partial evaluations are
+        unknown. The candidates' count is `InnerRepresentation.table_evaluations`, and
+        the level counts are `RefinementResources` `table_evaluations` plus
+        `support_evaluations`.
     """
 
     width: PositiveInt | None
@@ -693,126 +710,112 @@ class ALResources(Record):
 class ALEvaluation(Record):
     """The point a round chose, its residuals and the multiplier and penalty update it implies.
 
-    Normalized values divide by the scales of the run. Multipliers are
-    normalized, and ``constrained.ConstrainedQHDResult`` converts the last
-    round's multipliers to original units with ``lambda_i = (s_f/s_{h_i})
-    lambda~_i`` and ``mu_j = (s_f/s_{g_j}) mu~_j``.
+    `ALIteration.evaluation` holds it, for example `result.best.evaluation` for the best
+    point of a `ConstrainedQHDResult`. The fields below are read-only. `infeasibility`
+    and `complementarity` are the left sides of the stopping tests, and `objective` is f
+    at `point` in original units. Normalized values divide by the scales of the run.
+    Multipliers are normalized, and `ConstrainedQHDResult.multipliers` converts the last
+    round's multipliers to original units with `lambda_i = (s_f/s_{h_i}) lambda~_i` and
+    `mu_j = (s_f/s_{g_j}) mu~_j`.
 
-    The round compares its inner objective, L_k under the PHR policy and
-    L(x, s) with an inequality representation. A physical level solves this
-    objective, and a search-model level solves its positive normalization.
-    The point rules act in the inner coordinates. best_observed chooses the
-    least observed table value. most_probable chooses a joint mode.
-    mode_or_mean compares the joint mode with the joint conditional mean
-    using the inner objective, with a tie going to the grid point.
-    Refinement compares recorded relative values of the inner objective
-    across levels and takes the earlier level on a tie. The outer point is
-    the projection onto the original variables, and effective_value is the
-    PHR value L_k evaluated at that projection when a representation is
-    present.
+    The round reads its point by the rule of `AugmentedLagrangian.inner_point`, in the
+    inner coordinates of its inner objective, L_k under the PHR policy and L(x, s) with
+    an inequality representation. The Point rules note of
+    [`AugmentedLagrangian`][nwqlib.algorithms.qhd.constrained_records.AugmentedLagrangian]
+    describes the rules. The outer point is the projection onto the original variables,
+    and effective_value is the PHR value L_k evaluated at that projection when a
+    representation is present.
 
-    With box refinement the point is that of the level with the least
-    recorded relative value of the inner objective (``ALIteration.refinement``),
-    and the grid and the probability are that level's. f, h and g are
-    evaluated at its reported point in the original coordinates. For the
-    search model that point is ``a + D u`` rounded once to binary64 while
-    the level's objective is evaluated at the exact image ``a + D u``, so the
-    two can differ by the rounding of the point
-    (``refinement_records.RefinementLevel.point``).
+    With box refinement the point is that of the level with the least recorded relative
+    value of the inner objective (`ALIteration.refinement`), and the grid and the
+    probability are that level's. f, h and g are evaluated at its reported point in the
+    original coordinates. For the search model that point is `a + D u` rounded once to
+    binary64 while the level's objective is evaluated at the exact image `a + D u`, so
+    the two can differ by the rounding of the point (`RefinementLevel.point`).
 
-    With an ``InnerRepresentation`` the indices, probability, tie deficit,
-    tie window and mode status belong to the joint inner grid point, not to
-    the marginal of x summed over the slacks, ``inner_value`` holds L(x, s)
-    and ``effective_value`` the PHR objective L_k evaluated at x
-    (Proposition 54 of docs/mathematics.md). A joint mode need not project
-    to the mode of the marginal distribution of x. A joint probability table
-    with rows indexed by x and entries ``[[0.30, 0.29], [0.31, 0.10]]`` has
-    its unique joint maximum in the second row but its marginal maximum in
-    the first row, and two tied joint points can have the same x. An
-    unresolved joint status therefore does not imply competing projected x
-    values, and a resolved joint status does not certify a unique projected
-    marginal mode.
+    With an `InnerRepresentation` the indices, probability, tie deficit, tie window and
+    mode status belong to the joint inner grid point, not to the marginal of x summed
+    over the slacks, `inner_value` holds L(x, s) and `effective_value` the PHR objective
+    L_k evaluated at x ([Proposition 54](../../mathematics.md#r54)). A joint mode need
+    not project to the mode of the marginal distribution of x. A joint probability table
+    with rows indexed by x and entries `[[0.30, 0.29], [0.31, 0.10]]` has its unique
+    joint maximum in the second row but its marginal maximum in the first row, and two
+    tied joint points can have the same x. An unresolved joint status therefore does not
+    imply competing projected x values, and a resolved joint status does not certify a
+    unique projected marginal mode.
 
     Attributes:
-        rule: The inner-point rule (``AugmentedLagrangian.inner_point``).
-        kind: ``grid_point`` or ``valid_mean``, the valid-mass mean position
-            that ``mode_or_mean`` can choose.
-        indices: Grid index per original variable, None for ``valid_mean``.
-            With refinement, on the grid of the best level.
-        point: The point in the original coordinates, the projection of a
-            joint inner point.
-        probability: Unconditional probability of the inner grid point in
-            the inner result, or in the best level's result with refinement,
-            None for ``valid_mean``. With slack variables it is the
-            probability of the joint point.
-        tie_deficit: For a most probable grid point (``most_probable``, and
-            ``mode_or_mean`` when it takes the grid point), the computed
-            maximum probability minus the chosen point's probability,
-            positive when a point within the tie window was preferred by the
-            lexicographic rule. None otherwise. With slack variables it is
-            that of the joint point.
-        tie_window: The inner readout's tie window for such a point, or None
-            when there is none or the window was unavailable.
-        mode_status: Mode-resolution status of the inner grid representative when
-            this evaluation chooses it. With refinement it is copied from the best
-            level's QHD Result. None for best_observed or a selected valid-mass mean.
-            For a slack representation it describes the joint inner point before
-            projection onto the original variables.
-        mean_unavailable: For ``mode_or_mean``, why the valid-mass mean was
-            not compared: f, h or g was not finite and real there, or with
-            refinement the best level's inner objective
-            (``RefinementLevel.mean_unavailable``), so the round took the
-            grid point. None otherwise.
-        effective_value: L_k at the point in normalized units. Without a
-            representation, the inner value: with refinement the best
-            level's recorded objective (``RefinementLevel.objective``). With
-            a representation, the PHR objective L_k evaluated at ``point``
-            from f, h and g (``constrained._effective_value``), also at a
-            grid point.
-        effective_value_source: ``table`` when read from the inner Plan's
-            support tables, or with refinement when the level read L_k at its
-            grid point from its stored tables
-            (``refinement._tabulated_objective``). ``evaluated`` when L_k was
-            evaluated at an off-grid mean, from f, h and g by the layer or,
-            with refinement, by the level, and in every round with a
-            representation.
-        inner_value: For a round with a representation, the inner objective
-            L(x, s) at the selected joint point in normalized units, None
-            otherwise. In exact arithmetic the slack objective is at least
-            the PHR objective for nonnegative slacks. The recorded values can
-            have different evaluation and coordinate-transformation errors,
-            which this field does not bound.
-        inner_value_source: ``table`` or ``evaluated`` for ``inner_value``,
-            by the rules of ``effective_value_source``, None without it.
-        slack_indices: Grid index per slack variable of the joint grid point,
-            None for ``valid_mean`` and without slack variables.
-        slack_point: The slack coordinates of the joint point, in the order
-            of ``InnerRepresentation.slacks``, None without slack variables.
+        rule: The inner-point rule (`AugmentedLagrangian.inner_point`).
+        kind: `grid_point` or `valid_mean`, the valid-mass mean position that
+            `mode_or_mean` can choose.
+        indices: Grid index per original variable, None for `valid_mean`. With
+            refinement, on the grid of the best level.
+        point: The point in the original coordinates, the projection of a joint inner
+            point.
+        probability: Unconditional probability of the inner grid point in the inner
+            result, or in the best level's result with refinement, None for
+            `valid_mean`. With slack variables it is the probability of the joint point.
+        tie_deficit: For a most probable grid point (`most_probable`, and `mode_or_mean`
+            when it takes the grid point), the computed maximum probability minus the
+            chosen point's probability, positive when a point within the tie window was
+            preferred by the lexicographic rule. None otherwise. With slack variables it
+            is that of the joint point.
+        tie_window: The inner readout's tie window for such a point, or None when there
+            is none or the window was unavailable.
+        mode_status: Mode-resolution status of the inner grid representative when this
+            evaluation chooses it. With refinement it is copied from the best level's
+            QHD Result. None for best_observed or a chosen valid-mass mean. For a slack
+            representation it describes the joint inner point before projection onto the
+            original variables.
+        mean_unavailable: For `mode_or_mean`, why the valid-mass mean was not compared,
+            so that the round took the grid point. That happens when f, h or g was not
+            finite and real there, or with refinement the best level's inner objective
+            (`RefinementLevel.mean_unavailable`). None otherwise.
+        effective_value: L_k at the point in normalized units. Without a representation
+            it is the inner value, with refinement the best level's recorded objective
+            (`RefinementLevel.objective`). With a representation it is the PHR objective
+            L_k evaluated at `point` from f, h and g, also at a grid point.
+        effective_value_source: `table` when read from the inner Plan's support tables,
+            or with refinement when the level read L_k at its grid point from its stored
+            tables. `evaluated` when L_k was evaluated at an off-grid mean, from f, h
+            and g by the layer or, with refinement, by the level, and in every round
+            with a representation.
+        inner_value: For a round with a representation, the inner objective L(x, s) at
+            the chosen joint point in normalized units, None otherwise. In exact
+            arithmetic the slack objective is at least the PHR objective for nonnegative
+            slacks. The recorded values can have different evaluation and
+            coordinate-transformation errors, which this field does not bound.
+        inner_value_source: `table` or `evaluated` for `inner_value`, by the rules of
+            `effective_value_source`, None without it.
+        slack_indices: Grid index per slack variable of the joint grid point, None for
+            `valid_mean` and without slack variables.
+        slack_point: The slack coordinates of the joint point, in the order of
+            `InnerRepresentation.slacks`, None without slack variables.
         objective: f at the point in original units.
         objective_normalized: f/s_f.
         equality_residuals: h_i at the point in original units.
         equality_residuals_normalized: h_i/s_{h_i}.
         inequality_residuals: g_j at the point in original units.
         inequality_residuals_normalized: g_j/s_{g_j}.
-        infeasibility: ``max(||h~||_inf, ||g~_+||_inf)``, the left side of
-            Eq. (10.8) on normalized residuals.
-        complementarity: ``max(||h~||_inf, max_j |min(-g~_j, mu+_j)|)``, the
-            left side of Eq. (10.7).
-        measure: ``max(||h~||_inf, ||V||_inf)`` with
-            ``V_j = min(-g~_j, mu-bar_j/rho)``, Eq. (4.9).
+        infeasibility: `max(||h~||_inf, ||g~_+||_inf)`, the left side of Eq. (10.8) on
+            normalized residuals.
+        complementarity: `max(||h~||_inf, max_j |min(-g~_j, mu+_j)|)`, the left side of
+            Eq. (10.7).
+        measure: `max(||h~||_inf, ||V||_inf)` with `V_j = min(-g~_j, mu-bar_j/rho)`, Eq.
+            (4.9).
         tentative_equality_multipliers: lambda+ of Eq. (4.7).
         tentative_inequality_multipliers: mu+ of Eq. (4.8), nonnegative.
-        next_equality_multipliers: The equality multipliers a next round
-            uses, lambda+ clipped by ``multiplier_bounds`` when given.
-        next_inequality_multipliers: The inequality multipliers a next round
-            uses, nonnegative.
+        next_equality_multipliers: The equality multipliers a next round uses, lambda+
+            clipped by `multiplier_bounds` when given.
+        next_inequality_multipliers: The inequality multipliers a next round uses,
+            nonnegative.
         equality_truncated: Whether the safeguard changed each lambda+.
         inequality_truncated: Whether the safeguard changed each mu+.
-        next_penalty: The rho a next round uses. A round that stops the run
-            still records it.
+        next_penalty: The rho a next round uses. A round that stops the run still
+            records it.
         stationarity: The projected-gradient diagnostic r_stat, or None.
-        stationarity_unavailable: Why r_stat is None: not requested, a
-            nondifferentiable function, or a nonfinite gradient at the point.
+        stationarity_unavailable: Why r_stat is None: not requested, a nondifferentiable
+            function, or a nonfinite gradient at the point.
     """
 
     rule: Literal["most_probable", "best_observed", "mode_or_mean"]
@@ -900,58 +903,55 @@ class ALEvaluation(Record):
 
 
 class ALIteration(Record):
-    """One round: its multipliers and penalty, the inner QHD solve or box refinement, and the chosen point.
+    """One augmented-Lagrangian round: its multipliers and penalty, the inner QHD solve or box refinement, and the chosen point.
 
-    Without refinement the round's single inner QHD solve is named by
-    ``plan_id``, ``result_id`` and ``run_id``. With refinement those fields,
-    the masses and the range bound are None, and ``refinement`` holds the
-    round's whole refinement: its levels with their boxes, masses, Plans,
-    Results and Runs, its best point and level, its stopping reason and its
-    resources. Each level's random stream is the child
-    ``SeedSequence(entropy, spawn_key=level.spawn_key)`` with
-    ``level.spawn_key = spawn_key + (z - 1,)`` for level z.
+    `ConstrainedQHDResult.iterations` lists every started round, and `best` and `last`
+    name two of them. The fields below are read-only. Without refinement the round's
+    single inner QHD solve is named by `plan_id`, `result_id` and `run_id`. With
+    refinement those fields, the masses and the range bound are None, and `refinement`
+    holds the round's whole refinement: its levels with their boxes, masses, Plans,
+    Results and Runs, its best point and level, its stopping reason and its resources.
+    Each level's random stream is the child
+    `SeedSequence(entropy, spawn_key=level.spawn_key)` with
+    `level.spawn_key = spawn_key + (z - 1,)` for level z.
 
     Attributes:
         iteration: Round number k, from 0.
         penalty: rho_k of this round.
-        equality_multipliers: lambda-bar^k, the normalized equality
-            multipliers in L_k.
+        equality_multipliers: lambda-bar^k, the normalized equality multipliers in L_k.
         inequality_multipliers: mu-bar^k, nonnegative.
-        effective_objective: Identity of L_k, the SHA-256 of its ``srepr``,
-            the variable order and the box, as ``records.objective_reference``
-            forms it.
-        entropy: Entropy of the round's child ``SeedSequence``.
+        effective_objective: Content hash of L_k, the SHA-256 of its `srepr`, the
+            variable order and the box.
+        entropy: Entropy of the round's child `SeedSequence`.
         spawn_key: Its spawn key under the run's root seed.
-        plan_id: Content identity of the inner QHD Plan, None when planning
-            raised or with refinement.
-        result_id: Content identity of the inner QHDAnalysis, None when no
-            result was returned or with refinement.
-        run_id: Identity of the inner Run, None with refinement and when
-            preparation raised without a durable Run whose journal names it
-            (``_durable.closed_trace``).
+        plan_id: Content hash of the inner QHD Plan, None when planning raised or with
+            refinement.
+        result_id: Content hash of the inner QHDAnalysis, None when no result was
+            returned or with refinement.
+        run_id: Identifier of the inner Run, None with refinement and when preparation
+            raised without a saved Run whose run log names it.
         valid_mass: Valid mass of the inner result, None without one.
         invalid_mass: Invalid mass of the inner result, None without one.
-        missing: The inner result's missing populations.
-        effective_range_bound: Upper bound on ``max L_k - min L_k`` over the
-            grid, the sum of the ranges of the inner Plan's support tables, or
-            None without a Plan, with refinement (each level records its own
-            ``energy_scale``), with a representation, whose Plan solves the
-            inner objective instead, or when that sum exceeds binary64.
-        representation: How the round represents its kept inequalities and
-            which inner objective its Plans solve, or None under
-            ``inequality_form="phr"``, where the inner objective is L_k.
-        inner_range_bound: For a round with a representation, the same sum of
-            table ranges for the inner objective L(x, s) over the inner
-            Plan's grid, and None otherwise, as for ``effective_range_bound``.
-        refinement: The round's box refinement of its inner objective from
-            the preprocessed box and the round's slack boxes, or None without
-            refinement.
-        evaluation: The chosen point and its update, None when the round
-            produced no point: no valid point, an inner solve that raised,
-            a refinement that completed no level, or f, h or g not finite
-            and real at the round's point.
-        resources: This round's resources, including work spent before a
-            failure.
+        missing: The inner result's reasons for missing data.
+        effective_range_bound: Upper bound on `max L_k - min L_k` over the grid, the sum
+            of the ranges of the inner Plan's support tables. None without a Plan, with
+            refinement (each level records its own `energy_scale`), with a
+            representation, whose Plan solves the inner objective instead, or when that
+            sum exceeds binary64.
+        representation: How the round represents its kept inequalities and which inner
+            objective its Plans solve, or None under `inequality_form="phr"`, where the
+            inner objective is L_k.
+        inner_range_bound: For a round with a representation, the same sum of table
+            ranges for the inner objective L(x, s) over the inner Plan's grid, and None
+            otherwise, as for `effective_range_bound`.
+        refinement: The round's box refinement of its inner objective from the
+            preprocessed box and the round's slack boxes, or None without refinement.
+        evaluation: The chosen point and its update, an
+            [`ALEvaluation`][nwqlib.algorithms.qhd.constrained_records.ALEvaluation], or
+            None when the round produced no point. That happens with no valid point, an
+            inner solve that raised, a refinement that completed no level, or f, h or g
+            not finite and real at the round's point.
+        resources: This round's resources, including work spent before a failure.
     """
 
     iteration: Count
@@ -1050,171 +1050,120 @@ class ALIteration(Record):
 
 
 class AugmentedLagrangianRecord(Record):
-    """A whole augmented-Lagrangian run: problem, settings, preprocessing, rounds and termination.
+    """Record of a whole augmented-Lagrangian run: problem, settings, preprocessing, rounds and stopping status.
 
-    Termination statuses:
+    `ConstrainedQHDResult.record` holds it, and `ConstrainedQHDResult` reads
+    `termination`, `best` and `last` from it. The fields below are read-only.
 
-    - ``feasible_complementary``: the last round meets the normalized
-      complementarity and feasibility tests of Algencan's Eqs. (10.7)-(10.8).
-      This is not convergence in Algencan's sense, because the projected
-      stationarity of Eq. (10.6) is not a stopping condition, and it does not
-      assess optimality.
-    - ``feasible``: the last round meets the feasibility test alone
-      (``termination="feasibility"``).
-    - ``iteration_limit``: ``max_iterations`` rounds ran without stopping.
-    - ``no_valid_point``: the last inner result had no valid grid point.
-    - ``budget_exhausted``: the remaining cumulative ``limits`` could not fund
-      another round, possibly after zero rounds (``_outer.round_limits``).
-    - ``inner_failed``: the inner planning, preparation or execution of the
-      last round raised, for example because QHD planning refused a larger
-      penalty or a Run refused the remaining limits. Before anything has
-      completed, in the first round without refinement or the first level
-      of the first round with refinement, ``solve_augmented_lagrangian``
-      raises the original exception instead. The status also ends the run
-      when f, h or g is not finite and real at a round's point, which in the
-      first round raises, or at a point that a refinement level compares,
-      its grid point or a point that a stall split scores, which raises only
-      before anything has completed, as above (``_outer.inner_failure``). A
-      refined round whose point then meets the stopping test ends with that
-      test's status instead (``_outer.refinement_stop``). A resume with ``end_at_unfinishable=True``
-      records it for a reopened Run that could not finish without new work,
-      with that Run's error as the failure
-      (``constrained.resume_augmented_lagrangian``).
-    - ``flat_objective``, ``unresolved_objective``, ``width_floor``: reachable
-      only with refinement. The last round's refinement stopped before its
-      first level, because the inner objective's tables on the initial
-      augmented box show no variation, no variation it can resolve, or a
-      side at its width floor
-      (``refinement_records.BoxRefinementResult``), so the round has no point
-      and no update.
+    Stopping statuses:
 
-    These statuses update no multiplier in their last round and retry
-    nothing, and the completed rounds stay in ``iterations``. With
-    refinement, a round whose refinement completed a level and then stopped
-    with ``budget_exhausted``, ``inner_failed`` or ``no_valid_point`` keeps its
-    point and update, and the run ends with ``feasible_complementary`` or
-    ``feasible`` when that point meets the stopping test and with the
-    refinement's reason otherwise (``_outer.refinement_stop``).
+    - `feasible_complementary`: the last round meets the normalized complementarity and
+      feasibility tests of Algencan's Eqs. (10.7)-(10.8). This is not convergence in
+      Algencan's sense, because the projected stationarity of Eq. (10.6) is not a
+      stopping condition, and it does not assess optimality.
+    - `feasible`: the last round meets the feasibility test alone
+      (`termination="feasibility"`).
+    - `iteration_limit`: `max_iterations` rounds ran without stopping.
+    - `no_valid_point`: the last inner result had no valid grid point.
+    - `budget_exhausted`: the remaining cumulative `limits` could not fund another
+      round, possibly after zero rounds.
+    - `inner_failed`: the inner planning, preparation or execution of the last round
+      raised, for example because QHD planning refused a larger penalty or a Run refused
+      the remaining limits. Before anything has completed, in the first round without
+      refinement or the first level of the first round with refinement,
+      `solve_augmented_lagrangian` raises the original exception instead. The status
+      also ends the run when f, h or g is not finite and real at a round's point, which
+      in the first round raises, or at a point that a refinement level compares, its
+      grid point or a point that a stall split scores, which raises only before anything
+      has completed, as above. A refined round whose point then meets the stopping test
+      ends with that test's status instead. A resume with `end_at_unfinishable=True`
+      records it for a reopened Run that could not finish without new work, with that
+      Run's error as the failure.
+    - `flat_objective`, `unresolved_objective`, `width_floor`: reachable only with
+      refinement. The last round's refinement stopped before its first level, because
+      the inner objective's tables on the initial augmented box show no variation, no
+      variation it can resolve, or a side at its width floor
+      ([`BoxRefinementResult`][nwqlib.algorithms.qhd.refinement_records.BoxRefinementResult]),
+      so the round has no point and no update.
+
+    These statuses update no multiplier in their last round and retry nothing, and the
+    completed rounds stay in `iterations`. With refinement, a round whose refinement
+    completed a level and then stopped with `budget_exhausted`, `inner_failed` or
+    `no_valid_point` keeps its point and update, and the run ends with
+    `feasible_complementary` or `feasible` when that point meets the stopping test and
+    with the refinement's reason otherwise.
 
     Attributes:
         problem: The portable form of the constrained problem.
         qhd: The QHD configuration every round uses.
         options: The layer's options.
-        refinement: The box-refinement options of every round, or None when
-            each round is one QHD solve. With refinement,
-            ``options.inner_point`` equals ``refinement.point_rule``, the
-            readout of every level.
-        execution: ``quantum`` or ``classical``, for every round.
+        refinement: The box-refinement options of every round, or None when each round
+            is one QHD solve. With refinement, `options.inner_point` equals
+            `refinement.point_rule`, the readout of every level.
+        execution: `quantum` or `classical`, for every round.
         shots: Shots per round, or None for exact readout.
-        entropy: Entropy of the run's root ``SeedSequence``.
+        entropy: Entropy of the run's root `SeedSequence`.
         limits: Cumulative execution limits of the whole run.
         preprocessing: The box and constraints the rounds use.
         equality_scales: s_{h_i} of the equalities the rounds use.
         inequality_scales: s_{g_j} of the inequalities the rounds use.
         feasibility_tolerance: Resolved epsilon_f on normalized residuals.
         complementarity_tolerance: Resolved epsilon_c.
-        admitted_work_bound: Prior bound, fixed before the first round, on
-            the counted QHD admission categories and the layer's own admitted
-            work (``constrained._admitted_bounds`` derives it). Write M
-            for ``options.max_iterations``, L for ``refinement.max_levels``,
-            and ``a = 6`` for search-model or ``a = 4`` for physical
-            refinement. The bound is ``(a * M * L + t * M + 1) * qhd.max_work``.
-            Without refinement, L = 1 and a = 4. An ordinary Plan has at most
-            four category envelopes: the symbolic expansion
-            (``QHD._admit_symbolic_work``), the running total of the initial
-            state's evaluation and the table, compiled-block and
-            schedule-integral work (the same owner, whose first part, the
-            initial state, ``QHD.plan`` checks alone before evaluating it),
-            the optional kept state, and the classical evolution
-            (``QHD._host_construction``) or native construction
-            (``QHD._select_native``). A search-model level adds the symbolic
-            and running-total envelopes of its unscaled table stage
-            (``refinement._support_tables``). Intermediate checks of one
-            category are not separate populations. The trials of automatic
-            inequality selection on the quantum route add ``t = 6 (m + 1) - 4``
-            envelopes per round without refinement and ``t = 6 (m + 1)`` with
-            it, for m kept inequalities, and t = 0 otherwise. The layer admits
-            its support-table check of f, h and g, which also gives the
-            inequality ranges, and its evaluations once for the whole run
-            (``constrained._admit_layer_work``). At most M L levels are
-            attempted, an attempted level that stops or fails included.
-            Refinement geometry, marginal and joint-mass processing, the
-            refinement's repeated objective decomposition and point
-            evaluation, the symbolic construction of the inner objectives,
-            and library internals such as SymPy, SciPy and the simulators lie
-            outside these admission laws.
-        admitted_bytes_bound: ``(a * M * L + t * M) * qhd.max_bytes``, with
-            a, t, M and L as above. It sums the byte allowances of the
-            selected QHD categories over the attempted Plans, levels and
-            trials, each at most ``qhd.max_bytes`` while its operation runs.
-            It bounds neither process memory, nor the identity JSON of the
-            outer records, nor the further allocations of refinement itself.
-        iterations: Every started round, in order.
+        admitted_work_bound: Upper bound on the run's counted planning work,
+            `(a * M * L + t * M + 1) * qhd.max_work`, fixed before the first round. The
+            Work and byte bounds note below defines a, t, M and L and what the bound
+            covers.
+        admitted_bytes_bound: `(a * M * L + t * M) * qhd.max_bytes`, the sum of the byte
+            allowances over the attempted Plans, levels and trials. It bounds neither
+            process memory nor the outer records' content-hash JSON. The Work and byte
+            bounds note below gives the details.
+        iterations: Every started round, in order, each an
+            [`ALIteration`][nwqlib.algorithms.qhd.constrained_records.ALIteration].
         termination: One of the statuses above.
-        failure: Exception type and message for ``inner_failed``, the reason
-            for ``budget_exhausted``, otherwise None. When the last round's
-            refinement caused either status, its ``failure`` text.
-        best: Round of the reported best point, the round with the least f
-            among rounds whose normalized infeasibility is at most
-            ``feasibility_tolerance``, ties to the earliest. Without such a
-            round, the round with the least infeasibility, then f, then round
-            number. None when no round chose a point.
-        last: The last round that chose a point, which owns the reported
-            multipliers and penalty, or None.
-        resources: Totals of the rounds plus the layer's preprocessing
-            evaluations.
+        failure: Exception type and message for `inner_failed`, the reason for
+            `budget_exhausted`, otherwise None. When the last round's refinement caused
+            either status, its `failure` text.
+        best: Round of the reported best point, the round with the least f among rounds
+            whose normalized infeasibility is at most `feasibility_tolerance`, ties to
+            the earliest. Without such a round, the round with the least infeasibility,
+            then f, then round number. None when no round chose a point.
+        last: The last round that chose a point, which holds the reported multipliers
+            and penalty, or None.
+        resources: Totals of the rounds plus the layer's preprocessing evaluations.
 
-    Record size. Count the scalar JSON leaves of the exported record, each
-    number, Boolean, string or null once, including every nested record's
-    schema, parent and content identities, and excluding object keys and
-    containers. For solver-produced records with integer entropy,
-    one-entry round spawn keys and at most one QHD missing-data reason per
-    round, a round outside its nested refinement under
-    ``inequality_form="phr"`` has at most ``6 m + 2 d + 91`` leaves for m
-    kept constraints and d variables, the registered envelope. Its
-    ``ALEvaluation`` has at most ``5 m + 2 d + 24``, its ``mode_status``
-    included, its ``ALResources`` at most 49 (18 counts, 14 nullable with
-    one reason pair each, and 3 identities), and its other fields, a null
-    refinement and a null representation included, at most ``m + 18``.
-    Under the other forms, a round's ``InnerRepresentation`` with s slack
-    variables and T trials has at most ``d + m + 10 s + 10 T + 12`` leaves.
-    Replacing its null placeholder adds at most
-    ``d + m + 10 s + 10 T + 11`` leaves. The evaluation's slack fields
-    add at most ``2 max(s - 1, 0)`` leaves, because both remain null when
-    s = 0. The round therefore has at most
-    ``6 m + 2 d + 91 + d + m + 10 s + 10 T + 11 + 2 max(s - 1, 0)`` leaves.
-    With ``s, T <= m``, this is at most ``29 m + 3 d + 100`` for m >= 1,
-    and at most ``3 d + 102`` when m = 0.
 
-    A nested refinement with n completed levels and b split levels adds
-    at most ``2 g + 147 + n (13 d + 76) + b (8 d + 13)``
-    (``refinement_records.BoxRefinementResult``), with d replaced by the
-    ``d + s`` variables of a round with s slack variables, where g is the common
-    length of a ``GaussianState``'s center and widths, or zero for other
-    initial states, and level spawn keys have at most two entries. Let H
-    count the leaves outside ``iterations``. If H_other excludes the root
-    ``qhd`` field as well, then ``H = H_other + 34 + 2 g_0``, where g_0 is
-    the root Gaussian length or zero for other initial states. H includes
-    the problem, configurations, preprocessing, limits, scales, aggregate
-    resources and remaining root fields. With R stored rounds, the bound
-    is ``H + R (6 m + 2 d + 91)``, or H plus the sum of the round bounds
-    above under another form, plus the nested-refinement bounds above,
-    summed over refinements that exist. Adding each full refinement to
-    the round envelope overcounts its null placeholder by one.
+    Work and byte bounds:
+        `admitted_work_bound` is fixed before the first round and bounds the counted QHD
+        work categories and the layer's own counted work. Write M for
+        `options.max_iterations`, L for `refinement.max_levels`, and `a = 6` for
+        search-model or `a = 4` for physical refinement. The bound is
+        `(a * M * L + t * M + 1) * qhd.max_work`. Without refinement, L = 1 and a = 4.
+        An ordinary Plan has at most four category bounds: the symbolic expansion, the
+        running total of the initial state's evaluation and the table, compiled-block
+        and schedule-integral work, whose first part, the initial state, planning checks
+        alone before evaluating it, the optional kept state, and the classical evolution
+        or circuit construction. A search-model level adds the symbolic and
+        running-total bounds of its unscaled table stage. Intermediate checks of one
+        category are not counted separately. The trials of automatic inequality
+        selection on the quantum route add `t = 6 (m + 1) - 4` bounds per round without
+        refinement and `t = 6 (m + 1)` with it, for m kept inequalities, and t = 0
+        otherwise. The layer counts the work of its support-table check of f, h and g,
+        which also gives the inequality ranges, and of its evaluations once for the
+        whole run. At most M L levels are attempted, an attempted level that stops or
+        fails included. Refinement geometry, marginal and joint-mass processing, the
+        refinement's repeated objective decomposition and point evaluation, the symbolic
+        construction of the inner objectives, and library internals such as SymPy, SciPy
+        and the simulators lie outside these limit checks.
 
-    There are at most ``options.max_iterations`` rounds and each nested
-    history has at most ``refinement.max_levels`` levels, with
-    ``b <= min(n, refinement.max_splits)`` separately in each round and
-    b = 0 when splits are disabled. An unsplit level has at most
-    ``13 d + 76`` leaves and a split level at most ``21 d + 89``.
-    Each completed level's running total admits at least d K work units,
-    where K is ``qhd.num_grid_points``. For d >= 1 and K >= 2, these level
-    bounds are at most ``45 d K`` and ``55 d K``, respectively. Root fields
-    and each refinement's fixed term ``2 g + 147`` are accounted for
-    separately, including zero-level refinements. These counts give no
-    byte allowance. Text such as the joined unknown-count reasons and
-    integer digit counts have no fixed length, so identity JSON bytes are
-    not budgeted by this law or ``qhd.max_bytes``.
+        `admitted_bytes_bound` is `(a * M * L + t * M) * qhd.max_bytes`, with a, t, M
+        and L as above. It sums the byte allowances of the QHD categories over the
+        attempted Plans, levels and trials, each at most `qhd.max_bytes` while its
+        operation runs. It bounds neither process memory, nor the content-hash JSON of
+        the outer records, nor the further allocations of refinement itself.
+
+    Record size:
+        The bounds on the scalar JSON leaves of this record, with their derivation, are
+        in [Engineering constants](../../ENGINEERING_CONSTANTS.md#augmented-lagrangian-record-size).
     """
 
     problem: ConstrainedOptimization
@@ -1418,7 +1367,7 @@ class AugmentedLagrangianRecord(Record):
 
     @property
     def safeguard_used(self):
-        """Whether ``options.multiplier_bounds`` applied Algorithm 4.1 Step 4.
+        """Whether `options.multiplier_bounds` applied Algorithm 4.1 Step 4.
 
         The truncation flags of each round show which values changed.
         """
@@ -1426,48 +1375,47 @@ class AugmentedLagrangianRecord(Record):
 
 
 class ConstrainedGridMinimum(Record):
-    """Evaluated finite-grid reference of ``constrained.constrained_grid_minimum``.
+    """Evaluated finite-grid reference of `constrained_grid_minimum`.
 
-    Computed feasibility uses the run's scales and ``feasibility_tolerance``
-    on the normalized residuals. The reference covers the preprocessed box's
-    grid. It bounds neither objective nor constraint evaluation error and
-    does not establish equality of the computed and mathematical feasible
-    sets. A large objective constant can make distinct exact values tie in
-    binary64.
+    [`constrained_grid_minimum`][nwqlib.algorithms.qhd.constrained.constrained_grid_minimum]
+    returns it. The fields below are read-only. The answer is `gap`, the run's stored
+    best objective minus the least evaluated feasible objective `objective`, in original
+    units. Computed feasibility uses the run's scales and `feasibility_tolerance` on the
+    normalized residuals. The reference covers the preprocessed box's grid. It bounds
+    neither objective nor constraint evaluation error and does not establish equality of
+    the computed and mathematical feasible sets. A large objective constant can make
+    distinct exact values tie in binary64.
 
     Attributes:
-        record_id: Content identity of the AugmentedLagrangianRecord of the
-            run.
-        grid_points: K**d points evaluated.
+        record_id: Content hash of the AugmentedLagrangianRecord of the run.
+        grid_points: `K**d` points evaluated.
         feasible_points: Points whose computed normalized infeasibility is at most the
             tolerance.
-        indices: Grid index per variable of the point passing the computed
-            feasibility test with the least evaluated binary64 objective,
-            ties to the lexicographically smallest index, or None when no
-            grid point passes.
+        indices: Grid index per variable of the point passing the computed feasibility
+            test with the least evaluated binary64 objective, ties to the
+            lexicographically smallest index, or None when no grid point passes.
         point: That point in the original coordinates, or None.
         objective: Its evaluated f in original units, including the constant, or None.
-        best_objective: Stored evaluated f at the run's reported best point,
-            or None when the run chose no point.
-        best_feasible: Whether that best point passes the same computed
-            tolerance test, or None. This does not state objective optimality.
-        gap: ``best_objective - objective`` in original units, or None when
-            either is None. It compares a stored value with a fresh grid
-            minimum and can be negative, including when the point is
-            infeasible or is an off-grid mean chosen by ``mode_or_mean``.
-            Let G be the nonempty grid subset passing this check's computed
-            feasibility test, and let the reported point a lie in G.
-            Suppose a finite E >= 0 bounds the absolute error of the stored
-            objective at a and every fresh objective on G, relative to
-            exact values at the same coordinates. For finite reported gap
-            r and u = 2**-53, the exact gap F(a)-min_G F is at most
-            r/(1-u)+2*E if r >= 0, and r/(1+u)+2*E if r < 0.
-            These are real-arithmetic inequalities under round-to-nearest
-            binary64 with gradual underflow. The check establishes neither
-            E nor equality of G with the mathematically feasible grid set
-            (``constrained_grid_minimum``).
+        best_objective: Stored evaluated f at the run's reported best point, or None
+            when the run chose no point.
+        best_feasible: Whether that best point passes the same computed tolerance test,
+            or None. This does not state objective optimality.
+        gap: `best_objective - objective` in original units, or None when either is
+            None. It compares a stored value with a fresh grid minimum and can be
+            negative, including when the point is infeasible or is an off-grid mean
+            chosen by `mode_or_mean`. The Gap note below bounds the exact gap.
         feasibility_tolerance: The tolerance used.
-        work: Work admitted before the first evaluation.
+        work: Work checked against `max_work` before the first evaluation.
+
+    Gap:
+        Let G be the nonempty grid subset passing this check's computed feasibility
+        test, and let the reported point a lie in G. Suppose a finite E >= 0 bounds the
+        absolute error of the stored objective at a and every fresh objective on G,
+        relative to exact values at the same coordinates. For finite reported gap r and
+        u = 2**-53, the exact gap `F(a) - min_G F` is at most `r/(1-u) + 2*E` if r >= 0,
+        and `r/(1+u) + 2*E` if r < 0. These are real-arithmetic inequalities under
+        round-to-nearest binary64 with gradual underflow. The check establishes neither
+        E nor equality of G with the mathematically feasible grid set.
     """
 
     record_id: ContentID

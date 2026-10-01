@@ -15,29 +15,34 @@ from nwqlib.scientist import plan
 
 @dataclass(frozen=True)
 class MethodCase:
-    """One trusted, bounded scientific case and an independent wrong-pair witness.
+    """One small test case for a new Method: a problem, how to run it, an independent check of the answer and a deliberately wrong answer.
 
-    evaluate receives the actual selected Plan and returns its attached Result.
-    It explicitly chooses preparation/submission or already supplied RunData.
-    No generic reference is performed by this checker. accepts owns the
-    independent expected relation. invalid_result must change a scientific field
-    while keeping the same concrete Result type and Plan identity; it must be
-    intrinsically valid yet violate its method's Plan/result relation.
+    Build it with keyword arguments, usually in a `case()` function next to the
+    Method, and pass it to [`check_method`][nwqlib.algorithms.authoring.check_method]
+    or run `python -m nwqlib check-method my_methods:case`. `method`, `problem`,
+    `evaluate`, `accepts` and `invalid_result` are required. The checker computes
+    no reference answer of its own. `accepts` holds the independent expected
+    relation, and `evaluate` decides whether the case prepares and submits
+    circuits or analyzes data supplied with it. The Method's archive hooks are
+    trusted code and run under the ordinary archive byte limits. The reference
+    Hadamard Method, `tests/_hadamard_method.py`, defines such a `case()`.
 
-    The checker writes/reopens one temporary Result archive and tests altered
-    result metadata against that same saved selection/data. Method archive hooks
-    are explicitly trusted code, with the ordinary archive owner's byte bounds.
-
-    Attributes:
-        method: Actual configured Method under examination.
-        problem: Concrete admitted scientific input for this bounded case.
-        evaluate: Callback accepting the selected Plan and returning its actual attached Result.
-        accepts: Independent expected-relation predicate on that Result.
-        invalid_result: Callback producing an intrinsically valid wrong scientific pair with unchanged Result type and Plan identity.
-        output: Requested output, or None for the problem's default.
-        execution: Selected quantum or classical evaluation route.
-        shots: Explicit sampled population request, or None for exact/default selection.
-        seed: Root seed for this case, or None for the normal random initialization.
+    Args:
+        method: The configured Method under test.
+        problem: The problem of this case.
+        evaluate: Called with the Plan, returns that Plan's attached Result, for
+            example by `prepare`, `submit` and `run.wait()`.
+        accepts: Called with the Result, returns `True` when the independent
+            expected relation holds, for example `abs(result.value - 1.0) < 1e-12`.
+        invalid_result: Called with the Result, returns a Result of the same class
+            and Plan with a scientific field changed so that it is valid as a
+            record but wrong for this Plan, for example
+            `result.revise(value=-1.0)`.
+        output: Requested output, or `None` for the problem's default.
+        execution: `"quantum"` or `"classical"`.
+        shots: Requested shots, or `None` for exact readout or the Method's
+            default.
+        seed: Seed of the Plan's random streams, or `None` for fresh entropy.
     """
 
     method: Method
@@ -65,33 +70,35 @@ def _saved_content(result):
 
 
 def check_method(case: MethodCase) -> dict:
-    """Run this explicit case, saved-pair falsifier and legal preservation check.
+    """Check a new Method against its test case: the expected answer, the Plan checks and a saved-result round trip.
 
-    The check selects a Plan through the public ``plan``, evaluates it with
-    the author's callback, and requires the author's independent relation to
-    accept the Result. The Method's error model must equal the Plan's, and
-    ``result_type`` must name the concrete Result. The falsifier's Result
-    must be a valid record that ``validate_plan`` rejects, both in memory
-    and after being written into a saved archive in place of the legal
-    Result. The legal Result must then reload unchanged and still pass the
-    author's relation.
-
-    The wrong-pair steps test that the Method's own Plan/result validation
-    detects a scientifically wrong Result under the same Plan identity,
-    which record-level validation alone cannot do. The check adds no
-    reference solve or acquisition beyond the author's callback.
+    The check plans the case through the public `plan`, evaluates the Plan with
+    the case's callback, and requires the case's independent relation to accept
+    the Result. The Method's `error_model` must equal the Plan's, and its
+    `result_type` must name the Result class. The wrong Result from
+    `invalid_result` must be a valid record that the Method's `validate_plan`
+    rejects, both in memory and after it replaces the legal Result in a saved
+    archive. The legal Result must then reload unchanged and still pass the
+    relation. These wrong-answer steps show that the Method's own Plan and Result
+    check catches a scientifically wrong answer under the same Plan, which a
+    record's own field checks cannot do. Nothing beyond the case's callback is
+    computed, neither a reference solve nor extra circuits. `"CONFORMANT"` means this
+    one case passed. It does not certify other inputs, physical accuracy,
+    backend support or cost. The example at the top of
+    [Extending NWQLib](extending.md) runs it on the reference Hadamard Method.
 
     Args:
-        case: The explicit MethodCase.
+        case (MethodCase): The test case.
 
     Returns:
-        A mapping with keys ``status`` (``CONFORMANT``), ``method`` (the
-        descriptor's method name), ``plan_id``, ``result_id``, ``scope`` and
-        ``qualification``. It covers this one case only.
+        report (dict): A dict with `status` (`"CONFORMANT"`), `method` (the descriptor's method
+            name), `plan_id`, `result_id`, `scope` and `qualification`.
 
     Raises:
-        TypeError: The case, Method or Result type does not meet the protocol.
-        ValueError: A relation, falsifier or archive round-trip step fails.
+        TypeError: If the case, the Method or its Result class does not meet the
+            Method protocol.
+        ValueError: If the expected relation, the wrong-answer check or the saved
+            round trip fails.
     """
     from nwqlib._choice_archive import ArchiveFiles
     from nwqlib.saved_evidence import DEFAULT_MAX_BYTES, load_result

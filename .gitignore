@@ -16,6 +16,8 @@ docs/References/
 Thumbs.db
 ehthumbs.db
 Desktop.ini
+paper/*
+manuscript/*
 
 ## Editors and IDEs
 .idea/

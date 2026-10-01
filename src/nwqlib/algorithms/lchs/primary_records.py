@@ -265,28 +265,66 @@ class LCHSGroupMoments(Record):
 
 
 class LCHSAnalysis(Result):
-    """Physical value or explicitly requested array, backed by the acquired data.
+    """Solution or requested output of `du/dt = -A u + b` from an `LCHS` run.
+
+    [`solve`][nwqlib.scientist.solve] returns it for an `LCHS` method, and
+    `load_result` reopens a saved one. For the default `Solution` output the
+    answer is `solution`, the physical solution u(T) in the original
+    coordinates, with its norm and phase, in the problem's `unit`. A
+    `StateVector` output is in `state_vector`. `NormSquared`,
+    `QuadraticForm` and `NormalizedExpectation` give the scalar `value`, and
+    `Samples` gives `samples`. Counts do not recover a complex vector. When
+    the output cannot be recovered, `unavailable` gives the reason, for
+    example a normalized output at zero physical mass. `print(result)`
+    shows the value with the construction tolerance and the kernel bounds,
+    each labeled as not a total error bound. `result.analyze()` takes no
+    settings. The fields below are read-only. The fields of
+    [`Result`][nwqlib.core.analysis.Result] are present too.
+
+    The kernel-integral and k-quadrature bounds are facts of the Plan
+    (`result.plan.facts`), and a classical Result also carries them in
+    `result.facts`. They are physical L2 bounds of error components, not a
+    bound on the total error of the output. No reference solution is
+    computed unless `result.verify` is called.
 
     Attributes:
-        value: Requested scalar in its physical/unit output frame, if available.
-        unavailable: Concrete limitation when that value cannot be recovered.
-        norm_squared: Recovered physical norm-squared estimate, when available.
-        physical_scale: Acquired vector's physical scale, when representable.
-        numerator: Requested observable value in its frame: the normalized
-            ratio for a normalized expectation, the recovered physical
-            quadratic form for a quadratic form.
-        numerator_frame: Physical or unit frame of that numerator.
-        artifact: Manifest for an explicitly acquired array; display does not load it.
-        applications: Actual numerical applications and existing component facts.
-        references: not_run; independent references require explicit verification.
-        submitted_shots: Recorded requested sampled exposure, if applicable.
-        returned_shots: Actual returned count population before physical selection.
-        selected_shots: Returned counts admitted to the selected physical
-            output; for Samples, the sum of the sample counts.
-        samples: Selected original-coordinate indices and counts, not all
-            submitted shots.
-        reduction: Saved statistics of the exact projected reduction.
-        groups: Weighted moments of the sampled group and mass settings.
+        value: Requested scalar of a `NormSquared`, `QuadraticForm` or
+            `NormalizedExpectation` output, physical or unit-normalized as
+            that output defines it. `None` for vector and `Samples` outputs
+            and when unavailable.
+        unavailable: Reason the requested output cannot be recovered, or
+            `None`.
+        norm_squared: Recovered physical norm squared `||u(T)||**2`, when
+            available.
+        physical_scale: Physical scale of the obtained vector, when
+            representable.
+        numerator: Observable value, the normalized ratio for a
+            `NormalizedExpectation` and the recovered physical quadratic form
+            for a `QuadraticForm`.
+        numerator_frame: Normalization of `numerator`, `"unit"` for the
+            normalized ratio or `"physical"` for the quadratic form.
+        artifact: Description of the stored solution or state array.
+            Printing the result does not load the array, and `solution` and
+            `state_vector` read it.
+        applications: Numerical operator applications of the run, each with
+            its error-component facts.
+        references: Always `"not_run"`. An independent reference needs
+            `result.verify(checks=LCHSVerification(...))`.
+        submitted_shots: Shots requested for a sampled output, if
+            applicable.
+        returned_shots: Shots returned, before selection of the physical
+            coordinates.
+        selected_shots: Returned shots kept for the physical output. For
+            `Samples`, the sum of the sample counts.
+        samples: For a `Samples` output, the distinct original-coordinate
+            indices (`samples.indices`, increasing, padding coordinates
+            excluded) and their positive counts (`samples.counts`), both
+            int64 arrays. They do not cover all submitted shots.
+        reduction: Saved statistics of the exact scalar readout
+            (`shots=None`): the complete, success and physical-slice masses
+            and the projected moment, as mantissa-exponent pairs.
+        groups: Weighted moments of each sampled measurement setting, with
+            its Pauli labels, basis and returned and selected shots.
     """
 
     value: Real | None = None
@@ -377,6 +415,16 @@ class LCHSAnalysis(Result):
 
     @property
     def solution(self):
+        """The physical solution u(T) of a `Solution` output, a complex array.
+
+        It is in the original coordinates and keeps the physical norm and
+        phase. With no evolution (`time` equal to `initial_time`, or a zero
+        input) it is the supplied initial vector.
+
+        Raises:
+            AttributeError: If the requested output was not `Solution`.
+            ValueError: If the array is unavailable, with the reason.
+        """
         if self.plan.output.kind != "solution":
             raise AttributeError("solution was not the selected output")
         if self.artifact is None:
@@ -387,6 +435,15 @@ class LCHSAnalysis(Result):
 
     @property
     def state_vector(self):
+        """The state vector of a `StateVector` output, a complex array.
+
+        It is in the original coordinates, normalized and phased as the
+        `StateVector` output requests.
+
+        Raises:
+            AttributeError: If the requested output was not `StateVector`.
+            ValueError: If the array is unavailable, with the reason.
+        """
         if self.plan.output.kind != "state_vector":
             raise AttributeError("state_vector was not the selected output")
         if self.artifact is None:

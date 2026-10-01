@@ -114,13 +114,28 @@ def _array_input(value, *, ndim, max_bytes, extra_bytes_per_item=0):
 
 @dataclass(frozen=True, slots=True)
 class PeriodicStencil:
-    """Exact family parameters for mass I + diffusion (2I-S-S†) + i potential Z0.
+    """Parameters of the periodic operator `mass*I + diffusion*(2I - S - S†) + i*potential*Z_0`.
 
-    Attributes:
-        num_qubits: Positive q defining a periodic grid of 2**q points.
-        mass: Nonnegative real coefficient of the identity.
-        diffusion: Nonnegative real coefficient multiplying 2I-S-S† for cyclic shift S.
-        potential: Real coefficient of iZ0; zero gives a Hermitian mass/diffusion operator.
+    `S` is the cyclic shift `S|j> = |j+1 mod 2**q>` on a grid of `2**q`
+    points, and `Z_0` is Pauli Z on qubit 0. For `q = 1` both wrap-around
+    edges are kept. With `potential = 0` the operator is Hermitian, with
+    spectral endpoints `mass` and `mass + 4*diffusion`.
+
+    Build it with `PeriodicStencil(num_qubits, mass, diffusion, potential)`
+    and pass it as a Problem's matrix, for example `LinearDynamics(A=...)`,
+    or to [`operator_input`][nwqlib.operators.inputs.operator_input]. Only
+    the four parameters are stored, never a matrix or a Pauli expansion.
+
+    Args:
+        num_qubits: Positive integer q. The grid has `2**q` points.
+        mass: Nonnegative finite coefficient of the identity.
+        diffusion: Nonnegative finite coefficient of `2I - S - S†`.
+        potential: Finite real coefficient of `i*Z_0`. Zero gives a
+            Hermitian operator.
+
+    Raises:
+        ValueError: If `num_qubits` is not a positive integer, if `mass` or
+            `diffusion` is negative, or if a coefficient is not finite.
     """
 
     num_qubits: int
@@ -140,15 +155,33 @@ class PeriodicStencil:
 
 @dataclass(frozen=True, eq=False, init=False, slots=True)
 class OperatorInput:
-    """Factory-owned operator with correlated immutable metadata/native storage.
+    """An operator ready to use in a Problem: an immutable copy of its data and its metadata.
 
-    Fields cannot be independently replaced. Exported record revisions remain
-    standalone declarations and do not change this native owner.
+    [`operator_input`][nwqlib.operators.inputs.operator_input] and the
+    `ingest_*` functions return it. Constructing it directly raises
+    `TypeError`, and its fields cannot be replaced. It keeps the data in the
+    representation it was given (dense, CSR, CSC, Pauli terms, ordered
+    fermionic terms or periodic-stencil parameters) and never converts it to
+    a dense matrix implicitly. Pass it wherever a matrix or operator is
+    accepted, for example `Eigenproblem(A=handle)`. Reusing one handle
+    reuses its stored copy and its content hash.
+
+    The methods below read the stored data or apply it classically. Each
+    raises `ValueError` when the representation does not provide that
+    access, or when the handle was rebuilt by `from_record` and holds
+    metadata only. The fields below are read-only.
 
     Attributes:
-        manifest: Detached metadata and admitted input identity.
-        structure: Checked Hermitian or general, or a declared external claim.
-        _data: Private native storage; never serialized in a record.
+        manifest: The [`InputManifest`][nwqlib.operators.access.InputManifest]:
+            content hash, representation, basis, stored size, available
+            classical operations and the checks made when the input was
+            accepted.
+        structure: `"hermitian"` or `"general"`, from an exact check with no
+            tolerance. The check is equality of a stored matrix with its
+            conjugate transpose, real coefficients of a Pauli sum, or zero
+            `potential` of a periodic stencil. Fermionic terms are always
+            `"general"`. A handle rebuilt by `from_record` may also declare
+            `"unitary"`.
     """
 
     manifest: InputManifest
@@ -168,21 +201,42 @@ class OperatorInput:
 
     @property
     def basis(self):
+        """The computational [`Basis`][nwqlib.core.records.Basis]: dimension and coordinate order, qubit 0 rightmost."""
         return self.manifest.basis
 
     @property
     def reference(self):
+        """The input's reference: content hash, representation and source."""
         return self.manifest.reference
 
     def to_record(self):
-        """Describe this handle without copying, hashing or storing native data."""
+        """Return a JSON-ready description of this handle without its numerical data.
+
+        Returns:
+            record (dict): The keys `format`, `manifest` and `structure`.
+                Building it copies and hashes no numerical data.
+        """
         return dict(format="nwqlib.operator_input/2",
                     manifest=self.manifest.model_dump(mode="json", exclude_computed_fields=True),
                     structure=self.structure)
 
     @classmethod
     def from_record(cls, record):
-        """Read inert metadata; executable access requires a separate saved binding."""
+        """Rebuild a metadata-only handle from a `to_record()` description.
+
+        The handle reports the saved metadata, but every data method raises
+        `ValueError`, even for operations its manifest lists. Saved Results
+        and Runs restore their numerical inputs separately.
+
+        Args:
+            record (dict): A description returned by `to_record()`.
+
+        Returns:
+            handle (OperatorInput): A handle without numerical data.
+
+        Raises:
+            ValueError: If `record` is not such a description.
+        """
         if (type(record) is not dict or set(record) != {"format", "manifest", "structure"}
                 or record["format"] != "nwqlib.operator_input/2"):
             raise ValueError("unsupported operator input record")
@@ -195,35 +249,87 @@ class OperatorInput:
             raise ValueError("operator native data is unavailable; a descriptive record does not restore data access")
 
     def pauli_terms(self):
-        """Return immutable x/z words and coefficients without expansion."""
+        """Return the stored Pauli table without expanding it.
+
+        The table holds uint64 `x` and `z` masks and complex128
+        `coefficients`, one row per Pauli word. Its `labels()` method returns
+        `(label, coefficient)` pairs in Qiskit order, with the rightmost
+        character acting on qubit 0.
+
+        Returns:
+            table (PauliTerms): The immutable stored table.
+
+        Raises:
+            ValueError: If the operator is not a Pauli sum.
+        """
         self._require_data()
         if "pauli_terms" not in self.manifest.access:
             raise ValueError("structured Pauli access is unavailable")
         return self._data
 
     def dense_array(self):
-        """Access the immutable admitted dense snapshot without conversion or copy."""
+        """Return the stored dense matrix as a read-only array, without copying it.
+
+        Returns:
+            matrix (numpy.ndarray): The stored float64 or complex128 matrix.
+
+        Raises:
+            ValueError: If the operator was not given as a dense matrix. No
+                other representation is converted to dense.
+        """
         self._require_data()
         if self.manifest.reference.representation != "dense" or "entries" not in self.manifest.access:
             raise ValueError("dense access requires an ingested dense operator; no implicit densification")
         return self._data
 
     def fermion_terms(self):
-        """Return immutable ordered ladder arrays, without mapping or action."""
+        """Return the stored ordered fermionic table, without mapping it to qubits.
+
+        Returns:
+            table (FermionTerms): The immutable stored
+                [`FermionTerms`][nwqlib.operators._fermion.FermionTerms].
+                Its `to_pauli(mapping=...)` maps it to a Pauli operator.
+
+        Raises:
+            ValueError: If the operator is not a fermionic operator.
+        """
         self._require_data()
         if "fermion_terms" not in self.manifest.access:
             raise ValueError("ordered Fermion access is unavailable")
         return self._data
 
     def periodic_stencil(self):
-        """Read the admitted compact family parameters; no classical action."""
+        """Return the stored [`PeriodicStencil`][nwqlib.operators.inputs.PeriodicStencil] parameters.
+
+        A periodic-stencil operator has no classical matrix-vector action on
+        its handle.
+
+        Returns:
+            stencil (PeriodicStencil): The stored parameters.
+
+        Raises:
+            ValueError: If the operator is not a periodic stencil.
+        """
         self._require_data()
         if not isinstance(self._data, PeriodicStencil):
             raise ValueError("periodic stencil parameters require their native input factory")
         return self._data
 
     def entry(self, row: int, column: int):
-        """Read one existing dense/sparse entry without dense conversion."""
+        """Return one matrix entry, without converting a sparse matrix to dense.
+
+        Args:
+            row (int): Row index, `0 <= row < D`.
+            column (int): Column index, `0 <= column < D`.
+
+        Returns:
+            value (complex): The stored entry, zero where a sparse matrix
+                stores none.
+
+        Raises:
+            ValueError: If the operator is not a dense or sparse matrix, or
+                an index is outside the dimension.
+        """
         self._require_data()
         if "entries" not in self.manifest.access:
             raise ValueError("entry access is unavailable")
@@ -233,10 +339,23 @@ class OperatorInput:
         return complex(self._data[row, column])
 
     def sparse_entries(self, *, max_bytes=DEFAULT_INPUT_BYTES):
-        """Borrow immutable (data, indices, indptr), preserving CSR/CSC orientation.
+        """Return the stored `(data, indices, indptr)` arrays of a CSR or CSC matrix.
 
-        Native storage bytes are checked before exposing any arrays. No
-        conversion, traversal, copy or mutable sparse container is returned.
+        The arrays are the stored read-only arrays, in their original CSR or
+        CSC orientation and index dtype. Their stored bytes are checked
+        against `max_bytes` first. Nothing is converted, traversed or copied.
+
+        Args:
+            max_bytes (int): Limit on the stored bytes. Default 10 GB
+                (decimal, `10_000_000_000`).
+
+        Returns:
+            arrays (tuple[numpy.ndarray, numpy.ndarray, numpy.ndarray]): The
+                values, indices and index pointers.
+
+        Raises:
+            ValueError: If the operator is not a CSR or CSC matrix, or its
+                stored bytes exceed `max_bytes`.
         """
         self._require_data()
         if self.manifest.reference.representation not in {"csr", "csc"} or "entries" not in self.manifest.access:
@@ -246,17 +365,39 @@ class OperatorInput:
 
     def matvec(self, vector: np.ndarray, *, max_bytes=DEFAULT_INPUT_BYTES,
                max_products=1_000_000_000, limit_name="max_products") -> np.ndarray:
-        """Explicit classical action with vector/output bytes and scalar products.
+        """Apply the operator to a vector classically and return `A @ vector`.
 
-        Work law is D² for dense, nnz+D for sparse, and for Pauli terms the
-        grouped-action law of ``_matvec_requirements``, which includes the
-        possible ordered retry. Live numerical storage is O(D) beyond the
-        owned operator; the shared Pauli kernel additionally uses bounded
-        coordinate tiles and O(M) grouping metadata. The default
-        ``max_products`` is registered in ENGINEERING_CONSTANTS.md,
-        "Explicit input operation defaults".
-        ``limit_name`` names the caller's option that supplies
-        ``max_products`` in a refusal.
+        Before it reads the vector, the call checks the bytes of the vector,
+        output and work arrays against `max_bytes`, and the number of scalar
+        products against `max_products`. The product count is `D**2` for a
+        dense matrix, `nnz + D` for a sparse one, and for M Pauli terms the
+        grouped-action count on [Input cost
+        controls](../development/input_contracts.md), which includes a
+        possible ordered retry. It is derived from the representation, not
+        measured time. Beyond the stored operator the action keeps O(D)
+        numerical storage, and a Pauli action also bounded coordinate tiles
+        and O(M) grouping metadata.
+
+        Args:
+            vector (numpy.ndarray): One-dimensional float64 or complex128
+                array of length D with finite entries.
+            max_bytes (int): Limit on the checked bytes. Default 10 GB
+                (decimal, `10_000_000_000`).
+            max_products (int): Limit on the scalar products. Default
+                `1_000_000_000` ([engineering
+                constants](../ENGINEERING_CONSTANTS.md#explicit-input-operation-defaults)).
+            limit_name (str): Name of the caller's option that supplies
+                `max_products`, used in the error message.
+
+        Returns:
+            result (numpy.ndarray): The product `A @ vector`.
+
+        Raises:
+            ValueError: If the handle has no classical action (a periodic
+                stencil, fermionic terms or a metadata-only handle), if a
+                Pauli operator acts on more than 64 qubits, if `vector` has
+                another shape, dtype or a nonfinite entry, or if a limit is
+                exceeded.
         """
         _, payload_bytes, products = _matvec_requirements(self)
         _check_bytes(payload_bytes, max_bytes, "matrix-vector action")
@@ -387,18 +528,37 @@ def _scaled_observable_moment(operator, vector):
 
 
 def ingest_periodic_stencil(num_qubits: int, mass, diffusion, potential=0.0, *, max_bytes=DEFAULT_INPUT_BYTES) -> OperatorInput:
-    """Admit mass I + diffusion (2I-S-S†) + i potential Z0, S|j>=|j+1 mod 2**q>.
+    """Return an OperatorInput for `mass*I + diffusion*(2I - S - S†) + i*potential*Z_0`.
 
-    q is an exact positive integer, mass/diffusion are nonnegative finite real
-    scalars, and potential is real and finite. q=1 keeps both wrap edges.
-    The payload is three float64 parameters and q's integer magnitude. Before
-    forming dimension metadata, admission covers parameters plus their hash
-    array (48 bytes), q's magnitude, and two q-bit dimension integer slots.
-    Work is q+4 and items are four parameters. These are logical size laws,
-    not Python object/RSS accounting. No matrix, Pauli expansion, or vector
-    access is implied. Spectral endpoints of the Hermitian potential=0 family
-    are mass and mass+4*diffusion; their numerical use belongs to a consumer.
+    This is the operator of [`PeriodicStencil`][nwqlib.operators.inputs.PeriodicStencil]
+    on a periodic grid of `2**q` points, with the cyclic shift
+    `S|j> = |j+1 mod 2**q>`. For `q = 1` both wrap-around edges are kept.
+    Only the four parameters are stored, so the handle has no matrix, Pauli
+    expansion or matrix-vector access. With `potential = 0` the operator is
+    Hermitian, with spectral endpoints `mass` and `mass + 4*diffusion`.
+
+    Args:
+        num_qubits (int): Positive integer q.
+        mass (float): Nonnegative finite coefficient of the identity.
+        diffusion (float): Nonnegative finite coefficient of `2I - S - S†`.
+        potential (float): Finite real coefficient of `i*Z_0`.
+        max_bytes (int): Limit on the bytes checked before the parameters
+            are stored. Default 10 GB (decimal, `10_000_000_000`).
+
+    Returns:
+        operator (OperatorInput): Structure `"hermitian"` when `potential`
+            is zero, `"general"` otherwise.
+
+    Raises:
+        ValueError: If `num_qubits` is not a positive integer, if `mass` or
+            `diffusion` is negative, or if a coefficient is not finite.
     """
+    # Size law. The payload is three float64 parameters and q's integer
+    # magnitude. Before the dimension metadata is formed, the check covers
+    # the parameters plus their hash array (48 bytes), q's magnitude and two
+    # q-bit dimension integer slots. Work is q+4 and items are four
+    # parameters. These are logical size laws, not Python object or RSS
+    # accounting.
     if type(num_qubits) is not int or num_qubits < 1:
         raise ValueError("num_qubits must be a positive integer")
     integer_bytes = max(1, (num_qubits.bit_length() + 7) // 8)
@@ -480,18 +640,40 @@ def _pauli_label_limit(num_qubits, max_bytes):
 
 
 def pauli_table(terms, *, num_qubits: int, max_bytes=DEFAULT_INPUT_BYTES) -> PauliTerms:
-    """Admit an immutable raw label table, preserving duplicate/zero indices.
+    """Return the raw Pauli table of `(label, coefficient)` pairs, keeping duplicates and zeros.
 
-    Raw layout L=16W+16 bytes/term, W=ceil(q/64). Admission reserves
-    R*(q+4L+S) logical bytes. The q label bytes and the four L-byte copies
-    alive at the peak of ``_coalesced_input`` cover conversion and the
-    subsequent stable coalescing, and S is the identity JSON share of
-    ``_pauli_identity_bytes``. Python object overhead is not RSS accounting.
-    Work size law is R*(q+W+1). Unsized streams keep at most the raw limit
-    plus one lookahead.
+    The terms keep their order, repeated labels and zero coefficients. Use
+    [`ingest_pauli`][nwqlib.operators.inputs.ingest_pauli] for an operator
+    with identical labels summed. Labels follow Qiskit order, in which the
+    rightmost character acts on qubit 0. The number of terms is checked against
+    `max_bytes` before they are read, and an iterator of terms is read at
+    most one term past the number that fits (row "Pauli labels" of [Input
+    cost controls](../development/input_contracts.md)).
 
-    Labels follow Qiskit order: the rightmost character acts on qubit 0.
+    Args:
+        terms (Iterable[tuple[str, complex]]): Pairs of a label of exactly
+            `num_qubits` characters from `IXYZ` and a finite real or complex
+            coefficient.
+        num_qubits (int): Positive number of qubits q.
+        max_bytes (int): Byte limit. Default 10 GB (decimal,
+            `10_000_000_000`).
+
+    Returns:
+        table (PauliTerms): Immutable uint64 `x` and `z` masks and complex128
+            `coefficients`, one row per term.
+
+    Raises:
+        ValueError: If a label has another length or character, a
+            coefficient is not finite, or the terms exceed `max_bytes`.
+        TypeError: If a coefficient is not a number.
     """
+    # Size law. Raw layout L = 16W + 16 bytes per term, W = ceil(q/64). The
+    # check reserves R*(q+4L+S) logical bytes. The q label bytes and the four
+    # L-byte copies alive at the peak of _coalesced_input cover conversion
+    # and the subsequent stable coalescing, and S is the identity JSON share
+    # of _pauli_identity_bytes. Python object overhead is not RSS
+    # accounting. Work is R*(q+W+1). An unsized stream keeps at most the raw
+    # limit plus one lookahead.
     w = _pauli_width(num_qubits)
     raw_limit = _pauli_label_limit(num_qubits, max_bytes)
     if isinstance(terms, Sized) and len(terms) > raw_limit:
@@ -558,23 +740,81 @@ def _coalesced_input(table):
 
 
 def ingest_pauli(terms, *, num_qubits: int, max_bytes=DEFAULT_INPUT_BYTES) -> OperatorInput:
-    """Snapshot bounded labels into native masks, stably coalescing exact zeros.
+    """Return an OperatorInput for the Pauli sum `sum_k c_k P_k` given as `(label, coefficient)` pairs.
 
-    Uses pauli_table's conversion/coalescing envelope. No coefficient pruning.
+    Terms with identical labels are summed with stable summation, and only a
+    sum that is exactly zero is removed. No nonzero coefficient is pruned.
+    Because distinct Pauli words are Hermitian and linearly independent, the
+    operator is Hermitian exactly when every summed coefficient is real, and
+    its `structure` records that test without a tolerance. Labels follow
+    Qiskit order, in which the rightmost character acts on qubit 0. The byte
+    check is that of [`pauli_table`][nwqlib.operators.inputs.pauli_table].
+
+    Args:
+        terms (Iterable[tuple[str, complex]]): Pairs of a label of exactly
+            `num_qubits` characters from `IXYZ` and a finite real or complex
+            coefficient.
+        num_qubits (int): Positive number of qubits q.
+        max_bytes (int): Byte limit. Default 10 GB (decimal,
+            `10_000_000_000`).
+
+    Returns:
+        operator (OperatorInput): The coalesced Pauli operator.
+
+    Raises:
+        ValueError: If a label has another length or character, a
+            coefficient is not finite, or the terms exceed `max_bytes`.
+        TypeError: If a coefficient is not a number.
+
+    Examples:
+        Two `ZI` terms add up to one, with coefficient 1.25:
+
+        >>> from nwqlib.operators import ingest_pauli
+        >>> H = ingest_pauli([("ZI", 1.0), ("XX", 0.5), ("ZI", 0.25)],
+        ...                  num_qubits=2)
+        >>> H.pauli_terms().labels()
+        (('ZI', (1.25+0j)), ('XX', (0.5+0j)))
+        >>> H.structure
+        'hermitian'
     """
     return _coalesced_input(pauli_table(terms, num_qubits=num_qubits, max_bytes=max_bytes))
 
 
 def ingest_pauli_masks(x, z, coefficients, *, num_qubits: int, max_bytes=DEFAULT_INPUT_BYTES) -> OperatorInput:
-    """Admit native uint64 (R,W) masks and complex128 (R,) coefficients.
+    """Return an OperatorInput from packed Pauli masks and coefficients.
 
-    Reject invalid unused high bits and nonnative dtypes. Work size law
-    max(q, R*(W+1)) admits width metadata even for zero terms. The logical
-    byte envelope R*(4(16W+16)+S) beyond caller-owned arrays covers the four
-    L-byte copies alive at the peak of ``_coalesced_input`` and the identity
-    JSON share S of ``_pauli_identity_bytes``. The final content identity
-    is shared with label ingestion of identical ordered terms.
+    Row k with masks `(x, z)` denotes the word `i**popcount(x & z) X**x Z**z`,
+    so a qubit with both bits set carries Y, and its coefficient multiplies
+    that canonical I/X/Y/Z word. Bit `b` of word `w` refers to qubit
+    `64*w + b`. Identical words are summed as in
+    [`ingest_pauli`][nwqlib.operators.inputs.ingest_pauli], and the result
+    has the same content hash as label input of the same ordered terms. The
+    byte check is the row "Pauli masks" of [Input cost
+    controls](../development/input_contracts.md).
+
+    Args:
+        x (numpy.ndarray): uint64 X masks of shape `(R, W)`, with
+            `W = ceil(q/64)`.
+        z (numpy.ndarray): uint64 Z masks of the same shape.
+        coefficients (numpy.ndarray): complex128 coefficients of shape `(R,)`,
+            all finite.
+        num_qubits (int): Positive number of qubits q.
+        max_bytes (int): Byte limit. Default 10 GB (decimal,
+            `10_000_000_000`).
+
+    Returns:
+        operator (OperatorInput): The coalesced Pauli operator.
+
+    Raises:
+        TypeError: If an argument is not a NumPy array of the stated dtype.
+        ValueError: If the shapes disagree, a bit above qubit q-1 is set, a
+            coefficient is not finite, or the arrays exceed `max_bytes`.
     """
+    # Size law. Work max(q, R*(W+1)) covers the width metadata even for zero
+    # terms. The logical byte bound R*(4(16W+16)+S) beyond caller-owned
+    # arrays covers the four L-byte copies alive at the peak of
+    # _coalesced_input and the identity JSON share S of
+    # _pauli_identity_bytes.
     w = _pauli_width(num_qubits)
     if any(type(a) is not np.ndarray for a in (x, z, coefficients)):
         raise TypeError("Pauli masks and coefficients must be native ndarrays")
@@ -596,11 +836,28 @@ def ingest_pauli_masks(x, z, coefficients, *, num_qubits: int, max_bytes=DEFAULT
 
 
 def ingest_dense(matrix, *, max_bytes=DEFAULT_INPUT_BYTES) -> OperatorInput:
-    """Snapshot a native small square array; no padding or symmetrization.
+    """Return an OperatorInput holding an immutable copy of a square dense matrix.
 
-    Admission scans O(D²) entries, keeping one snapshot. Finite and exact
-    stored Hermiticity checks use O(D²) temporary comparison storage, never
-    eigensolves. max_bytes bounds the numerical snapshot size.
+    Integer and real data become float64 and complex data complex128. The
+    matrix is neither padded nor symmetrized. The call scans the `O(D**2)`
+    entries once, checking that they are finite and whether the stored
+    matrix equals its conjugate transpose exactly. Those checks use `O(D**2)`
+    temporary storage and no eigensolver.
+
+    Args:
+        matrix (numpy.ndarray | list | tuple): A nonempty square NumPy array,
+            or nested lists or tuples of real or complex numbers.
+        max_bytes (int): Limit on the bytes of the stored copy. Default
+            10 GB (decimal, `10_000_000_000`).
+
+    Returns:
+        operator (OperatorInput): Structure `"hermitian"` or `"general"`.
+
+    Raises:
+        TypeError: If `matrix` is another type or holds booleans, objects or
+            strings.
+        ValueError: If `matrix` is empty, not square, ragged or not finite,
+            or its copy exceeds `max_bytes`.
     """
     matrix = _array_input(matrix, ndim=2, max_bytes=max_bytes)
     if matrix.shape[0] == 0 or matrix.shape[0] != matrix.shape[1]:
@@ -616,11 +873,29 @@ def ingest_dense(matrix, *, max_bytes=DEFAULT_INPUT_BYTES) -> OperatorInput:
 
 
 def ingest_sparse(matrix, *, max_bytes=DEFAULT_INPUT_BYTES) -> OperatorInput:
-    """Snapshot canonical CSR/CSC storage; sparse never becomes dense.
+    """Return an OperatorInput holding an immutable copy of a SciPy CSR or CSC matrix, kept sparse.
 
-    Only native sorted, duplicate-free CSR/CSC arrays/matrices are supported.
-    The caller explicitly canonicalizes other forms. Admission and Hermiticity
-    comparison cost O(nnz+D), with O(nnz+D) temporary sparse storage.
+    The matrix must be a `csr_matrix`, `csc_matrix`, `csr_array` or
+    `csc_array` in canonical form, with sorted indices and no duplicate
+    entries. Canonicalize other storage before the call. The copy keeps the
+    CSR or CSC orientation and index dtype. Checking finiteness and exact
+    equality with the conjugate transpose costs O(nnz + D) work and O(nnz +
+    D) temporary sparse storage. The matrix never becomes dense.
+
+    Args:
+        matrix (scipy.sparse.csr_matrix | scipy.sparse.csc_matrix): A
+            nonempty square canonical CSR or CSC matrix or array of real or
+            complex numbers.
+        max_bytes (int): Limit on the stored values, indices and index
+            pointers. Default 10 GB (decimal, `10_000_000_000`).
+
+    Returns:
+        operator (OperatorInput): Structure `"hermitian"` or `"general"`.
+
+    Raises:
+        TypeError: If `matrix` is another type or holds booleans or objects.
+        ValueError: If `matrix` is empty, not square, not canonical or not
+            finite, or its copy exceeds `max_bytes`.
     """
     if type(matrix) not in (sparse.csr_matrix, sparse.csc_matrix, sparse.csr_array, sparse.csc_array):
         raise TypeError("sparse ingestion requires native canonical CSR or CSC")
@@ -653,7 +928,53 @@ def ingest_sparse(matrix, *, max_bytes=DEFAULT_INPUT_BYTES) -> OperatorInput:
 
 
 def operator_input(value, *, max_bytes=DEFAULT_INPUT_BYTES) -> OperatorInput:
-    """Admit a known operator representation without implicit densification."""
+    """Return an OperatorInput for a matrix or operator, keeping its representation.
+
+    The call dispatches on the type of `value`:
+
+    - a NumPy array, or nested lists or tuples: [`ingest_dense`][nwqlib.operators.inputs.ingest_dense]
+    - a SciPy CSR or CSC matrix or array: [`ingest_sparse`][nwqlib.operators.inputs.ingest_sparse]
+    - a [`PeriodicStencil`][nwqlib.operators.inputs.PeriodicStencil]:
+      [`ingest_periodic_stencil`][nwqlib.operators.inputs.ingest_periodic_stencil]
+    - a Qiskit `SparsePauliOp`: its Pauli terms, summed as in
+      [`ingest_pauli`][nwqlib.operators.inputs.ingest_pauli]
+    - an `OperatorInput`: returned unchanged
+
+    Qiskit stores each Pauli word as `(-i)**phase` times its label, so the
+    coefficient of the canonical I/X/Y/Z label is `coeff * (-i)**phase`.
+    Qiskit is imported only for a `SparsePauliOp` argument. Sparse and Pauli
+    input is never converted to a dense matrix.
+
+    Args:
+        value (object): The matrix or operator.
+        max_bytes (int): Byte limit of the dispatched function. Default
+            10 GB (decimal, `10_000_000_000`).
+
+    Returns:
+        operator (OperatorInput): The accepted operator.
+
+    Raises:
+        TypeError: If `value` has none of the types above, or a dispatched
+            function rejects its contents.
+        ValueError: If the dispatched function rejects `value`.
+
+    Examples:
+        A NumPy matrix stays dense, and a `SparsePauliOp` stays a Pauli sum:
+
+        >>> import numpy as np
+        >>> from qiskit.quantum_info import SparsePauliOp
+        >>> from nwqlib.operators import operator_input
+        >>> A = operator_input(np.array([[2.0, 1.0], [1.0, 2.0]]))
+        >>> A.manifest.reference.representation, A.structure
+        ('dense', 'hermitian')
+        >>> A.matvec(np.array([1.0, 1.0]))
+        array([3., 3.])
+        >>> H = operator_input(SparsePauliOp(["ZI", "XX"], coeffs=[1.0, 0.5]))
+        >>> H.manifest.reference.representation, H.basis.dimension
+        ('pauli', 4)
+        >>> H.pauli_terms().labels()
+        (('ZI', (1+0j)), ('XX', (0.5+0j)))
+    """
     _check_bytes(0, max_bytes)
     if isinstance(value, OperatorInput):
         return value

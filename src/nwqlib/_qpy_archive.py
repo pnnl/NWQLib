@@ -8,8 +8,8 @@ instruction whose first parameter is a JSON header (nominal width, name, label,
 ``up_to_diagonal``, whether the table is already simplified, and the one-based
 active controls) followed by the stored matrices. Decoding rebuilds the gate
 directly, without simplifying the table again or synthesizing its matrix.
-``docs/run_archives.md`` (Qiskit UCGate compatibility) is the public contract,
-including when this storage may change.
+``docs/development/execution.md`` (Circuit entries and Qiskit UCGate
+compatibility) is the public contract, including when this storage may change.
 
 The container prefix selects this codec, and ordinary raw QPY is never
 interpreted as this storage format. Within a container the marker is chosen

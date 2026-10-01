@@ -12,7 +12,8 @@ matvec in the original dimension.
 The shots selected from an absolute sampling tolerance follow Hoeffding
 (1963), doi:10.1080/01621459.1963.10500830, Theorem 2, for each label's
 parity, with a union bound over the measured labels and a triangle
-inequality (ExpectationMethod.sampling_shots). Grouping unmitigated counts and one
+inequality (ExpectationMethod.sampling_shots). docs/mathematics.md,
+Proposition 1, derives that shot count. Grouping unmitigated counts and one
 parity experiment per term under mitigation are NWQLib's design choices.
 The binary inference and the affine calibration
 model are derived in evidence/binary.py and docs/algorithms/expectation.md.
@@ -294,27 +295,52 @@ class ExpectationReconstruction(Record):
 
 
 class ExpectationStatistics(Record):
-    """Performed binary inference and data dependencies, with conditional scope.
+    """Counts, inference and variance behind a measured `ExpectationAnalysis` value.
 
-    variance is empirical or delta-method under its kept covariance premises,
-    not total physical variance. interval has the selected statistical meaning
-    and no independent physical-model guarantee.
+    A run with positive shots stores it as `result.statistics`. `variance`
+    is an empirical or delta-method estimate under its recorded covariance
+    assumptions, not the total physical variance. `interval` has the
+    statistical meaning of the chosen inference and no physical-model
+    guarantee. The fields below are read-only.
 
     Attributes:
-        inference_options_id: Content identity of the BinaryInferenceOptions this analysis used.
-        populations: Without mitigation, one BinaryEstimate per nonzero nonidentity label, named ``<group setting>:<label>``, in group and member order; its marginal parity counts come from its group's population, and the labels of one group share its sources, observations and receipts, which count as one exposure. With mitigation, one BinaryEstimate per predeclared science and calibration setting, in setting order. Each keeps raw counts and any posterior result.
-        corrections: One affine BinaryCorrection per science term, with its signed fitted point, when mitigation is selected, otherwise empty.
-        receipt_ids: Preparation receipts associated with the counted sources.
-        raw_value: Uncorrected empirical value in the requested output frame.
-        variance_kind: ``empirical``, ``delta_method`` for fitted calibration, or ``posterior`` for Beta inference.
-        variance: Output-frame variance under the stored covariance premises, or None. The empirical variance of grouped readout has one contribution per group, the empirical variance of its weighted score mean, so covariance between labels of one group is included.
-        variance_unavailable: Reason variance is None.
-        interval: Linear image of the simultaneous per-population intervals in the output frame, or None for point inference.
-        fixed_time: Whether the data qualify for a fixed-time interval: exactly one complete original acquisition per setting (group, parity or calibration) with its receipts, no blocking population reason, and no cancellation or early termination.
-        fixed_time_reason: Why fixed_time holds or fails.
-        applicability_reason: Why missing receipts leave target, compiler or layout applicability unverified, or None.
-        independence_reason: Why independence across settings is unverified because they share one fixed sampling stream, or None. Labels of one QWC group share their group's shots by design; independence concerns distinct groups.
-        source: Implementation source of the binary inference.
+        inference_options_id: Content hash of the `BinaryInferenceOptions`
+            this analysis used.
+        populations: Without mitigation, one `BinaryEstimate` per nonzero
+            non-identity term, named `<group setting>:<label>`, in group and
+            member order. Its counts are the term's marginal parities in its
+            group's histogram, and the terms of one group share that group's
+            sources, observations and preparation records, which count as one
+            measurement. With mitigation, one `BinaryEstimate` per
+            predeclared science and calibration setting, in setting order.
+            Each keeps its raw counts and any posterior.
+        corrections: With mitigation, one affine `BinaryCorrection` per
+            science term, with its signed corrected point. Empty otherwise.
+        receipt_ids: Content hashes of the preparation records of the counted
+            sources.
+        raw_value: The same weighted sum over the uncorrected raw means, for
+            the requested output.
+        variance_kind: `"empirical"`, `"delta_method"` for fitted calibration,
+            or `"posterior"` for Beta inference.
+        variance: Variance of the requested output under the recorded
+            covariance assumptions, or None. Without mitigation it has one contribution
+            per group, the empirical variance of the group's weighted score
+            mean, so the covariance between terms of one group is included.
+        variance_unavailable: Reason `variance` is None.
+        interval: Linear image of the simultaneous per-population intervals
+            for the requested output, or None for point inference.
+        fixed_time: Whether the data qualify for a fixed-time interval:
+            exactly one complete original measurement per setting (group,
+            parity or calibration) with its preparation records, no reason
+            blocking a population, and no cancellation or early stop.
+        fixed_time_reason: Why `fixed_time` holds or fails.
+        applicability_reason: Why missing preparation records leave the
+            target, compiler or layout unverified, or None.
+        independence_reason: Why independence across settings is unverified
+            because they share one fixed sampling stream, or None. The terms
+            of one qubit-wise commuting group share their group's shots by
+            design, so independence concerns distinct groups.
+        source: Name and version of the binary-inference implementation.
     """
 
     inference_options_id: ContentID
@@ -340,16 +366,42 @@ class ExpectationStatistics(Record):
 
 
 class ExpectationAnalysis(Result):
-    """Requested normalized or physical value; raw populations preserve their own frame.
+    """Expectation value from an `ExpectationMethod` run, with its measurement statistics.
+
+    [`solve`][nwqlib.scientist.solve] returns it for an `ExpectationMethod`,
+    and `load_result` reopens a saved one. The answer is `value`, in the unit
+    of the `Expectation` problem: the normalized expectation
+    `<psi|O|psi>/<psi|psi>` for a `NormalizedExpectation` output, or the
+    quadratic form `<psi|O|psi>` for a `QuadraticForm` output. With
+    `s = ||psi||**2`, the quadratic form multiplies the normalized point and
+    interval by s and the estimator variance by `s**2`. `value` is None when
+    a term has no data or the value is unavailable, and `missing` and
+    `unavailable` then say why. `print(result)` shows the value and its
+    scope, and `result.analyze(inference=...)` applies other
+    `BinaryInferenceOptions` to the same counts without new measurement. The
+    fields below are read-only. The fields of
+    [`Result`][nwqlib.core.analysis.Result] are present too.
+    [Reading the Result](../../algorithms/expectation.md#reading-the-result)
+    gives the meaning and scaling of each field, including the `BinaryEstimate`
+    and `BinaryCorrection` records inside `statistics`.
 
     Attributes:
-        value: Requested normalized expectation or quadratic form, or None when data are missing or the value is unrepresentable.
-        physical_scale: Norm of the supplied state as a mantissa and binary exponent.
-        missing: Nonidentity Pauli labels without data.
-        statistics: Count inference record of measured parity data, otherwise None.
-        estimates: Original provider estimates in the normalized-state observable frame.
-        unavailable: Reason value is None when no label is missing.
-        inference: BinaryInferenceOptions used by a measured analysis, otherwise None.
+        value: `c_0 + sum_j c_j*estimate_j` for `O = c_0 I + sum_j c_j P_j`,
+            times s for a quadratic form. `estimate_j` is the exact Pauli
+            mean, the chosen binary estimate, or the corrected point with
+            mitigation. A provider estimate or a classical matrix-vector
+            product gives the whole sum instead. None exactly when `missing`
+            is nonempty or `unavailable` is set.
+        physical_scale: `||psi||` as a mantissa and binary exponent, the
+            source of s.
+        missing: Non-identity Pauli terms without data.
+        statistics: The `ExpectationStatistics` of measured counts, otherwise
+            None.
+        estimates: Original provider estimates of the normalized expectation,
+            on the provider path only.
+        unavailable: Reason `value` is None when no term is missing.
+        inference: `BinaryInferenceOptions` used by a measured analysis,
+            otherwise None.
     """
 
     value: Real | None
@@ -392,10 +444,13 @@ class ExpectationAnalysis(Result):
 
     @property
     def provider_output_estimates(self):
-        """Cheap output-frame views; estimates keeps immutable original provider values.
+        """Provider estimates converted to the requested output, times s for a quadratic form.
 
-        SEM keeps the provider's original meaning. Repeated estimates have no
-        implied covariance or combined SEM. No output view is persisted twice.
+        One dict per entry of `estimates`, with the keys `source_id`, `value`,
+        `standard_error` and `uncertainty_unavailable`. They are computed when
+        read and are not saved, and `estimates` keeps the original provider
+        values. The standard error keeps the provider's meaning, and several
+        estimates carry no covariance or combined standard error.
         """
         rec = self.plan.reconstruction
         views = []
@@ -2383,30 +2438,94 @@ def _terms(problem, output):
 
 
 class ExpectationMethod(Method):
-    """Select exact readout, counts inference or an explicit weighted provider estimate.
+    """Pauli expectation method for the expectation value of an observable in a state.
 
-    Exact Expectation readout acquires all selected nonidentity labels in
-    one experiment. Sampled grouping uses joint measurement populations
-    whose uncertainty calculation includes within-group covariance.
-    Positive shots without mitigation select one measured experiment per
-    qubit-wise commuting group, with shots per group and the configured
-    binary inference on each label's marginal parity. With mitigation,
-    positive shots select one measured parity experiment per nonidentity
-    term and its pivot calibrations. estimate_precision selects one
-    provider-managed estimate of the whole weighted sum. Classical
-    execution uses the original matvec access. Identity terms are algebraic
-    constants on the exact and measured paths, and an identity-only
-    observable needs no acquisition on any path. The Expectation guide
-    derives the statistical quantities.
+    Build it with keyword arguments and pass it as `method=`, for example
+    `solve(Expectation(state=psi, observable=O), method=ExpectationMethod())`.
+    Every argument is optional. The result is an
+    [`ExpectationAnalysis`][nwqlib.algorithms.expectation.ExpectationAnalysis]
+    whose `value` is the normalized expectation `<psi|O|psi>/<psi|psi>`, or
+    with `output=QuadraticForm(observable=O)` the quadratic form
+    `<psi|O|psi>`. For `O = c_0 I + sum_j c_j P_j` it measures the
+    expectations `<P_j>` of the nonzero non-identity Pauli terms and adds the
+    identity coefficient exactly, so an identity-only observable needs no
+    measurement on any path.
+
+    The call chooses how the terms are measured:
+
+    - Default, exact readout: one prepared state supplies every term.
+    - `shots=n`: one circuit per qubit-wise commuting group, n shots each,
+      with `inference` applied to each term's parity. The uncertainty
+      includes the covariance of terms in one group.
+    - `shots=n` with `mitigation`: one parity circuit per non-identity term,
+      plus calibration circuits for each pivot qubit.
+    - `estimate_precision`: one provider estimate of the whole weighted sum.
+    - `execution="classical"`: a matrix-vector product with the stored
+      observable in its original dimension.
+
+    Instead of `shots`, `accuracy=Accuracy(component="sampling",
+    absolute_tolerance=epsilon)` lets `sampling_shots` choose the shots per
+    group from Hoeffding's inequality (Hoeffding (1963),
+    doi:10.1080/01621459.1963.10500830, Theorem 2) with a union bound over
+    the measured terms. That bound covers sampling only, under its
+    assumptions. [Proposition 1](../../mathematics.md#r1) derives the count,
+    and the [Expectation guide](../../algorithms/expectation.md) states the
+    statistical quantities and their assumptions.
 
     Attributes:
-        preparation_choice: ``native`` state PREP or equivalent ``hzh`` wiring for admitted occupation preparations only.
-        inference: Binary count-inference configuration, including its conditional interval model.
-        mitigation: Optional zero/one readout calibration per measured pivot; selects one parity experiment per term instead of QWC groups and adds actual calibration acquisitions.
-        estimate_precision: Positive managed Estimator precision request; None keeps exact/counts selection. It does not specify a raw shot population.
-        max_bytes: Bound on known operator/state and classical workspace bytes.
-        max_classical_products: Cap on counted classical observable applications, and the comparison budget of the QWC grouping of sampled readout.
-        max_admission_steps: Admission ceiling of the Plan's Programs, their ``AdmissionLimits.max_steps``: the kept field slots and the structural and lifecycle work units of one admission check. The resource fold of a Program may use up to 24 times this value. The default, 1,000,000, is the QLS default, ten times the shared ``AdmissionLimits`` default. Raising it admits a larger metadata check and fold. It changes no selected quantum work.
+        preparation_choice: Default `"native"`, the state's own preparation
+            circuit. `"hzh"` selects an equivalent wiring that is accepted
+            only for occupation-number states.
+        inference: Default `BinaryInferenceOptions()`, empirical points
+            without an interval. How measured counts become estimates and
+            intervals. Any other choice needs positive shots.
+        mitigation: Default `None`, no calibration. A
+            `BinaryReadoutMitigation` measures one parity circuit per
+            non-identity term instead of one circuit per commuting group and
+            adds its calibration circuits. It needs positive shots and
+            excludes Beta inference.
+        estimate_precision: Default `None`. Positive precision requested from
+            a provider Estimator for the whole weighted sum, in the units of
+            the observable's coefficients. It excludes positive shots, a
+            non-default `inference` and `mitigation`, and it does not set a
+            shot count.
+        max_bytes: Default 10 GB (decimal, `10_000_000_000` bytes). Limit on
+            the known bytes of the operator, the state and the classical
+            workspace.
+        max_classical_products: Default `100_000_000`. Limit on the counted
+            classical operator applications, and on the comparisons that
+            sort the terms of sampled readout into qubit-wise commuting
+            groups.
+        max_admission_steps: Default `1_000_000`. Limit on the planning work
+            of checking each circuit description that the method builds. It
+            caps both the number of stored fields of a description and the
+            work units of one structural check of it.
+            Summing a description's resource counts may use up to 24 times
+            this value. The default equals that of `QLS` and is ten times the
+            shared default of `100_000`. Raising it permits a larger check
+            and changes no quantum operation
+            ([planning work limit](../../development/program_checks.md#planning-work-limit)).
+
+    Raises:
+        ValueError: If `estimate_precision` is combined with a non-default
+            `inference` or with `mitigation`, or if `mitigation` is combined
+            with Beta inference.
+
+    Examples:
+        For the state `psi = (3, 4)` and `O = Z`, the quadratic form is
+        `9 - 16 = -7` and the normalized expectation is `-7/25 = -0.28`. The
+        default quantum path runs on Aer with exact readout:
+
+        >>> from nwqlib import Expectation, QuadraticForm, solve
+        >>> from nwqlib.algorithms import ExpectationMethod
+        >>> problem = Expectation(state=[3, 4], observable=[[1, 0], [0, -1]])
+        >>> result = solve(problem, method=ExpectationMethod())
+        >>> print(round(result.value, 10))
+        -0.28
+        >>> quadratic = QuadraticForm(observable=problem.observable)
+        >>> result = solve(problem, method=ExpectationMethod(), output=quadratic)
+        >>> print(round(result.value, 10))
+        -7.0
     """
 
     schema_version: Literal[2] = 2
@@ -2432,25 +2551,50 @@ class ExpectationMethod(Method):
         return self
 
     def sampling_shots(self, problem, *, output, accuracy, execution, shots):
-        """Return the shots per QWC group selected by an absolute sampling tolerance.
+        """Return the shots per qubit-wise commuting group for an absolute sampling tolerance.
 
-        For L nonzero nonidentity labels and ``C=sum_j abs(c_j)``, use
-        ``ceil(2*(C/epsilon)**2*log(2*L/delta))``, where
-        ``delta=1-confidence``. Each label uses the shots of its group, and a
-        union bound over labels permits their parities to be correlated
-        within a shot. A quadratic form uses C in its physical output frame.
-        An identity-only observable needs no acquisition. This selection
-        supports raw quantum counts without mitigation, Beta inference or
-        provider estimation and conflicts with an explicit shot count.
+        `solve` and `plan` call it when they receive
+        `accuracy=Accuracy(component="sampling", absolute_tolerance=epsilon)`
+        in place of `shots`. For L nonzero non-identity terms and
+        `C = sum_j abs(c_j)`, the count is
+        `n = ceil(2*(C/epsilon)**2*log(2*L/delta))` with
+        `delta = 1 - confidence`. Each term uses the shots of its group, and a
+        union bound over terms permits their parities to be correlated
+        within a shot. A quadratic form uses `s*C`, with s the squared norm
+        of the state. This choice supports raw quantum counts without
+        mitigation, Beta inference or a provider estimate, and it conflicts
+        with an explicit shot count.
 
-        For fixed counts, Hoeffding's inequality on each parity gives
-        ``Pr(abs(mean_j - mu_j) > r_j) <= delta/L`` with ``r_j =
-        sqrt(2*log(2*L/delta)/n_g(j))``; a union over labels and the triangle
-        inequality bound the weighted error by ``sum_j abs(c_j)*r_j`` with
-        probability at least 1-delta, without within-group or cross-group
-        independence. Equal n per group and ``C*sqrt(2*log(2*L/delta)/n) <=
-        epsilon`` give the count above, and the science workload is G*n
-        shots for G groups. Returns None when no label needs measurement.
+        For fixed counts, Hoeffding's inequality (Hoeffding (1963),
+        doi:10.1080/01621459.1963.10500830, Theorem 2) on each parity gives
+        `Pr(abs(mean_j - mu_j) > r_j) <= delta/L` with
+        `r_j = sqrt(2*log(2*L/delta)/n_g(j))`. A union bound over terms and
+        the triangle inequality bound the weighted error by
+        `sum_j abs(c_j)*r_j` with probability at least `1 - delta`, without
+        independence within or across groups. Equal n per group and
+        `C*sqrt(2*log(2*L/delta)/n) <= epsilon` give the count above, and the
+        measurement uses `G*n` shots for G groups. The bound covers sampling
+        only, given independent stationary shots within each group.
+        [Proposition 1](../../mathematics.md#r1) gives the derivation.
+
+        Args:
+            problem (Expectation): The problem.
+            output (NormalizedExpectation | QuadraticForm): The requested
+                output.
+            accuracy (Accuracy): The accuracy request.
+            execution (str): `"quantum"`, the only supported execution.
+            shots (int | None): Must be None.
+
+        Returns:
+            shots (int | None): The shots per group, a positive integer, or
+                None when no term needs measurement.
+
+        Raises:
+            ApplicabilityError: If `accuracy` is not an absolute sampling
+                tolerance, if execution is classical, or if mitigation, Beta
+                inference or a provider estimate is chosen.
+            ValueError: If `shots` is also given, or if the count exceeds
+                `2**53 - 1`.
         """
         if (
             not isinstance(accuracy, Accuracy)

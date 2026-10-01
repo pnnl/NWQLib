@@ -53,7 +53,10 @@ def _as_square_matrix(matrix: Any) -> np.ndarray:
 
 @dataclass(frozen=True, kw_only=True)
 class PauliTerm:
-    """Single Pauli term in a matrix decomposition.
+    """One term `c P` of a Pauli decomposition, with `P` a Qiskit Pauli label.
+
+    Build it with keyword arguments, for example
+    `PauliTerm(label="ZI", coefficient=0.5)`. Both arguments are required.
 
     Args:
         label: Pauli string label using Qiskit's ordering convention.
@@ -66,10 +69,16 @@ class PauliTerm:
 
 @dataclass(frozen=True, kw_only=True)
 class PauliDecomposition:
-    """Sparse Pauli decomposition of a matrix.
+    """A matrix written as a sum of Pauli strings, with its dimensions and the coefficient cutoff used.
+
+    [`decompose_matrix_to_pauli`][nwqlib.subroutines.pauli_decomposition.decompose_matrix_to_pauli]
+    returns it. It can also be built with keyword arguments, all required,
+    to pass a Pauli sum to
+    [`build_block_encoding`][nwqlib.subroutines.block_encoding.build_block_encoding].
+    The operator is `sum_j c_j P_j` over `terms`.
 
     Args:
-        terms: Nonzero Pauli terms defining the represented operator after selected pruning.
+        terms: Nonzero Pauli terms defining the represented operator after any pruning.
         input_dimension: Original matrix dimension.
         operator_dimension: Dimension actually decomposed; it exceeds input_dimension
             exactly when the input was zero-padded to a power-of-two dimension.
@@ -114,19 +123,37 @@ def prune_pauli_terms_relative(
     *,
     rtol: float = PAULI_COEFFICIENT_RTOL,
 ) -> tuple[tuple[PauliTerm, ...], float]:
-    """Prune relatively negligible Pauli terms and bound the removed operator.
+    """Remove Pauli terms that are small relative to the largest, and return a bound on the removed operator.
+
+    A term is removed when `|c| <= rtol * max_j |c_j|` and kept otherwise.
 
     Args:
-        terms: Exact Pauli-decomposition terms to inspect.
-        rtol: Relative cutoff applied to the largest coefficient magnitude.
+        terms (Sequence[PauliTerm]): Exact Pauli-decomposition terms to
+            inspect, such as `decomposition.terms`.
+        rtol (float): Default `1e-12`. Relative cutoff applied to the
+            largest coefficient magnitude.
 
     Returns:
-        The kept terms and ``sum(abs(c))`` over pruned coefficients. Since every
-        Pauli string has operator norm one, the latter bounds the operator norm
-        of the removed part.
+        kept (tuple[PauliTerm, ...]): The kept terms.
+        removed_mass (float): `sum(abs(c))` over the removed coefficients.
+            Since every Pauli string has operator norm one, it bounds the
+            operator norm of the removed part.
 
     Raises:
         ValueError: If ``rtol`` is negative or non-finite.
+
+    Examples:
+        The `1e-14 XI` term of `0.5 ZZ + 1e-14 XI` is below `1e-12` times
+        the largest coefficient:
+
+        >>> from qiskit.quantum_info import SparsePauliOp
+        >>> from nwqlib.subroutines.pauli_decomposition import (
+        ...     decompose_matrix_to_pauli, prune_pauli_terms_relative)
+        >>> A = SparsePauliOp(["ZZ", "XI"], [0.5, 1e-14]).to_matrix()
+        >>> kept, removed = prune_pauli_terms_relative(
+        ...     decompose_matrix_to_pauli(A).terms)
+        >>> print([term.label for term in kept], removed)
+        ['ZZ'] 1e-14
     """
 
     tolerance = float(rtol)
@@ -160,33 +187,52 @@ def decompose_matrix_to_pauli(
     rtol: float | None = None,
     pad_to_power_of_two: bool = False,
 ) -> PauliDecomposition:
-    """Decompose an explicit matrix with the shared I/X/Y/Z block transform.
+    """Write a square matrix as a sum of Pauli strings, `A = sum_P c_P P` with `c_P = 2**-n Tr(P A)`.
 
     This helper prepares matrix inputs for LCHS and later circuit-building
-    paths. Matrix dimensions must be powers of two unless explicit zero padding
-    is requested. ``operators._pauli.pauli_coefficients`` owns the transform,
-    including overflow-safe averages and vectorized level traversal. No matrix
+    paths. Matrix dimensions must be powers of two unless explicit zero
+    padding is requested. NWQLib's I/X/Y/Z block transform computes the
+    coefficients with overflow-safe componentwise averages at each level and
+    omits only computed exact-zero coefficients before the cutoff below. It
+    avoids the tiny-magnitude loss of Qiskit's zero-tolerance decomposition.
+    For dimension D and width q,
+    the arithmetic is `O(q D**2)` with `O(D**2)` array workspace. No matrix
     norm or reference decomposition is added to choose the pruning scale.
     Rounding already present in a densely assembled matrix can appear as tiny
     coefficients. Explicit ``rtol`` or ``prune_pauli_terms_relative`` can remove
     those terms, with the omitted coefficient mass reported by the latter.
 
     Args:
-        matrix: Square complex matrix to decompose.
-        atol: Explicit absolute coefficient cutoff. Zero preserves every
-            computed nonzero coefficient by default.
-        rtol: Relative cutoff against the largest computed coefficient.
-            ``None`` uses zero. The combined cutoff is max(atol, rtol*scale).
-        pad_to_power_of_two: Whether to zero-pad non-power-of-two matrices to
-            the next power-of-two dimension before decomposition.
+        matrix (array_like): Square complex matrix to decompose.
+        atol (float): Default `0.0`. Explicit absolute coefficient cutoff,
+            in the units of the matrix. Zero keeps every computed nonzero
+            coefficient.
+        rtol (float | None): Default `None`, which uses zero. Relative
+            cutoff against the largest computed coefficient. The combined
+            cutoff is `max(atol, rtol * max_P |c_P|)`, and a term is kept
+            when `|c_P|` exceeds it.
+        pad_to_power_of_two (bool): Default `False`. Whether to zero-pad a
+            non-power-of-two matrix to the next power-of-two dimension
+            before decomposition.
 
     Returns:
-        PauliDecomposition containing nonzero terms and embedding metadata.
+        decomposition (PauliDecomposition): The kept terms in
+            `decomposition.terms`, the dimensions, and the resolved cutoff
+            in `decomposition.atol`.
 
     Raises:
         ValueError: If the matrix is not square, the tolerance is negative, or a
             non-power-of-two dimension is provided without padding, or a
             coefficient magnitude exceeds the finite binary64 range.
+
+    Examples:
+        `[[1, 0.5], [0.5, -1]]` is `0.5 X + Z`:
+
+        >>> from nwqlib.subroutines.pauli_decomposition import (
+        ...     decompose_matrix_to_pauli)
+        >>> decomposition = decompose_matrix_to_pauli([[1.0, 0.5], [0.5, -1.0]])
+        >>> print([(t.label, t.coefficient) for t in decomposition.terms])
+        [('X', (0.5+0j)), ('Z', (1+0j))]
     """
 
     atol = finite_real(atol, "atol")

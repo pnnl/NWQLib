@@ -442,10 +442,14 @@ class QCELSFit(Record):
 
     Attributes:
         objective: Always the amplitude-eliminated complex least squares.
-        effective_grid: Grid size G of numerical.qcels_grid_size.
-        evaluations: Objective evaluations performed, at most
-            (1 + QCELS_BRACKET_EVALUATIONS)*G.
-        residual: Smallest objective value found, mean |z_p - a*exp(-i*p*theta)|**2.
+        effective_grid: Grid size `G = max(grid_size, 8*span + 1)` on
+            `[-pi, pi)`, with `grid_size` the requested setting and `span`
+            the largest minus the smallest power.
+        evaluations: Objective evaluations performed, at most `65*G`: the
+            grid points and 64 golden-section evaluations for each local
+            minimum of the grid.
+        residual: Smallest objective value found,
+            `mean |z_p - a*exp(-i*p*theta)|**2`.
         interval_method: Always ``unavailable``.
     """
 
@@ -464,7 +468,7 @@ class QPEInterval(Record):
     Attributes:
         low: Lower endpoint in ``frame``.
         high: Upper endpoint in ``frame``.
-        level: Nominal model level, numerical.QPE_INTERVAL_CONFIDENCE.
+        level: Nominal model level, 0.95.
         method: Interval construction, ``rwpe_gaussian_credible``.
         frame: Unwrapped phase turns centered on the reported phase, or
             energy in the requested operator units.
@@ -489,11 +493,12 @@ class QPEInterval(Record):
 class QPESample(Record):
     """One measured ancilla mean with the power, phase and observations it came from.
 
-    ``mean`` is the ancilla <Z> in [-1, 1]. For counts it equals
-    (zeros - ones)/(zeros + ones). ``raw_mean`` keeps an exact non-count mean
+    ``mean`` is the ancilla `<Z>` in [-1, 1]. For counts it equals
+    `(zeros - ones)/(zeros + ones)`. ``raw_mean`` keeps an exact non-count mean
     whose magnitude exceeded one within its roundoff window, and ``mean`` is
-    then the corresponding endpoint. The guide section "Meaning of the result"
-    states this convention.
+    then the corresponding endpoint. The guide section [Read the
+    result](../../algorithms/qpe.md#meaning-of-the-result) states this
+    convention.
 
     Attributes:
         experiment: Query name.
@@ -503,7 +508,7 @@ class QPESample(Record):
             host kernel evaluated. None for a trajectory point, which reads
             its quadrature from the ancilla X or Y expectation without an
             executed phase.
-        mean: Re(exp(i*s)*z_p) as measured, in [-1, 1].
+        mean: `Re(exp(i*s)*z_p)` as measured, in [-1, 1].
         raw_mean: Original exact mean when it lay just outside [-1, 1].
         zeros: Returned shots with outcome 0, None for exact readout.
         ones: Returned shots with outcome 1, None for exact readout.
@@ -1228,7 +1233,8 @@ class RWPEGaussian(Record):
     Attributes:
         mean: Posterior mean of the unwrapped phase in radians.
         standard_deviation: Posterior width in radians,
-            numerical.rwpe_scale(prior_std, processed steps).
+            `prior_std*((e-1)/e)**(k/2)` after k processed steps (Granade and
+            Wiebe, arXiv:2208.04526v1, Eq. (7b)).
     """
 
     mean: Real
@@ -1253,45 +1259,63 @@ class QPEExposure(Record):
 
 
 class QPEAnalysis(Result):
-    """QPE Result: the estimate, its scope and the samples it was computed from.
+    """Eigenvalue or eigenphase estimate from a QPE method, with the samples behind it.
 
-    Construction and uncertainty refer to the original Plan. The receipts of
-    the contributing observations record the points actually executed.
+    [`solve`][nwqlib.scientist.solve] returns it for `QCELS`, `SPE`, `RFE`
+    and `RWPE`, and `load_result` reopens a saved one. The answer is
+    `value`: the eigenvalue in the operator's unit for an `Eigenvalue`
+    output, or the eigenphase in turns, in [0, 1), for an `Eigenphase`
+    output. The phase is defined by
+    `U v = exp(2*pi*i*phase) v`, and for a Hamiltonian `U = exp(-i*tau*H)`,
+    so the eigenvalue includes the minus sign of that conversion.
+    `estimator_value` is None, and `complete` is False, when no estimate was
+    identified. Only RWPE reports an interval, the nominal 95-percent
+    interval of its Gaussian model. The estimate concerns the eigenvalues
+    present in the prepared state and does not identify the ground state.
+    `print(result)` shows the estimate with these limits, and
+    `result.analyze(grid_size=...)` reanalyzes QCELS or SPE from the same
+    samples. The fields below are read-only. The fields of
+    [`Result`][nwqlib.core.analysis.Result] are present too. Its
+    construction and uncertainty refer to the original Plan, and the
+    preparation records of the contributing observations record the points
+    actually run.
 
     Attributes:
-        estimator: ``qcels``, ``spe``, ``rfe`` or ``rwpe``.
-        estimator_value: Kernel value, energy in operator units for a
-            Hamiltonian or principal eigenphase in radians for a unitary.
+        estimator: `"qcels"`, `"spe"`, `"rfe"` or `"rwpe"`.
+        estimator_value: Estimator output: energy in operator units for a
+            Hamiltonian, or principal eigenphase in radians for a unitary.
             None when no estimate was identified.
         phase_turns: Eigenphase of U in turns, in [0, 1).
         interval: Nominal model interval, RWPE only.
-        samples: Reduced ancilla means, one per acquired value.
+        samples: Reduced ancilla means, one per measured value.
         missing: Names of planned queries without data.
         complete: True when all planned data are present and an estimate
             exists. For RWPE, every planned step has been processed.
         gaussian: RWPE posterior moments, None for the other estimators.
         processed_steps: RWPE updates applied.
-        controller_work: RWPE controller size units charged.
-        stop_reason: Why acquisition stopped, why no estimate is identified,
-            or, for QCELS, that the fit is aliased.
-        analysis_settings: Reanalysis settings, such as a changed grid_size.
+        controller_work: RWPE work units counted against `max_work`.
+        stop_reason: Why the measurement stopped, why no estimate is
+            identified, or, for QCELS, that the fit is aliased.
+        analysis_settings: Reanalysis settings, such as a changed `grid_size`.
         fit: QCELS search record, None for the other estimators.
-        exposure: Requested and received population of every count-mode SPE
-            or RFE query, empty otherwise.
+        exposure: Requested and received shots of every SPE or RFE query
+            measured with counts, empty otherwise.
         requested_exposure_complete: Whether every count query returned its
-            requested population, computed from all queries and separate from
-            ``complete``; None without count-mode Fourier queries.
-        minimum_effective_shots_per_draw: The exact rational min_q n_q/m_q as
-            (numerator, denominator), an effective exposure rather than a
-            fractional physical shot count; None without count queries.
-        rfe_coordinate_variance_upper: Upward binary64 publication of the
-            exact received-count proxy A = sum_u (m_u/M)**2 max(1/n_uR,
-            1/n_uI), an upper bound on each real and imaginary coordinate
+            requested shots, computed from all queries and separate from
+            `complete`. None without count-mode Fourier queries.
+        minimum_effective_shots_per_draw: The exact rational `min_q n_q/m_q`
+            of received shots n_q over draw multiplicity m_q, as
+            `(numerator, denominator)`, an effective number of shots per draw
+            rather than a fractional physical shot count. None without count
+            queries.
+        rfe_coordinate_variance_upper: The exact received-count proxy
+            `A = sum_u (m_u/M)**2 max(1/n_uR, 1/n_uI)`, rounded up to
+            binary64, an upper bound on each real and imaginary coordinate
             proxy of the sampled Fourier coefficients in units of squared
-            ancilla expectation (for SPE, 4*S**2*A bounds the CDF proxy with
-            its weight sum S). It concerns the conditional shot contribution
-            under independent stationary shots, not the random-draw term, and
-            gives no energy confidence interval.
+            ancilla expectation. For SPE, `4*S**2*A` bounds the CDF proxy
+            with its weight sum S. It concerns the conditional shot
+            contribution under independent stationary shots, not the
+            random-draw term, and gives no energy confidence interval.
     """
 
     estimator: Literal["qcels", "spe", "rfe", "rwpe"]
@@ -1447,16 +1471,24 @@ class QPEAnalysis(Result):
 
     @property
     def phase(self):
+        """Eigenphase of U in turns, in [0, 1), the same as `phase_turns`."""
         return self.phase_turns
 
     @property
     def eigenvalue(self):
+        """Energy estimate `estimator_value` in the operator's unit.
+
+        Raises:
+            AttributeError: For unitary-only input, which has no Hamiltonian
+                eigenvalue.
+        """
         if self.plan.reconstruction.tau is None:
             raise AttributeError("a unitary-only input has no Hamiltonian eigenvalue conversion")
         return self.estimator_value
 
     @property
     def value(self):
+        """The answer: `phase` for an `Eigenphase` output, otherwise `eigenvalue`."""
         from nwqlib.problems import Eigenphase
 
         return self.phase_turns if isinstance(self.plan.output, Eigenphase) else self.eigenvalue
@@ -1572,33 +1604,49 @@ DESCRIPTOR = AlgorithmDescriptor(
 
 
 class QPEVerification(Record):
-    """Explicit nominal spectral comparison in the estimator's target frame.
+    """Options for checking a QPE estimate against a dense reference spectrum.
 
-    SPE compares the lowest spectral cluster. Other estimators compare the
-    largest prepared cluster. Numerical grouping does not prove degeneracy.
+    Build it with keyword arguments, for example
+    `QPEVerification(tolerance=1e-3)`, and pass it to
+    `result.verify(checks=...)`. `tolerance` is the only required argument.
+    The check computes a nominal reference spectrum of the estimator's
+    target, H or U, and a QR projector. SPE compares the lowest spectral
+    cluster, and the other estimators compare the largest prepared cluster.
+    It returns `(receipt, facts)`, a record of the check and the facts that
+    compare `component_error` with `tolerance` and
+    `overlap_deficit = max(0, minimum_overlap - weight)` with zero.
+    Numerical grouping does not prove degeneracy. The check runs on
+    explicit dense data only, with no automatic Pauli expansion.
 
     Attributes:
-        tolerance: Accepted component discrepancy in the requested output
-            unit, the Problem's energy unit for an ``Eigenvalue`` output and
-            turns of circular distance for an ``Eigenphase`` output.
-        group_atol: Absolute tolerance for numerical spectral clustering, in
-            the unit of the compared eigenvalues. For a Hamiltonian target it
-            is in the Problem's energy unit and compares eigenvalues of H.
-            For a unitary target it is in radians and compares the principal
-            differences of eigenphase angles. It does not follow the output
-            unit, so an ``Eigenphase`` output of a Hamiltonian still groups
-            by energy.
-        minimum_overlap: Required projector weight, defaulting to SPE's declared eta or .9 otherwise.
-        materialize_preparation: Explicitly allow simulation of a supplied preparation to obtain its reference state.
-        reuse_only: Require matching existing spectrum and reference data instead of computing them.
-        max_bytes: Cap on known reference arrays.
-        max_work: Cap on declared reference work.
+        tolerance: Required, nonnegative. Accepted component discrepancy in
+            the requested output unit: the Problem's energy unit for an
+            `Eigenvalue` output, and turns of circular distance for an
+            `Eigenphase` output.
+        group_atol: Default `1e-8`, nonnegative. Absolute tolerance for
+            numerical spectral clustering, in the unit of the compared
+            eigenvalues. For a Hamiltonian target it is in the Problem's
+            energy unit and compares eigenvalues of H. For a unitary target it
+            is in radians and compares the principal differences of
+            eigenphase angles. It does not follow the output unit, so an
+            `Eigenphase` output of a Hamiltonian still groups by energy.
+        minimum_overlap: Default `None`, which uses SPE's declared eta, or
+            0.9 for the other estimators. Required projector weight, in
+            [0, 1].
+        materialize_preparation: Default `False`. `True` allows simulating a
+            supplied preparation circuit to obtain its reference state.
+        reuse_only: Default `False`. `True` requires existing spectral and
+            reference data whose target and preparation match, instead of
+            computing them.
+        max_bytes: Default 10 GB (decimal, `10_000_000_000` bytes). Limit on
+            the known bytes of reference arrays.
+        max_work: Default `1_000_000_000`. Limit on the declared reference
+            work.
     """
 
     tolerance: Nonnegative
     group_atol: Nonnegative = 1e-8
     minimum_overlap: Annotated[Real, Field(ge=0, le=1)] | None = None
-    """Required projector weight, defaulting to SPE's declared eta or .9 otherwise."""
     materialize_preparation: StrictBool = False
     reuse_only: StrictBool = False
     max_bytes: PositiveInt = DEFAULT_MAX_BYTES

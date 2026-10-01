@@ -9,6 +9,7 @@ from typing import Mapping, TypeAlias
 from nwqlib.serialization import FieldSerializedRecord
 
 ProviderParameter: TypeAlias = str | int | float | bool | None
+"""Type of one kernel or quadrature parameter value, a JSON scalar or `None`."""
 
 
 def _immutable_parameter_map(
@@ -30,14 +31,24 @@ def _immutable_parameter_map(
 
 @dataclass(frozen=True, kw_only=True)
 class ProviderConfig(FieldSerializedRecord):
-    """A provider request containing only explicitly supplied parameters.
+    """Choice of an LCHS kernel or k-quadrature rule, with its explicit parameters.
+
+    Build it with keyword arguments and pass it as `lchs_kernel=` or
+    `k_quadrature=` of [`LCHS`][nwqlib.algorithms.lchs.method.LCHS] or of
+    [`resolve_lchs_coefficient_plan`][nwqlib.algorithms.lchs.providers.resolve_lchs_coefficient_plan],
+    for example
+    `LCHS(lchs_kernel=ProviderConfig(implementation="near_optimal_eq7", parameters={"beta": 0.7}))`.
+    `implementation` is the only required argument. `LCHS` also accepts the
+    name alone or a dict with these two keys. The `lchs_kernel` and
+    `k_quadrature` rows of `LCHS` list the names and their parameters.
 
     Attributes:
-        implementation: Name to resolve in the selected kernel or quadrature registry.
-            Constructing this record alone does not check registry membership.
-        parameters: Explicit parameter names and JSON scalar values, stored in sorted
-            read-only order. Defaults and provider-specific domain checks are applied
-            by the selected resolver, not by this request record.
+        implementation: Required. Kernel or quadrature name. Building this
+            record does not check the name, and `LCHS` refuses an unknown
+            one.
+        parameters: Default empty. Parameter names mapped to JSON scalars
+            or `None`, stored sorted and read-only. The named rule supplies
+            the defaults and range checks when `LCHS` resolves it.
     """
 
     implementation: str
@@ -55,13 +66,20 @@ class ProviderConfig(FieldSerializedRecord):
 
 @dataclass(frozen=True, kw_only=True)
 class ResolvedProviderConfig(FieldSerializedRecord):
-    """A normalized provider configuration with defaults injected.
+    """Kernel or quadrature choice after its defaults and checks are applied.
+
+    It appears in the `resolved_lchs_kernel` and `resolved_k_quadrature`
+    fields of an
+    [`LCHSCoefficientPlan`][nwqlib.algorithms.lchs.providers.LCHSCoefficientPlan].
+    The fields below are read-only.
 
     Attributes:
-        implementation: Actual resolved implementation name. An algebraic unitary
-            reduction can differ from the originally requested quadrature name.
-        parameters: Complete resolved scalar parameters in sorted read-only order;
-            together with the implementation name they define the configuration identity.
+        implementation: Name of the rule used. For an exactly zero L the
+            algebraic reduction `"unitary_reduction"` replaces the requested
+            quadrature name.
+        parameters: Every parameter after defaults, stored sorted and
+            read-only. Together with `implementation`, they identify the
+            configuration.
     """
 
     implementation: str

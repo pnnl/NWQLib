@@ -54,16 +54,29 @@ from nwqlib.subroutines.block_encoding.core import (
 
 @dataclass(frozen=True, kw_only=True)
 class BandSpecification:
-    """Scalable periodic banded-Toeplitz input: bands only, never a dense matrix.
+    """A periodic banded Toeplitz (circulant) matrix given by its bands, without forming the matrix.
+
+    The matrix is `A = sum_b beta_b S^b` with the cyclic shift
+    `S |x> = |x + 1 mod 2**num_qubits>`. Build it with keyword arguments,
+    for example
+    `BandSpecification(offsets=(-1, 0, 1), coefficients=(-1, 2, -1), num_qubits=3)`
+    for `A = 2 I - S - S^-1` on 8 points, and pass it to
+    [`build_block_encoding`][nwqlib.subroutines.block_encoding.build_block_encoding].
+    All three arguments are required. The builder checks that `num_qubits`
+    is positive, that there is one coefficient per offset and at least one
+    band, that the offsets are distinct modulo `2**num_qubits` and that no
+    coefficient is zero.
 
     This specification is periodic-only. For broader structured banded
     block encodings, see Camps et al., arXiv:2203.10236v4, Sec. 4.
 
     Args:
-        offsets: Signed band offsets ``b``; band ``b`` couples ``|x>`` to
-            ``|x + b mod 2**num_qubits>``.
-        coefficients: One complex coefficient ``beta_b`` per offset.
-        num_qubits: Number of system qubits (dimension ``2**num_qubits``).
+        offsets: Signed band offsets `b`. Band `b`
+            couples `|x>` to `|x + b mod 2**num_qubits>`.
+        coefficients: One nonzero complex coefficient
+            `beta_b` per offset.
+        num_qubits: Number of system qubits (dimension
+            `2**num_qubits`).
     """
 
     offsets: tuple[int, ...]
@@ -167,29 +180,30 @@ def build_banded_block_encoding(
     *,
     requested_implementation: str = "banded",
 ) -> BlockEncoding:
-    """Block-encode a periodic banded Toeplitz operator as an LCU of shifts.
+    """Block-encode a periodic banded Toeplitz operator as a linear combination of cyclic shifts.
 
-    The address PREP is the direct magnitude/phase tree of
-    ``subroutines/state_preparation/direct.py`` over the 2**a band
-    addresses. It is not a declared PREP block, so a Run's
-    ``max_direct_amplitudes`` does not apply. Planning admits it in
-    ``core._banded_plan`` at ``64 * 2**a * (q + 16)`` bytes and
-    ``32 * 2**a * q**2`` work, and with at most 2**q distinct bands that
-    allows at most 2**13 addresses at a ``max_work`` of 10**8 and 2**16 at
-    the default of 10**9, which QLS shares.
+    The address PREP is the direct magnitude and phase tree of
+    [`build_qiskit_state_preparation`][nwqlib.subroutines.state_preparation.direct.build_qiskit_state_preparation]
+    over the `2**a` band addresses. It is not a declared PREP block, so a
+    Run's `max_direct_amplitudes` does not apply to it. Planning checks it
+    at `64 * 2**a * (q + 16)` bytes and `32 * 2**a * q**2` work for q
+    system qubits, and with at most `2**q` distinct bands that allows at
+    most `2**13` addresses at a `max_work` of `10**8` and `2**16` at the
+    default of `10**9`, which QLS shares.
 
     Args:
-        operator: A ``BandSpecification``; no dense matrix is materialized.
-            ``build_block_encoding`` detects bands in a dense matrix.
-        requested_implementation: Implementation name the caller asked for.
+        operator (BandSpecification): The bands. No dense matrix is formed.
+            `build_block_encoding` detects bands in a dense matrix.
+        requested_implementation (str): Default `"banded"`. Implementation
+            name recorded as requested.
 
     Returns:
-        BlockEncoding with ``alpha = sum_b |beta_b|``,
-        ``ceil(log2 num_bands)`` ancillas in the low-order ``lcu_control``
-        register, and zero algebraic error for the given specification.
+        encoding (BlockEncoding): The circuit with `alpha = sum_b |beta_b|`,
+            `ceil(log2 num_bands)` ancillas in the low-order `lcu_control`
+            register, and zero algebraic error for the given specification.
 
     Raises:
-        TypeError: If ``operator`` is not a ``BandSpecification``.
+        TypeError: If `operator` is not a `BandSpecification`.
         ValueError: For invalid band specifications.
     """
     from nwqlib.subroutines.state_preparation import build_qiskit_state_preparation

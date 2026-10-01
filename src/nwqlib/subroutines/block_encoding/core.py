@@ -80,22 +80,34 @@ from nwqlib.subroutines._serialization import array_to_json
 
 @dataclass(frozen=True, kw_only=True)
 class BlockEncoding:
-    """Block-encoding circuit and its scientific bookkeeping.
+    """A block-encoding circuit with its `alpha`, ancilla count and error bound.
 
-    Args:
+    [`build_block_encoding`][nwqlib.subroutines.block_encoding.build_block_encoding],
+    [`build_block_encoding_from_plan`][nwqlib.subroutines.block_encoding.build_block_encoding_from_plan]
+    and [`build_banded_block_encoding`][nwqlib.subroutines.block_encoding.build_banded_block_encoding]
+    return it. The circuit is the answer: its all-zero ancilla block is
+    `A / alpha`, which
+    [`block_encoding_top_left`][nwqlib.subroutines.block_encoding.block_encoding_top_left]
+    reads from the circuit's unitary. Construction requires a finite
+    positive `alpha`, a finite nonnegative `error_bound` when one is given,
+    and nonnegative integer widths. These checks do not inspect the circuit
+    or prove its operator relation. The fields below are read-only.
+
+    Attributes:
         circuit: Unitary circuit whose all-zero ancilla block encodes
-            ``A / alpha``.
-        alpha: Subnormalization ``alpha``; a scientific output, never a
-            hidden constant.
+            `A / alpha`.
+        alpha: Subnormalization `alpha` in the units of `A`.
         num_ancillas: Number of ancilla qubits (placed before the system
             register, low-order bits).
         system_qubits: Number of system qubits.
         error_bound: Operator-norm bound on
-            ``|| A - alpha * encoded block ||``, or None when unavailable.
-        implementation: Resolved implementation name.
-        metadata: JSON-like construction provenance and implementation notes.
-            The top-level fields above are canonical for the subnormalization,
-            ancilla count, error, and resolved implementation.
+            `|| A - alpha * encoded block ||` in the units of `A`, or None
+            when unavailable.
+        implementation: Construction used: `"multiplexed_pauli"`,
+            `"banded"` or `"dense_dilation"`.
+        metadata: JSON-like record of how the circuit was built. Where it
+            repeats the subnormalization, ancilla count, error or
+            construction, the fields above are the values to use.
     """
 
     circuit: QuantumCircuit
@@ -132,61 +144,69 @@ class BlockEncoding:
 
 @dataclass(frozen=True, kw_only=True)
 class BlockEncodingPlan:
-    """Circuit-free record of the block encoding to build, fixed before any circuit exists.
+    """The block encoding to build, chosen before any circuit exists.
 
-    ``plan_block_encoding`` computes it, and ``build_block_encoding_from_plan``
-    builds exactly this implementation from ``source`` and ``decomposition``
-    without choosing again.
+    [`plan_block_encoding`][nwqlib.subroutines.block_encoding.plan_block_encoding]
+    returns it, and
+    [`build_block_encoding_from_plan`][nwqlib.subroutines.block_encoding.build_block_encoding_from_plan]
+    builds exactly this construction from `source` and `decomposition`
+    without choosing again. `alpha`, `num_ancillas` and `error_bound` are
+    known before the circuit is built. Construction requires a finite
+    `alpha`, positive except for `"exact_zero"`, a finite nonnegative
+    `error_bound` and nonnegative integer widths. The fields below are
+    read-only.
 
     Attributes:
-        requested_implementation: Name the caller passed: ``"auto"``,
-            ``"pauli_lcu"``, ``"multiplexed_pauli"``, ``"banded"`` or
-            ``"dense_dilation"``.
+        requested_implementation: Name the caller passed: `"auto"`,
+            `"pauli_lcu"`, `"multiplexed_pauli"`, `"banded"` or
+            `"dense_dilation"`.
         implementation: Construction the builder will use:
-            ``"multiplexed_pauli"``, ``"banded"`` or ``"dense_dilation"``.
-            The LCHS compiled selection also records ``"exact_zero"`` for the
-            H part of ``A = L + iH`` when relative pruning keeps none of its
-            Pauli terms. No encoding is built for that part.
+            `"multiplexed_pauli"`, `"banded"` or `"dense_dilation"`.
+            LCHS's compiled QSP SELECT also records `"exact_zero"` for the
+            H part of `A = L + iH` when relative pruning keeps none of its
+            Pauli terms. No encoding is built for that part: the record has
+            zero `alpha`, error and ancilla count, no source and no
+            decomposition, it cannot be built into a circuit, and it
+            introduces no division by zero.
         alpha: Subnormalization in the units of A. The all-zero ancilla
-            block of the unitary is ``A / alpha``. It is the Pauli
+            block of the unitary is `A / alpha`. It is the Pauli
             coefficient 1-norm for multiplexed Pauli, the band-coefficient
-            1-norm for banded, and ``||A||_2`` or the supplied normalization
-            for dense dilation. Zero only for ``exact_zero``.
-        num_ancillas: Ancilla qubits of the encoding: ``ceil(log2 L)`` for
-            L Pauli terms, ``ceil(log2 B)`` for B bands, 1 for dense
-            dilation and 0 for ``exact_zero``.
-        system_qubits: Number n of system qubits. A acts on dimension ``2**n``.
-        error_bound: Upper bound on ``||A - alpha * block||_2`` in the units
-            of A. ``plan_block_encoding`` sets 0 for multiplexed Pauli, the
+            1-norm for banded, and `||A||_2` or the supplied normalization
+            for dense dilation. Zero only for `"exact_zero"`.
+        num_ancillas: Ancilla qubits of the encoding: `ceil(log2 L)` for
+            L Pauli terms, `ceil(log2 B)` for B bands, 1 for dense
+            dilation and 0 for `"exact_zero"`.
+        system_qubits: Number n of system qubits. A acts on dimension `2**n`.
+        error_bound: Upper bound on `||A - alpha * block||_2` in the units
+            of A. `plan_block_encoding` sets 0 for multiplexed Pauli, the
             circulant-detection bound for a detected banded input, and the
             outward-rounded normalization residual bound for dense dilation.
-            A caller that pruned Pauli terms first, such as the LCHS compiled
-            selection, adds the pruned coefficient mass.
-        source: Input the builder reads: the complex128 ``2**n``-square
+            A caller that pruned Pauli terms first, such as LCHS's compiled
+            QSP SELECT, adds the pruned coefficient mass.
+        source: Input the builder reads: the complex128 `2**n`-square
             matrix for dense dilation (the converted input, or the dense
-            expansion of a Pauli input), the ``BandSpecification`` for
+            expansion of a Pauli input), the `BandSpecification` for
             banded, the converted dense matrix or None (Pauli input) for
-            multiplexed Pauli, and None for ``exact_zero``.
-        decomposition: The ``PauliDecomposition`` whose terms SELECT applies
+            multiplexed Pauli, and None for `"exact_zero"`.
+        decomposition: The `PauliDecomposition` whose terms SELECT applies
             for multiplexed Pauli. For dense dilation it is the Pauli form of
             the input, supplied or computed for the cost comparison, or None
             when dense dilation was requested for a dense matrix.
-            ``plan_block_encoding`` sets None for banded plans. The LCHS
-            compiled selection attaches its kept terms to every plan it
-            returns except ``exact_zero``, which has None.
-        detail: JSON-like routing record. After a Pauli cost comparison it
-            holds the SELECT census of ``_pauli_plan_detail`` (term count,
-            padded table size, per-qubit effective control counts, the
-            per-qubit projected address supports and CX
-            counts), the predicted per-query CX of both candidates, the Pauli
-            alpha and, when it was computed, the dense-dilation alpha, and
-            the reason for the choice. For banded it
-            holds the band count, the detection route and the gate census.
-            It is empty when dense dilation was requested for a dense matrix.
-            The Pauli and dense-dilation builders copy it into the circuit
-            metadata, the Pauli builder builds SELECT from its
-            ``dependency_supports``, and the banded builder reads its
-            detection route.
+            `plan_block_encoding` sets None for banded plans. LCHS's compiled
+            QSP SELECT attaches its kept terms to every plan it returns
+            except `"exact_zero"`, which has None.
+        detail: JSON-like record of the choice. After a Pauli cost
+            comparison it holds the SELECT gate counts (term count, padded
+            table size, per-qubit effective control counts, the per-qubit
+            projected address supports and CX counts), the predicted
+            per-query CX of both candidates, the Pauli alpha and, when it
+            was computed, the dense-dilation alpha, and the reason for the
+            choice. For banded it holds the band count, how the bands were
+            detected and the gate counts. It is empty when dense dilation
+            was requested for a dense matrix. The Pauli and dense-dilation
+            builders copy it into the circuit metadata, the Pauli builder
+            builds SELECT from its `dependency_supports`, and the banded
+            builder reads how the bands were detected.
     """
 
     requested_implementation: str
@@ -214,7 +234,7 @@ class BlockEncodingPlan:
             raise ValueError("error_bound must be nonnegative")
 
     def to_dict(self) -> dict[str, Any]:
-        """Return the circuit-free sizing and routing record."""
+        """Return the plan's scalar fields and its `detail` record as JSON-like data."""
 
         return {
             "requested_implementation": self.requested_implementation,
@@ -247,13 +267,18 @@ def _json_ready(value: Any) -> Any:
 def block_encoding_top_left(unitary: Any, *, num_ancillas: int) -> np.ndarray:
     """Return the all-zero ancilla block of a block-encoding unitary matrix.
 
+    The ancilla register precedes the system register, so the ancilla bits
+    are the low-order bits of Qiskit's little-endian index, and the block
+    entry `(A / alpha)[s', s]` sits at row `s' * 2**num_ancillas` and column
+    `s * 2**num_ancillas`. The function reads the matrix at that stride.
+
     Args:
-        unitary: Full unitary matrix in the module register convention
-            (ancilla bits in the low-order positions).
-        num_ancillas: Number of ancilla qubits.
+        unitary (array_like): Full unitary matrix of the circuit, for
+            example `Operator(encoding.circuit).data`.
+        num_ancillas (int): Number of ancilla qubits.
 
     Returns:
-        The encoded ``A / alpha`` block.
+        block (numpy.ndarray): The encoded `A / alpha` block.
     """
 
     matrix = np.asarray(unitary, dtype=complex)
@@ -1114,28 +1139,47 @@ def plan_block_encoding(
     max_bytes: int = DEFAULT_MAX_BYTES,
     max_work: int = DEFAULT_MAX_BLOCK_WORK,
 ) -> BlockEncodingPlan:
-    """Resolve one circuit-free structural block-encoding plan.
+    """Choose a block encoding and compute its `alpha`, width and error bound without building it.
 
-    A supplied ``normalization`` becomes ``alpha`` only when the plan uses
-    dense dilation. Without one, dense dilation uses the optimal spectral
-    normalization ``||A||_2``. Pauli SELECT always uses its coefficient
-    1-norm.
-    Arithmetic failures in structural error bounds propagate rather than
-    selecting another encoding without the required bound.
-    For a ``PauliDecomposition``, the target operator is its kept terms.
-    The encoding bound does not include loss from an earlier decomposition,
-    so its caller must carry any original-to-kept approximation separately.
-
-    An exact circulant, either a supplied ``BandSpecification`` or structure
-    detected with zero error, routes to ``banded`` first. Otherwise
-    ``"auto"`` compares the per-query CX laws of multiplexed Pauli SELECT and
-    dense dilation and selects the smaller CX bound. A tie selects the smaller
-    alpha, with dense dilation winning when both alpha values are equal. Automatic
+    An exact circulant, either a supplied `BandSpecification` or structure
+    detected with zero error, goes to `banded` first. Otherwise `"auto"`
+    compares the per-query CX counts of multiplexed Pauli SELECT and dense
+    dilation and selects the smaller. A tie selects the smaller alpha, with
+    dense dilation winning when both alpha values are equal. Automatic
     routing never introduces an approximate structure. An explicit
-    ``"banded"`` request keeps the detector tolerance and records the
-    resulting bound as ``error_bound``. ``build_block_encoding_from_plan``
-    builds the returned plan's implementation without comparing candidates
-    again.
+    `"banded"` request keeps the detector tolerance and records the
+    resulting bound as `error_bound`.
+    [`build_block_encoding_from_plan`][nwqlib.subroutines.block_encoding.build_block_encoding_from_plan]
+    builds the returned plan's construction without comparing candidates
+    again. Pass it the same `max_bytes` and `max_work`.
+
+    A supplied `normalization` becomes `alpha` only when the plan uses
+    dense dilation. Without one, dense dilation uses the optimal spectral
+    normalization `||A||_2`. Pauli SELECT always uses its coefficient
+    1-norm. Arithmetic failures in structural error bounds propagate rather
+    than selecting another encoding without the required bound. For a
+    `PauliDecomposition`, the target operator is its kept terms. The
+    encoding bound does not include loss from an earlier decomposition, so
+    its caller must carry any original-to-kept approximation separately.
+    The plan computes the normalization without keeping the singular
+    vectors, so building it later computes its own SVD for the synthesis.
+
+    Args:
+        operator (array_like | PauliDecomposition | BandSpecification): The
+            operator `A`, as for `build_block_encoding`.
+        implementation (str): `"auto"` (default), `"pauli_lcu"`,
+            `"multiplexed_pauli"`, `"banded"` or `"dense_dilation"`.
+        normalization (float | None): `alpha` to use if the plan is a dense
+            dilation. Default `None`, which selects `||A||_2`.
+        max_bytes (int): Default 10 GB (decimal, `10_000_000_000` bytes).
+            Limit on the array bytes of each planning step, as for
+            `build_block_encoding`.
+        max_work (int): Default `1_000_000_000`. Limit on the work of each
+            planning step, as for `build_block_encoding`.
+
+    Returns:
+        plan (BlockEncodingPlan): The chosen construction with its `alpha`,
+            `num_ancillas` and `error_bound`.
 
     Raises:
         ValueError: For unknown implementation names or operator/implementation
@@ -1514,41 +1558,73 @@ def build_block_encoding(
     max_bytes: int = DEFAULT_MAX_BYTES,
     max_work: int = DEFAULT_MAX_BLOCK_WORK,
 ) -> BlockEncoding:
-    """Build a block encoding through the implementation-selection slot.
+    """Build a block-encoding circuit of a square matrix, a Pauli sum or a circulant.
+
+    The function chooses the construction as
+    [`plan_block_encoding`][nwqlib.subroutines.block_encoding.plan_block_encoding]
+    does and builds it. It computes one dense SVD and uses it for the
+    normalization, an equal-cost comparison and the completion. The
+    [constructions table](block_encoding.md#constructions)
+    lists what each construction encodes, its `alpha` and its ancillas.
 
     Args:
-        operator: A dense square matrix (power-of-two dimension), a
-            ``PauliDecomposition`` whose kept terms define the operator, or a
-            ``BandSpecification`` describing a periodic banded Toeplitz
-            operator without materializing it.
-        implementation: ``"auto"``, ``"pauli_lcu"``, ``"banded"``, or
-            ``"dense_dilation"``. ``"multiplexed_pauli"`` is accepted as the
-            resolved name of ``"pauli_lcu"``. ``"auto"`` resolves banded
-            structure first, then compares the dependency-projected Pauli and
-            dense-dilation per-query structural costs without building either
-            candidate.
-        max_bytes: Limit in bytes on the array data that each planning or
+        operator (array_like | PauliDecomposition | BandSpecification): A
+            dense square matrix (power-of-two dimension), a
+            `PauliDecomposition` whose kept terms define the operator, or a
+            `BandSpecification` describing a periodic banded Toeplitz
+            operator without forming its matrix.
+        implementation (str): `"auto"` (default), `"pauli_lcu"`,
+            `"banded"`, or `"dense_dilation"`. `"multiplexed_pauli"` is
+            accepted as the resolved name of `"pauli_lcu"`. `"auto"` looks
+            for exact banded structure first, then compares the per-query CX
+            counts of the Pauli and dense-dilation constructions without
+            building either one.
+        max_bytes (int): Default 10 GB (decimal, `10_000_000_000` bytes).
+            Limit in bytes on the array data that each planning or
             construction step holds at the same time, checked before the
             step allocates it. NumPy, LAPACK and Qiskit internal workspace
             and Python object overhead are not counted, except in the
-            circulant classification of a Pauli plan: ``_admit_pauli_plan``
-            charges its Python integers, parsed tuples, Fraction wrappers
-            and dictionary entries, and a fixed allowance
-            (``BOOKKEEPING_BYTES``) for scalar bookkeeping and ndarray
-            headers.
-        max_work: Limit on the work of each step in the size units of
-            ``_admit_dense_input`` and ``_admit_pauli_plan``, for example
-            ``8 d**3`` for a dense SVD. Planning, the dense SVD and
-            construction are each checked against it separately.
+            circulant classification of a Pauli input, which counts its
+            Python integers, parsed tuples, Fraction wrappers and dictionary
+            entries, and a fixed allowance of 65,536 bytes for scalar
+            bookkeeping and ndarray headers.
+        max_work (int): Default `1_000_000_000`. Limit on the work of each
+            step, in NWQLib's work units, which estimate scalar operations:
+            `d**3` for a product of two d-square matrices and `8 d**3` for
+            a dense SVD.
+            Planning, the dense SVD and construction are each checked
+            against it separately.
 
     Returns:
-        BlockEncoding built by the resolved implementation.
+        encoding (BlockEncoding): The circuit with its `alpha`,
+            `num_ancillas` and `error_bound`.
 
     Raises:
-        ValueError: For unknown implementation names or operator/implementation
-            mismatches.
+        ValueError: For unknown implementation names, operator and
+            implementation mismatches, or a step that exceeds `max_bytes` or
+            `max_work`.
         OverflowError: If structural error-bound arithmetic overflows.
         FloatingPointError: If a structural error bound is nonfinite.
+
+    Examples:
+        `A = [[1, 0.5], [0.5, -1]]` has spectral norm
+        `sqrt(5)/2 = 1.1180339887...`. For this one-qubit matrix `"auto"`
+        chooses the one-ancilla dense dilation, whose `alpha` is that norm,
+        and `alpha` times the all-zero ancilla block of the circuit's
+        unitary is `A`:
+
+        >>> import numpy as np
+        >>> from qiskit.quantum_info import Operator
+        >>> from nwqlib.subroutines.block_encoding import (
+        ...     block_encoding_top_left, build_block_encoding)
+        >>> A = np.array([[1.0, 0.5], [0.5, -1.0]])
+        >>> encoding = build_block_encoding(A)
+        >>> print(encoding.implementation, round(encoding.alpha, 10))
+        dense_dilation 1.1180339887
+        >>> U = Operator(encoding.circuit).data
+        >>> block = block_encoding_top_left(U, num_ancillas=1)
+        >>> print(np.allclose(encoding.alpha * block, A))
+        True
     """
 
     selected_svd = None
@@ -1567,7 +1643,23 @@ def build_block_encoding(
 
 def build_block_encoding_from_plan(plan: BlockEncodingPlan, *, max_bytes=DEFAULT_MAX_BYTES,
                                    max_work=DEFAULT_MAX_BLOCK_WORK) -> BlockEncoding:
-    """Build exactly the implementation and structure resolved by ``plan``."""
+    """Build the circuit of a `BlockEncodingPlan` without choosing again.
+
+    Args:
+        plan (BlockEncodingPlan): A plan from `plan_block_encoding`.
+        max_bytes (int): Default 10 GB (decimal, `10_000_000_000` bytes).
+            Pass the value used for the plan.
+        max_work (int): Default `1_000_000_000`. Pass the value used for
+            the plan.
+
+    Returns:
+        encoding (BlockEncoding): The circuit of `plan.implementation`, with
+            the plan's `alpha`, `num_ancillas` and `error_bound`.
+
+    Raises:
+        ValueError: If a construction step exceeds `max_bytes` or
+            `max_work`.
+    """
     return _build_block_encoding_from_plan(plan, max_bytes=max_bytes, max_work=max_work)
 
 

@@ -26,47 +26,56 @@ def _source(name):
 
 
 def signed_pauli_cx_bound(index_qubits: int, system_qubits: int, *, controlled=False) -> int:
-    """Native CX slot upper bound, including UCG completion and sign diagonal.
+    """Return an upper bound on the CX gates of a signed Pauli SELECT, optionally with one control.
 
-    L=2**a labels give <=3(L-1) CX per system-qubit UCG, plus <=L-2
-    sign-diagonal CX. One extra control costs <=6 CX per existing CX and
-    <=2 CX per one-qubit operation (per UCG: L core slots and 2L-1
-    completion-diagonal rotations; also L-1 sign-diagonal rotations).
-    Global phase becomes a one-qubit phase under control: zero CX, not zero work.
-    Exact dependency projection can reduce these bounds; hardware cost is unknown.
+    With `a = index_qubits`, `L = 2**a` labels and `q = system_qubits`, the bound
+    counts the CX positions of the signed Pauli SELECT construction of
+    [`select_signed_pauli`][nwqlib.blocks.selection.select_signed_pauli]:
 
-    This is NWQLib's own count of ``subroutines._semantic.signed_pauli_select``,
-    with a = index_qubits, L = 2**a and q = system_qubits:
-
-    - Each system qubit receives one uniformly controlled one-qubit gate
-      (UCG) with a controls. Qiskit's exact ``UCGate`` construction
-      (``up_to_diagonal=False``) uses L one-qubit core gates and L-1 CX,
-      followed by an exact completion diagonal on a+1 qubits. This core is
-      the decomposition of Bergholm, Vartiainen, Mottonen and Salomaa,
-      arXiv:quant-ph/0410066v2, Sec. III, pp. 3-4, drawn in Fig. 6(a),
-      p. 5, which implements a UCG with k controls by 2**k one-qubit gates
-      and 2**k - 1 CNOTs up to one diagonal (k+1)-qubit gate. In Qiskit 2.5.2,
+    - Each system qubit receives one uniformly controlled one-qubit gate (UCG)
+      with a controls. Qiskit's exact `UCGate` construction
+      (`up_to_diagonal=False`) uses L one-qubit core gates and `L-1` CX, followed
+      by an exact completion diagonal on `a+1` qubits. This core is the
+      decomposition of Bergholm, Vartiainen, Mottonen and Salomaa,
+      arXiv:quant-ph/0410066v2, Sec. III, pp. 3-4, drawn in Fig. 6(a), p. 5,
+      which implements a UCG with k controls by `2**k` one-qubit gates and
+      `2**k - 1` CNOTs up to one diagonal `(k+1)`-qubit gate. In Qiskit 2.5.2,
       the lower bound of the declared dependency, a random UCGate with
-      a = 1, ..., 4 lowers to exactly 3(L-1) CX at optimization level 0,
+      `a = 1, ..., 4` transpiles to exactly `3(L-1)` CX at optimization level 0,
       matching the per-UCG total below.
-    - A diagonal on m qubits costs 2**m - 2 CX and 2**m - 1 Rz rotations.
+    - A diagonal on m qubits costs `2**m - 2` CX and `2**m - 1` Rz rotations.
       Shende, Bullock and Markov, arXiv:quant-ph/0406176v5, Theorem 7 (p. 10)
-      splits a diagonal into a multiplexed Rz with m-1 select bits and a
-      diagonal on the remaining m-1 qubits. Their Theorem 8 (p. 11) gives
-      2**k CX for a multiplexed rotation with k select bits. Summing over
-      k = 1, ..., m-1 gives the count. The completion diagonal (m = a+1)
-      therefore adds 2L-2 CX, so each UCG costs 3(L-1) CX.
-    - The coefficient sign diagonal on the index register (m = a) adds at
-      most L-2 CX and L-1 rotations.
+      splits a diagonal into a multiplexed Rz with `m-1` select bits and a
+      diagonal on the remaining `m-1` qubits. Their Theorem 8 (p. 11) gives
+      `2**k` CX for a multiplexed rotation with k select bits. Summing over
+      `k = 1, ..., m-1` gives the count. The completion diagonal (`m = a+1`)
+      therefore adds `2L-2` CX, so each UCG costs `3(L-1)` CX.
+    - The coefficient sign diagonal on the index register (`m = a`) adds at most
+      `L-2` CX and `L-1` rotations.
 
-    The uncontrolled total is ``3q(L-1) + max(0, L-2)``. With one control,
-    each CX becomes a Toffoli of 6 CX and one-qubit gates, and each of the
-    ``q(3L-1) + L-1`` one-qubit operations becomes a controlled one-qubit
-    gate of at most 2 CX (the two-CX circuit of Shende, Bullock and Markov,
+    The uncontrolled total is `3q(L-1) + max(0, L-2)`. With one control, each CX
+    becomes a Toffoli of 6 CX and one-qubit gates, and each of the
+    `q(3L-1) + L-1` one-qubit operations becomes a controlled one-qubit gate of
+    at most 2 CX (the two-CX circuit of Shende, Bullock and Markov,
     arXiv:quant-ph/0406176v5, Sec. 3.1, p. 9). The six-CX Toffoli is the
-    textbook circuit reproduced
-    by Shende and Markov, arXiv:0803.2316v1, Fig. 1, p. 3. Their Theorem 1
-    shows that no Toffoli circuit of CX and one-qubit gates uses fewer CX.
+    textbook circuit reproduced by Shende and Markov, arXiv:0803.2316v1, Fig. 1,
+    p. 3. Their Theorem 1 shows that no Toffoli circuit of CX and one-qubit
+    gates uses fewer CX. A global phase becomes a one-qubit phase under control,
+    which costs zero CX but is not zero work. Removing exact dependencies can
+    lower these counts, and hardware cost is unknown.
+
+    Args:
+        index_qubits (int): Nonnegative width a of the label register.
+        system_qubits (int): Nonnegative system width q.
+        controlled (bool): Count one added coherent control.
+
+    Returns:
+        bound (int): The bound `3q(L-1) + max(0, L-2)`, or with `controlled=True`
+            `6 (3q(L-1) + max(0, L-2)) + 2 (q(3L-1) + L-1)`.
+
+    Raises:
+        ValueError: If a width is negative or not an integer, or `controlled` is
+            not a bool.
     """
     if any(type(value) is not int or value < 0 for value in (index_qubits, system_qubits)) or type(controlled) is not bool:
         raise ValueError("CX law requires nonnegative widths and a boolean control flag")
@@ -76,7 +85,26 @@ def signed_pauli_cx_bound(index_qubits: int, system_qubits: int, *, controlled=F
 
 
 def pauli_readout_cx_bound(index_qubits: int, system_qubits: int, *, controlled=False) -> int:
-    """Same UCG core/completion bound as SELECT, with no coefficient sign diagonal."""
+    """Return an upper bound on the CX gates of a Pauli label readout block, optionally with one control.
+
+    The readout uses the same UCG core and completion diagonal per system qubit
+    as [`signed_pauli_cx_bound`][nwqlib.blocks.selection.signed_pauli_cx_bound],
+    without the coefficient sign diagonal. With `L = 2**a`, the bound is that
+    function's value minus `max(0, L-2)` uncontrolled, or minus
+    `6 max(0, L-2) + 2 (L-1)` with one control.
+
+    Args:
+        index_qubits (int): Nonnegative width a of the label register.
+        system_qubits (int): Nonnegative system width q.
+        controlled (bool): Count one added coherent control.
+
+    Returns:
+        bound (int): The CX bound.
+
+    Raises:
+        ValueError: If a width is negative or not an integer, or `controlled` is
+            not a bool.
+    """
     bound = signed_pauli_cx_bound(index_qubits, system_qubits, controlled=controlled)
     size = 1 << index_qubits
     sign_cx = max(0, size - 2)
@@ -177,21 +205,20 @@ def _readout_circuit(block, arguments, method_context):
 
 @dataclass(frozen=True, eq=False, init=False, slots=True)
 class SelectedBlock:
-    """Immutable selected record and explicitly bound trusted native code.
+    """A selected block: its portable record and the trusted code that builds its circuit.
 
-    The binding is what connects a portable selection to its native lowering.
-    Lowering accepts a block only when its record is the exact selected
-    definition named by the Program, so a record loaded from JSON, or an
-    equal-looking input, cannot attach a different circuit. A control or
-    adjoint keeps the live base block instead of its own constructor, so the
-    base's realized gate and global phase remain the single source of the
-    transformed action.
+    The `select_*` functions and `transform_block` return it, and
+    [`SelectedBlock.bind`][nwqlib.blocks.selection.SelectedBlock.bind] builds one
+    for a new kind of block. A Plan binds the blocks its Program calls, and
+    [`lower_qiskit`][nwqlib.blocks.lowering.lower_qiskit] accepts a block only when
+    its record is exactly the selected definition the Program names, so a record
+    loaded from JSON or an equal-looking input cannot attach a different circuit.
+    A controlled or adjoint block keeps its live base block instead of its own
+    constructor, so the base's gates and global phase remain the single source of
+    the transformed action. Direct construction raises `TypeError`.
 
     Attributes:
-        record: Portable selected definition.
-        _payload: Actual admitted native input or immutable construction tuple.
-        _base: Selected base for one control and/or adjoint; no global cache.
-        _constructor: Live leaf constructor; never loaded from portable provenance.
+        record: The [`SelectedDefinition`][nwqlib.blocks.records.SelectedDefinition].
     """
 
     record: SelectedDefinition
@@ -204,13 +231,31 @@ class SelectedBlock:
 
     @classmethod
     def bind(cls, record, *, payload=None, base=None, constructor=None):
-        """Bind trusted code to its exact versioned selection and admitted inputs.
+        """Bind trusted code to a selected definition and its inputs, for a new kind of block.
 
-        A leaf constructor receives (block, arguments, method_context) and returns
-        a circuit after common lowering admission. It must implement this record's
-        semantics/work law and must not keep the context getter or Run.
-        Control/adjoint uses the actual base instead of a second constructor.
-        Loading a SelectedDefinition alone never recreates executable access.
+        A leaf block gets a constructor that receives `(block, arguments,
+        method_context)` and returns a Qiskit circuit, after the common checks of
+        `lower_qiskit`. The constructor must implement the record's promised action and work
+        rule, and must not keep the context getter or the Run. A controlled or
+        adjoint block gets its base instead of a constructor. Loading a
+        `SelectedDefinition` from a file never recreates this binding.
+
+        Args:
+            record (SelectedDefinition): The selected definition.
+            payload (object | None): The checked input or construction
+                data the constructor reads.
+            base (SelectedBlock | None): The base block of a control
+                or adjoint, whose content hash equals `record.base_selection_id`.
+            constructor (Callable | None): The leaf constructor,
+                required unless `record` names a blocker or a base.
+
+        Returns:
+            block (SelectedBlock): The bound block.
+
+        Raises:
+            TypeError: If `record` is not a `SelectedDefinition` or `constructor` is
+                not callable.
+            ValueError: If the base and constructor do not match the record.
         """
         if type(record) is not SelectedDefinition:
             raise TypeError("native binding requires a SelectedDefinition")
@@ -234,23 +279,39 @@ class SelectedBlock:
 
 def select_preparation(name: str, state: StateInput, *,
                        choice: str = "native", per_bit: bool = False) -> SelectedBlock:
-    """Select the native preparation of an admitted StateInput, or HZH for an occupation input.
+    """Build the state preparation block of a state input, `U|0> = state`, with the cheapest exact recipe its form allows.
 
-    Selection scans only the admitted representation;
-    it never normalizes, hashes the payload again, synthesizes, or simulates.
-    X/HZH are equal as full operators. Generic preparation promises only U|0>.
-    per_bit exposes the same ordered native system wires as one-bit ports for
-    consumers that explicitly measure or connect individual sites.
+    Pass a [`StateInput`](inputs.md) from `state_input` or the `ingest_*`
+    functions. Selection reads only the stored representation. It never
+    normalizes, hashes the data again, synthesizes or simulates. An occupation,
+    basis or uniform state gets an exact gate recipe, with the physical global
+    phase as a phase gate. A prefix-uniform, general or product state uses the
+    direct preparation and its CX upper bound, and a product state is counted as
+    q one-qubit preparations, not one q-qubit vector. A supplied Qiskit circuit
+    becomes its own block with unknown synthesis cost and error, because its
+    content cannot be recognized. The block promises only `U|0>`, the normalized
+    state, with the physical global phase kept, including under control.
+    `choice="hzh"` prepares each occupied site of an occupation input with
+    H, Z, H instead of X. The two recipes are equal as full operators and are
+    different choices, with different content hashes and gate counts.
 
-    The input is classified so the resource fold gets the tightest law the
-    construction supports. Occupation, basis and full-uniform states get an
-    exact primitive recipe (with the physical global phase as a phase
-    primitive), while prefix-uniform, general and product states point to
-    the direct-preparation CX law. A ``qiskit.product`` state is priced as q
-    applications of the one-qubit law, not as a generic q-qubit vector. A
-    ``qiskit.supplied`` circuit becomes ``preparation.supplied`` with a fresh
-    choice label. Its content cannot be recognized, so each supplied circuit
-    is its own selection with unknown synthesis cost and error.
+    Args:
+        name (str): Signature name of the block.
+        state (StateInput): The state input.
+        choice (str): `"native"`, or `"hzh"` for an
+            occupation input.
+        per_bit (bool): With `True`, the block has one one-qubit
+            port `system_<j>` per qubit, in the same order, for a caller that
+            measures or connects single sites.
+
+    Returns:
+        block (SelectedBlock): The preparation block, with port `system` of q qubits, or
+            the per-qubit ports.
+
+    Raises:
+        ValueError: If the state's preparation has no circuit constructor, `choice` is unknown,
+            or `"hzh"` is used for an input that is not an occupation.
+        TypeError: If `per_bit` is not a bool.
     """
     spec = state.preparation
     if spec.blocker:
@@ -385,59 +446,61 @@ def signed_pauli_coefficients(operator):
 
 
 def select_signed_pauli(name: str, operator: OperatorInput, *, max_bytes=DEFAULT_INPUT_BYTES) -> SelectedBlock:
-    """Build signed Pauli construction data in O(M*q + 2**a) bounded work.
+    """Build the signed Pauli SELECT block of a Hermitian Pauli operator, the core of its LCU block encoding.
 
-    Includes identity terms; no centering or coefficient threshold. Padding SELECT
-    is identity and PREP amplitude zero. The operator input owner admits the zero
-    operator, but it cannot define this positive-alpha encoding. Coefficient
-    normalization is never metadata work.
-
-    For ``A = sum_j c_j P_j`` with real c_j, ``alpha = sum_j |c_j|`` and
-    ``|G> = PREP|0> = sum_j sqrt(|c_j| / alpha) |j>``, SELECT applies
-    ``sign(c_j) P_j`` on label j. Then
-    ``(<G| tensor I) SELECT (|G> tensor I) = A / alpha``, written with the
-    label register first as the papers do. The block places the label
-    register on the low-order qubits, so a Qiskit dense matrix of it, whose
-    qubit 0 is the least significant index, reads
-    ``(I tensor <G|) SELECT (I tensor |G>)``. The recorded relation string
-    keeps the paper order. This is the LCU relation of An, Childs and
-    Lin, arXiv:2312.03916v2, Appendix A.3, Lemma 24, Eq. (178), with each
-    coefficient's sign moved from the two preparation oracles into SELECT.
-    Both oracles then coincide, so the unpreparation is the exact adjoint of
-    PREP and a single real preparation serves both sides. Kirby, Motta and
-    Mezzacapo, arXiv:2208.00567v4, Eqs. (2)-(4), p. 3, use the same form,
-    with nonnegative weights and each Pauli carrying its sign. Their weights
-    have unit L1 norm, so their alpha_i, P_i and H are ``|c_j|/alpha``,
-    ``sign(c_j) P_j`` and ``A/alpha`` here. Every branch ``sign(c_j) P_j`` is
+    For `A = sum_j c_j P_j` with real `c_j`, `alpha = sum_j |c_j|` and
+    `|G> = PREP|0> = sum_j sqrt(|c_j| / alpha) |j>`, SELECT applies
+    `sign(c_j) P_j` on label j. Then
+    `(<G| tensor I) SELECT (|G> tensor I) = A / alpha`, written with the label
+    register first as the papers do. The block places the label register on the
+    low-order qubits, so a Qiskit dense matrix of it, whose qubit 0 is the least
+    significant index, reads `(I tensor <G|) SELECT (I tensor |G>)`. The recorded
+    relation string keeps the paper order. This is the LCU relation of An,
+    Childs and Lin, arXiv:2312.03916v2, Appendix A.3, Lemma 24, Eq. (178), with
+    each coefficient's sign moved from the two preparation oracles into SELECT.
+    Both oracles then coincide, so the unpreparation is the exact adjoint of PREP
+    and a single real preparation serves both sides. Kirby, Motta and
+    Mezzacapo, arXiv:2208.00567v4, Eqs. (2)-(4), p. 3, use the same form, with
+    nonnegative weights and each Pauli carrying its sign. Their weights have
+    unit L1 norm, so their `alpha_i`, `P_i` and H are `|c_j|/alpha`,
+    `sign(c_j) P_j` and `A/alpha` here. Every branch `sign(c_j) P_j` is
     Hermitian and unitary, so SELECT squares to the identity. That is their
-    Eq. (5), p. 4, the premise of the Chebyshev walk in their Lemma 1.
+    Eq. (5), p. 4, the assumption of the Chebyshev walk in their Lemma 1.
 
-    Selection admits the read-only coefficient array, padded amplitudes and
-    their construction temporaries. The archive stores the shared operator
-    and amplitude array once and derives coefficients from the restored
-    operator. The byte law ``m*(q+16) + 32P`` of
-    ``_signed_pauli_requirements``, P = 2**a >= m, bounds the documented
-    logical labels and selection arrays because the coefficients are frozen
-    before the amplitudes are built: coefficients use 8m, amplitudes 8P,
-    and at most two float64 temporaries 16m, giving 24m + 8P <= 32P.
-    Coefficient freezing peaks at 16m before amplitudes exist, amplitude
-    freezing peaks at 8m + 16P <= 24P, and these phases are sequential. The
-    coefficients are the stored real components in order and bits (see
-    ``signed_pauli_coefficients``); alpha is ``fsum(abs(c))`` over them and
-    each amplitude keeps the operand order ``sqrt(abs(c_j)) / sqrt(alpha)``.
-    One term gives a = 0 and P = 1; identity terms are valid; padding has
-    zero amplitudes and identity SELECT action; empty or zero-alpha input
-    fails the positive-alpha encoding.
+    Identity terms are included, and no centering or coefficient threshold is
+    applied. Padding labels apply the identity and get PREP amplitude zero. One
+    term gives `a = 0` and `P = 1`. The zero operator, and an empty or zero-alpha
+    input, has no positive-alpha encoding and is rejected. The coefficients are
+    the real parts of the stored complex128 coefficients, copied bit for bit,
+    alpha is `fsum(abs(c))` over them and each amplitude keeps the operand order
+    `sqrt(abs(c_j)) / sqrt(alpha)`. A saved block derives them again from the
+    restored operator in the same way, so alpha, the coefficients and the PREP
+    amplitudes are equal before saving and after loading. Selection does
+    `O(M*q + 2**a)` work.
+
+    `max_bytes` limits the `m*(q+16) + 32P` bytes, with `m = M` terms and
+    `P = 2**a >= m`, of the label strings with their 16-byte coefficients and of the selection arrays.
+    The selection arrays stay within `32P` because the coefficients are frozen
+    before the amplitudes are built: coefficients use `8m`, amplitudes `8P`, and
+    at most two float64 temporaries `16m`, giving `24m + 8P <= 32P`. Coefficient
+    freezing peaks at `16m` before amplitudes exist, amplitude freezing at
+    `8m + 16P <= 24P`, and these phases are sequential.
 
     Args:
-        name: Signature name of the SELECT block.
-        operator: Admitted Hermitian Pauli operator A with M terms on q qubits.
-        max_bytes: Limit on the known selection arrays of ``_signed_pauli_requirements``.
+        name (str): Signature name of the SELECT block in the Program.
+        operator (OperatorInput): Hermitian Pauli operator A with M terms on q
+            qubits, from [`ingest_pauli`](inputs.md).
+        max_bytes (int): Default 10 GB (decimal, `10_000_000_000` bytes).
+            Nonnegative limit on the bytes above.
 
     Returns:
-        The SelectedBlock with ports ``index`` (a = ceil(log2 M) qubits,
-        omitted for M = 1) and ``system`` (q qubits). Its
-        ``record.semantics.alpha`` is ``sum_j |c_j|`` in the units of A.
+        block (SelectedBlock): The SELECT, with ports `index` (`a = ceil(log2 M)` qubits,
+            omitted for M = 1) and `system` (q qubits). Its
+            `record.semantics.alpha` is `sum_j |c_j|` in the units of A.
+
+    Raises:
+        ValueError: If the operator has no Hermitian Pauli terms, `max_bytes` is
+            negative or too small, or alpha is zero or not finite.
     """
     if operator.structure != "hermitian" or "pauli_terms" not in operator.manifest.access:
         raise ValueError("signed Pauli selection requires admitted Hermitian Pauli access")
@@ -484,10 +547,29 @@ def select_signed_pauli(name: str, operator: OperatorInput, *, max_bytes=DEFAULT
 
 
 def select_pauli_preparation(name: str, select: SelectedBlock, *, max_bytes=DEFAULT_INPUT_BYTES) -> SelectedBlock:
-    """Admit the small coefficient vector as a StateInput, then select its PREP.
+    """Build the coefficient preparation PREP of a signed Pauli SELECT, `PREP|0> = sum_j sqrt(|c_j| / alpha) |j>`.
 
-    Its input identity is the coefficient vector, while SELECT keeps physical A.
-    Single-term encodings have no index register and require no PREP call.
+    The amplitudes come from the SELECT block, so the PREP is tied to that
+    SELECT and the pair encodes `A/alpha` as
+    [`select_signed_pauli`][nwqlib.blocks.selection.select_signed_pauli] states.
+    The PREP's input is the coefficient vector, while the SELECT keeps the
+    physical operator A. Use the PREP, the SELECT and the adjoint of the PREP
+    (from [`transform_block`][nwqlib.blocks.selection.transform_block]) in that
+    order on the label register. A single-term SELECT has no label register and
+    needs no PREP.
+
+    Args:
+        name (str): Signature name of the PREP block.
+        select (SelectedBlock): The untransformed signed Pauli SELECT.
+        max_bytes (int): Default 10 GB (decimal, `10_000_000_000` bytes). Limit
+            on the bytes of the amplitude vector input.
+
+    Returns:
+        block (SelectedBlock): The PREP block on the label register.
+
+    Raises:
+        ValueError: If `select` is not an untransformed signed Pauli SELECT, or
+            it has a single term.
     """
     if select.record.implementation.name != "pauli.signed_select" or select._base is not None:
         raise ValueError("coefficient preparation requires an untransformed native signed SELECT")
@@ -500,11 +582,29 @@ def select_pauli_preparation(name: str, select: SelectedBlock, *, max_bytes=DEFA
 
 
 def select_pauli_readout(name: str, select: SelectedBlock) -> SelectedBlock:
-    """Select the existing label-controlled readout using admitted data.
+    """Build the readout block of a signed Pauli SELECT, a label-controlled change to the basis of each Pauli term.
 
-    This choice performs no new payload scan. Actual basis-table synthesis is
-    charged by explicit logical lowering. The classical diagonal outcome uses
-    coefficient sign times non-I system parity; padding outcomes contribute zero.
+    Controlled on the label register, the block V applies H for X, `H S^dagger`
+    for Y, and the identity for Z, I and padding labels on each system qubit.
+    A computational measurement after V is read with the diagonal value D:
+    the coefficient sign times the parity of the non-identity system qubits
+    for a used label, and zero for a padding label. Then
+    `V^dagger D V = Pi_used SELECT Pi_used`, the SELECT restricted to the used
+    labels, not the full identity-padded SELECT. No postselection is needed. The label register
+    is kept and may remain entangled. The block reuses the SELECT's data and
+    reads no input again. Its gate tables are built when the circuit is
+    built, and its CX count is bounded by
+    [`pauli_readout_cx_bound`][nwqlib.blocks.selection.pauli_readout_cx_bound].
+
+    Args:
+        name (str): Signature name of the readout block.
+        select (SelectedBlock): The untransformed signed Pauli SELECT.
+
+    Returns:
+        block (SelectedBlock): The readout block, with the same ports as `select`.
+
+    Raises:
+        ValueError: If `select` is not an untransformed signed Pauli SELECT.
     """
     if select.record.implementation.name != "pauli.signed_select" or select._base is not None:
         raise ValueError("readout requires an untransformed native signed SELECT")
@@ -526,19 +626,30 @@ def select_pauli_readout(name: str, select: SelectedBlock) -> SelectedBlock:
 
 
 def select_zero_reflection(name: str, num_qubits: int) -> SelectedBlock:
-    """Select the Lanczos sign 2|0><0|-I, with no hidden workspace.
+    """Build the reflection `2|0><0| - I` on q qubits, the sign step of the Lanczos Chebyshev walk.
 
     Conjugated by the coefficient PREP G, this block is the reflection
-    ``R = (2|G><G| - I) (x) I`` of Kirby, Motta and Mezzacapo,
-    arXiv:2208.00567v4, Lemma 1, Eq. (6), p. 4, with the label register
-    written first as in ``select_signed_pauli``. With the self-inverse signed
-    SELECT U of an operator A, their Eq. (7) gives
-    ``(<G| (x) I)(R U)**k (|G> (x) I) = T_k(A/alpha)``. Their H has
-    coefficients of unit L1 norm, which is A/alpha here. The Lanczos Method
-    reads expectations of these Chebyshev polynomials. The sign convention
-    matters under control, because control makes the global phase relative.
-    The recipe applies X on every qubit, a multi-controlled Z, X again and a
-    global phase pi, so zero gets +1 and every other basis state -1.
+    `R = (2|G><G| - I) (x) I` of Kirby, Motta and Mezzacapo, arXiv:2208.00567v4,
+    Lemma 1, Eq. (6), p. 4, with the label register written first as in
+    [`select_signed_pauli`][nwqlib.blocks.selection.select_signed_pauli]. With the
+    self-inverse signed SELECT U of an operator A, their Eq. (7) gives
+    `(<G| (x) I)(R U)**k (|G> (x) I) = T_k(A/alpha)`. Their H has coefficients of
+    unit L1 norm, which is `A/alpha` here. The Lanczos method reads expectations
+    of these Chebyshev polynomials. The sign convention matters under control,
+    because control makes the global phase relative. The recipe applies X on
+    every qubit, a multi-controlled Z, X again and a global phase pi, so `|0>`
+    gets +1 and every other basis state -1. It uses no extra qubits, and zero
+    width gives the identity.
+
+    Args:
+        name (str): Signature name of the block.
+        num_qubits (int): Nonnegative width q.
+
+    Returns:
+        block (SelectedBlock): The block, with port `system` of q qubits.
+
+    Raises:
+        ValueError: If `num_qubits` is negative or not an integer.
     """
     if type(num_qubits) is not int or num_qubits < 0:
         raise ValueError("reflection width must be a nonnegative integer")
@@ -572,27 +683,38 @@ def select_zero_reflection(name: str, num_qubits: int) -> SelectedBlock:
 
 
 def transform_block(name: str, block: SelectedBlock, *, control=False, adjoint=False) -> SelectedBlock:
-    """One coherent control and/or inverse of the selected extension, never phase-free equivalence.
+    """Build the controlled version, the adjoint, or both, of a selected block, keeping its global phase.
 
-    A block's semantic contract usually fixes only part of the operator (for
-    a preparation, only ``U|0>``). Control and inversion act on the whole
-    selected extension, including its global phase, which control makes
-    observable. The transformed record therefore keeps the base contract in
-    ``base_semantics`` and declares its own approximation unknown, because a
-    state or projected-block error of the base does not bound the
-    transformed operator. A transformed block cannot be transformed again, so every
-    transform refers to one concrete base. When control is added, the
-    construction work grows by the controlled law of the base implementation,
-    and a direct preparation's CX law switches to its controlled form. The
-    Pauli SELECT and readout laws read the ``controlled`` flag instead. A
-    dense-dilation encoding adds the work of the exact synthesis of its
-    unitary (``_dense_synthesis.dense_synthesis_size``) and of Qiskit's
-    control of the synthesized gates (``gatewise_control_size``). A
-    supplied preparation or native encoding adds the same for each dense
-    unitary in its circuit (``qiskit_compat.dense_synthesis_widths`` and
-    ``dense_control_counts``). Lowering charges these syntheses before they
-    start, against its ``max_synthesis_work`` or, in a Run, against the
-    Run's ``ExecutionLimits.max_synthesis_work``.
+    A block's promise usually fixes only part of the operator, for a
+    preparation only `U|0>`. Control and inversion act on the whole selected
+    circuit, including its global phase, which control makes observable. The new
+    block therefore keeps the base block's promise as its `base_semantics` and
+    declares its own error unknown, because a state or projected-block error of
+    the base does not bound the transformed operator. A transformed block cannot
+    be transformed again, so every transform refers to one concrete base. Adding
+    a control increases the construction work by the controlled cost rule of the
+    base, and a direct preparation's CX count switches to its controlled form.
+    The Pauli SELECT and readout counts read the `controlled` flag instead. A
+    dense-dilation encoding adds the work of the exact synthesis of its unitary
+    and of Qiskit's control of the synthesized gates, and a supplied preparation
+    or encoding adds the same for each dense unitary in its circuit. `lower_qiskit`
+    counts these syntheses before they start, against its `max_synthesis_work`,
+    or in a Run against `ExecutionLimits.max_synthesis_work`.
+
+    Args:
+        name (str): Signature name of the new block.
+        block (SelectedBlock): The untransformed base block.
+        control (bool): Add one coherent control, as a first
+            port `control` of one qubit.
+        adjoint (bool): Take the adjoint.
+
+    Returns:
+        block (SelectedBlock): The transformed block.
+
+    Raises:
+        ValueError: If neither `control` nor `adjoint` is set, `block` is already
+            transformed or has parameters, or its promise does not allow the
+            transformation.
     """
     if type(control) is not bool or type(adjoint) is not bool or not (control or adjoint):
         raise ValueError("select at least one boolean control/adjoint transformation")

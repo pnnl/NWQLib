@@ -63,54 +63,259 @@ def _projected_allowance(method, plan, point, *, observation, width, run,
 
 
 class LCHS(Method):
-    """Select a finite LCHS approximation; tolerance is not total output error.
+    """LCHS method for the solution of a linear ODE given by `LinearDynamics`.
 
-    Default dense SELECT uses classically computed branch exponentials. The
-    near-optimal kernel uses beta=.75 unless configured otherwise. Quadrature,
-    truncation, evolution and state-preparation errors have distinct scopes.
+    Build it with keyword arguments and pass it as `method=`, for example
+    `solve(LinearDynamics(A=A, initial_state=u0, time=T), method=LCHS())`.
+    Every argument is optional. The result is an
+    [`LCHSAnalysis`][nwqlib.algorithms.lchs.primary_records.LCHSAnalysis]
+    whose `solution`, for the default `Solution` output, approximates
+    `u(T) = exp(-A T) u0 + (integral_0^T exp(-A s) ds) b`, the solution of
+    `du/dt = -A u + b` at elapsed time T, with u0 the `initial_state` and b
+    the `source` (An, Childs and Lin, arXiv:2312.03916v2, here ACL,
+    Eq. (2)).
+
+    Linear combination of Hamiltonian simulation (LCHS) writes `exp(-A T)`
+    as an integral over real k of `g(k) exp(-i T (k L + H))`, with
+    `A = L + iH`, `L = (A + A^dagger)/2` and `H = (A - A^dagger)/(2i)`
+    (ACL Eqs. (3)-(4), (6) and (60)), and replaces the integral by a finite
+    sum over quadrature nodes k_j. L must be positive semidefinite,
+    or the default `make_l_psd=True` shifts it. The default kernel is ACL's
+    near-optimal kernel, Eq. (7), with `beta = 0.75`, on composite Gauss
+    quadrature. `lchs_kernel` also offers the Cauchy kernel (An, Liu and
+    Lin, doi:10.1103/PhysRevLett.131.150603, restated as ACL Eqs. (5) and
+    (181)) and the Low–Somma kernel (Low and Somma, arXiv:2508.19238v2,
+    Eq. (6)), whose integral representation is approximate (their Eq. (8)).
+
+    `approximation_tolerance` bounds only the kernel-integral and
+    k-quadrature components of the error. It does not bound the total error
+    of the physical output, which also depends on input scaling, PSD
+    recovery, state preparation, evolution and floating-point error. The
+    default `dense_exact` backend computes each branch matrix
+    `exp(-i t (k_j L + H))` classically and builds one dense SELECT circuit,
+    which applies branch j when its address register holds j. The
+    product-formula and `qsp_block_encoding` backends build more structured
+    circuits, each with its own limit checks.
+
+    Vector outputs (`Solution`, `StateVector`) need exact amplitude readout,
+    so they take no `shots`. `Samples` needs `execution="quantum"` and
+    positive `shots`. `execution="classical"` takes no `shots` and does not
+    run the `qsp_block_encoding` backend. `result.analyze()` takes no
+    settings, because the Plan fixes the recovery scale and coordinates.
+    `result.verify(checks=...)` takes one
+    [`LCHSVerification`][nwqlib.algorithms.lchs.verification.LCHSVerification]
+    or [`LCHSRefinement`][nwqlib.algorithms.lchs.refinement.LCHSRefinement],
+    extra computation that `plan`, `solve` and analysis never run. The
+    [LCHS guide](../../algorithms/lchs.md) explains kernel and quadrature
+    selection, the evolution backends and each error component.
+
+    Examples:
+        The exact solution of this two-coordinate problem at T = 0.1 is
+        `exp(-0.1 A) [1, 0]`, approximately `[0.96082565, -0.00484022]`.
+        The default run on local Aer differs from it by about 0.000821 in
+        the L2 norm.
+
+        >>> import numpy as np
+        >>> from nwqlib import LinearDynamics, solve
+        >>> from nwqlib.algorithms.lchs import LCHS
+        >>> problem = LinearDynamics(A=[[.4, .15], [.05, .25]],
+        ...                          initial_state=[1, 0], time=.1)
+        >>> result = solve(problem, method=LCHS())
+        >>> print(np.round(result.solution, 4))
+        [ 0.9601-0.j -0.0051+0.j]
 
     Attributes:
-        approximation_tolerance: Combined tail and quadrature allowance for the default provider pair, in (0,1). QSP synthesis or each automatic Trotter branch separately receives 0.1 times this value. It is not a total physical-output tolerance.
-        lchs_kernel: ProviderConfig selecting the integral kernel and explicit scalar parameters.
-        k_quadrature: ProviderConfig selecting nodes/weights; defaults to composite Gauss panels.
-        hamiltonian_evolution_backend: ``dense_exact``, fixed ``trotter``, ``trotter_error_budgeted`` or ``qsp_block_encoding`` branch evolution.
-        lcu_select_implementation: ``auto``, ``multiplexor``, ``structured`` or ``branch_controlled`` SELECT wiring.
-        dense_control_route: ``gatewise``, ``whole_matrix`` or ``auto`` route by which a construction controls a dense unitary on two or more qubits (``_dense_synthesis.select_dense_control_route``): a ``dense_exact`` branch on its address bits and a ``dense_dilation`` QSP child on the joint generator's combine qubit. ``gatewise`` synthesizes the unitary and lets Qiskit control each synthesized gate, ``whole_matrix`` synthesizes the controlled matrix, and ``auto`` takes the whole-matrix route for one control and the gate-wise route for more. On the whole-matrix route a constant-source branch is one unitary, its evolution times the matrix of its input preparation. The QSP pass that holds the generator is controlled gate-wise on every route.
-        trotter_steps: Positive fixed step count of the ``trotter`` backend, or None when trotter_synthesis_tolerance selects it. ``trotter_error_budgeted`` selects its own counts and requires the default 1. ``dense_exact`` and ``qsp_block_encoding`` apply no product formula, so a value other than 1 selects the same approximation and circuit as the default, and planning warns about it.
-        trotter_synthesis_tolerance: Positive allowance for the Strang synthesis bound of the compact periodic route, or None. The route selects the smallest step count whose weighted bound (``periodic.select_periodic_parameters``) is at most this value, in the same per-unit-input operator-norm frame as approximation_tolerance. It requires the fixed ``trotter`` backend and trotter_steps=None, and other routes refuse it.
-        trotter_order: Lie order 1 or symmetric Suzuki order 2 of the fixed or budgeted product formula. dense_exact and qsp_block_encoding accept only 2.
-        max_trotter_steps: Cap on automatically selected product-formula steps.
-        duhamel_nodes: Positive constant-source time-quadrature node count; not automatically reduced to fit a cap.
-        make_l_psd: Allow the documented Hermitian-part shift and physical recovery; False requires the admitted PSD premise.
-        psd_tolerance: Numerical allowance in Hermitian-part PSD admission, not permission to ignore a negative mode.
-        initial_state_preparation: ``direct`` or explicitly approximate ``mps_circuit`` initial-state PREP.
-        initial_state_mps_max_bond_dim: Optional retained bond-dimension cap for initial-state compression.
-        initial_state_mps_threshold: Positive singular-value truncation threshold for initial-state compression.
-        initial_state_mps_num_layers: Positive number of initial-state MPS circuit layers.
-        lcu_state_preparation: ``direct`` or explicitly approximate ``mps_circuit`` coefficient PREP.
-        lcu_mps_max_bond_dim: Optional coefficient-state bond-dimension cap.
-        lcu_mps_threshold: Positive singular-value truncation threshold for coefficient compression.
-        mps_num_layers: Positive number of coefficient-state MPS circuit layers.
-        max_dense_select_slots: Maximum padded slots in the dense SELECT validation construction.
-            A larger selection is refused at planning, and the grid, Duhamel nodes
-            and tolerance are never changed to fit.
-        max_bytes: Cap on known input and numerical workspace bytes.
-        max_svd_work: Cap on counted state/coefficient compression work, including the layered
-            construction of an ``mps_circuit`` PREP (``mps.layered_construction_size``).
-        max_spectral_work: Cap on counted spectral analysis work.
-        max_quadrature_work: Cap on selected quadrature node/weight work. For the composite-Gauss
-            provider it covers the completed panel search plus the selected rule's construction,
-            not every scalar probe.
-        max_select_work: Cap on counted SELECT construction work.
-        max_readout_work: Inclusive cap on sampled-readout grouping comparisons and
-            registered exact projected-reduction input visits. The default is
-            2_000_000_000. Planning checks the sampled-readout grouping comparisons
-            against this cap and records them. Preparation checks each exact
-            projected reduction against the remaining allowance before
-            acquisition, and completed projected reductions spend it.
-        max_qsp_degree: Maximum polynomial degree for selected QSP branch evolution.
-        max_qsp_evaluations: Maximum phase-solver residual evaluations.
-        max_admission_steps: Admission ceiling of the Plan's Programs, their ``AdmissionLimits.max_steps``: the kept field slots and the structural and lifecycle work units of one admission check. The resource fold of a Program may use up to 24 times this value. The default, 1,000,000, is the QLS default, ten times the shared ``AdmissionLimits`` default. Raising it admits a larger metadata check and fold. It changes no selected quantum work.
+        approximation_tolerance: Default `0.01`, strictly between 0 and 1.
+            Construction tolerance of the kernel-quadrature pair, in the
+            operator norm for a unit input before PSD growth. The default
+            pair gives half to the cutoff tail and half to the k quadrature.
+            QSP synthesis, and each node of `trotter_error_budgeted`,
+            separately receives 0.1 times this value. Planning refuses a
+            coefficient table whose binary64 rounding `u*alpha` exceeds 0.1
+            times this value, with `u = 2**-53` and alpha the coefficient
+            1-norm. It is not a tolerance on the total physical-output error.
+        lchs_kernel: Default `"near_optimal_eq7"` with `beta=0.75`. Kernel
+            g(k) of the integral, given as a name, as a dict
+            `{"implementation": name, "parameters": {...}}` or as a
+            [`ProviderConfig`][nwqlib.algorithms.lchs.provider_config.ProviderConfig].
+            `"near_optimal_eq7"` is ACL Eq. (7) with `beta` strictly between
+            0 and 1. `"cauchy_density"` is the Cauchy kernel and takes no
+            parameters. `"low_somma_f2"` is the Low–Somma kernel with shift
+            `c > 0`, default 1, whose coefficient 1-norm grows with c. It
+            requires `approximation_tolerance` at most 4/5 and gives the
+            kernel-integral and quadrature components a third of it each
+            (Low and Somma, Theorems 2-4).
+        k_quadrature: Default `"composite_gauss"` with
+            `truncation_multiplier=1`. Quadrature rule in k, given like
+            `lchs_kernel`. `"composite_gauss"` chooses the cutoff and the
+            Gauss–Legendre panels from the tolerance, and
+            `truncation_multiplier`, at least 1, enlarges the cutoff.
+            `"signed_binary_uniform"` is a uniform grid of `2**num_qubits`
+            nodes with spacing `2**lsb_position`, both required, and carries
+            no error bound. `"symmetric_uniform_trapezoid"` is the Low–Somma
+            trapezoid rule and takes no parameters. The allowed pairs are
+            `near_optimal_eq7` with `composite_gauss` (both component bounds
+            hold) or with `signed_binary_uniform`, `cauchy_density` with
+            `signed_binary_uniform`, and `low_somma_f2` with
+            `symmetric_uniform_trapezoid` (both component bounds hold, and
+            the synthesis stages are not budgeted with them). Building the
+            Method refuses any other pair.
+        hamiltonian_evolution_backend: Default `"dense_exact"`. How each
+            branch `exp(-i t (k_j L + H))` is built. `"dense_exact"` computes
+            the branch matrix from the node's Hermitian eigensystem and
+            controls its circuit. `"trotter"` uses a sorted-Pauli product
+            formula of order `trotter_order` with `trotter_steps` steps.
+            `"trotter_error_budgeted"` gives each node the smallest step
+            count whose product-formula bound plus the Pauli pruning bound
+            fits 0.1 times `approximation_tolerance` (Childs et al.,
+            doi:10.1103/PhysRevX.11.011020, Propositions 9-10 and Sec. V B).
+            `"qsp_block_encoding"` evolves under the joint generator with
+            quantum signal processing on block encodings of L and H (Pocrnic
+            et al., arXiv:2506.20760v2, Section IV) and needs quantum
+            execution. A `PeriodicStencil` A needs `"trotter"` with
+            `trotter_order=2` and quantum execution.
+        lcu_select_implementation: Default `"auto"`. How the SELECT circuit
+            applies the branches. `"dense_exact"` accepts `"auto"` or
+            `"branch_controlled"`, and `"qsp_block_encoding"` accepts only
+            `"auto"`. With `"trotter_error_budgeted"`, `"auto"` gives
+            `"multiplexor"`, and `"structured"` is refused, because per-node
+            step counts break the affine address structure. With
+            `"trotter"`, `"auto"` gives `"structured"` only when an affine
+            address structure is eligible, as checked from the k-node
+            addresses and the real Pauli coefficients of the generator, and
+            its CX count is lower than the multiplexor's, and gives
+            `"multiplexor"` otherwise. An explicit `"structured"` without
+            that eligibility is refused. A `PeriodicStencil` A accepts
+            `"auto"` or `"structured"`.
+        dense_control_route: Default `"auto"`. How a construction controls
+            a dense unitary on two or more qubits. It applies to a
+            `dense_exact` branch on its address bits and to a dense-dilation
+            QSP child on the combine qubit of the joint generator.
+            `"gatewise"` synthesizes the unitary and lets Qiskit control
+            each synthesized gate, `"whole_matrix"` synthesizes the
+            controlled matrix, and `"auto"` takes the whole-matrix route for
+            one control and the gate-wise route for more. On the
+            whole-matrix route a constant-source branch is one unitary, its
+            evolution times the matrix of its input preparation. The QSP
+            pass that holds the generator is controlled gate-wise on every
+            route.
+        trotter_steps: Default `1`. Fixed step count of the `"trotter"`
+            backend, a positive integer at most `max_trotter_steps`, or
+            `None` when `trotter_synthesis_tolerance` chooses it. Exactly one
+            of the two is set. `"trotter_error_budgeted"` chooses its own
+            counts and requires the default 1. `"dense_exact"` and
+            `"qsp_block_encoding"` apply no product formula, so they treat
+            any value as 1, and planning warns about a value other than 1.
+        trotter_synthesis_tolerance: Default `None`. Positive tolerance on
+            the Strang synthesis bound of a `PeriodicStencil` A, in the same
+            unit-input operator norm as `approximation_tolerance`. Planning
+            chooses the smallest step count r with `B/r**2` at most this
+            value, where
+            `B = T**3 sum_j |c_j| (2 |k_j| diffusion + |potential|)**3 / 3`
+            over the nodes k_j and coefficients c_j (Childs et al.,
+            doi:10.1103/PhysRevX.11.011020, Proposition 10, Eq. (121),
+            relaxed by NWQLib). It requires
+            `hamiltonian_evolution_backend="trotter"` and
+            `trotter_steps=None`, and other inputs refuse it.
+        trotter_order: Default `2`. Order of the product formula of the
+            `"trotter"` and `"trotter_error_budgeted"` backends, 1 for the
+            Lie formula or 2 for the symmetric Suzuki (Strang) formula.
+            `"dense_exact"` and `"qsp_block_encoding"` accept only 2.
+        max_trotter_steps: Default `100_000`. Upper limit on the
+            product-formula step count, fixed or chosen automatically.
+        duhamel_nodes: Default `8`. Number of Gauss–Legendre nodes of the
+            time integral of a constant source, one panel on [0, T] (ACL
+            Eq. (72)). It is never reduced automatically to fit a limit.
+        make_l_psd: Default `True`. Rule for an eigenvalue of L below
+            `-psd_tolerance*||L||_2`. `True` shifts L by
+            `s = -lambda_min + psd_tolerance*||L||_2` and multiplies the
+            result by the growth factor `exp(s*T)`. `False` refuses the
+            input.
+        psd_tolerance: Default `1e-12`, positive. Relative window of the PSD
+            check. An eigenvalue of L at or above `-psd_tolerance*||L||_2`
+            is accepted without a shift. The window is the scale of the
+            eigensolver's rounding (LAPACK Users' Guide, 3rd ed., Sec. 4.7),
+            so the decision does not depend on the time unit. It does not
+            permit a negative eigenvalue below that window.
+        initial_state_preparation: Default `"direct"`, which prepares the
+            initial state exactly. `"mps_circuit"` prepares it approximately
+            with a layered circuit from a matrix-product-state (MPS)
+            compression. Quantum execution with a constant source, or with a
+            `PeriodicStencil` A, requires `"direct"`.
+        initial_state_mps_max_bond_dim: Default `None`, no limit. Upper
+            limit on the kept bond dimension of the initial-state
+            compression.
+        initial_state_mps_threshold: Default `1e-14`, positive.
+            Singular-value truncation threshold of the initial-state
+            compression.
+        initial_state_mps_num_layers: Default `2`, positive. Number of
+            layers of the initial-state MPS circuit.
+        lcu_state_preparation: Default `"direct"`. Preparation of the
+            coefficient state `sqrt(|c_j|/alpha)` that weights the branches,
+            with the same choices and restrictions as
+            `initial_state_preparation`. The circuit error of
+            `"mps_circuit"` stays unevaluated until an explicit validation,
+            even when the compression discards no weight.
+        lcu_mps_max_bond_dim: Default `None`, no limit. Upper limit on the
+            kept bond dimension of the coefficient-state compression.
+        lcu_mps_threshold: Default `1e-14`, positive. Singular-value
+            truncation threshold of the coefficient-state compression.
+        mps_num_layers: Default `2`, positive. Number of layers of the
+            coefficient-state MPS circuit.
+        max_dense_select_slots: Default `256`. Upper limit on the padded
+            address count, a power of two, of the dense SELECT circuit of
+            `"dense_exact"`. Planning refuses a larger construction and never
+            changes the grid, Duhamel nodes or tolerance to fit.
+        max_bytes: Default 10 GB (decimal, `10_000_000_000` bytes). Upper
+            limit on the known bytes of input and numerical workspace.
+        max_svd_work: Default `1e8` (`100_000_000`). Upper limit on the
+            counted work of state and coefficient compression, including the
+            construction of an `"mps_circuit"` layered circuit.
+        max_spectral_work: Default `1e8`. Upper limit on the counted work of
+            the eigenvalue check of L for dense A, `d**3` for physical
+            dimension d, so the default accepts a dense A of dimension at
+            most 464 when L is nonzero. A
+            [periodic stencil](../../algorithms/lchs.md#periodic-stencils)
+            has an analytically PSD L and no eigenvalue check.
+        max_quadrature_work: Default `1e8`. Upper limit on the counted work
+            of building the k nodes and weights. For `"composite_gauss"` it
+            covers the completed panel search plus the construction of the
+            chosen rule, not every scalar probe.
+        max_select_work: Default `1e8`. Upper limit on the counted work of
+            building the SELECT circuit, including the branch matrices and
+            their synthesis for `"dense_exact"` and the Pauli decomposition
+            of the product-formula backends. The
+            [LCHS guide](../../algorithms/lchs.md#native-methods-and-physical-coordinates)
+            gives the sizes that fit this default.
+        max_readout_work: Default `2_000_000_000`. Upper limit, inclusive,
+            on the comparisons of grouping sampled Pauli terms and the input
+            visits of exact scalar readout (`shots=None`). Planning checks
+            and records the grouping comparisons. Before the circuits run,
+            each exact readout is checked against what remains, and
+            completed exact readouts count against it.
+        max_qsp_degree: Default `256`. Upper limit on the QSP polynomial
+            degree of `"qsp_block_encoding"`.
+        max_qsp_evaluations: Default `20_000`. Upper limit on the residual
+            evaluations of the QSP phase solver.
+        max_admission_steps: Default `1_000_000`, ten times the shared
+            default. Upper limit on the planning work of checking each
+            `Program` of the Plan (NWQLib's description of a circuit as
+            named steps), counting its stored fields and the structural and
+            lifecycle work of one check. Summing a Program's resource counts
+            may use up to 24 times this value. Raising it changes no quantum
+            operation. See the
+            [planning work limit](../../development/program_checks.md#planning-work-limit).
+
+    Raises:
+        ValueError: If the kernel-quadrature pair is not allowed or a kernel
+            or quadrature parameter is invalid, if both or neither of
+            `trotter_steps` and `trotter_synthesis_tolerance` are set, if
+            `trotter_synthesis_tolerance` is set without the `"trotter"`
+            backend, if `"trotter_error_budgeted"` gets `trotter_steps`
+            other than 1, if `trotter_steps` exceeds `max_trotter_steps`, or
+            if `trotter_order=1` is set without a product-formula backend.
+        TypeError: If `lchs_kernel` or `k_quadrature` is not a name, a dict
+            or a `ProviderConfig`.
     """
 
     schema_version: Literal[6] = 6

@@ -60,12 +60,28 @@ class _DuhamelBoundEvaluation:
 
 
 def duhamel_quadrature(final_time: float, node_count: int) -> tuple[np.ndarray, np.ndarray]:
-    """Return Gaussian-Legendre nodes and weights for the source-time integral.
+    """Return Gauss–Legendre nodes and weights on [0, T] for the source time integral.
 
-    One Gauss-Legendre panel on [0, T] discretizes the Duhamel integral of
-    ACL arXiv:2312.03916v2 Eq. (2), the single-panel case of Eq. (72). The
-    rule is exact for polynomials of degree 2*node_count-1, and its
-    remainder is bounded by _duhamel_quadrature_error_bound.
+    One Gauss–Legendre panel on [0, T] discretizes the Duhamel integral of
+    An, Childs and Lin, arXiv:2312.03916v2, Eq. (2), the single-panel case
+    of their Eq. (72). `LCHS` uses `duhamel_nodes` of these nodes for a
+    constant source. The rule is exact for polynomials of degree
+    `2*node_count - 1`. Its remainder bound follows DLMF Eqs. 3.5.19 and
+    3.5.21, and `LCHSRefinement(components=("duhamel",))` evaluates it for
+    a Result.
+
+    Args:
+        final_time (float): Positive, finite elapsed time T.
+        node_count (int): Number of nodes, at least 1.
+
+    Returns:
+        rule (tuple[numpy.ndarray, numpy.ndarray]): The nodes `T*(x_i + 1)/2`
+            and weights `T*w_i/2`, from the Gauss–Legendre rule `(x_i, w_i)`
+            on [-1, 1].
+
+    Raises:
+        ValueError: If `final_time` is not positive and finite or
+            `node_count` is below 1.
     """
 
     final_time = validate_final_time(final_time)

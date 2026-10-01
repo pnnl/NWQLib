@@ -108,32 +108,41 @@ _ROUNDOFF_PER_OPERATION = {
 
 
 class PreparedArtifact(Record):
-    """Portable receipt for a factory-owned native snapshot, not executable bytes.
+    """The preparation record of one circuit or host computation: what was built, for which target, and its roundoff bounds.
 
-    snapshot names a fresh in-process owned circuit; it is not a verified file
-    digest. Target/compiler sources are actual preparation-time snapshots.
-    The exact small Realization survives failed attempts and journal restoration;
-    no completed observation or default-point inference is needed to recover it.
-    Inspection of this record is allocation-free with respect to native data.
+    `run.data.receipts` and `result.data.receipts` hold one per preparation.
+    It describes the prepared circuit and holds no executable bytes.
+    `snapshot` names a circuit built in this process and is not a verified
+    file digest. `target` and `compiler` are recorded when the circuit is
+    prepared. The concrete parameter values (`realization`) survive failed
+    attempts and the reopening of a saved Run, so recovering them needs no
+    completed observation and no guess of a default point. Reading this
+    record loads no circuit data. The fields below are read-only.
 
     Attributes:
-        execution: quantum_circuit or host_kernel preparation kind.
-        plan_id: Original Plan identity.
-        realization_id: Exact concrete experiment realization identity.
-        realization: Concrete selected arguments and experiment, kept even before any result exists.
-        construction_id: Selected construction used for this preparation.
-        snapshot: Factory-owned native snapshot identity, not a payload digest.
-        target: Actual target identity at preparation time.
-        compiler: Actual compiler/preparation source.
-        runtime: Effective runtime seed and native preparation options.
-        observation: Exact selected readout semantics.
-        quantum_layout: Selected logical quantum register layout.
-        classical_layout: Selected logical classical register layout.
-        native_basis: Actual native gate vocabulary after preparation.
-        environment: Actual preparation-process dependency versions.
-        preparation_time: Recorded preparation timestamp.
-        construction_work_reserved: Counted quantum construction work charged before execution.
-        logical: Optional actual logical-lowering receipt; None for a host-only preparation.
+        execution: `"quantum_circuit"` or `"host_kernel"`, the kind of
+            preparation.
+        plan_id: Content hash of the Plan.
+        realization_id: Content hash of `realization`.
+        realization: The experiment and its concrete parameter values, kept
+            even before any result exists.
+        construction_id: Content hash of the construction used for this
+            preparation.
+        snapshot: Name of the circuit built in this process, not a digest of
+            its bytes.
+        target: The backend target (`Source`) when the circuit was prepared.
+        compiler: The compiler or preparation code (`Source`).
+        runtime: The runtime seed and backend preparation options in effect.
+        observation: The readout ([`ObservationSpec`][nwqlib.core.planning.ObservationSpec]).
+        quantum_layout: Layout of the logical quantum registers.
+        classical_layout: Layout of the logical classical registers.
+        native_basis: The backend's gate names after preparation.
+        environment: Versions of the packages used by the preparation
+            (`Source` records).
+        preparation_time: Time of the preparation.
+        construction_work_reserved: Circuit construction work counted before
+            execution, in work units.
+        logical: Record of how the logical circuit was built, or None for a host-only preparation.
         native_operations: Prepared operation count, or None when unavailable.
             For a coherent statevector readout on Aer, a trajectory included,
             it counts the native evolution operations that execute, including
@@ -145,41 +154,48 @@ class PreparedArtifact(Record):
             point. On Aer, a body with control flow and sampled counts count
             every instruction of the prepared native circuit. Other adapters
             state their own count.
-        host_preparation_work_reserved: Counted host setup work charged by this preparation.
-        selected_kernel_id: Exact host declaration identity, or None for native circuit execution.
-        transformation: Description of the actual selected-to-native transformation.
-        population: unconditional, native_conditioned or unknown measurement-population meaning.
-        payload: Optional native-byte locator, not the bytes themselves.
-        native_quantum_layout: Actual compiled quantum register layout.
-        native_classical_layout: Actual compiled classical register layout.
-        logical_to_native: Ordered logical-to-native wire map.
-        backend_configuration_id: Exact connection configuration identity, or None for host execution.
-        counts_sampling: Actual count-source sampling contract, or None for non-counts readouts.
-        provider_options_json: Saved effective provider settings without credentials.
+        host_preparation_work_reserved: Host setup work counted for this
+            preparation.
+        selected_kernel_id: Content hash of the host computation's
+            declaration, or None for a circuit.
+        transformation: Description of how the planned circuit was turned
+            into the backend's circuit.
+        population: `"unconditional"`, `"native_conditioned"` or
+            `"unknown"`, which shots the measured counts cover.
+        payload: Where the backend's circuit bytes are saved, or None. It
+            holds no bytes itself.
+        native_quantum_layout: Layout of the compiled quantum registers.
+        native_classical_layout: Layout of the compiled classical registers.
+        logical_to_native: The compiled wire of each logical wire, in order.
+        backend_configuration_id: Content hash of the backend configuration,
+            or None for host execution.
+        counts_sampling: How the counts are sampled (`CountsSampling`), or
+            None for other readouts.
+        provider_options_json: The provider settings in effect, saved without
+            credentials.
         probability_window_exclusions: Labels of the native operations, readout path,
             simulator version or non-default compiler optimization level whose effect
             the derivation of ``probability_window`` does not bound. An empty tuple means the whole execution lies inside it.
             None means the preparing backend did not assess it.
-        body_length: Number of bound logical operations of the selected body, the
-            largest trajectory boundary, recorded for a trajectory; None otherwise.
+        body_length: Number of bound logical operations of the planned
+            body, the largest trajectory boundary, recorded for a trajectory,
+            and None otherwise.
         boundaries: Resolved boundary of each trajectory point in declaration
             order, with the end-position shorthand resolved before native
             preparation; empty for other readouts.
         template_seed: Seed of the per-construction native template that the
-            adapter prepared this circuit from, as the preparation hook
-            supplied it (``_prepared_execution._template_seed``); None when the
-            adapter used no template.
-        statevector_roundoff: The ``(t, e)`` envelope of the host phase
-            correction of this execution's saved statevectors
-            (``_phase_product.phase_product_envelope``), the componentwise
-            maxima over the receipt's save keys, charged to every statevector
-            consumer the receipt covers (``saved_state_error`` and
-            ``saved_state_probability_window``). The pair ``(t, e)`` bounds
-            the output phase product on saved statevectors. ``(0.0, 0.0)``
-            denotes an assessed zero-error operation, including no product or
-            multiplication by the represented factor ``(1.0, ±0.0)`` under
-            the host arithmetic model. ``None`` means the host correction was
-            not assessed.
+            backend prepared this circuit from, or None when the backend used
+            no template.
+        statevector_roundoff: The bound ``(t, e)`` on the error of the host
+            phase correction of this execution's saved statevectors, the
+            componentwise maxima over the record's saved states. It is
+            included in the error of every user of those statevectors
+            (``saved_state_error`` and ``saved_state_probability_window``).
+            The pair ``(t, e)`` bounds the output phase product on saved
+            statevectors. ``(0.0, 0.0)`` denotes an assessed zero-error
+            operation, including no product or multiplication by the
+            represented factor ``(1.0, ±0.0)`` under the host arithmetic
+            model. ``None`` means the host correction was not assessed.
     """
 
     schema_version: Literal[8] = 8
@@ -220,10 +236,15 @@ class PreparedArtifact(Record):
 
     @property
     def probability_window(self) -> float:
-        """Admitted binary64 roundoff between one and an exact probability population of this
-        execution. It follows the native operation count, the width and the executing
-        simulator's per-instruction constant, see ``exact_probability_window``. Host and
-        unknown counts keep the fixed floor."""
+        """The accepted binary64 roundoff between one and the total of an exact probability population of this execution.
+
+        It is ``max(1e-12, (c*G + 2**(n+1) + 10)*u)`` for G native operations,
+        the circuit width n, the executing simulator's per-instruction
+        constant c and ``u = 2**-53``, as [Engineering
+        constants](../ENGINEERING_CONSTANTS.md) derives. A target without a
+        derived constant of its own uses Aer's, the larger one. Host and
+        unknown counts keep the fixed floor ``1e-12``.
+        """
         per_operation = _ROUNDOFF_PER_OPERATION.get(self.target.name, AER_STATEVECTOR_ROUNDOFF_PER_OPERATION)
         return exact_probability_window(self.native_operations, len(self.logical_to_native),
                                         per_operation=per_operation)
@@ -235,24 +256,22 @@ class PreparedArtifact(Record):
         target's derived per-instruction constant, a first-order bound on
         ``||psi_hat - exp(i phi) psi||_2`` against the unitary native circuit.
         It describes distance modulo one common global phase. It does not
-        bound the exact prefix phase, the accumulation of the phase ledger
-        (``backends.qiskit_aer._trajectory_phase_ledger``), the subtraction
-        forming its correction angle, or a phase-defined amplitude; a saved
-        statevector's consumers use ``saved_state_error``. It exists only
+        bound the exact prefix phase, the summation that accumulates the
+        prefix phase of a saved state, the subtraction forming its correction
+        angle, or a phase-defined amplitude. The users of a saved statevector
+        use ``saved_state_error``. It exists only
         when the derivation covers the whole execution, that is, for a
         circuit on a target with a derived constant, a known operation count
         and assessed ``probability_window_exclusions`` that are all in
         ``resolved``, the labels whose effect the caller's own readout bounds.
         Unlike ``probability_window``, an unknown count or target gets no
         default constant and no floor. The budget enters the bound on
-        differences of point probabilities
-        (``_validation.probability_difference_window``, used by
-        ``algorithms.qhd.method._readout_window`` for the most-probable tie
-        window). The Aer constant that ``probability_window`` takes for an
-        unknown target has no derivation for that target, and the
-        ``NUMERICAL_RELATION_RTOL`` floor that it keeps for an unknown count
-        is an input convention for a population total, not a derived bound, so
-        neither can stand in for delta.
+        differences of point probabilities, which QHD uses for the tie window
+        of its most probable point. The Aer constant that
+        ``probability_window`` takes for an unknown target has no derivation
+        for that target, and the ``1e-12`` floor that it keeps for an unknown
+        count is an input convention for a population total, not a derived
+        bound, so neither can stand in for delta.
         """
         per_operation = _ROUNDOFF_PER_OPERATION.get(self.target.name)
         if self.execution != "quantum_circuit" or per_operation is None:
@@ -270,8 +289,7 @@ class PreparedArtifact(Record):
         """Return ``(delta_saved, reason)``: ``state_error(resolved)`` after the host correction of a saved state.
 
         ``delta_saved = delta + t (1 + delta) + e`` with ``(t, e)`` the
-        receipt's ``statevector_roundoff``
-        (``_phase_product.corrected_state_error``). Like ``state_error`` it
+        record's ``statevector_roundoff``. Like ``state_error`` it
         is a distance modulo one common global phase, conditional on the
         native first-order model. It returns the native unavailable reason
         unchanged when delta is unavailable, and an unavailable reason for
@@ -290,8 +308,7 @@ class PreparedArtifact(Record):
         """``probability_window`` propagated through the host correction of a saved state, or None.
 
         ``omega_saved = omega + (2t + t**2)(1 + omega) + 2(1 + t)(1 + omega) e
-        + e**2`` with ``(t, e)`` the receipt's ``statevector_roundoff``
-        (``_phase_product.corrected_mass_window``). An unassessed correction
+        + e**2`` with ``(t, e)`` the record's ``statevector_roundoff``. An unassessed correction
         gives None, not the uncorrected window, so it yields no finite
         mass-check budget.
         """
@@ -470,11 +487,28 @@ class ScalarValue(Record):
 
 
 class KernelApplication(Record):
-    """One selected numerical application and its bounded scalar evidence.
+    """One classical numerical call, with its arguments and the raw values it produced.
 
-    arguments keep method-owned parameters, including selected schedule
-    counts. Facts keep their scientific frames and missing-value evidence.
-    Names and source are declarations; neither can load an implementation.
+    A [`VerificationReceipt`][nwqlib.execution.VerificationReceipt] lists
+    the calls of one verification in `applications`, and an observation
+    computed by a classical routine lists its calls the same way. The
+    fields below are read-only.
+
+    Attributes:
+        name: Name of the call, distinct within its record, for example
+            `reference_error` for the `expm` reference of an LCHS check.
+        implementation: The [`Source`][nwqlib.core.records.Source] that
+            names the routine, its version, domain and literature reference.
+            It describes the routine and cannot load it.
+        arguments: The parameters that the Method set for the call, as
+            [`Binding`][nwqlib.ir.expressions.Binding] records with distinct
+            names, including schedule counts. The LCHS reference records the
+            attempted and completed numerical calls here, for example
+            `expm_attempts` and `expm_completed`.
+        facts: The raw values of the call, each a
+            [`FramedFact`][nwqlib.evidence.FramedFact] with its error frame.
+            A value the call could not compute keeps the evidence that says
+            why.
     """
 
     name: Text
@@ -495,15 +529,60 @@ def verification_invocation():
 
 
 class VerificationReceipt(Record):
-    """An explicit verification's raw facts, numerical calls and admitted work.
+    """The record of one verification: what was checked, the reference, and each numerical call with its raw values.
 
-    artifact_ids identify the live target arrays actually read. Application
-    facts have declared evidence; returned check facts may cite this completed
-    receipt. Application facts state the actual selected numerical work.
-    Receipt absence cannot establish whether
-    a reference ran. invocation_id distinguishes actual producing calls; None
-    means manual or otherwise unknown invocation provenance. Load never creates
-    an invocation or proves that two calls were statistically independent.
+    `result.verify(checks=...)` returns it as the first element of
+    `(receipt, facts)`, and so do `verify_projected`, `verify_energy_shift`
+    and `verify_number_sector`. The raw values sit in the `facts` of each
+    entry of `applications`. Each returned fact
+    with a value cites this verification record: its
+    `fact.evidence.artifact` is `receipt.content_id`. Loading a saved
+    verification record creates no new invocation and repeats no computation.
+    A missing verification record does not show whether a reference ran, and
+    two verification records do not show that their calls were statistically
+    independent. The fields below are read-only.
+
+    Attributes:
+        schema_version: Format version of the record, 2.
+        plan_id: Content hash of the Plan of the checked Result.
+        invocation_id: Identifier of the `verify` call that produced the
+            record, which tells two calls with equal inputs apart. `None`
+            for a record built by hand or of unknown origin.
+        result_id: Content hash of the checked Result.
+        construction_id: Content hash of the construction of that Plan.
+        artifact_ids: Content hashes of the stored arrays that the check
+            read, distinct. Empty when it read none.
+        reference: The [`Source`][nwqlib.core.records.Source] of the
+            reference computation or check.
+        options_id: Content hash of the options record passed to `verify`.
+        applications: The numerical calls, each a
+            [`KernelApplication`][nwqlib.execution.KernelApplication] with a
+            distinct name.
+
+    Examples:
+        Compare an LCHS solution with the matrix exponential, then read the
+        raw discrepancy and the call counts from the verification record:
+
+        >>> import numpy as np
+        >>> from nwqlib import LinearDynamics, solve
+        >>> from nwqlib.algorithms import LCHS
+        >>> from nwqlib.algorithms.lchs import LCHSVerification
+        >>> A = np.array([[0.4, 0.15], [0.05, 0.25]])
+        >>> problem = LinearDynamics(A=A, initial_state=[1.0, 0.0], time=0.1)
+        >>> result = solve(problem, method=LCHS())
+        >>> checks = LCHSVerification(reference="expm", metric="absolute_l2",
+        ...                           threshold=0.01)
+        >>> receipt, facts = result.verify(checks=checks)
+        >>> call = receipt.applications[0]
+        >>> for fact in call.facts:
+        ...     print(fact.fact.quantity, fact.fact.value.value)
+        reference_error 0.0008214720329548587
+        reference_error.reference_norm 0.9608378411789008
+        >>> counts = {item.parameter: item.value for item in call.arguments}
+        >>> print(counts["expm_completed"], counts["matvec_completed"])
+        1 1
+        >>> print(facts[0].fact.evidence.artifact == receipt.content_id)
+        True
     """
 
     schema_version: Literal[2] = 2
@@ -585,9 +664,8 @@ def _probability_mapping(outcomes, width):
 class Histogram:
     """Outcome indices and weights of one probabilities or counts chunk.
 
-    ``ObservationChunk.histogram()`` returns it. The layout below is the
-    reader contract that consumers and later storage build on. All arrays are
-    read-only.
+    ``ObservationChunk.histogram()`` returns it. Code that reads
+    observations can rely on the layout below. All arrays are read-only.
 
     - ``width``: the readout width w, the number of observed qubits
       (probabilities) or of classical bits over the whole classical layout
@@ -734,73 +812,90 @@ class Histogram:
 
 
 class ObservationChunk(Record):
-    """One immutable acquisition's sufficient statistics, never per-shot copies.
+    """The statistics of one measurement, or of one point of a trajectory, as stored with a Run or Result.
 
-    Distinct attempt/chunk identities stay distinct even with equal values.
-    Identity is provenance, not evidence that random acquisitions are independent.
+    `data.observations.chunks` holds them, and a Method's `analyze` reads
+    them, as [Run your own circuit](../own_circuit.md) shows. A chunk keeps
+    the sufficient statistics of its measurement, never one record per
+    shot. Chunks of different attempts stay distinct even when their values
+    are equal. Their identifiers record where the data came from and are not
+    evidence that random measurements are independent.
 
-    Probabilities and counts are read through ``histogram()``, whose layout
-    ``Histogram`` states, and built with ``from_histogram``. Counts are
-    stored as JSON ``CountBin`` records. Every count, the exact total and the
-    requested shots are at most ``MAX_COUNT = 2**63 - 1``, the int64 maximum
-    of the reader's count weights, and a chunk outside that domain is
-    rejected. A probability marginal stores its values in binary arrays: the
-    chunk holds one ``ProbabilityArrays`` record with the array manifests and
-    the scalar summaries computed at publication. The arrays live in the
-    artifact store of the Run or Result that holds the chunk. A chunk keeps a
-    private reference to that store, which is not a field, and publication,
-    reopening a Run (``load_run``), loading a Result (``load_result``) and
-    the chunk's own ``revise`` and copies set or carry it; ``histogram()``
-    reads the arrays through it on first use, once per payload for the
-    store's lifetime. A chunk rebuilt from JSON by any other path has no such
-    reference, and its ``histogram()`` refuses with the loader to use.
+    Read probabilities and counts with `histogram()`, whose layout
+    [`Histogram`][nwqlib.execution.Histogram] states, and build such a chunk
+    with `from_histogram`. Counts are stored as JSON `CountBin` records.
+    Every count, the exact total and the requested shots are at most
+    `2**63 - 1`, the int64 maximum of the count weights that the reader
+    returns, and a chunk outside that range is rejected. A probability
+    marginal stores its values in binary arrays. The chunk holds one
+    `ProbabilityArrays` record with the array manifests and the summary
+    values computed when the arrays were saved. The arrays live in the array
+    store of the Run or Result that holds the chunk. A chunk keeps a private
+    reference to that store, which is not a field. Saving the arrays,
+    reopening a Run (`load_run`), loading a Result (`load_result`) and the
+    chunk's own `revise` and copies set or carry it, and `histogram()` reads
+    the arrays through it on first use, once per payload for the store's
+    lifetime. A chunk rebuilt from JSON in any other way has no such
+    reference, and its `histogram()` raises an error that names the loader
+    to use.
 
-    A trajectory acquisition stores one chunk per observation point. The
-    chunk names its ``point`` and resolved ``boundary``, so a saved value maps
-    to its body, point and receipt after reload. A trajectory stores one full
-    declaration in its preparation receipt and one row per point, with only
-    that point's readout declaration and the shared declaration identity on
-    the row. Receipt validation and point indexing visit the schedule once,
-    each chunk validates its own declaration and values, and ``readout()``
-    returns the stored one-point spec. Storage and validation are linear in
-    the total admitted declarations and payloads, with no per-point copy or
-    rescan of the full schedule. The one-point spec is
-    ``ObservationSpec.point_observation`` of the point, and
-    ``trajectory_id`` is the content identity of the full declaration. The
-    join with the receipt (``validate_unit_bound`` and ``Run._write``)
-    checks both. Point chunks share their actual
-    acquisition's completion, preparation, shot and native-work population:
-    the chunks of one acquisition share its run, attempt and job, and differ
-    in ``chunk`` (``point_chunk_key``). A missing point makes its dependent
-    quantity incomplete. It never triggers a replay of the shared prefix in
-    analysis or loading.
+    A trajectory measurement stores one chunk per observation point. The
+    chunk names its `point` and resolved `boundary`, so a saved value maps to
+    its body, point and preparation record after reloading. A trajectory
+    stores one full declaration in its preparation record and one row per
+    point, with only that point's readout declaration and the content hash
+    of the shared declaration on the row. Validating the preparation record
+    and indexing the points visit the schedule once, each chunk validates its
+    own declaration and values, and `readout()` returns the stored
+    single-point readout. Storage and validation are linear in the total
+    accepted declarations and payloads, with no per-point copy or rescan of
+    the full schedule. The single-point readout is
+    `ObservationSpec.point_observation` of the point, and `trajectory_id` is
+    the content hash of the full declaration. Joining the chunk to its
+    preparation record, in `validate_unit_bound` and when the Run records the
+    chunk, checks both. Point chunks share their measurement's completion,
+    preparation, shots and native work. The chunks of one measurement share
+    its run, attempt and job, and differ in `chunk`. A missing point makes
+    the quantity that depends on it incomplete. It never causes the shared
+    prefix to be run again in analysis or loading.
 
     Attributes:
-        run_id: Original acquisition Run identity.
-        execution: quantum_circuit or host_kernel contribution kind.
-        plan_id: Exact selected Plan identity.
-        realization_id: Concrete selected experiment arguments.
-        prepared_id: Actual prepared artifact used by the acquisition.
-        experiment: Original experiment name.
-        setting: Actual readout or batch setting.
-        bindings: Original ordered experiment argument values.
-        quantum_layout: Selected quantum register order for interpreting coordinates.
-        classical_layout: Selected classical register order for interpreting count labels.
-        attempt: Identity of the original reserved acquisition attempt.
-        job: Original acquisition/job identity, not a new reduction ID.
-        chunk: Original item/slot within that acquisition.
-        observation: Selected readout declaration against which returned
-            statistics are checked; for a trajectory point, that point's
-            one-point readout.
-        population: Actual unconditional, native_conditioned or unknown population.
-        returned_shots: Returned raw count total, or None when no raw-shot total is available.
-        trajectories: Actual trajectory count, or None when unavailable/not applicable.
-        values: Sufficient statistics in the original label and physical-frame
-            association: for probabilities one ``ProbabilityArrays`` record,
-            for counts one ``CountBin`` per stored outcome. Probabilities and
-            counts are read with ``histogram()``.
-        source: Actual backend/kernel provenance.
-        selected_kernel_id: Host declaration identity, or None for quantum contributions.
+        run_id: Identifier of the Run that made the measurement.
+        execution: `"quantum_circuit"` or `"host_kernel"`, the kind of
+            computation that produced the data.
+        plan_id: Content hash of the Plan.
+        realization_id: Content hash of the experiment's concrete parameter
+            values.
+        prepared_id: Content hash of the preparation record of the circuit
+            or host computation that was run.
+        experiment: Name of the experiment in the Plan.
+        setting: The readout or batch setting.
+        bindings: The experiment's parameter values, in order.
+        quantum_layout: Order of the quantum registers, which fixes how
+            outcome coordinates are read.
+        classical_layout: Order of the classical registers, which fixes how
+            count labels are read.
+        attempt: Identifier of the attempt that was set aside for this
+            measurement.
+        job: Identifier of the job that produced the data, not of a later
+            reduction.
+        chunk: Position of this part within that job.
+        observation: The readout against which the returned statistics are
+            checked. For a trajectory point, it is that point's single-point
+            readout.
+        population: `"unconditional"`, `"native_conditioned"` or
+            `"unknown"`, which shots the statistics cover.
+        returned_shots: Total of the returned counts, or None when no shot
+            total is available.
+        trajectories: Number of trajectories, or None when unavailable or
+            not applicable.
+        values: Sufficient statistics, each kept with its original label and
+            its physical normalization. Probabilities have one
+            ``ProbabilityArrays`` record, and counts one ``CountBin`` per
+            stored outcome. Read both with ``histogram()``.
+        source: The backend or host code that produced the data (`Source`).
+        selected_kernel_id: Content hash of the host computation's
+            declaration, or None for a circuit.
         physical_scale: Positive factor that restores physical magnitude to
             this chunk's unit-normalized data, or None. Its meaning belongs to
             the Method. For LCHS and the QLS ``qsvt_inverse`` solver it is the
@@ -816,14 +911,14 @@ class ObservationChunk(Record):
         physical_scale_unavailable: Why ``physical_scale`` is None, because the
             scale is unavailable or no recovery applies. Host and amplitude
             chunks set exactly one of the two fields.
-        artifacts: Manifests of arrays from this same acquisition.
-        applications: Actual host operator/application receipts.
+        artifacts: Manifests of the arrays saved from this measurement.
+        applications: Records of the host operator applications.
         unavailable: Named outputs that could not be produced.
         point: ID of the trajectory point whose values this chunk holds, or
             None for a readout without a point schedule.
-        boundary: Resolved boundary of that point in the selected body, or None.
-        trajectory_id: Content identity of the trajectory declaration that
-            the point belongs to, held by the preparation receipt, or None.
+        boundary: Resolved boundary of that point in the planned body, or None.
+        trajectory_id: Content hash of the trajectory declaration that the
+            point belongs to, held by the preparation record, or None.
     """
 
     schema_version: Literal[3] = 3
@@ -997,20 +1092,20 @@ class ObservationChunk(Record):
         """Build a probabilities or counts chunk from its outcomes.
 
         Validation is that of every other construction path, including the
-        ``MAX_COUNT`` count domain. A probability chunk keeps its arrays in
-        memory, with manifests that carry the digest of their bytes; its
-        stored encoding (dense or sparse) and its canonical sorted order are
-        those of ``artifacts.probability_readout``.
+        count range ``0`` to ``2**63 - 1``. A probability chunk keeps its
+        arrays in memory, with manifests that carry the digest of their
+        bytes. Its stored encoding, dense or sparse, and its sorted order are
+        those of every saved probability readout.
 
         Args:
-            outcomes: Either a mapping from bit-string key to weight, with keys
+            outcomes (Mapping | tuple): Either a mapping from bit-string key to weight, with keys
                 spelled as the chunk stores them (rightmost character bit 0,
                 no register separators), or a pair ``(indices, weights)`` in the
                 layout of ``Histogram``: 1-D indices for a width of at most 64
                 or ``(entries, words)`` packed indices for every width, integer
                 counts or float64 probabilities. Empty arrays of shape ``(0,)``
                 or ``(0, words)`` describe an empty chunk whatever their dtype.
-            **fields: The other ObservationChunk fields except ``values``.
+            **fields (object): The other ObservationChunk fields except ``values``.
                 ``observation`` selects counts or probabilities. The width is
                 the number of its qubits (probabilities) or of the bits of
                 ``classical_layout`` (counts).
@@ -1073,8 +1168,8 @@ class ObservationChunk(Record):
         rebuilt from stored JSON returns a Histogram whose ``width`` and
         ``entries`` come from its summaries; its arrays are read through the
         artifact store of its Run or Result on the first access to the weights
-        or indices (``ArtifactStore.get``: one hydration per payload for the
-        store's lifetime, with no value or summary recheck).
+        or indices, once per payload for the store's lifetime, with no
+        recheck of the values or summaries.
 
         Raises:
             ValueError: For any other readout kind, or for a probability chunk
@@ -1117,12 +1212,13 @@ class ObservationChunk(Record):
 
     @property
     def acquisition_key(self):
-        """``(run_id, attempt, job, chunk)``, the identity of one acquisition's data.
+        """``(run_id, attempt, job, chunk)``, which identifies the data of one measurement.
 
         A Run stores, deduplicates and joins observations under this key. Two
-        chunks with equal values but different keys are different acquisitions,
-        except that the point chunks of one trajectory acquisition share its
-        run, attempt and job and differ only in ``chunk``.
+        chunks with equal values but different keys are different
+        measurements, except that the point chunks of one trajectory
+        measurement share its run, attempt and job and differ only in
+        ``chunk``.
         """
         return self.run_id, self.attempt, self.job, self.chunk
 
@@ -1290,12 +1386,19 @@ class ObservationChunk(Record):
         return self
 
     def declares_readout_of(self, receipt):
-        """Whether this chunk holds the readout its preparation receipt declares.
+        """Return whether this chunk holds the readout that its preparation record declares.
 
-        A point chunk holds the one-point readout of its point in the
-        receipt's trajectory, whose identity is its ``trajectory_id``; any
-        other chunk holds the receipt's observation itself. The receipt's
-        point lookup is indexed, so K point chunks join in O(K) lookups.
+        A point chunk holds the single-point readout of its point in the
+        preparation record's trajectory, whose content hash is its
+        ``trajectory_id``. Any other chunk holds the record's readout itself.
+        The record's point lookup is indexed, so K point chunks join in O(K)
+        lookups.
+
+        Args:
+            receipt (PreparedArtifact): The preparation record.
+
+        Returns:
+            declared (bool): Whether the readouts match.
         """
         if self.point is None:
             return self.trajectory_id is None and receipt.observation == self.observation
@@ -1308,36 +1411,44 @@ class ObservationChunk(Record):
                 and declaration._point_readout(point) == self.observation)
 
     def validate_unit_bound(self, receipt):
-        """Admit exact probabilities, Pauli expectations and branch masses that exceed their
-        unit endpoint only within the binary64 roundoff window of the executed circuit.
+        """Check that exact probabilities, Pauli expectations and branch masses exceed one only within the roundoff window of the executed circuit.
 
-        The window follows the receipt's native operation count, so this check joins the
-        chunk to its own preparation receipt. Alone, the chunk admits nonnegative
-        probabilities and masses and finite expectations. Counts and host scalars have
-        no roundoff endpoint here.
+        The window follows the native operation count of the preparation
+        record, so this check joins the chunk to its own preparation record.
+        Alone, the chunk accepts nonnegative probabilities and masses and
+        finite expectations. Counts and host scalars have no roundoff
+        endpoint here.
 
-        The window is derived from the receipt rather than stored on the chunk. A
-        stored copy would change the record format and add derived data that every
-        reader would have to check against its receipt. The cost is that each place
-        where a new chunk meets its receipt must call this method. The shared places
-        are the decoding of backend output and the validation of a standalone Result
-        before it is saved (``saved_evidence._validate_recorded_data``). Reopening a
-        Run or loading a Result reads chunks that passed one of them, and it does
-        not call this method again. Method result validators may add their own
-        calls, as QLS does for its masses. A new producer of chunks that bypasses
-        both places must add the call. The window
-        is defined in the ``exact_probability_window`` paragraph of
-        docs/ENGINEERING_CONSTANTS.md.
+        The window is derived from the preparation record rather than stored
+        on the chunk. A stored copy would change the record format and add
+        derived data that every reader would have to check against its
+        record. The cost is that each place where a new chunk meets its
+        record must call this method. The shared places are the decoding of
+        backend output and the validation of a standalone Result before it is
+        saved. Reopening a Run or loading a Result reads chunks that passed
+        one of them, and it does not call this method again. A Method's
+        Result validation may add its own calls, as QLS does for its masses.
+        A new producer of chunks that bypasses both places must add the call.
+        [Engineering constants](../ENGINEERING_CONSTANTS.md) defines the
+        window in its ``exact_probability_window`` paragraph.
 
-        A trajectory point chunk also joins its receipt's trajectory
-        declaration: the same ``trajectory_id``, the declared point's one-point
-        readout and its resolved boundary. A reduction point has no endpoint
-        here: host contractions of saved states have their own accumulation
-        error, which the receipt's probability/Pauli readout term does not
-        certify. Amplitude-derived masses use the receipt's
-        ``saved_state_probability_window``, which includes the host correction
-        of the saved state, and are checked for nonnegativity only when that
-        correction was not assessed.
+        A trajectory point chunk also joins its record's trajectory
+        declaration: the same ``trajectory_id``, the declared point's
+        single-point readout and its resolved boundary. A reduction point has
+        no endpoint here, because host contractions of saved states have
+        their own accumulated error, which the record's probability and Pauli
+        readout term does not bound. Amplitude-derived masses use the
+        record's ``saved_state_probability_window``, which includes the host
+        correction of the saved state, and are checked for nonnegativity only
+        when that correction was not assessed.
+
+        Args:
+            receipt (PreparedArtifact): The chunk's preparation record.
+
+        Raises:
+            ValueError: If the record is not this chunk's, a point chunk does
+                not match its declared point or boundary, or a value exceeds
+                its endpoint by more than the window.
         """
         if receipt.content_id != self.prepared_id:
             raise ValueError("an observation's unit bound requires its own preparation receipt")
@@ -1410,21 +1521,56 @@ class TimingObservation(Record):
 
 
 class ExecutionLimits(Record):
-    """Execution-only inclusive limits, independent of symbolic planning.
+    """Limits on what one Run may prepare, execute and store.
 
-    max_data_bytes bounds stored run records and numerical arrays, not process
-    RSS. Simulator memory covers the native state and known working arrays.
-    max_total_circuits independently caps preparation and circuit acquisitions.
+    Build it with keyword arguments and pass it as `limits=` to
+    [`solve`][nwqlib.scientist.solve] or `prepare`, for example
+    `ExecutionLimits(max_total_shots=10_000_000)`. Every argument is
+    optional, and every limit is inclusive. The `max_total_*` limits,
+    `max_data_bytes` and `max_synthesis_work` count totals over the whole
+    Run. Planning does not use these limits. A Method checks its own
+    planning limits, such as `Lanczos.max_bytes`. Raise a limit of an
+    existing Run with `Run.extend_limits`.
 
     Attributes:
-        max_simulation_qubits: Maximum selected width admitted before local native simulation.
-        simulator_memory_mb: Native simulator memory allowance in MiB.
-        max_total_circuits: Independent inclusive cap on quantum preparations and on circuit acquisition attempts.
-        max_total_shots: Inclusive total reserved raw-shot budget, including uncertain attempts.
-        max_data_bytes: Cap on recorded Run data and numerical payloads, not total process RSS.
-        max_completion_metadata_bytes: Additional JSON metadata allowance per completed acquisition, apart from declared numeric values, arrays and host application receipts that the kernel declares.
-        max_direct_amplitudes: Largest amplitude count of a declared direct magnitude/phase state preparation that the Run synthesizes.
-        max_synthesis_work: Largest total work, in the units of ``_dense_synthesis.dense_synthesis_size``, of the exact dense-unitary syntheses that the Run makes while it prepares circuits, over all its preparations. It counts each synthesis that a backend makes when it lowers a prepared circuit to a gate basis. The Run keeps the circuit of each such synthesis, keyed by its matrix, until the Run is closed (``Run._exact_dense_unitaries``), so each distinct matrix is synthesized and counted once, and again after the Run is reopened. It also counts the syntheses and Qiskit's control of them (``_dense_synthesis.gatewise_control_size``) when lowering controls a transformed block. Each amount is checked against the remaining allowance and reserved on the preparation's charge before its first synthesis starts. A preparation that the check refuses stays charged as a preparation but leaves its experiment unprepared, so a later call can prepare it once the limit is raised. Syntheses that a Method charges to its own limits at planning are not counted.
+        max_simulation_qubits: Default `20`. Largest circuit width that a
+            local simulator (Aer or the local NWQ-Sim backend) accepts. A
+            20-qubit complex128 statevector needs 16 MiB.
+        simulator_memory_mb: Default `1024` (MiB). Memory allowance of the
+            local simulator for the quantum state and its known working
+            arrays. Aer receives it as `max_memory_mb`.
+        max_total_circuits: Default `512`. Largest number of circuit
+            preparations, and separately of circuit execution attempts.
+        max_total_shots: Default `1_000_000`. Largest total of shots reserved
+            for circuit executions, including attempts whose outcome is
+            uncertain.
+        max_data_bytes: Default 10 GB (decimal, `10_000_000_000` bytes).
+            Largest size of the Run's recorded data and numerical arrays. It
+            does not bound the memory of the Python process.
+        max_completion_metadata_bytes: Default `65_536`. JSON metadata
+            allowed for each completed circuit execution or host
+            computation, in addition to the numeric values, arrays and
+            host-computation records that it declares.
+        max_direct_amplitudes: Default `65_536` (`2**16`, a 16-qubit
+            state). Largest amplitude count of a direct magnitude and phase
+            state preparation that the Run synthesizes.
+        max_synthesis_work: Default `1e9` work units. Largest total work of
+            the exact syntheses of dense unitaries that the Run makes while
+            it prepares circuits. It counts the syntheses of a backend that
+            translates a circuit to its gate basis, and the syntheses and
+            Qiskit's control of them when building the Qiskit circuit adds
+            controls to a transformed block. The default allows the synthesis
+            of one dense unitary on 8 qubits (5.2e8 units) and refuses one on
+            9 qubits (4.0e9 units). The work of a preparation's syntheses is
+            checked against the remaining allowance before the first of them
+            starts. Each distinct matrix is synthesized and counted once while
+            the Run is open, and again after the Run is reopened. A refused
+            preparation still counts against `max_total_circuits` and leaves
+            its experiment unprepared, so a later call can prepare it after
+            the limit is raised. Syntheses that a Method counts against its
+            own limits at planning are not counted here. The work unit and
+            the synthesis cache are defined in [Explicit workflow and reference
+            controls](../ENGINEERING_CONSTANTS.md#explicit-workflow-and-reference-controls).
     """
 
     schema_version: Literal[5] = 5
@@ -1450,17 +1596,33 @@ class ExecutionLimits(Record):
 
 
 class LimitAmendment(Record):
-    """One committed increase and the known counters immediately before it.
+    """One raise of a Run's limits, with the Run's counts just before it.
 
-    sequence orders amendments; recorded_at is an aware wall-clock timestamp,
-    not an elapsed-time measure. old/new contain complete execution caps.
-    circuit_preparations includes failed and successful-unused preparations;
-    circuit_attempts includes reserved and uncertain circuit acquisitions.
-    raw_shots counts explicitly prescribed shots, not unknown sampling inside
-    managed provider estimates. stored_data_bytes excludes pending_output_bytes;
-    both describe this Run's accounted data, never physical memory/RSS.
-    synthesis_work is the dense synthesis work reserved against
-    max_synthesis_work.
+    `Run.extend_limits` records one in `run.limit_amendments` for each call
+    that raises a limit. Each raises at least one limit and lowers none, and
+    the counts it records lie within the old limits. The fields below are
+    read-only.
+
+    Attributes:
+        sequence: Position in the Run's history of raises, from 1.
+        recorded_at: Time-zone-aware wall-clock time of the raise. It is a
+            timestamp, not a measure of elapsed time.
+        old: The complete
+            [`ExecutionLimits`][nwqlib.execution.ExecutionLimits] before the
+            raise.
+        new: The complete `ExecutionLimits` after the raise.
+        circuit_preparations: Circuit preparations so far, failed and unused
+            ones included.
+        circuit_attempts: Circuit execution attempts so far, reserved and
+            uncertain ones included.
+        raw_shots: Shots requested explicitly so far. Unknown sampling inside
+            an estimate that a provider manages is not included.
+        stored_data_bytes: Bytes of the Run's stored data, without
+            `pending_output_bytes`. Both byte counts describe the data the
+            Run accounts for, never physical memory.
+        pending_output_bytes: Bytes set aside for outputs not yet received.
+        synthesis_work: Work of the exact syntheses of dense unitaries
+            counted against `max_synthesis_work` so far.
     """
 
     schema_version: Literal[2] = 2
@@ -1721,33 +1883,54 @@ class SubmissionRecord(Record):
 
 
 class ExecutionTrace(Record):
-    """One run's bounded preparation charges and attempt history.
+    """The attempts of a Run and the work counted against its limits.
 
-    local_prepared_ids names successful preparations performed in this run.
-    A used portable receipt may instead come from another authorized run;
-    its use incurs execution exposure, not a new local preparation charge.
-    limits and limit_amendments capture this snapshot's cap/history prefix;
-    absent limits means this standalone trace has no supplied cap metadata.
+    `run.trace` and `result.data.trace` return it. It includes failed and
+    uncertain attempts and unused preparations, so a Result built from it
+    accounts for all the work of the Run, not only the measurements it uses.
+    `local_prepared_ids` names the successful preparations made in this Run.
+    A saved preparation that this Run uses may instead come from another
+    Run that is allowed to use it, and using it counts as execution work,
+    not as a new local preparation. `limits` and `limit_amendments` are the
+    limits and their history when the trace was taken, so raising the
+    Run's limits later does not change an earlier Result. The fields below
+    are read-only.
 
     Attributes:
-        run_id: Original Run identity.
-        plan_id: Exact selected Plan identity.
-        preparations: Number of actual local quantum preparation attempts.
-        construction_work_reserved: Quantum construction work charged in this Run.
-        events: Ordered immutable attempt records, including failed and uncertain work.
-        submissions: Original quantum submission records and per-item association.
-        host_preparations: Number of local host setup attempts.
-        host_preparation_work_reserved: Counted host setup work charged in this Run.
-        host_invocations: Number of reserved host invocations, including interrupted work.
-        host_work_reserved: Counted host execution work charged before invocation.
-        data_bytes_reserved: Output/data reservation total across attempts.
-        data_bytes: Recorded Run data bytes at this snapshot.
-        synthesis_work_reserved: Exact dense synthesis work reserved against ``max_synthesis_work`` in this Run.
-        local_prepared_ids: Successful preparations actually performed locally in this Run.
-        cancel_requested: Explicit cancellation request, or None; a request does not prove provider cancellation.
-        termination_reason: Method/controller termination explanation, or None while absent.
-        limits: Limits at this snapshot, or None for a standalone trace without cap metadata.
-        limit_amendments: Original ordered history of explicit limit increases.
+        run_id: Identifier of the Run.
+        plan_id: Content hash of the Run's Plan.
+        preparations: Number of preparation attempts in this Run, failed and
+            interrupted ones included. It includes the host setups counted in
+            `host_preparations`.
+        construction_work_reserved: Circuit construction work counted in this
+            Run, in work units.
+        events: Every attempt (`ConsumptionEvent` records), in order, failed
+            and uncertain ones included.
+        submissions: The circuit submissions (`SubmissionRecord` records),
+            with the attempts of each.
+        host_preparations: Number of host setup attempts.
+        host_preparation_work_reserved: Work of host setups counted in this
+            Run.
+        host_invocations: Number of host computations started, interrupted
+            ones included.
+        host_work_reserved: Work of host computations, counted before each
+            starts.
+        data_bytes_reserved: Bytes set aside for outputs, summed over the
+            attempts.
+        data_bytes: Bytes of the Run's stored data when the trace was taken.
+        synthesis_work_reserved: Work of the exact syntheses of dense
+            unitaries counted against `max_synthesis_work` in this Run.
+        local_prepared_ids: Content hashes of the successful preparations
+            made in this Run.
+        cancel_requested: The reason given to `Run.cancel`, or `None`. A
+            request does not prove that the provider cancelled the job.
+        termination_reason: Why the Method ended the run early, or `None`.
+        limits: The [`ExecutionLimits`][nwqlib.execution.ExecutionLimits]
+            when the trace was taken, or `None` for a trace recorded without
+            them.
+        limit_amendments: Every raise of the limits so far
+            ([`LimitAmendment`][nwqlib.execution.LimitAmendment] records), in
+            order.
     """
 
     schema_version: Literal[4] = 4
@@ -1773,7 +1956,7 @@ class ExecutionTrace(Record):
 
     @property
     def jobs(self) -> int:
-        """Reserved physical quantum requests, including unresolved intents."""
+        """Number of circuit submissions, including those whose acknowledgement from the backend has not arrived."""
         return len(self.submissions)
 
     def validate_observation(self, chunk):
@@ -1840,38 +2023,45 @@ class ExecutionTrace(Record):
 
 
 class RunFailed(RuntimeError):
-    """A terminal outcome or an unavailable recovery from Run continuation.
+    """Raised when a run fails, or when the outcome of an attempt cannot be recovered.
 
-    The stage and status describe the outcome being reported. A recovery error
-    reports an unavailable attempt outcome with status uncertain, even when its
-    submission is terminal because the output is irretrievable. ``locator`` and
-    ``directory`` preserve the original recovery coordinates; ``failure`` is
-    recorded failure text, not an invented local exception. ``trace`` and
-    ``exposure`` capture the existing attempts and charges without another
-    backend call. Recovery with status uncertain does not claim that execution
-    failed. The attempt field identifies the original acquisition, whose record
-    and charged exposure are available in the trace and exposure snapshots.
+    `submit`, `Run.resume` and `Run.wait` raise it. `stage` and `status`
+    describe the outcome. A recovery error (`stage="recovery"`) reports an
+    attempt whose outcome is unavailable, with status `"uncertain"`, even
+    when its submission has ended because its output cannot be retrieved.
+    Status `"uncertain"` does not claim that the execution failed. `locator`
+    and `directory` locate the original job and the saved Run, and `failure`
+    is the recorded failure text, not an invented local exception. `trace`
+    and `exposure` capture the attempts and counted work without another
+    backend call, and `attempt` names the original attempt of a recovery
+    error, whose record and counted work are in those snapshots. The message
+    names each of these. For a recovery error, it also tells you to inspect
+    the saved data or cancel the Run, and to start a new Run to execute the
+    Plan again, because nothing is resubmitted in this Run and the attempt
+    stays uncertain and counted.
 
     Attributes:
-        stage: ``prepare``, ``execute`` or ``recovery``.
-        status: Observed outcome, such as ``failed``, ``cancelled`` or ``uncertain``.
-        locator: Original provider job or remote-preparation locator, or None when
-            none was acknowledged.
-        failure: Recorded failure text, or None.
-        directory: Durable Run folder, or None for an in-memory Run.
-        trace: ExecutionTrace snapshot at the time of the error.
-        exposure: Read-only exposure snapshot, as returned by ``Run.exposure``.
-        attempt: Attempt identity for a recovery error, otherwise None.
+        stage: `"prepare"`, `"execute"` or `"recovery"`.
+        status: The observed outcome, such as `"failed"`, `"cancelled"` or
+            `"uncertain"`.
+        locator: The original provider job or remote-preparation locator, or
+            `None` when none was acknowledged.
+        failure: The recorded failure text, or `None`.
+        directory: The Run's folder, or `None` for a Run without one.
+        trace: The [`ExecutionTrace`][nwqlib.execution.ExecutionTrace] at the
+            time of the error.
+        exposure: Read-only copy of `Run.exposure` at the time of the error,
+            the counted work by outcome.
+        attempt: The attempt's identifier for a recovery error, otherwise
+            `None`.
     """
 
     def __init__(self, *, stage, status, locator, failure, directory, trace, exposure, attempt=None):
-        """Keep the recovery coordinates and build one message naming each of them.
-
-        ``exposure`` is copied into read-only mappings, so a caller cannot edit
-        the snapshot it inspects. A recovery error adds the remedy: inspect the
-        saved evidence or cancel the Run, and start a new Run to execute the
-        Plan again, because resubmitting in place is never offered.
-        """
+        # Keep the recovery coordinates and build one message naming each of
+        # them. ``exposure`` is copied into read-only mappings, so a caller
+        # cannot edit the snapshot it inspects. A recovery error adds the
+        # remedy (class docstring), because resubmitting in place is never
+        # offered.
         from types import MappingProxyType
 
         self.stage, self.status = stage, status

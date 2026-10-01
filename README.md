@@ -2,9 +2,9 @@
 
 [![PyPI](https://img.shields.io/pypi/v/nwqlib.svg)](https://pypi.org/project/nwqlib/)    [![Python](https://img.shields.io/badge/python-3.12%2B-blue.svg)](https://pypi.org/project/nwqlib/)    [![License](https://img.shields.io/badge/license-BSD--2--Clause-blue.svg)](https://github.com/pnnl/NWQLib/blob/main/LICENSE)    [![Documentation](https://img.shields.io/badge/docs-pnnl.github.io%2FNWQLib-blue.svg)](https://pnnl.github.io/NWQLib/)    [![DOI](https://zenodo.org/badge/DOI/10.5281/zenodo.23074265.svg)](https://doi.org/10.5281/zenodo.23074265)
 
-NWQLib applies quantum algorithms to scientific problems. A workflow connects your inputs and requested output to a selected method, execution and a report of the result, evidence and resources. Native circuit execution uses Qiskit and an explicitly selected backend.
+NWQLib applies quantum algorithms to scientific problems. You state the problem and choose a method, and NWQLib plans the construction, runs it on the backend you choose and returns the result with its resource counts and what is known about its error. Circuits are built with Qiskit.
 
-**Documentation: <https://pnnl.github.io/NWQLib/>**
+Documentation: <https://pnnl.github.io/NWQLib/>
 
 ## Installation
 
@@ -14,11 +14,9 @@ NWQLib requires Python 3.12 or later. Install the package with the local Aer sim
 python -m pip install "nwqlib[aer]"
 ```
 
-The base package, `python -m pip install nwqlib`, supports metadata, admitted inputs, default LCHS planning and the classical methods. Native preparation and execution need the extra of the selected backend (`aer`, `ibm`, `ionq`, `nexus`). The [framework page](https://pnnl.github.io/NWQLib/FRAMEWORK/) lists every optional group, and the [backends guide](https://pnnl.github.io/NWQLib/backends/) explains what each backend supports. For development, install an editable checkout with `python -m pip install -e ".[dev,aer]"`.
+The base package, `python -m pip install nwqlib`, describes the methods, accepts inputs, plans LCHS with its default settings and runs the classical methods. Building and running circuits needs the extra of the chosen backend (`aer`, `ibm`, `ionq`, `nexus`), each of which includes Qiskit. [Install and first result](https://pnnl.github.io/NWQLib/quickstart/#install) lists every extra, and [Choose a backend](https://pnnl.github.io/NWQLib/backends/) explains what each backend supports. To work on NWQLib itself, see [Set up, test and build](https://pnnl.github.io/NWQLib/development/setup/).
 
-## Start here
-
-**The [example notebooks](https://github.com/pnnl/NWQLib/tree/main/examples) solve complete scientific problems from input to result, error and circuit cost, and the [examples guide](https://pnnl.github.io/NWQLib/examples/) points you to the one that matches your problem. The [mathematics page](https://pnnl.github.io/NWQLib/mathematics/) states the bounds, resource laws and error budgets that NWQLib uses, each with its proof or source and the code that implements it.**
+## First result
 
 To solve `du/dt = -A u` with a small physical input:
 
@@ -35,47 +33,62 @@ result = solve(problem, method=LCHS())
 print(result.solution)
 ```
 
-The default returns the physical solution approximation using nine total qubits. The [quickstart](https://pnnl.github.io/NWQLib/quickstart/) compares it with an independent reference and shows how to change the approximation. Other planning paths follow their Method's input and conversion requirements, and the method guides describe these boundaries.
+```text
+[ 0.96006038-1.54102084e-12j -0.00513885+3.61167323e-13j]
+```
 
-The notebooks in `examples/` apply NWQLib to molecular ground-state energy, a linear system, linear dynamics and optimization, and one estimates the resources of a linear system, heat flow, two spin chains, a GCiM trial basis and a QHD optimization step at up to 100 qubits. The [examples guide](https://pnnl.github.io/NWQLib/examples/) describes the work each notebook performs.
+The default returns an approximation of the physical solution using nine qubits in total. [Install and first result](https://pnnl.github.io/NWQLib/quickstart/) compares it with an independent reference and shows how to change the approximation. Each method accepts its own input forms and conversions, which its algorithm guide describes.
+
+The [example notebooks](https://github.com/pnnl/NWQLib/tree/main/examples) solve complete scientific problems from input to result, error and circuit cost: molecular ground-state energy, a linear system, linear dynamics and optimization. One more notebook estimates the resources of a linear system, heat flow, two spin chains and a GCiM trial basis at 80 to 100 system qubits, where the largest circuit, LCHS for heat flow, has 109 qubits in total. It also estimates one QHD step on a three-variable grid of 32 points per variable, which takes 96 qubits in the one-hot encoding. The [examples guide](https://pnnl.github.io/NWQLib/examples/) points you to the notebook that matches your problem. The [mathematics page](https://pnnl.github.io/NWQLib/mathematics/) states the bounds, resource formulas and error budgets that NWQLib uses, each with its proof or source and the code that implements it.
 
 ## Choose a task
 
 | Task | Read |
 | --- | --- |
-| Learn the Python workflow | [Quickstart](https://pnnl.github.io/NWQLib/quickstart/), [examples](https://pnnl.github.io/NWQLib/examples/) |
+| Install and get a first result | [Install and first result](https://pnnl.github.io/NWQLib/quickstart/), [examples](https://pnnl.github.io/NWQLib/examples/) |
+| Learn what Problem, Method, Plan, Run and Result are | [How NWQLib works](https://pnnl.github.io/NWQLib/how_it_works/) |
+| Choose a problem and output | [Choose a problem and output](https://pnnl.github.io/NWQLib/problems/) |
 | Compare NWQLib with other quantum packages | [Why NWQLib](https://pnnl.github.io/NWQLib/why_nwqlib/) |
-| Discover methods or use the command line | [CLI guide](https://pnnl.github.io/NWQLib/cli/) |
-| Compare methods and inspect results | [Scientist workflow](https://pnnl.github.io/NWQLib/scientist/) |
-| Supply operators and states | [Input access](https://pnnl.github.io/NWQLib/inputs/) |
-| Estimate resources and assess a device | [Resource estimates](https://pnnl.github.io/NWQLib/resources/), [device profiles](https://pnnl.github.io/NWQLib/profiles/) |
-| Run locally or submit to a provider | [Prepared execution](https://pnnl.github.io/NWQLib/prepared_execution/), [backends](https://pnnl.github.io/NWQLib/backends/) |
-| Save results or continue a workflow | [Saved evidence](https://pnnl.github.io/NWQLib/saved_evidence/), [run archives](https://pnnl.github.io/NWQLib/run_archives/) |
+| Compare methods and inspect results | [Plan, compare and solve](https://pnnl.github.io/NWQLib/scientist/) |
+| Supply operators and states | [Supply inputs](https://pnnl.github.io/NWQLib/inputs/) |
+| Estimate resources and check device fit | [Estimate resources](https://pnnl.github.io/NWQLib/resources/), [Check device fit and run time](https://pnnl.github.io/NWQLib/profiles/) |
+| Check a result against a reference or tolerance | [Check accuracy and verify a result](https://pnnl.github.io/NWQLib/verification/) |
+| Run locally or submit to a provider | [Run on a backend](https://pnnl.github.io/NWQLib/prepared_execution/), [Choose a backend](https://pnnl.github.io/NWQLib/backends/) |
+| Save results or continue an interrupted run | [Save, load and reanalyze results](https://pnnl.github.io/NWQLib/saved_evidence/), [Continue an interrupted run](https://pnnl.github.io/NWQLib/run_archives/) |
+| Run your own circuit or compare your own method | [Run your own circuit](https://pnnl.github.io/NWQLib/own_circuit/), [Add a method](https://pnnl.github.io/NWQLib/algorithm_protocol/) |
+| List methods or use the command line | [Use the command line](https://pnnl.github.io/NWQLib/cli/) |
 | Look up a signature | [API reference](https://pnnl.github.io/NWQLib/api/) |
 | Check known defects in Qiskit and other dependencies, and how NWQLib handles them | [Dependency issues](https://pnnl.github.io/NWQLib/dependency_issues/) |
-| Extend or maintain NWQLib | [Run your own circuit](https://pnnl.github.io/NWQLib/own_circuit/), [Contributing](https://github.com/pnnl/NWQLib/blob/main/CONTRIBUTING.md), [code tour](https://pnnl.github.io/NWQLib/CODE_TOUR/), [maintenance](https://pnnl.github.io/NWQLib/MAINTENANCE/) |
 | Trace code to its paper, equation and reason | [Code tour](https://pnnl.github.io/NWQLib/CODE_TOUR/#find-the-source-and-reason-for-a-line-of-code), [references](https://pnnl.github.io/NWQLib/references/) |
-| Find the bound, resource law or error budget behind a result, its proof or source, and its code | [Mathematics](https://pnnl.github.io/NWQLib/mathematics/) |
+| Find the bound, resource formula or error budget behind a result, its proof or source, and its code | [Mathematics](https://pnnl.github.io/NWQLib/mathematics/) |
+| Maintain NWQLib | [Set up, test and build](https://pnnl.github.io/NWQLib/development/setup/), [Contributing](https://github.com/pnnl/NWQLib/blob/main/CONTRIBUTING.md) |
 
 ## Algorithms
 
 | Scientific task | Methods |
 | --- | --- |
 | Normalized expectation of a finite real Pauli sum | [Expectation](https://pnnl.github.io/NWQLib/algorithms/expectation/) |
-| Energy estimates from moments or a selected subspace | [Chebyshev Lanczos](https://pnnl.github.io/NWQLib/algorithms/lanczos/), [fixed and adaptive GCiM](https://pnnl.github.io/NWQLib/algorithms/gcim/) |
+| Energy estimates from moments or a chosen subspace | [Chebyshev Lanczos](https://pnnl.github.io/NWQLib/algorithms/lanczos/), [fixed and adaptive GCiM](https://pnnl.github.io/NWQLib/algorithms/gcim/) |
 | Phase or energy estimation | [QPE: QCELS, RWPE, SPE and RFE](https://pnnl.github.io/NWQLib/algorithms/qpe/) |
 | Time-independent linear dynamics | [LCHS](https://pnnl.github.io/NWQLib/algorithms/lchs/) |
 | Linear systems | [QLS: QSVT inverse polynomial (`qsvt_inverse`, the default) and the Dalzell kernel shortcut (`shortcut_native_svp`, `shortcut_dilation`)](https://pnnl.github.io/NWQLib/algorithms/qls/) |
 | Box-constrained optimization | [QHD](https://pnnl.github.io/NWQLib/algorithms/qhd/) |
 | Optimization over a box with equality or inequality constraints | [QHD augmented Lagrangian](https://pnnl.github.io/NWQLib/algorithms/qhd/#constrained-problems) |
 
-Methods report the quantity actually obtained and any unresolved accuracy conditions. A projected energy, local statistical interval or completed simulation does not by itself establish the full requested scientific claim. The [roadmap](https://pnnl.github.io/NWQLib/ROADMAP/) records current limitations and open work. Reusable state preparation, block encoding, LCU, QSP/QSVT and evolution primitives have their own [API references](https://pnnl.github.io/NWQLib/api/).
+Each method reports the quantity it obtained and any accuracy conditions that remain unresolved. A projected energy, a local statistical interval or a completed simulation does not by itself establish the full requested scientific claim. [Limitations and open work](https://pnnl.github.io/NWQLib/ROADMAP/) lists current limitations. State preparation, block encoding, LCU, QSP/QSVT and evolution subroutines have their own [API reference pages](https://pnnl.github.io/NWQLib/api/).
 
 ## Backend support
 
-Aer supports local execution. NWQ-Sim CPU execution and process-exit continuation have been exercised on macOS and Linux with the qualified build described in the [backend guide](https://pnnl.github.io/NWQLib/backends/). IBM Runtime, IonQ and Nexus have offline SDK and injected-result qualification. Live provider accounts, queues and QPUs remain unqualified. Slurm and GPU/site support have their documented offline qualification boundaries.
+| Backend | Runs where | Tested against the live service |
+| --- | --- | --- |
+| [Aer](https://pnnl.github.io/NWQLib/aer/) | Locally | Not applicable |
+| [NWQ-Sim](https://pnnl.github.io/NWQLib/nwqsim/) | Locally, with the NWQ-Sim build described in its guide. CPU execution, and continuing a run after Python exits, were tested on macOS and Linux with that build | Not applicable |
+| [Slurm](https://pnnl.github.io/NWQLib/slurm/) | NWQ-Sim on your cluster, with explicit site configuration | No. Scheduler and site-configuration handling is tested offline. Site allocation, MPI and GPU execution are not tested |
+| [IBM Runtime](https://pnnl.github.io/NWQLib/ibm/) | IBM Quantum service | No. SDK calls and result handling are tested offline. Live accounts, queues and QPUs are not tested |
+| [IonQ](https://pnnl.github.io/NWQLib/ionq/) | IonQ service | No. Circuit conversion and result handling are tested offline. QPUs are not tested |
+| [Quantinuum Nexus](https://pnnl.github.io/NWQLib/nexus/) | Nexus H2 service | No. Conversion, remote-job handling and results are tested offline. Nexus needs a [pandas dependency exception and has no per-request timeout](https://pnnl.github.io/NWQLib/nexus/#costs-timeout-and-qualification) |
 
-The [Nexus guide](https://pnnl.github.io/NWQLib/nexus/#costs-timeout-and-qualification) documents its pandas dependency exception and missing per-request timeout. See [Slurm](https://pnnl.github.io/NWQLib/slurm/) for explicit site configuration. Each method/backend/readout combination must satisfy its own capability checks.
+A backend runs a method only when it supports that method's circuits and readout. [Choose a backend](https://pnnl.github.io/NWQLib/backends/) gives the details.
 
 ## Citation
 

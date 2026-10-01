@@ -249,15 +249,31 @@ def circuit_layout(circuit, registers):
 
 
 class AerBackend(Record):
-    """Local Aer configuration; explicit noise applies to sampled counts only.
+    """Local Qiskit Aer simulator, the default backend of `prepare` and `solve`.
 
-    from_noise_model binds the actual caller-owned SDK object without copying or
-    serializing it. Do not mutate that model while this backend or its prepared
-    handles are reused. noise_model_id identifies this binding, not model contents.
-    JSON configuration alone is inert. Run.save stores the bound model as the
-    SDK's native dictionary with NumPy array files. load_run binds the model it
-    rebuilds from them to the reopened Run's own copy of this configuration
-    (``run.backend``) and leaves the backend passed to it unchanged.
+    Build it with `AerBackend()` for noiseless simulation, or with
+    `AerBackend.from_noise_model(model)` for a Qiskit Aer noise model, and pass
+    it as `backend=` to [`solve`][nwqlib.scientist.solve] or
+    [`prepare`][nwqlib.scientist.prepare]. It needs the `aer` extra
+    (`pip install "nwqlib[aer]"`) and no credentials. A noise model acts on
+    sampled counts only. An exact expectation, probability or amplitude would
+    describe neither the noiseless circuit nor the noisy samples, so those readouts
+    reject a noisy backend before any circuit is built.
+
+    The backend holds the caller's `NoiseModel` object without copying or
+    serializing it, so keep that model unchanged while this backend or its
+    prepared circuits are in use. `Run.save` stores the model as the SDK's
+    dictionary with NumPy array files, and `load_run` binds the rebuilt model to
+    the reopened Run's own copy of this configuration (`run.backend`), leaving
+    the backend passed to `load_run` unchanged. `revise` keeps the bound model
+    while `noise_model_id` is unchanged. The [Aer guide](../aer.md) covers
+    readouts, noise and circuit inspection.
+
+    Attributes:
+        noise_model_id: Default `None`, no noise model. `from_noise_model` sets
+            it to a fresh UUID that identifies the binding, not the model's
+            contents. A configuration rebuilt from JSON with this field set
+            holds no model and raises when used.
     """
 
     kind: Literal["qiskit_aer"] = "qiskit_aer"
@@ -266,7 +282,20 @@ class AerBackend(Record):
 
     @classmethod
     def from_noise_model(cls, model):
-        """Bind one supplied NoiseModel; import its SDK only on this explicit call."""
+        """Return an Aer backend that applies a Qiskit Aer noise model to sampled counts.
+
+        The model is held without copying, and `qiskit_aer` is imported only by
+        this call.
+
+        Args:
+            model (qiskit_aer.noise.NoiseModel): The noise model to apply.
+
+        Returns:
+            backend (AerBackend): A new backend whose `noise_model_id` is a fresh UUID.
+
+        Raises:
+            TypeError: If `model` is not a Qiskit Aer `NoiseModel`.
+        """
         from qiskit_aer.noise import NoiseModel
         if not isinstance(model, NoiseModel):
             raise TypeError("from_noise_model requires a Qiskit Aer NoiseModel")

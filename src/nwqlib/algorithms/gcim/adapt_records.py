@@ -460,41 +460,45 @@ def _energy_gradient_work(members, thetas, dimension, hamiltonian_work):
 
 
 class AdaptRound(Record):
-    """One projected analysis and the adaptive decision that followed it.
+    """One projected analysis of an `ADAPT` run and the selection that followed it.
 
-    Rounds record the values that actually drove each decision, so a later
-    cutoff reanalysis of the Result cannot rewrite them.
+    `ADAPTResult.history` holds one per completed projected analysis. A round
+    keeps the values that drove its decision, so a later reanalysis of the
+    Result at another cutoff does not change it. The fields below are
+    read-only.
 
     Attributes:
         iteration: Number of selected generators in the basis of this round.
         selected: Pool indices of those generators in selection order.
         theta: Their angles at this analysis, in radians.
         energy: Lowest projected Ritz value of this round, or None.
-        gradient_norm: Euclidean norm of the screened product-state gradients, or
-            None when no screening followed.
-        gradients: ``(pool_index, <[H, A_i]>)`` pairs for the unselected generators.
-        winner: Pool index selected next, or None when no screening followed or
-            the gradient-norm floor stopped the controller.
-        residual_norm: Full-space residual ``||(H - E) psi||`` of the normalized Ritz
-            state. It is recorded only under ``residual_norm`` stopping and is None
-            otherwise.
+        gradient_norm: Euclidean norm of the screened product-state
+            gradients, or None when no screening followed.
+        gradients: `(pool_index, <[H, A_i]>)` pairs for the unselected
+            generators.
+        winner: Pool index selected next, or None when no screening followed
+            or the gradient-norm floor stopped the run.
+        residual_norm: Full-space residual `||(H - E) psi||` of the normalized
+            Ritz state. It is recorded only under `"residual_norm"` stopping
+            and is None otherwise.
         flat_count: Consecutive small energy changes counted after this round.
-        contribution_ids: Observation chunks first collected after the previous
+        contribution_ids: Observation data first collected after the previous
             round's screening and up to this round's screening, including any
             optimizer energy queries in between.
-        basis_realization: Realization identity of the query that supplied the
-            diagonal of the full selected product, which the completed matrix
-            stage must contain: the shared full-chain query of an exact quantum
-            run, whose screening values the later screen reuses, or the diagonal
-            pair query otherwise.
-        analysis_attempt: Controller analysis attempt that produced this round.
+        basis_realization: Content hash of the query that supplied the
+            diagonal of the full selected product, which the
+            completed matrix stage must contain: the shared full-chain query
+            of an exact quantum run, whose screening values the later screen
+            reuses, or the diagonal pair query otherwise.
+        analysis_attempt: Analysis attempt of the run that produced this round.
         optimizer_attempts: Cumulative optimizer invocations at this round.
         optimizer_rounds: Cumulative completed BFGS iterations at this round.
-        energy_queries: Cumulative logical energy queries charged to the optimizer
-            allowance.
-        sampled_failure: Sampled-pencil failure or enclosure excursion code, or None.
-        sampled_enclosure_violation: Distance of the sampled Ritz value outside the
-            processed Pauli enclosure, or None.
+        energy_queries: Cumulative energy queries counted against
+            `optimize_max_evaluations`.
+        sampled_failure: Sampled-pencil failure or enclosure excursion code,
+            or None.
+        sampled_enclosure_violation: Distance of the sampled Ritz value
+            outside the Pauli L1 enclosure of the processed operator, or None.
     """
 
     schema_version: Literal[2] = 2
@@ -518,36 +522,52 @@ class AdaptRound(Record):
 
 
 class ADAPTResult(Result):
-    """Adaptive projected estimate, its trajectory and its controller outcome.
+    """Smallest projected eigenvalue from an `ADAPT` run, with its history and stop reason.
 
-    ``selected``/``theta`` describe the controller's latest coordinates, while
-    ``value_selected``/``value_theta`` describe the basis that produced
-    ``eigenvalue`` and ``pencil``. They differ when a generator was selected
-    or optimized after the last projection, and reanalysis always uses the
-    value basis.
+    [`solve`][nwqlib.scientist.solve] returns it for an `ADAPT` method, and
+    `load_result` reopens a saved one. The answer is `eigenvalue`, the lowest
+    projected Ritz value of the processed Hamiltonian in the basis given by
+    `value_selected` and `value_theta`, in the unit of the `Eigenproblem`. It
+    establishes neither the ground state nor coverage of the adaptive search.
+    `stop_reason` says why the run ended, `history` holds one round per
+    projected analysis, and `pencil` holds the projected matrices. `selected`
+    and `theta` describe the latest generators and angles, while
+    `value_selected` and `value_theta` describe the basis behind `eigenvalue`
+    and `pencil`. They differ when a generator was selected or optimized
+    after the last projection, and reanalysis always uses the value basis.
+    `print(result)` shows the value, its scope and the stop reason. The
+    fields below are read-only. The fields of
+    [`Result`][nwqlib.core.analysis.Result] are present too.
 
     Attributes:
-        eigenvalue: Lowest projected Ritz value of the processed Hamiltonian, or
-            None. It establishes neither ground identity nor adaptive coverage.
+        eigenvalue: Lowest projected Ritz value of the processed Hamiltonian,
+            or None. It establishes neither the ground state nor coverage of
+            the adaptive search.
         selected: Pool indices chosen so far, in selection order.
         theta: Current angles of those generators, in radians.
-        value_selected: Pool indices of the basis behind ``eigenvalue``.
-        value_theta: Angles of the basis behind ``eigenvalue``.
-        history: One ``AdaptRound`` per completed projected analysis.
-        pencil: Projected pencil of the value basis, or None.
-        stop_reason: Controller outcome. Scientific stops are ``gradient_norm_floor``,
-            ``flat_counter``, ``residual_norm_threshold``, ``pool_exhausted``,
-            ``max_iterations``, ``optimization_evaluation_budget_exhausted``,
-            ``no_usable_overlap_subspace`` and ``invalid_sampled_evidence``.
-            Execution states are ``running``, ``cancelled``, ``partial_observation``,
-            ``pending_preparation``, ``pending_acquisition``, ``uncertain_preparation``,
-            ``uncertain_native_intent``, ``backend_failed`` and ``not_started``.
+        value_selected: Pool indices of the basis behind `eigenvalue`.
+        value_theta: Angles of the basis behind `eigenvalue`.
+        history: One [`AdaptRound`][nwqlib.algorithms.gcim.adapt_records.AdaptRound]
+            per completed projected analysis.
+        pencil: The [`ProjectedPencil`][nwqlib.algorithms.gcim.fixed_basis.ProjectedPencil]
+            of the value basis, or None.
+        stop_reason: Why the run stopped. Scientific stops are
+            `gradient_norm_floor`, `flat_counter`, `residual_norm_threshold`,
+            `pool_exhausted`, `max_iterations`,
+            `optimization_evaluation_budget_exhausted`,
+            `no_usable_overlap_subspace` and `invalid_sampled_evidence`.
+            Execution states are `running`, `cancelled`,
+            `partial_observation`, `pending_preparation`,
+            `pending_acquisition`, `uncertain_preparation`,
+            `uncertain_native_intent`, `backend_failed` and `not_started`.
         pending: Labels of queries or statuses that blocked further progress.
         optimizer_attempts: Number of optimizer invocations started.
         optimizer_rounds: Completed BFGS iterations over all invocations.
-        optimizer_restarts: Records of BFGS restarts from a saved incumbent after resume.
-        energy_queries: Logical energy queries charged to ``optimize_max_evaluations``.
-        analysis_attempts: Projected analyses started by the controller.
+        optimizer_restarts: Records of BFGS restarts from a saved incumbent
+            after the run was resumed.
+        energy_queries: Energy queries counted against
+            `optimize_max_evaluations`.
+        analysis_attempts: Projected analyses started by the run.
         analysis_cutoff: Overlap-eigenvalue cutoff of this analysis.
         target_identification: Fixed statement of what the value does not establish.
     """
@@ -628,6 +648,18 @@ class ADAPTResult(Result):
                 sampled=plan.execution == "quantum" and plan.shots is not None)
 
     def projected_diagnostics(self):
+        """Return the stored Gram matrix and solve diagnostics for projected checks.
+
+        It reads the stored `pencil` and runs no new solve.
+        `result.verify(checks=ProjectedVerificationOptions(...))` uses it.
+
+        Returns:
+            diagnostics (ProjectedDiagnostics): Its `overlap`, `spectrum`,
+                `normalization` and `backward_error` are the pencil's
+                `overlap`, `overlap_eigenvalues`, `overlap_normalization_error`
+                and `projected_backward_error`, the last on the physical
+                pencil (H, S). All four are None when there is no pencil.
+        """
         from nwqlib.evidence.verification import ProjectedDiagnostics
 
         p = self.pencil

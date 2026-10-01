@@ -107,29 +107,52 @@ def cartesian_decomposition(
     max_bytes=DEFAULT_MAX_BYTES,
     max_spectral_work=100_000_000,
 ) -> tuple[np.ndarray, np.ndarray]:
-    """Return the Cartesian decomposition used by LCHS.
+    """Return the Hermitian parts `(L, H)` of `A = L + iH` used by LCHS.
 
-    The implemented convention is ``A = L + iH``, so
-    ``L = (A + A^dagger)/2`` and ``H = (A - A^dagger)/(2i)``, as in ACL
-    arXiv:2312.03916v2 Eqs. (3)-(4). LCHS assumes L is PSD, which keeps
-    ``||exp(-A*t)|| <= 1`` (ACL Lemma 21, Eq. (162)).
-    ``eigcheck=False`` selects decomposition only, without claiming the PSD
-    premise. The Method separately validates its already selected endpoints.
+    `L = (A + A^dagger)/2` and `H = (A - A^dagger)/(2i)`, as in An, Childs
+    and Lin, arXiv:2312.03916v2, Eqs. (3)-(4). LCHS needs L positive
+    semidefinite (PSD), which keeps `||exp(-A t)|| <= 1` (same paper,
+    Lemma 21, Eq. (162)). With `eigcheck=True` the function also checks that
+    condition. `eigcheck=False` only decomposes. It does not establish
+    the PSD condition or replace the check of `LCHS`, which tests its own
+    eigenvalue endpoints.
 
-    Form the Cartesian parts L=(A+A†)/2 and H=(A−A†)/(2i) from one
-    conjugate-transpose workspace (_cartesian_parts). With A live, the parts
-    hold 48 d**2 bytes. The eigenvalue check of a nonzero L is admitted
-    first: its known NumPy arrays, A, L, H, the solver's internal d-square
-    copy and the internal and public eigenvalue vectors, are
-    B_cartesian = 64 d**2 + 16 d bytes, and its work is d**3 against
-    ``max_spectral_work``. The eigensolver's queried LAPACK workspace
-    Q_N(d) = 16 l_N + 8 r_N + I i_N (JOBZ=N) is not charged: this is a
-    declared known-array logical workspace, not a complete workspace cap.
-    These units are admission proxies, not timings or equal-cost CPU
-    operations.
+    Args:
+        matrix (array_like): Finite square matrix A.
+        eigcheck (bool): Check that L is PSD within `psd_tolerance`.
+        psd_tolerance (float): Default `1e-12`. Relative window of the
+            check. An eigenvalue of L at or above `-psd_tolerance*||L||_2`
+            passes.
+        max_bytes (int): Default 10 GB (decimal, `10_000_000_000` bytes).
+            Upper limit on the arrays of the check, `64 d**2 + 16 d` bytes
+            for dimension d, tested before they are formed. The count covers
+            the known NumPy arrays, not the eigensolver's own LAPACK
+            workspace.
+        max_spectral_work (int): Upper limit on the eigenvalue check of a
+            nonzero L, counted as `d**3` work units, which are not timings.
+
+    Returns:
+        parts (tuple[numpy.ndarray, numpy.ndarray]): L and H as complex
+            arrays.
+
+    Raises:
+        ValueError: If A is not a finite square matrix, or, with `eigcheck`,
+            if L has an eigenvalue below `-psd_tolerance*||L||_2` or the
+            check exceeds `max_spectral_work` or `max_bytes`.
     """
     from nwqlib.operators.access import _check_bytes
 
+    # Form the Cartesian parts L=(A+A†)/2 and H=(A−A†)/(2i) from one
+    # conjugate-transpose workspace (_cartesian_parts). With A live, the parts
+    # hold 48 d**2 bytes. The eigenvalue check of a nonzero L is admitted
+    # first: its known NumPy arrays, A, L, H, the solver's internal d-square
+    # copy and the internal and public eigenvalue vectors, are
+    # B_cartesian = 64 d**2 + 16 d bytes, and its work is d**3 against
+    # max_spectral_work. The eigensolver's queried LAPACK workspace
+    # Q_N(d) = 16 l_N + 8 r_N + I i_N (JOBZ=N) is not charged: this is a
+    # declared known-array logical workspace, not a complete workspace cap.
+    # These units are admission proxies, not timings or equal-cost CPU
+    # operations.
     array = as_square_matrix(matrix)
     d = array.shape[0]
     if eigcheck:

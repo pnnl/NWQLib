@@ -1470,35 +1470,62 @@ def _unknown_error_model(problem, output, construction):
 
 
 class _QPEMethod(Method):
-    """Shared input, evolution, analysis and execution for concrete estimators.
+    """Settings that `QCELS`, `SPE`, `RFE` and `RWPE` all accept, with the same defaults.
 
-    Eigenproblem initialization belongs to this Method. SpectralEstimation
-    supplies its own prepared population. A peak or credible interval does not
-    establish the requested ground target or general mixed-spectrum accuracy.
+    Each estimator observes the signal `z_p = <psi|U^p|psi>` through one
+    ancilla qubit, with `U = exp(-i*tau*H)` for a Hamiltonian H, or the
+    polar factor of a supplied unitary. An `Eigenproblem` takes its prepared
+    state from `initial_state`, and a `SpectralEstimation` supplies its own.
+    A peak, fit or credible interval does not establish the requested ground
+    state or accuracy on a mixed spectrum.
+
+    Attributes:
+        initial_state: Default `None`. Reference state `|psi>`, required for
+            an `Eigenproblem`. A `SpectralEstimation` supplies its own state,
+            and this must then be `None`.
+        tau: Default `None`, which chooses `0.9*phase_radius/R` from a
+            spectral-radius bound R, the dense row-sum bound or the L1 norm
+            of the Pauli coefficients with the identity included. The phase
+            radius is pi, and smaller for SPE, as the
+            [QPE guide](../../algorithms/qpe.md) explains. Positive time step
+            of `U = exp(-i*tau*H)`, in inverse operator units. Unitary input
+            takes `None`.
+        controlled_power_backend: Default `"auto"`, which picks
+            `"trotter_error_budgeted"` for Pauli input and `"dense_exact"`
+            otherwise. Construction of the controlled powers `U^p`:
+            `"dense_exact"`, the exact power of explicit dense input, or
+            `"trotter_error_budgeted"`, a second-order product formula, which
+            needs a Hamiltonian.
+        controlled_power_error_budget: Default `1e-3`, positive. Operator-norm
+            allowance for each power, covering Pauli pruning plus
+            product-formula error. It does not bound the estimator error.
+        pauli_pruning_rtol: Default `1e-12`, nonnegative. Non-identity Pauli
+            terms with `abs(c) <= pauli_pruning_rtol*max abs(c)` are dropped,
+            and their L1 mass is counted against each power's error
+            allowance.
+        max_bytes: Default 10 GB (decimal, `10_000_000_000` bytes). Limit on
+            the known bytes of input and analysis arrays.
+        max_work: Default `1_000_000_000`. Limit on the counted work of the
+            likelihood, the grid and the evolution choice.
+        max_power: Default `100_000`. Largest absolute evolution time in
+            units of tau, including the non-integer times of RWPE.
+        max_trotter_steps: Default `1_000_000`. Largest number of
+            product-formula steps per controlled power.
     """
 
     result_type: ClassVar[type] = QPEAnalysis
     initial_state: StateData | None = None
-    """Reference state |psi> for an Eigenproblem, where it is required. SpectralEstimation supplies its own state, and this field must then be None."""
     tau: Annotated[Real, Field(gt=0)] | None = None
-    """Time step tau of U = exp(-i*tau*H), in inverse operator units. None chooses it from a spectral-radius bound. Unitary input takes None."""
     estimator: ClassVar[str]
     controlled_power_backend: Literal["auto", "dense_exact", "trotter_error_budgeted"] = "auto"
-    """Controlled U^p construction: ``dense_exact``, ``trotter_error_budgeted`` (second-order product formula), or ``auto``, which picks the product formula for Pauli input and the dense power otherwise."""
     controlled_power_error_budget: Annotated[Real, Field(gt=0)] = 1e-3
-    """Operator-norm allowance for each selected power, covering Pauli pruning plus product-formula error. It is not a bound on the estimator error."""
     pauli_pruning_rtol: Nonnegative = 1e-12
-    """Nonidentity Pauli terms with abs(c) <= pauli_pruning_rtol*max abs(c) are dropped. Their l1 mass is charged to each power's error allowance."""
 
     # Selected scalar/array limits, independent of Run exposure and SDK internals.
     max_bytes: PositiveInt = DEFAULT_MAX_BYTES
-    """Cap on known selected input and analysis array bytes."""
     max_work: PositiveInt = 1_000_000_000
-    """Cap on counted likelihood/grid/evolution-selection work."""
     max_power: PositiveInt = 100_000
-    """Maximum absolute evolution time in tau units, including continuous RWPE queries."""
     max_trotter_steps: PositiveInt = 1_000_000
-    """Maximum selected product-formula steps per controlled power."""
 
     def _admit(self, work, payload_bytes):
         """Raise ValueError if work > max_work or bytes > max_bytes, naming the Method class, the exceeded limits and both sizes.
@@ -1580,34 +1607,30 @@ class _QPEMethod(Method):
         return operator, state, "unitary" if unitary else "hamiltonian"
 
     def plan(self, problem, *, output, execution, shots, rng):
-        """Return the bound Plan: time step, schedule, controlled powers and Program.
+        """Return the Plan: time step, schedule, controlled powers and circuit description.
 
-        Steps in order, each admitted before it runs:
+        Steps in order, each checked against the limits before it runs:
 
-        1. Check the problem and output (``_inputs``) and the requested
-           shots. RWPE needs a Hamiltonian and exactly one shot per quantum
-           update.
-        2. Choose the controlled-power backend from the input access. A Pauli
-           target never triggers dense spectral construction.
-        3. Choose tau: supplied, or 0.9*phase_radius/R with R the dense
-           row-sum bound (``_safe_time``) or the Pauli l1 norm. A unitary
-           has no tau.
-        4. Obtain Pauli coefficients for product-formula powers and split
-           off the identity and the pruned terms (``_split_pauli_terms``).
-        5. Admit and draw the schedule (numerical.planned_power_schedule).
-           Repeated SPE and RFE draws of one (power, phase) become one query
-           with a multiplicity. Exact readout evaluates it once, and counts
-           acquire shots times its multiplicity fresh shots.
-        6. Select the powers once (powers.select_powers): one polar base for a
-           unitary, one common step for exact-trajectory product-formula
-           powers, one independently selected step per sampled or RWPE
-           product-formula power, and one dense block per trajectory gap or
-           sampled power.
-        7. Build the quantum Program (``_quantum_program``): one trajectory
-           for exact static estimators, one Hadamard test per sampled or RWPE
-           query, or the host
-           kernel (``_host_construction``), the QPEReconstruction that
-           analysis reads, and the error model.
+        1. Check the problem, the output and the requested shots. RWPE needs
+           a Hamiltonian and exactly one shot per quantum update.
+        2. Choose the controlled-power construction from the input access. A
+           Pauli target never triggers a dense spectral construction.
+        3. Choose tau: the supplied value, or `0.9*phase_radius/R` with R the
+           dense row-sum bound or the Pauli L1 norm. A unitary has no tau.
+        4. Obtain Pauli coefficients for product-formula powers and separate
+           the identity term and the pruned terms.
+        5. Draw the schedule. Repeated SPE and RFE draws of one
+           (power, phase) become one query with a multiplicity. Exact
+           readout evaluates it once, and counts measure `shots` times its
+           multiplicity in fresh shots.
+        6. Choose the powers once: one polar factor for a unitary, one common
+           step for exact-trajectory product-formula powers, one
+           independently chosen step per sampled or RWPE product-formula
+           power, and one dense block per trajectory gap or sampled power.
+        7. Build the circuit description: one trajectory for exact static
+           estimators, one Hadamard test per sampled or RWPE query, or the
+           classical kernel, with the record that analysis reads and the
+           error model.
         """
         if self.estimator == "rwpe" and isinstance(problem, SpectralEstimation) and problem.unitary is not None:
             raise ApplicabilityError("RWPE requires continuous Hamiltonian evolution, not only integer powers of a unitary")
@@ -1923,13 +1946,14 @@ class _QPEMethod(Method):
         return super().execute(plan, run=run)
 
     def analyze(self, plan, data, *, settings):
-        """Reduce saved observations to samples and evaluate the estimator without acquisition.
+        """Reduce saved observations to ancilla means and evaluate the estimator.
 
-        RWPE reads the Gaussian mean and processed-step count from the saved
-        checkpoint. Its width follows Granade and Wiebe arXiv:2208.04526v1,
-        Eq. (7b), without replaying observations. Without a checkpoint its
-        estimate is reported as missing. Its stop reason is the termination
-        reason that controller.run_rwpe recorded in the Run trace.
+        `result.analyze(...)` calls it, and it measures nothing new. RWPE
+        reads the Gaussian mean and the number of processed steps from the
+        saved run state, and its width follows Granade and Wiebe,
+        arXiv:2208.04526v1, Eq. (7b), without replaying observations.
+        Without saved run state, the RWPE estimate is reported as missing.
+        Its stop reason is the one the run recorded when it ended.
         """
         validate_selection(plan)
         samples = _samples(plan, data.observations, data.trace, receipts=data.receipts)
@@ -2015,27 +2039,59 @@ def _estimator_integer(value, info):
 
 
 class QCELS(_QPEMethod):
-    """Finite single-mode complex least squares in dimensionless phase.
+    """QCELS method for an eigenvalue or eigenphase, by a single-mode complex least-squares fit.
 
-    Fits the QCELS objective of Ding and Lin, arXiv:2211.11973v2, Eq. (2),
-    to one schedule of integer powers. Their accuracy theorems, Theorems 1
-    and 2 (p. 14), assume p0 > 0.71 for the squared overlap
-    p0 = |<psi|psi_0>|**2 of the prepared state with the target eigenvector.
-    Smaller overlaps need the Fourier-filtered variant of their Sec. IV
-    (p. 15). Neither that variant nor the multi-level schedule of their
-    Algorithm 1 (p. 13) is implemented, and NWQLib does not check p0. See
-    numerical.qcels for the search and aliasing limits.
+    Build it with keyword arguments and pass it as `method=`, for example
+    `solve(Eigenproblem(A=H), method=QCELS(initial_state=psi))`. An
+    `Eigenproblem` needs `initial_state`, and a `SpectralEstimation`
+    supplies its own state. The other arguments are optional, and the
+    [shared settings][nwqlib.algorithms.qpe.method._QPEMethod] apply too. The
+    result is a [`QPEAnalysis`][nwqlib.algorithms.qpe.records.QPEAnalysis]
+    whose `value` comes from the single mode `a*exp(-i*p*theta)`, with
+    `theta = E*tau`, that best fits the signals `z_p = <psi|U^p|psi>` of a
+    schedule of integer powers p.
 
-    max_time=None selects maximum integer power 10, independent of units.
-    num_times bounds positive times, with the zero-power quadratures added.
-    grid_size is a requested minimum; the effective grid has at least eight
-    cells per power span. Finite bracket refinement has no global-optimum or
-    uncertainty guarantee. Original observations remain available for analysis.
+    The fit minimizes the QCELS objective of Ding and Lin,
+    arXiv:2211.11973v2, Eq. (2). Their accuracy theorems, Theorems 1 and 2
+    (p. 14), assume `p0 > 0.71` for the squared overlap
+    `p0 = |<psi|psi_0>|**2` of the prepared state psi with the target
+    eigenvector psi_0, and NWQLib does not check p0. Smaller overlaps need
+    the Fourier-filtered variant of their Sec. IV (p. 15). Neither that
+    variant nor the multi-level schedule of their Algorithm 1 (p. 13) is
+    implemented. The finite grid search and bracket refinement have no
+    global-optimum or uncertainty guarantee, and `interval` is None.
+    `result.analyze(grid_size=...)` fits the same signals on another grid.
+    The [QPE guide](../../algorithms/qpe.md) describes the search and its
+    aliasing limits.
 
     Attributes:
-        num_times: Number of selected positive times; zero-power quadratures are added separately.
-        max_time: Maximum physical sampling time; None selects maximum integer power 10.
-        grid_size: Requested minimum phase-grid cells; the effective grid also resolves the selected power span.
+        num_times: Default `16`. Upper bound on the number of positive
+            sampling times. The zero-power quadratures are added separately.
+            For maximum power P (set by `max_time`), `num_times >= P` gives
+            the consecutive powers 0 through P, the form of the data set of
+            Ding and Lin, arXiv:2211.11973v2, Eq. (6). Otherwise power 0 is
+            kept and `num_times` integer powers are spread over 1 through P,
+            a schedule their Theorems 1 and 2 do not describe and whose fit
+            can land on a replica of the energy
+            ([QPE guide](../../algorithms/qpe.md#qcels-schedule)).
+        max_time: Default `None`, which selects maximum integer power 10,
+            independent of units. Otherwise the positive maximum physical
+            sampling time, which selects maximum power `floor(max_time/tau)`,
+            or `floor(max_time)` for a unitary.
+        grid_size: Default `4096`, at least 8. Requested minimum number of
+            phase-grid points. The effective grid is
+            `max(grid_size, 8*(max(p) - min(p)) + 1)`, so it also resolves
+            the span of powers.
+
+    Examples:
+        `H = diag(-0.5, 0.5)` has eigenvalue -0.5 for the eigenvector `|0>`:
+
+        >>> from nwqlib import Eigenproblem, solve
+        >>> from nwqlib.algorithms import QCELS
+        >>> problem = Eigenproblem(A=[[-0.5, 0], [0, 0.5]])
+        >>> result = solve(problem, method=QCELS(initial_state=[1, 0]), seed=7)
+        >>> print(round(result.eigenvalue, 10))
+        -0.5
     """
 
     estimator: ClassVar[str] = "qcels"
@@ -2049,40 +2105,69 @@ class QCELS(_QPEMethod):
 
 
 class SPE(_QPEMethod):
-    """Statistical phase estimation by Fourier CDF thresholding.
+    """SPE method for the lowest eigenvalue or eigenphase in the spectrum of the prepared state.
 
-    Wan--Berta--Campbell, arXiv:2110.12071v2, PDF Eqs. (A1)-(A2) (HTML (16)-(17)) and
-    Algorithm 1 supply the filter and eta/2 threshold. Each draw acquires
-    both quadratures of a controlled evolution. The chosen evolution backend
-    owns its approximation, independently of the paper's randomized compiler.
+    Build it with keyword arguments and pass it as `method=`, for example
+    `solve(Eigenproblem(A=H), method=SPE(initial_state=psi, overlap_lower_bound=0.5))`.
+    `overlap_lower_bound` is required, and an `Eigenproblem` also needs
+    `initial_state`. The other arguments are optional, and the
+    [shared settings][nwqlib.algorithms.qpe.method._QPEMethod] apply too. The
+    result is a [`QPEAnalysis`][nwqlib.algorithms.qpe.records.QPEAnalysis]
+    whose `value` is the lowest value in the prepared spectral support. For
+    a Hamiltonian that is the lowest energy. For a unitary it is the lowest
+    principal eigenphase angle theta, with `U v = exp(i*theta) v` and theta
+    scanned on `[-pi/2, pi/2)`. When `tau*|E| < pi/2` for every prepared
+    energy E of `U = exp(-i*tau*H)`, `theta = -tau*E`, so on such a unitary
+    SPE returns the phase of the highest energy of the prepared support.
+    Supplying H, or `U^dagger = exp(i*tau*H)`, targets the lowest energy
+    instead.
 
-    Positive odd frequencies are sampled by their PDF Eq. (A2) Fourier
-    weights, numbered Eq. (17) in the HTML version.
-    Both quadratures are measured for each draw, and conjugacy supplies the
-    negative-frequency contribution. Repeated draws of one frequency share
-    one query per quadrature with their multiplicity, and with counts that
-    query acquires shots times the multiplicity in fresh shots (QPEQuery).
-    The finite filter and sample defaults do not enforce their precision
-    theorem. A scan with grid_size decisions replaces the paper's
-    O(log(1/delta)) binary-search decisions, and the sample count is not
-    derived from its Eq. (11), so its Theorem 1 does not apply. See
-    numerical.spe for each departure.
-
-    SPE returns the lowest value in the prepared spectral support. For a
-    Hamiltonian that is the lowest energy. For a unitary it is the lowest
-    principal eigenphase angle theta, with ``U v = exp(i theta) v`` and theta
-    scanned on [-pi/2, pi/2). When ``tau |E| < pi/2`` for every prepared
-    energy E of ``U = exp(-i tau H)``, ``theta = -tau E``, so on such a
-    unitary SPE returns the phase of the highest energy of the prepared
-    support. Supplying H, or ``U^dagger = exp(i tau H)``, targets
-    the lowest energy instead.
+    Statistical phase estimation locates the first crossing of `eta/2` by a
+    Fourier-filtered approximate cumulative distribution function (CDF) of
+    the prepared state's spectrum, scanned on a finite grid. The filter and
+    the `eta/2` threshold come from Wan, Berta and Campbell,
+    arXiv:2110.12071v2, PDF Eqs. (A1)-(A2) (HTML Eqs. (16)-(17)) and
+    Algorithm 1. Positive odd frequencies are drawn by their PDF Eq. (A2)
+    Fourier weights, numbered Eq. (17) in the HTML version. Both
+    quadratures of the controlled evolution are measured for each draw, and
+    conjugation supplies the negative-frequency contribution. Repeated
+    draws of one frequency share one setting per quadrature, which with
+    counts receives `shots` times the number of draws in fresh shots. The
+    finite filter and sample defaults do not enforce the paper's precision
+    theorem. A scan over `grid_size` thresholds replaces
+    its O(log(1/delta)) binary-search decisions, and the sample count is not
+    derived from its Eq. (11), so its Theorem 1 does not apply. The chosen
+    controlled-evolution construction sets its own approximation,
+    independently of the paper's randomized compiler. `interval` is None,
+    and `result.analyze(grid_size=...)` scans the same signals on another
+    grid. The [QPE guide](../../algorithms/qpe.md) lists each departure from
+    the paper.
 
     Attributes:
-        overlap_lower_bound: Caller-declared lower bound eta on the probability of the target component.
-        num_samples: Independent positive-frequency draws, each with two quadratures.
-        fourier_degree: Filter parameter d, with maximum frequency 2*d+1.
-        filter_beta: Positive error-function smoothing parameter beta.
-        grid_size: Number of ACDF threshold coordinates in [-pi/2, pi/2).
+        overlap_lower_bound: Required, in (0, 1]. Caller-declared lower bound
+            eta on the probability of the target component in the prepared
+            state. NWQLib does not verify it.
+        num_samples: Default `32`. Independent positive-frequency draws, each
+            with two quadratures.
+        fourier_degree: Default `11`. Filter parameter d, with maximum
+            frequency `2*d + 1`.
+        filter_beta: Default `6.0`, positive. Error-function smoothing
+            parameter beta.
+        grid_size: Default `4096`, at least 8. Number of threshold points of
+            the approximate CDF in `[-pi/2, pi/2)`.
+
+    Examples:
+        `H = diag(-0.5, 0.5)` has eigenvalue -0.5 for the eigenvector `|0>`.
+        SPE returns the first threshold crossing on its finite grid, from 32
+        random frequency draws:
+
+        >>> from nwqlib import Eigenproblem, solve
+        >>> from nwqlib.algorithms import SPE
+        >>> problem = Eigenproblem(A=[[-0.5, 0], [0, 0.5]])
+        >>> method = SPE(initial_state=[1, 0], overlap_lower_bound=1.0)
+        >>> result = solve(problem, method=method, seed=7)
+        >>> print(round(result.eigenvalue, 6))
+        -0.499674
     """
 
     schema_version: Literal[2] = 2
@@ -2101,27 +2186,48 @@ class SPE(_QPEMethod):
 
 
 class RFE(_QPEMethod):
-    """Randomized Fourier phase estimation from paired Hadamard tests.
+    """RFE method for an eigenvalue or eigenphase, from the largest sampled Fourier coefficient.
 
-    Each of M independent draws selects a uniform integer power in [0,K).
-    The largest magnitude of the K sampled Fourier coefficients determines
-    the phase. The precision theorem assumes an eigenstate and sufficient M.
+    Build it with keyword arguments and pass it as `method=`, for example
+    `solve(Eigenproblem(A=H), method=RFE(initial_state=psi))`. An
+    `Eigenproblem` needs `initial_state`. The other arguments are optional,
+    and the [shared settings][nwqlib.algorithms.qpe.method._QPEMethod] apply
+    too. The result is a
+    [`QPEAnalysis`][nwqlib.algorithms.qpe.records.QPEAnalysis] whose phase
+    is `2*pi*j/K` for the frequency j of the largest of the K sampled Fourier
+    coefficients, on the principal branch, and whose energy is `-phase/tau`.
 
-    The acquisition uses the real and imaginary Hadamard tests of
-    Kshirsagar, Katabarwa and Johnson, arXiv:2209.11322v3 (Eqs. (1)-(6),
-    p. 4). The default exact readout acquires the same quadratures as the
-    ancilla X and Y expectations at each power position of one controlled
-    trajectory; the sampled route keeps the paired tests. Algorithm 1 and
-    Eq. (7), p. 5, define the sampled Fourier coefficients. Repeated draws
-    keep their multiplicity in one query per quadrature, which with counts
-    acquires shots times the multiplicity in fresh shots (QPEQuery), and
-    the output identifies the principal phase branch. The default M is far
-    below the sample count required by Theorem 2.1 (p. 6). See
-    numerical.rfe.
+    In randomized Fourier estimation, each of M independent draws picks a
+    uniform integer power in `[0, K)` and measures the real and imaginary
+    Hadamard tests of Kshirsagar, Katabarwa and Johnson, arXiv:2209.11322v3
+    (Eqs. (1)-(6), p. 4).
+    Algorithm 1 and Eq. (7), p. 5, define the sampled Fourier coefficients.
+    The default exact readout reads the same quadratures as the ancilla X
+    and Y expectations at each power of one controlled trajectory, and
+    sampled readout keeps the paired tests. Repeated draws of one power
+    share one setting per quadrature, which with counts receives `shots`
+    times the number of draws in fresh shots. The precision theorem,
+    Theorem 2.1 (p. 6), assumes an eigenstate and enough draws, and the
+    default M is far below the count it requires. `interval` is None.
+    Changing K needs a new Plan. The [QPE guide](../../algorithms/qpe.md)
+    gives the sign convention and the sample bound.
 
     Attributes:
-        num_samples: Number M of independent power draws, each with two quadratures.
-        num_frequencies: Fourier size K, also one greater than the maximum sampled power.
+        num_samples: Default `97`. Number M of independent power draws, each
+            with two quadratures.
+        num_frequencies: Default `49`, at least 2. Fourier size K, one greater
+            than the largest sampled power.
+
+    Examples:
+        `H = diag(-0.5, 0.5)` has eigenvalue -0.5 for the eigenvector `|0>`.
+        RFE returns a phase on the grid `2*pi*j/49`:
+
+        >>> from nwqlib import Eigenproblem, solve
+        >>> from nwqlib.algorithms import RFE
+        >>> problem = Eigenproblem(A=[[-0.5, 0], [0, 0.5]])
+        >>> result = solve(problem, method=RFE(initial_state=[1, 0]), seed=7)
+        >>> print(round(result.eigenvalue, 6))
+        -0.498866
     """
 
     estimator: ClassVar[str] = "rfe"
@@ -2134,24 +2240,56 @@ class RFE(_QPEMethod):
 
 
 class RWPE(_QPEMethod):
-    """Basic random-walk phase estimation with a Gaussian prior.
+    """RWPE method for an eigenvalue, by a Gaussian random walk with one measured bit per step.
 
-    Granade--Wiebe arXiv:2208.04526v1, Eq. (7) and Algorithm 1, use one bit
-    at time 1/sigma, a mean shift of +/-sigma/sqrt(e), and width shrink
-    sqrt((e-1)/e).
-    Continuous Hamiltonian evolution is required. A bare unitary's integer
-    powers do not supply that access. The Gaussian interval is a model output.
+    Build it with keyword arguments and pass it as `method=`, for example
+    `solve(Eigenproblem(A=H), method=RWPE(initial_state=psi))`. An
+    `Eigenproblem` needs `initial_state`. The other arguments are optional,
+    and the [shared settings][nwqlib.algorithms.qpe.method._QPEMethod] apply
+    too. The result is a
+    [`QPEAnalysis`][nwqlib.algorithms.qpe.records.QPEAnalysis] whose energy
+    is `-mean/tau` for the posterior mean of the phase `phi = -tau*E`, with
+    the nominal 95-percent interval of the Gaussian model in `interval` and
+    the posterior moments in `gaussian`. The input must be a Hamiltonian,
+    because the method needs continuous evolution times, which the integer
+    powers of a bare unitary do not supply. It uses exactly one shot per
+    step. Because each feedback angle depends on the outcomes before it,
+    `prepare(plan, settings="all")` is refused, and `prepare(plan)` prepares
+    the next query.
 
-    The likelihood is Eq. (2) of Granade and Wiebe, arXiv:2208.04526v1
-    (p. 2). The implemented feedback sign follows that likelihood and the
-    positive outcome-zero update in Eq. (7a), correcting the opposing sign
-    printed in Algorithm 1. Algorithm 2's consistency checks and unwinding
-    are absent. See numerical.rwpe_choose and numerical.rwpe_update.
+    The random-walk phase estimation update is the basic walk of Granade and
+    Wiebe, arXiv:2208.04526v1, Eq. (7) and Algorithm 1: one bit at time
+    `1/sigma`, a mean shift of `+/-sigma/sqrt(e)` and a width shrink by
+    `sqrt((e-1)/e)`. The likelihood is Eq. (2) of Granade and Wiebe,
+    arXiv:2208.04526v1 (p. 2). The feedback sign follows that likelihood
+    and the positive outcome-zero update in Eq. (7a), correcting the
+    opposite sign printed in Algorithm 1. The
+    consistency checks and unwinding of their Algorithm 2 are not
+    implemented. The Gaussian interval is a model output, not a coverage
+    guarantee. The [QPE guide](../../algorithms/qpe.md) describes the finite
+    range that the walk can explore.
 
     Attributes:
-        max_steps: Maximum feedback steps; zero returns the prior without acquisition.
-        prior_mean: Prior mean of the unwrapped phase -tau*E in radians.
-        prior_std: Positive prior standard deviation in phase radians.
+        max_steps: Default `14`, nonnegative. Largest number of feedback
+            steps, which a run uses exactly unless it is cancelled or fails.
+            Zero returns the prior without measurement.
+        prior_mean: Default `0.0`. Prior mean of the unwrapped phase
+            `-tau*E`, in radians.
+        prior_std: Default `pi`, positive. Prior standard deviation of the
+            phase, in radians.
+
+    Examples:
+        `H = diag(-0.5, 0.5)` has eigenvalue -0.5 for the eigenvector `|0>`.
+        After 14 one-bit updates the estimate and its nominal 95-percent
+        interval are:
+
+        >>> from nwqlib import Eigenproblem, solve
+        >>> from nwqlib.algorithms import RWPE
+        >>> problem = Eigenproblem(A=[[-0.5, 0], [0, 0.5]])
+        >>> result = solve(problem, method=RWPE(initial_state=[1, 0]), seed=7)
+        >>> low, high = result.interval.low, result.interval.high
+        >>> print(round(result.eigenvalue, 4), round(low, 4), round(high, 4))
+        -0.4784 -0.5223 -0.4345
     """
 
     schema_version: Literal[2] = 2

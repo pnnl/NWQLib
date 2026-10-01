@@ -145,11 +145,14 @@ GENERATOR_TAYLOR_DEGREE = 18
 
 @dataclass(frozen=True, kw_only=True)
 class FermionicGenerator:
-    """One anti-Hermitian ADAPT-GCiM pool generator ``A``.
+    """One anti-Hermitian ADAPT-GCiM pool generator `A`, stored as its Pauli sum and, for the fermionic families, its normal-ordered terms.
+
+    The `enumerate_*_pool` functions return tuples of them in pool-index
+    order. The fields below are read-only.
 
     Attributes:
         family: Generator family, which fixes its excitation pattern and
-            orientation (module docstring).
+            orientation (see the module text above).
         spatial_indices: Ordered spatial-orbital indices defining the generator,
             ``(p, q)`` for singles and ``(p, q, r, s)`` for doubles.
         pool_index: Position in the enumerated pool.
@@ -309,7 +312,18 @@ def _generator_reference(generator, *, max_bytes=DEFAULT_INPUT_BYTES, max_produc
 
 
 def spin_orbital(spatial_orbital: int, spin: Spin) -> int:
-    """Return the spin-orbital index for the paper's convention."""
+    """Return the spin-orbital (mode) index `2*g` for spin up and `2*g + 1` for spin down of spatial orbital `g`.
+
+    This is the convention of Zheng et al., arXiv:2312.07691v3,
+    Appendix E.1.
+
+    Args:
+        spatial_orbital (int): Nonnegative spatial-orbital index `g`.
+        spin (str): `"up"` or `"down"`.
+
+    Returns:
+        mode (int): The spin-orbital index, which is also the qubit index.
+    """
 
     if spatial_orbital < 0:
         raise ValueError("spatial_orbital must be non-negative")
@@ -384,9 +398,20 @@ def enumerate_uccsd_sd_pool(reference_occupations) -> tuple[FermionicGenerator, 
     """Enumerate the occupied-to-virtual UCCSD singles and doubles of a reference.
 
     This smaller, reference-dependent pool is a comparison baseline beside
-    :func:`enumerate_spin_adapted_gsd_pool`. The module docstring gives the
-    ordering, index meaning and spin selection, and the source equations
-    (Romero et al., arXiv:1701.02691v2, Eqs. (8)-(9) and (17)).
+    [`enumerate_spin_adapted_gsd_pool`][nwqlib.subroutines.fermionic_pool.enumerate_spin_adapted_gsd_pool].
+    The module text gives the ordering, index meaning and spin selection,
+    and the source equations (Romero et al., arXiv:1701.02691v2,
+    Eqs. (8)-(9) and (17)).
+
+    Args:
+        reference_occupations (str | Sequence[int]): Nonempty 0/1 string or
+            sequence whose entry `j` is the occupation of spin orbital `j`,
+            in the interleaved order of `spin_orbital`. It fixes the
+            occupied and virtual spin orbitals.
+
+    Returns:
+        pool (tuple[FermionicGenerator, ...]): The generators in pool-index
+            order.
     """
 
     bits, occupied, virtual = _occupation_sets(reference_occupations)
@@ -431,9 +456,10 @@ def enumerate_uccsd_sd_pool(reference_occupations) -> tuple[FermionicGenerator, 
 
 
 def enumerate_qeb_sd_pool(reference_occupations) -> tuple[FermionicGenerator, ...]:
-    """Enumerate reference-dependent QEB singles/doubles.
+    """Enumerate the reference-dependent qubit-excitation singles and doubles (QEB-SD).
 
-    The occupied/virtual enumeration mirrors :func:`enumerate_uccsd_sd_pool`,
+    The occupied/virtual enumeration mirrors
+    [`enumerate_uccsd_sd_pool`][nwqlib.subroutines.fermionic_pool.enumerate_uccsd_sd_pool],
     but the operators are the qubit excitations of Yordanov et al.,
     arXiv:2011.10540v2, Eqs. (17)-(18), p. 6:
     ``Q_a^dagger Q_i - Q_i^dagger Q_a`` and
@@ -484,7 +510,7 @@ def enumerate_qeb_sd_pool(reference_occupations) -> tuple[FermionicGenerator, ..
 
 
 def enumerate_ceo_ovp_pool(reference_occupations) -> tuple[FermionicGenerator, ...]:
-    """Enumerate one-variational-parameter coupled exchange operators.
+    """Enumerate the one-variational-parameter coupled exchange operators (OVP-CEO) of a reference.
 
     MVP-CEOs are deliberately not represented: they need per-component
     parameters inside one selected generator, while ADAPT-GCiM records one
@@ -844,7 +870,19 @@ def _active_occupation_blocks(generator, *, max_bytes=DEFAULT_INPUT_BYTES, max_p
 
 
 def apply_generator(generator: FermionicGenerator, state: np.ndarray) -> np.ndarray:
-    """Apply a generator through its matrix-free Pauli action."""
+    """Return `A @ state` for a pool generator `A`, from its Pauli sum, without forming a matrix.
+
+    The cost of this matrix-free action is given on the
+    [fermionic pools page](fermionic_pool.md#cost-of-the-matrix-free-pauli-action).
+
+    Args:
+        generator (FermionicGenerator): The generator `A`.
+        state (numpy.ndarray): Complex vector of length
+            `2**generator.num_qubits`.
+
+    Returns:
+        result (numpy.ndarray): A new vector `A @ state`.
+    """
 
     return apply_terms(generator.pauli_terms, state, num_qubits=generator.num_qubits)
 
@@ -879,12 +917,16 @@ def apply_generator_exponential(
     state: np.ndarray,
     theta: float,
 ) -> np.ndarray:
-    """Apply ``exp(theta * A)`` to a state vector by scaled Taylor steps.
+    """Return `exp(theta * A) @ state` for a pool generator `A`, by scaled Taylor steps without forming a matrix.
 
     The state is not normalized, and a new vector of the same length is
-    returned. The work is ``steps * GENERATOR_TAYLOR_DEGREE`` matrix-free
-    Pauli-sum actions, with ``steps`` from ``_taylor_steps``. ADAPT's
-    classical work laws take their step count from the same function.
+    returned. The step count is `max(1, ceil(2 |theta| sum_k |c_k|))` over
+    the Pauli coefficients `c_k` of `A` (0 when that product is zero), so
+    each step `h` has `||h A|| <= 1/2`. Each step is a Taylor polynomial of
+    degree 18, whose remainder is below
+    `exp(1/2) (1/2)**19 / 19! < 2.6e-23` per step. The work is 18
+    matrix-free Pauli-sum actions per step. ADAPT's classical work counts
+    use the same step count.
 
     Args:
         generator: Anti-Hermitian generator ``A``.
@@ -892,8 +934,8 @@ def apply_generator_exponential(
         theta: Rotation angle in radians.
 
     Returns:
-        ``exp(theta * A) @ state`` up to the Taylor and rounding errors
-        described in the code.
+        ``exp(theta * A) @ state`` up to the Taylor remainder above and
+        rounding errors.
     """
 
     vector = np.asarray(state, dtype=complex).reshape(-1)
@@ -929,12 +971,30 @@ def _scaled_taylor_step(
 
 
 def apply_spin_squared(state: np.ndarray, *, num_qubits: int) -> np.ndarray:
-    """Apply ``S^2`` matrix-free using the same JW ladder convention.
+    """Return `S^2 @ state` for the total spin, without forming a matrix, in the same Jordan-Wigner convention.
 
     Uses ``S^2 = S_- S_+ + S_z (S_z + 1)`` with
     ``S_+ = sum_p a_{p up}^dagger a_{p down}`` and ``S_- = S_+^dagger``. The
     ladder product is a two-factor matrix-free action, and ``S_z`` is
     diagonal in the interleaved occupation basis.
+
+    Args:
+        state (array_like): The `2**num_qubits` amplitudes in the
+            interleaved occupation basis, qubit `2p` for spatial orbital
+            `p` with spin up and qubit `2p + 1` with spin down. It is
+            converted to complex.
+        num_qubits (int): Number of spin orbitals, even.
+
+    Returns:
+        vector (numpy.ndarray): `S^2 @ state`, complex, of length
+            `2**num_qubits`.
+
+    Raises:
+        ValueError: If `num_qubits` is odd, if the state length is not
+            `2**num_qubits`, or if the action needs more than 10 GB
+            (decimal, `10_000_000_000` bytes) of known arrays or more than
+            1,000,000,000 scalar products. These two limits are fixed and
+            checked before the action.
     """
 
     if num_qubits % 2:

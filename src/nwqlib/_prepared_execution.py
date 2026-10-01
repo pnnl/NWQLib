@@ -361,21 +361,34 @@ def _notebook_progress():
 
 @dataclass(frozen=True, init=False, eq=False)
 class Run:
-    """One cumulative execution with its original Plan, streams and attempts.
+    """One execution of a Plan: its circuits, attempts, measured data, limits and counted work.
 
-    The Run is the only object that reserves, submits, publishes and charges work
-    in its execution. Limits are cumulative over its whole life, including failed and
-    uncertain attempts, so extending or reopening a Run never refunds spent
-    exposure. A durable Run journals every transition in ``run.sqlite`` and holds
-    an exclusive controller lock until it is closed. An in-memory Run keeps the
-    same counters without a journal and can be saved later with ``save``.
+    [`prepare`][nwqlib.scientist.prepare] creates a Run (`prepared.run`),
+    [`submit`][nwqlib.scientist.submit] starts it, and
+    [`load_run`][nwqlib.scientist.load_run] reopens a saved one. `wait()`
+    returns the Result, and `resume()` continues the Run once without
+    waiting. Close a Run when done, for example with
+    `with prepared.run as run:`. Closing cancels no job.
+
+    The Run is the only object that sets work aside, submits it, saves its
+    outcomes and counts it against the limits. The limits apply to totals
+    over the Run's whole life, failed and uncertain attempts included, so
+    raising the limits or reopening the Run never gives back work already
+    counted. A Run with a folder records every step in `run.sqlite` there
+    and holds an exclusive lock on the folder until it is closed. A Run
+    without a folder keeps the same counts in memory and can be saved later
+    with `save`. [Run on a backend](../prepared_execution.md) and [Continue
+    an interrupted run](../run_archives.md) describe both. The fields below
+    are read-only.
 
     Attributes:
-        plan: Original selected Plan; continuation never substitutes a new selection.
-        backend: Explicit backend connection, or None for a host-only Run.
-        forecast: Optional already-computed PlanEstimate associated with this Plan.
-        allocation: Optional supplied resource allocation; not recomputed by continuation.
-        run_id: Identity of this acquisition history, distinct from another Run of the same Plan.
+        plan: The Plan being executed. Continuing the Run never replaces it.
+        backend: The backend, or `None` for a Run of host computations only.
+        forecast: The `PlanEstimate` given with the Plan, or `None`.
+        allocation: The `Allocation` given with the Plan, or `None`. Continuing
+            the Run does not recompute it.
+        run_id: Identifier of this execution, distinct from another Run of the
+            same Plan.
     """
 
     plan: Plan
@@ -388,30 +401,26 @@ class Run:
 
     def __init__(self, plan, *, backend=None, limits=None, directory=None, progress=None,
                  forecast=None, allocation=None):
-        """Admit the selected execution and create its original identity, streams and optional
-        journal.
-
-        A durable Run writes, in this order, its new directory, the journal with its
-        controller lock, the selected inputs with ``run.json``, and finally the
-        journal header with the initial RNG snapshot. The selected inputs are
-        therefore on disk before any backend can start work. A crash before the
-        header commits leaves a folder that ``load_run`` rejects, and no
-        preparation or acquisition can have happened by then.
-
-        Args:
-            plan (Plan): Selected Plan. Its randomness snapshot seeds the Run's streams.
-            backend (object | None): Backend connection. None selects local Aer for
-                quantum execution and no backend for classical execution.
-            limits (ExecutionLimits | None): Cumulative limits, the defaults when None.
-            directory (str | Path | None): New durable folder. Remote-capable
-                backends always get one, under ``~/.nwqlib/runs/<run_id>`` when none
-                is given, so that an acknowledged external job can be reopened after
-                the process ends.
-            progress (object | None): Progress callback, False to disable, or None
-                for the notebook display.
-            forecast (object | None): Already computed PlanEstimate for this Plan.
-            allocation (object | None): Supplied Allocation matching the forecast.
-        """
+        # Admit the selected execution and create its original identity, streams
+        # and optional journal. ``prepare`` constructs the Run; users never do.
+        #
+        # A durable Run writes, in this order, its new directory, the journal
+        # with its controller lock, the selected inputs with ``run.json``, and
+        # finally the journal header with the initial RNG snapshot. The selected
+        # inputs are therefore on disk before any backend can start work. A
+        # crash before the header commits leaves a folder that ``load_run``
+        # rejects, and no preparation or acquisition can have happened by then.
+        #
+        # plan: selected Plan; its randomness snapshot seeds the Run's streams.
+        # backend: backend connection; None selects local Aer for quantum
+        # execution and no backend for classical execution. limits: cumulative
+        # ExecutionLimits, the defaults when None. directory: new durable
+        # folder; remote-capable backends always get one, under
+        # ~/.nwqlib/runs/<run_id> when none is given, so that an acknowledged
+        # external job can be reopened after the process ends. progress:
+        # progress callback, False to disable, or None for the notebook
+        # display. forecast: already computed PlanEstimate for this Plan.
+        # allocation: supplied Allocation matching the forecast.
         if not isinstance(plan, Plan):
             raise TypeError("Run requires a selected Plan")
         from nwqlib._run_archive import validate_provenance
@@ -511,11 +520,16 @@ class Run:
 
     @property
     def limits(self):
+        """The Run's current [`ExecutionLimits`][nwqlib.execution.ExecutionLimits]."""
         return self._state["limits"]
 
     @property
     def limit_amendments(self):
-        """The immutable ordered history of successfully published cap increases."""
+        """Every raise of the Run's limits so far, in order.
+
+        Each is a [`LimitAmendment`][nwqlib.execution.LimitAmendment] with
+        the old and new limits and the Run's counts just before the raise.
+        """
         return tuple(self._state["limit_amendments"])
 
     @property
@@ -524,10 +538,18 @@ class Run:
 
     @property
     def directory(self):
+        """The Run's folder, as a `pathlib.Path`, or `None` for a Run without one.
+
+        A backend that runs jobs outside this process always gets a folder,
+        under `~/.nwqlib/runs/<run_id>` when `prepare` was given no
+        `directory`, so that a submitted job can be reopened after the
+        process ends.
+        """
         return self._state["directory"]
 
     @property
     def result(self):
+        """The Run's Result once the run is complete, and `None` before."""
         return self._state["result"]
 
     @property
@@ -699,7 +721,10 @@ class Run:
 
     @property
     def warnings(self):
-        """Process-local observer and backend notices, without replaying work."""
+        """Notices recorded in this process, such as a disabled progress callback or a backend's notice.
+
+        Reading them repeats no work. They are not saved with the Run.
+        """
         return tuple(self._state["warnings"])
 
     def _method_context(self, factory, *, marks_changes=False):
@@ -861,15 +886,33 @@ class Run:
         return exact_dense_unitaries(circuit, charge=self._charge_synthesis, cache=cache)
 
     def extend_limits(self, **changes):
-        """Atomically record a real cap increase and its pre-publication counters.
+        """Raise one or more limits of this Run, keeping everything it has counted.
 
-        The new ``limits`` row and one ``LimitAmendment`` row commit together, so a
-        process that stops before the commit reopens with the old caps, and one
-        that stops after it reopens with the new caps and their history.
-        ``_restore`` checks that the amendment chain leads from the header's
-        initial caps to the current ones. Caps only increase, and counters are
-        never reset, so extending a Run does not refund spent exposure.
+        `run.extend_limits(max_total_shots=128)` sets the Run's total shot
+        limit to 128. It does not add 128 shots, reset any count or change a
+        scientific setting, so raising a limit gives back no work already
+        counted. Limits can only be kept or raised. A call that raises a limit
+        records a [`LimitAmendment`][nwqlib.execution.LimitAmendment] in
+        `limit_amendments`. The new limits and that record are saved
+        together, so a process that stops before the save reopens with the
+        old limits, and one that stops after it reopens with the new limits
+        and their record. A call that raises nothing records nothing.
+
+        Args:
+            **changes (int): New values of
+                [`ExecutionLimits`][nwqlib.execution.ExecutionLimits] fields,
+                by name, as integers at least the current values.
+
+        Returns:
+            run (Run): This Run.
+
+        Raises:
+            ValueError: If no limit is named, a name is not a limit, or a
+                value is not an integer at least the current one.
         """
+        # The new ``limits`` row and one ``LimitAmendment`` row commit
+        # together. ``_restore`` checks that the amendment chain leads from the
+        # header's initial caps to the current ones.
         with self._lock:
             self._ensure_open()
             allowed = {name for name in ExecutionLimits.model_fields if name not in {"parent_id", "schema_version"}}
@@ -1034,11 +1077,12 @@ class Run:
 
     @property
     def observations(self):
-        """Collected chunks in collection order. A completed but uncollected chunk is absent.
+        """The observations that the Method has collected so far, in the order it collected them.
 
-        Collection only appends chunks, so one immutable view is kept and
-        returned again until the next collection, when it is rebuilt with
-        the new chunk.
+        An `ObservationView` whose `chunks` hold the statistics of each
+        measurement. A completed measurement that the Method has not yet
+        collected is absent. The same object is returned until the next
+        collection.
         """
         state = self._state
         chunks, cached = state["chunks"], state["observation_view"]
@@ -1329,17 +1373,15 @@ class Run:
 
     @property
     def trace(self):
-        """Immutable snapshot of preparation counts and every attempt, submission and cap.
+        """The Run's attempts and counted work as they stand, as an [`ExecutionTrace`][nwqlib.execution.ExecutionTrace].
 
-        It includes failed, uncertain and unused work, so a Result built from it
-        accounts for the whole acquisition population rather than only its
-        contributing chunks.
-
-        The snapshot is kept and returned again until an event, submission,
-        counter or limit it reads changes. The comparison key holds the
-        current event and submission records, which a change replaces, and
-        the counters and limits themselves.
+        It includes failed, uncertain and unused work, so a Result built from
+        it accounts for all the work of the Run rather than only the
+        measurements it uses. The same snapshot is returned until an attempt,
+        submission, count or limit changes.
         """
+        # The comparison key holds the current event and submission records,
+        # which a change replaces, and the counters and limits themselves.
         state = self._state
         key = (tuple(state["events"]), tuple(state["submissions"].values()), state["preparations"],
                state["construction_work"], state["host_preparations"], state["host_preparation_work"],
@@ -1371,12 +1413,12 @@ class Run:
 
     @property
     def data(self):
-        """Immutable RunData over collected observations, receipts, trace and arrays.
+        """The Run's measured data as it stands, as a [`RunData`][nwqlib.core.analysis.RunData].
 
-        Arrays and records are shared, not copied. Method context appears only when
-        the Method supplies an immutable snapshot for a concrete consumer. The
-        observations and trace are the kept snapshots of ``observations`` and
-        ``trace``, so repeated reads build neither again.
+        It holds the collected observations, preparation records, trace and
+        saved arrays, shared rather than copied. Its `method_context` is set
+        only when the Method keeps analysis data with the Result. Repeated
+        reads reuse the snapshots of `observations` and `trace`.
         """
         store = self._state["artifacts"]
         context = None
@@ -1389,13 +1431,17 @@ class Run:
 
     @property
     def exposure(self):
-        """Physical work by outcome: completed, reserved, uncertain and failed.
+        """The work submitted so far, by outcome: completed, reserved, uncertain and failed.
 
-        Jobs are counted per submission. Intent and acknowledged submissions are
-        reserved. Failed, cancelled and uncertain submissions are all counted as
-        uncertain jobs, because a provider's terminal status does not state how much
-        work it consumed. Circuits, shots and provider-managed sampling are counted
-        per attempt by event status. Only host attempts can be failed, so the
+        A dictionary with the keys `"completed"`, `"reserved"`, `"uncertain"`
+        and `"failed"`, each mapping `jobs`, `circuits`, `shots` and
+        `provider_managed_sampling` to a count. Jobs are counted per
+        submission. Submissions not yet acknowledged by the backend, or
+        acknowledged and not finished, are reserved. Failed, cancelled and
+        uncertain submissions are all counted as uncertain jobs, because a
+        provider's final status does not state how much work it consumed.
+        Circuits, shots and provider-managed sampling are counted per attempt,
+        by the attempt's status. Only host computations can fail, so the
         failed category never contains circuits or shots.
         """
         result = {status: dict(jobs=0, circuits=0, shots=0, provider_managed_sampling=0)
@@ -1410,14 +1456,23 @@ class Run:
         return result
 
     def cancel(self, reason="user requested cancellation"):
-        """Stop new work, then ask the backend to cancel the original pending jobs.
+        """Stop new work in this Run, then ask the backend to cancel its pending jobs.
 
-        The request is journaled first, so a crash while contacting the provider
-        still leaves a Run that refuses new preparation and acquisition when
-        reopened. Pending remote preparations and submissions are then refreshed,
-        which sends each original job at most one cancellation request. A request
-        is not proof of cancellation. Only a returned provider status is. All
-        exposure stays charged.
+        The request is saved first, so a Run reopened after a crash while
+        contacting the provider still refuses new preparations and
+        measurements. Pending remote preparations and submissions are then
+        refreshed, which sends each job at most one cancellation request. A
+        request does not prove that a job was cancelled, and only a status
+        returned by the provider does. All counted work stays counted. A
+        backend without a cancellation operation, such as local NWQ-Sim,
+        receives no request.
+
+        Args:
+            reason (str): Reason recorded with the request. Default
+                `"user requested cancellation"`.
+
+        Returns:
+            run (Run): This Run.
         """
         with self._lock:
             self._ensure_open()
@@ -1443,25 +1498,60 @@ class Run:
         self._state["termination_reason"] = reason
 
     def resume(self, *, reanalyze=False):
-        """Advance the original execution frontier and publish only a result covering its actual
-        work.
+        """Continue the Run once: retrieve pending results, let the Method go on, and return.
 
-        Order: an explicit ``reanalyze`` recovery, then one refresh of existing
-        submissions, then the Method's ``execute`` on the same Plan and Run. Changed
-        caches are saved even when ``execute`` raises, so expensive native or
-        numerical work done before the error is reused on the next resume. A
-        returned Result that the Method already attached must belong to this Plan,
-        and its data must equal the Run's current observations, receipts, forecast,
-        allocation and trace. The stored byte counter is excluded because it keeps
-        growing after the Result was captured. An unattached Result is attached to
-        the Run's current data. Either way a Method cannot publish a Result that
-        omits failed or uncertain exposure. With no Result, an uncertain attempt
-        that nothing can retrieve raises ``RunFailed`` at the recovery stage.
+        `resume` reads each pending submission once, then lets the Method
+        continue from where the Run stands, without waiting. When the Method
+        finishes, `run.result` holds the Result. Otherwise `run.result` is
+        still `None`, and a later `resume` or `wait` continues. A complete
+        Run returns at once. Work done before an error, such as a computed
+        circuit or numerical intermediate, is kept for the next `resume`. A
+        Result always accounts for every attempt of the Run, failed and
+        uncertain ones included.
 
-        The Result row commits after every observation it uses. If the process
-        stops before that commit, the reopened Run has no Result, and the next
-        ``resume`` calls ``execute`` again on the saved frontier.
+        Args:
+            reanalyze (bool): Default `False`. `True` retries an interrupted
+                analysis of a Method that supports it, from its saved data,
+                before continuing. A completed Run is analyzed again with
+                `result.analyze(...)` instead.
+
+        Returns:
+            run (Run): This Run.
+
+        Raises:
+            RunFailed: If no Result is available and an uncertain attempt
+                cannot be retrieved by any route (stage `"recovery"`).
+            ValueError: If `reanalyze=True` is given for a Run that already
+                has its Result.
+
+        Examples:
+            A local Aer run completes in its first pass:
+
+            >>> from nwqlib import Expectation, plan, prepare, submit
+            >>> from nwqlib.algorithms import ExpectationMethod
+            >>> problem = Expectation(state=[1.0, 0.0],
+            ...                       observable=[[1.0, 0.0], [0.0, -1.0]])
+            >>> selected = plan(problem, method=ExpectationMethod(), shots=64,
+            ...                 seed=7)
+            >>> prepared = prepare(selected)
+            >>> with prepared.run as run:
+            ...     started = submit(prepared)
+            ...     print(started is run, run.resume().result.value)
+            True 1.0
         """
+        # Order: an explicit ``reanalyze`` recovery, then one refresh of
+        # existing submissions, then the Method's ``execute`` on the same Plan
+        # and Run. Changed caches are saved even when ``execute`` raises. A
+        # returned Result that the Method already attached must belong to this
+        # Plan, and its data must equal the Run's current observations,
+        # receipts, forecast, allocation and trace. The stored byte counter is
+        # excluded because it keeps growing after the Result was captured. An
+        # unattached Result is attached to the Run's current data. Either way a
+        # Method cannot publish a Result that omits failed or uncertain
+        # exposure. The Result row commits after every observation it uses. If
+        # the process stops before that commit, the reopened Run has no
+        # Result, and the next ``resume`` calls ``execute`` again on the saved
+        # frontier.
         if type(reanalyze) is not bool:
             raise TypeError("reanalyze must be a boolean")
         with self._lock:
@@ -1557,17 +1647,39 @@ class Run:
                 attempt=event.attempt)
 
     def wait(self, *, timeout=None, poll_interval=1.):
-        """Return the method's Result, or expose a terminal failure or unavailable recovery.
+        """Continue the Run until it has a Result, and return the Result.
 
-        Retrieval errors and uncertain submissions keep their original recovery
-        semantics. A Method may publish a lawful partial Result before this
-        terminal check; the lifecycle never manufactures scientific output.
+        Each pass calls `resume`, which reads every pending provider job once,
+        and then sleeps `poll_interval` seconds. A Method may return a valid
+        partial Result from the data it has before a failed job is reported,
+        and the Run never invents scientific output. A retrieval error
+        propagates and keeps the job's locator, so a later `resume` or `wait`
+        can read the same job, and an uncertain submission is never
+        resubmitted.
 
-        Each pass calls ``resume``, which refreshes every pending provider job
-        once, and then sleeps ``poll_interval`` seconds. The 1-second default is
-        an untuned polling interval registered in docs/ENGINEERING_CONSTANTS.md
-        ("Explicit workflow and reference controls"). A longer interval sends
-        fewer status requests to a provider.
+        Args:
+            timeout (float | None): Seconds to wait before raising
+                `TimeoutError`. `None`, the default, waits without a limit.
+            poll_interval (float): Default `1.0`. Seconds between passes. A
+                longer interval sends fewer status requests to a provider.
+                The default is a polling interval chosen without tuning
+                ([Engineering
+                constants](../ENGINEERING_CONSTANTS.md#explicit-workflow-and-reference-controls)).
+
+        Returns:
+            result (Result): The Run's Result.
+
+        Raises:
+            RunFailed: If a preparation, host computation or submission ended
+                in failure or cancellation, or an uncertain attempt cannot be
+                recovered.
+            TimeoutError: If the Run is still pending after `timeout`. The
+                same Run can be continued later.
+            RuntimeError: If the Run was cancelled before it completed. Its
+                pending work is saved in its folder.
+
+        Examples:
+            See [`submit`][nwqlib.scientist.submit].
         """
         started = monotonic()
         while self.result is None:
@@ -1615,13 +1727,16 @@ class Run:
 
     @property
     def artifacts(self):
-        """The Run's array store, created on first use.
+        """The store of the arrays this Run has saved, created on first use.
 
-        It shares the Run lock and routes each publication through the Run, so an
-        array commits in the same transaction as the observation that produced it.
-        A reopened Run's arrays are registered lazily: the store reads a saved
-        payload from the journal on its first use (``_saved_payload``).
+        Read one array with `hydrate(manifest)`, or take the handles from
+        `run.data.artifacts`.
         """
+        # The store shares the Run lock and routes each publication through the
+        # Run, so an array commits in the same transaction as the observation
+        # that produced it. A reopened Run's arrays are registered lazily: the
+        # store reads a saved payload from the journal on its first use
+        # (``_saved_payload``).
         if self._state["artifacts"] is None:
             from nwqlib.artifacts import ArtifactStore
             store = ArtifactStore(max_bytes=self.limits.max_data_bytes)
@@ -1732,12 +1847,20 @@ class Run:
         self._state["publication_batch"] = None
 
     def hydrate(self, manifest):
-        """Return the handle of one published array, reading its saved bytes from the journal once.
+        """Return the handle of one saved array, reading its bytes from the Run's folder once.
 
-        Nothing is acquired or recomputed. Missing bytes stay unavailable. The
-        store reads the payload through ``_saved_payload`` on first use and
-        keeps it for its lifetime (``ArtifactStore.get``); a probability chunk
-        and an artifact handle of this Run read through the same store.
+        Nothing is measured or recomputed. The array is read on first use and
+        kept for the life of the Run. A probability observation and an array
+        handle of this Run read through the same store.
+
+        Args:
+            manifest (ArtifactManifest): The array's manifest.
+
+        Returns:
+            handle (ArtifactHandle): The array's handle.
+
+        Raises:
+            ValueError: If the Run has no saved bytes for the array.
         """
         if not self.artifacts.available(manifest):
             raise ValueError("run has no saved bytes for this requested array")
@@ -2164,20 +2287,45 @@ class Run:
             state["array_bytes"] = sum(manifest.data_bytes for manifest in manifests.values())
 
     def save(self, path):
-        """Copy this frontier to a new folder, without moving or resetting the live Run.
+        """Copy the Run's current state to a new folder. The open Run continues unchanged.
 
-        See ``_run_archive.save``. The copy and the original name the same provider
-        jobs, so only one of them should be continued.
+        Call it while the Run is open, after a Run call has returned. The copy
+        holds the Plan, the limits and counts, the random state, the
+        preparations, the attempts and the locators of pending jobs, the
+        observations, the arrays and any Result. A Run without a folder gets
+        one this way. `load_run` reopens the copy. The copy and the original
+        name the same provider jobs, so continue only one of them. The copied
+        files count against `max_data_bytes`, and a failed copy leaves no new
+        folder.
+
+        Args:
+            path (str | os.PathLike): New folder to create.
+
+        Returns:
+            path (pathlib.Path): The created folder.
+
+        Raises:
+            ValueError: If the Run is in the middle of a step, for example
+                while an outcome is being saved.
         """
         from nwqlib._run_archive import save
         return save(self, path=path)
 
     def release_native(self):
-        """Release durably saved idle QPY handles; keep receipts and order.
+        """Release the in-memory circuits of preparations that are fully collected, idle and saved as QPY.
 
-        Other backends, unsaved data and active consumers remain in place.
-        Inspection restores an existing QPY snapshot on demand; no lowering,
-        transpilation or submission occurs. Counts do not claim released RSS.
+        For a long Run with a folder, this frees the Qiskit circuits that are
+        no longer needed. The preparation records and the order of the
+        prepared circuits stay. Inspecting a released circuit reads its saved
+        QPY once, and nothing is built, transpiled or submitted again.
+        Circuits of other backends, unsaved circuits and circuits still in use
+        are kept. Aer is the backend whose circuits are released. The counts
+        describe released circuits, not measured memory.
+
+        Returns:
+            released (dict): `released`, the content hashes of the released
+                preparations, and `kept`, pairs of a content hash and the
+                reason it was kept.
         """
         from nwqlib._run_archive import release_native
         with self._lock:
@@ -2185,11 +2333,12 @@ class Run:
             return release_native(self)
 
     def close(self):
-        """Release the journal, the controller lock and private caches. Idempotent.
+        """Close the Run's folder, release its lock and free its working caches. Closing twice is harmless.
 
-        Closing cancels no job. Durable files, the attached Result, receipts,
-        immutable arrays and every exposure counter stay, so a later ``load_run``
-        or inspection sees the same spent work.
+        Closing cancels no job. The saved files, the Result, the preparation
+        records, the arrays and every count stay, so a later `load_run` or
+        inspection sees the same work. `with prepared.run as run:` closes the
+        Run at the end of the block.
         """
         with self._lock:
             if not self._state["closed"]:
@@ -2216,16 +2365,21 @@ class Run:
 
 @dataclass(frozen=True, init=False, eq=False)
 class PreparedHandle:
-    """An actual native snapshot bound to one selected experiment and backend.
+    """The prepared circuit of one experiment for one backend, with its preparation record.
 
-    Submission uses this exact native object, so the executed circuit is the one
-    the receipt describes. After ``Run.release_native`` the native object is
-    dropped and restored on demand from the Run's saved QPY, without lowering or
-    transpiling again.
+    Submission uses exactly this circuit, so the circuit that executes is the
+    one the preparation record describes. After `Run.release_native` the
+    circuit is dropped from memory and read back from the Run's saved QPY
+    when needed, without building or transpiling it again. Method authors
+    receive handles from the Run's preparation calls. The fields below are
+    read-only.
 
     Attributes:
-        record: Actual preparation receipt including selected readout and backend association.
-        realization: Concrete experiment arguments and selected construction for this handle.
+        record: The preparation record
+            ([`PreparedArtifact`][nwqlib.execution.PreparedArtifact]), with
+            the readout and the backend.
+        realization: The experiment's concrete parameter values and
+            construction (`Realization`).
     """
 
     record: PreparedArtifact
@@ -2263,11 +2417,18 @@ class PreparedHandle:
         return self._native
 
     def inspect_circuit(self):
-        """Return a copy, so inspection cannot change the circuit that executes.
+        """Return a copy of the prepared Qiskit circuit.
 
-        ``QuantumCircuit.copy`` gives the copy its own instruction list and
-        its own operation objects (checked against the installed Qiskit), so
-        changing the copy leaves the executing circuit unchanged.
+        `QuantumCircuit.copy` gives the copy its own instruction list and its
+        own operation objects (checked against the installed Qiskit), so
+        changing the copy leaves the circuit that executes unchanged.
+
+        Returns:
+            circuit (QuantumCircuit): The copy.
+
+        Raises:
+            ValueError: If this preparation is a host computation without a
+                circuit.
         """
         self._restore_native()
         if self.record.execution != "quantum_circuit" or self._native.circuit is None:
@@ -2275,7 +2436,35 @@ class PreparedHandle:
         return self._native.circuit.copy()
 
     def inspect_resources(self, *, transpile_options=None, max_operations=100_000, max_bytes=DEFAULT_MAX_BYTES):
-        """Count the actual native circuit's top-level operations, without copying or execution."""
+        """Count the operations of the prepared circuit, without copying or running it.
+
+        Each top-level instruction of the circuit counts once under its
+        operation name, measurements, barriers, simulator saves, `Clifford`
+        objects and user-defined gates included, and names are reported as
+        they are. Gate definitions and control-flow bodies are not expanded. With `transpile_options`, a transpiled copy is
+        counted instead, with the simulator saves removed first. The circuit
+        that executes is never changed or run.
+
+        Args:
+            transpile_options (dict | None): Options for Qiskit's `transpile`.
+                `None`, the default, counts the prepared circuit as it is.
+            max_operations (int): Default `100_000`. Largest number of
+                operations of the circuit, and of its transpiled copy.
+            max_bytes (int): Default 10 GB (decimal, `10_000_000_000`).
+                Largest size of the known inspection data and options. It
+                does not bound the compiler's own memory.
+
+        Returns:
+            inventory (dict): `circuit`, `basis`, `compiler` (Qiskit version
+                and options, or `None`), `operations` (count by name),
+                `total_operations`, `num_qubits`, `num_clbits` and `depth`
+                (Qiskit's default depth, which skips directives such as
+                barriers and simulator saves).
+
+        Raises:
+            ValueError: If this preparation has no circuit or a limit is
+                exceeded.
+        """
         self._restore_native()
         if self.record.execution != "quantum_circuit" or self._native.circuit is None:
             raise ValueError("this prepared handle has no live circuit to inspect")
@@ -2287,10 +2476,17 @@ class PreparedHandle:
 
 @dataclass(frozen=True)
 class Prepared:
-    """Opaque public preparation; its Run owns subsequent work and limits.
+    """The prepared circuits of a Plan and their open Run, before submission.
+
+    [`prepare`][nwqlib.scientist.prepare] returns it. Inspect the circuits
+    with `circuits`, `circuit(index)`, `setting_names` and
+    `inspect_resources`, then pass it to [`submit`][nwqlib.scientist.submit].
+    The Run holds the preparations, the limits, the measured data and
+    everything that follows. Close it when done, for example with
+    `with prepared.run as run:`. The field below is read-only.
 
     Attributes:
-        run: Live Run owning preparation handles, cumulative limits, acquired data and continuation.
+        run: The open [`Run`][nwqlib._prepared_execution.Run].
     """
 
     run: Run
@@ -2308,14 +2504,31 @@ class Prepared:
 
     @property
     def circuits(self):
-        """Copies of every prepared quantum circuit, in the index order of ``inspect_resources``.
+        """Copies of every prepared Qiskit circuit, in index order.
 
-        Each access copies every circuit; ``circuit(index)`` copies one.
+        The index of a circuit is the one that `circuit`, `setting_names` and
+        `inspect_resources` use. Each access copies every circuit, and
+        `circuit(index)` copies one. Host computations have no circuit and
+        are skipped.
         """
         return tuple(handle.inspect_circuit() for handle in self._circuit_handles())
 
     def circuit(self, index=0):
-        """A copy of one prepared quantum circuit, at its index in ``circuits`` and ``setting_names``."""
+        """Return a copy of one prepared Qiskit circuit.
+
+        Args:
+            index (int): Default `0`. Position of the circuit in `circuits`
+                and `setting_names`.
+
+        Returns:
+            circuit (QuantumCircuit): The copy.
+
+        Raises:
+            ValueError: If no circuit has this index. After the default
+                `prepare(plan, settings="first")` only the first setting is
+                prepared, and `settings="all"` prepares every setting of
+                fixed experiments.
+        """
         return self._circuit_handle(index).inspect_circuit()
 
     def _circuit_handle(self, index):
@@ -2330,20 +2543,48 @@ class Prepared:
 
     @property
     def setting_names(self):
-        """The name of the Plan setting of each prepared circuit, in the index order of ``circuits``.
+        """The Plan experiment of each prepared circuit, in the index order of `circuits`.
 
-        Entry i is the name of the Plan experiment (``Experiment.name`` in
-        ``plan.experiments``) that circuit i realizes. After
-        ``prepare(plan, settings="all")`` a static Plan's names are those of its
-        quantum experiments in Plan order. The default ``settings="first"``
-        prepares only the setting that the Method submits first, and an
-        adaptive controller can prepare one experiment several times with
-        different arguments.
+        Entry i is the name (`Experiment.name` in `plan.experiments`) of the
+        experiment that circuit i implements. After
+        `prepare(plan, settings="all")` the names of fixed experiments are
+        those of the Plan's circuit experiments, in Plan order. The default
+        `settings="first"` prepares only the setting that the Method submits
+        first, and an adaptive Method can prepare one experiment several
+        times with different parameter values.
         """
         return tuple(handle.realization.experiment for handle in self._circuit_handles())
 
     def inspect_resources(self, *, index=0, transpile_options=None, max_operations=100_000, max_bytes=DEFAULT_MAX_BYTES):
-        """Count one existing quantum preparation's operations, in circuits display order."""
+        """Count the operations of one prepared circuit, without copying or running it.
+
+        Each top-level instruction of the circuit counts once under its
+        operation name, measurements, barriers, simulator saves, `Clifford`
+        objects and user-defined gates included, and names are reported as
+        they are. Gate definitions and control-flow bodies are not expanded. With `transpile_options`, a transpiled copy is
+        counted instead, with the simulator saves removed first. The circuit
+        that executes is never changed or run.
+
+        Args:
+            index (int): Default `0`. Position of the circuit in `circuits`.
+            transpile_options (dict | None): Options for Qiskit's `transpile`.
+                `None`, the default, counts the prepared circuit as it is.
+            max_operations (int): Default `100_000`. Largest number of
+                operations of the circuit, and of its transpiled copy.
+            max_bytes (int): Default 10 GB (decimal, `10_000_000_000`).
+                Largest size of the known inspection data and options. It
+                does not bound the compiler's own memory.
+
+        Returns:
+            inventory (dict): `circuit`, `basis`, `compiler` (Qiskit version
+                and options, or `None`), `operations` (count by name),
+                `total_operations`, `num_qubits`, `num_clbits` and `depth`
+                (Qiskit's default depth, which skips directives such as
+                barriers and simulator saves).
+
+        Raises:
+            ValueError: If no circuit has this index or a limit is exceeded.
+        """
         return self._circuit_handle(index).inspect_resources(transpile_options=transpile_options,
                                                              max_operations=max_operations, max_bytes=max_bytes)
 
@@ -4975,18 +5216,45 @@ def restore_prepared(prepared_id, *, run, for_submission=False):
 
 
 def submit_detached(prepared, *, run, checkpoint_sequences=None):
-    """Publish original batch intent before launch. Never wait for or replace a job.
+    """Submit prepared circuits as one job to a backend that runs jobs outside this process, without waiting.
 
-    The backend admits the whole batch and the Method's ``before_submit`` runs
-    before the intent commits (commit 4 of the module docstring). Then ``launch``
-    starts the provider job and the returned locator is acknowledged (commit 5).
-    If the process ends between launch and acknowledgement, reopening finds an
-    uncertain submission without a locator, and only the backend's ``reconcile``
-    (by the original submission identity) can recover the job. A launch error
-    marks the submission and its events uncertain with their exposure still
-    charged, because the provider may have accepted the request before the error
-    reached this process.
+    [`submit`][nwqlib.scientist.submit] and `Run.resume` call it for such a
+    backend, so most code never does. The [IonQ guide](../ionq.md) calls it
+    directly to submit several circuits with equal shots as one job. The
+    backend checks the whole batch, the submission is saved in the Run's
+    folder, the backend then starts the job, and the job's locator is saved
+    when the backend returns it. If the process ends between the start and
+    the saved locator, the reopened Run has an uncertain submission without
+    a locator, and only the backend's own lookup by the original submission
+    can find the job. An error while starting the job marks the submission
+    and its attempts uncertain, with their work still counted, because the
+    provider may have accepted the request before the error reached this
+    process. The job is never resubmitted or replaced. Read its results with
+    `run.resume()`, `run.wait()` or `refresh_submissions`.
+
+    Args:
+        prepared (tuple[PreparedHandle, ...]): The prepared circuits of this
+            Run and backend, at least one.
+        run (Run): The Run that holds them. It needs a folder.
+        checkpoint_sequences (tuple | None): For an adaptive Method, the
+            iteration checkpoint of each circuit, in order, or `None`.
+
+    Returns:
+        submission (SubmissionRecord): The saved submission with its job
+            locator.
+
+    Raises:
+        TypeError: If `prepared` is not a nonempty tuple of prepared circuits.
+        ValueError: If the Run has no folder, the backend cannot start jobs,
+            a circuit belongs to another backend, or `checkpoint_sequences`
+            does not match `prepared`.
     """
+    # The backend admits the whole batch and the Method's ``before_submit``
+    # runs before the intent commits (commit 4 of the module docstring). Then
+    # ``launch`` starts the provider job and the returned locator is
+    # acknowledged (commit 5). Only the backend's ``reconcile`` (by the
+    # original submission identity) can recover a job whose acknowledgement
+    # was lost.
     if type(prepared) is not tuple or not prepared or any(type(handle) is not PreparedHandle for handle in prepared):
         raise TypeError("detached submission requires a nonempty tuple of native handles")
     # A trajectory item publishes one chunk per point from its refresh
@@ -5073,28 +5341,36 @@ def _merged_associations(submission, reported, *, run):
 
 
 def refresh_submissions(*, run: Run):
-    """Refresh each unconsumed submission once, without any new launch.
+    """Read each pending job of a Run once and save the new results, without submitting anything.
 
-    Retrieval errors preserve the original locator, exposure and prior results.
-    New result/event associations commit atomically and can be collected once.
-    After recording a failed refresh, the original exception propagates. A later
-    explicit call can continue fetching the same known job.
+    `Run.resume` and `Run.wait` call it, so most code never does. Each new
+    result is saved with its attempt in one step and can be collected once.
+    A job read twice still saves each result once, because results that are
+    already saved are skipped. A submission whose locator was lost is read
+    only through the backend's own lookup by the original submission. Items
+    of a job keep their original positions and result keys, and a provider
+    may add a child job or result identifier to an item but cannot replace
+    one. When a provider reports failure, cancellation or
+    an uncertain state, the remaining attempts become uncertain and stay
+    counted. If reading a job fails, the failure is recorded on its
+    submission and the original exception propagates, with the job's
+    locator, counted work and earlier results kept, so a later call can read
+    the same job again.
 
-    A submission without a locator is refreshed only through the backend's
-    ``reconcile``, which looks the job up by its original submission identity.
-    Items keep their original ordinals and result keys. A provider may add a child
-    job or result identifier to an item but cannot replace one. Items that already
-    have an observation are skipped, so a job read twice still publishes each
-    observation once. When a provider reports failure, cancellation or an
-    uncertain state, the remaining items become uncertain and stay charged.
+    Args:
+        run (Run): The Run whose pending jobs are read.
 
-    Each refresh splits commit 6 of the module docstring into two transactions,
-    provider status first (``_commit_refresh_status``) and observations second
-    (``_commit_refresh_outcomes``). A reconciled locator is acknowledged
-    (commit 5) before the refresh reads the job. A cancellation request is
-    written before it is sent (``_request_cancellation``), and a failed refresh
-    is recorded on its submission (``_record_refresh_failure``).
+    Returns:
+        observations (tuple[ObservationChunk, ...]): The newly saved
+            observations.
     """
+    # Each refresh splits commit 6 of the module docstring into two
+    # transactions, provider status first (``_commit_refresh_status``) and
+    # observations second (``_commit_refresh_outcomes``). A reconciled locator
+    # is acknowledged (commit 5) before the refresh reads the job. A
+    # cancellation request is written before it is sent
+    # (``_request_cancellation``), and a failed refresh is recorded on its
+    # submission (``_record_refresh_failure``).
     with run._lock:
         run._ensure_open()
         observed = []

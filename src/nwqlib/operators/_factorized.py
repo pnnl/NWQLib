@@ -12,22 +12,40 @@ from ._pauli import pauli_product_requirements
 
 @dataclass(frozen=True, eq=False, init=False, slots=True)
 class FactorizedOperatorProduct:
-    """Nonempty immutable ordered tuple of admitted compatible operator handles.
+    """Ordered product `A_1 A_2 ... A_k` of operator handles, kept as separate factors.
+
+    Build it with a nonempty tuple of
+    [`OperatorInput`][nwqlib.operators.inputs.OperatorInput] handles that
+    share one basis, for example `FactorizedOperatorProduct((A, B))`. The
+    factors are referenced, not copied or read. `matvec` applies the product
+    to a vector factor by factor, and `expand` multiplies it out into one
+    operator when the factors share a representation. The fields below are
+    read-only.
 
     Attributes:
-        factors: Existing payload owners, referenced without traversal or copies.
-        manifest: Ordered InputRefs and basis; structure is always general.
+        factors: The factor handles, in product order.
+        manifest: The [`ProductManifest`][nwqlib.operators.access.ProductManifest]:
+            factor references, shared basis and sizes. Its structure is
+            always `"general"`.
     """
 
     factors: tuple[OperatorInput, ...]
     manifest: ProductManifest
 
     def __init__(self, factors, *, max_bytes=DEFAULT_INPUT_BYTES):
-        """Reference admitted handles in order, without reading their payloads.
+        """Reference the factor handles in order, without reading their data.
 
-        All factors must share one basis and dimension. Referenced payload
-        bytes are summed per occurrence, or unknown if any factor's size is
-        unknown.
+        Args:
+            factors (tuple[OperatorInput, ...]): Nonempty tuple of handles
+                with one shared basis and dimension.
+            max_bytes (int): Limit on the bytes of the factor references and
+                dimension metadata. Default 10 GB (decimal,
+                `10_000_000_000`).
+
+        Raises:
+            ValueError: If `factors` is not a nonempty tuple, the bases
+                differ, or the references exceed `max_bytes`.
+            TypeError: If a factor is not an `OperatorInput`.
         """
         if type(factors) is not tuple or not factors:
             raise ValueError("factorized product requires a nonempty native tuple")
@@ -47,11 +65,17 @@ class FactorizedOperatorProduct:
         object.__setattr__(self, "manifest", manifest)
 
     def action_requirements(self):
-        """Cumulative local action sizes plus the outer vector frontier.
+        """Return the size of one `matvec` call as `(D, bytes, products)`, from metadata only.
 
-        All capabilities are checked first from metadata. Two factor-result
-        vectors are live across a step; original input may remain referenced.
-        Pauli conversion/chunk space is included by the shared native law.
+        The bytes are `32*D` for the two intermediate vectors alive across a
+        step (the original input may stay referenced) plus each factor's
+        own `matvec` byte count, which for Pauli factors includes their
+        conversion and tile space. The products are the sum of the factors'
+        scalar-product counts.
+
+        Raises:
+            ValueError: If a factor has no classical action, or a Pauli
+                factor acts on more than 64 qubits.
         """
         if any("matvec" not in f.manifest.access or
                (f.manifest.reference.representation == "pauli" and
@@ -63,10 +87,26 @@ class FactorizedOperatorProduct:
 
     def matvec(self, vector, *, max_bytes=DEFAULT_INPUT_BYTES, max_products=1_000_000_000,
                limit_name="max_products"):
-        """Admit the entire action before vector access, then apply right first.
+        """Apply the product to a vector classically, rightmost factor first.
 
-        ``limit_name`` names the caller's option that supplies ``max_products``
-        in a refusal.
+        The total bytes and scalar products of all factors, from
+        `action_requirements`, are checked before the vector is read.
+
+        Args:
+            vector (numpy.ndarray): float64 or complex128 vector of length D.
+            max_bytes (int): Byte limit. Default 10 GB (decimal,
+                `10_000_000_000`).
+            max_products (int): Limit on the total scalar products. Default
+                `1_000_000_000`.
+            limit_name (str): Name of the caller's option that supplies
+                `max_products`, used in the error message.
+
+        Returns:
+            result (numpy.ndarray): `A_1 @ (A_2 @ (... @ (A_k @ vector)))`.
+
+        Raises:
+            ValueError: If a factor has no classical action, the vector is
+                invalid, or a limit is exceeded.
         """
         requirements = self.action_requirements()
         _check(max_bytes, requirements)
@@ -78,14 +118,33 @@ class FactorizedOperatorProduct:
         return current
 
     def expansion_requirements(self, *, max_bytes=DEFAULT_INPUT_BYTES, max_products=1_000_000_000):
-        """Admit homogeneous expansion before any product/native multiplication.
+        """Check and return the size of `expand` as `(items, bytes, work)`, before any multiplication.
 
-        Sparse C counts candidate scalar products, with
-        C >= structural nnz >= final nnz. Later chain steps conservatively use
-        prior nnz upper bound times next maximum row nnz. No pattern pass.
-        A Pauli chain step multiplies the running M-row product by the next
-        K-row factor and is charged ``pauli_product_requirements(M, K, W)``,
-        the bytes that its PauliTerms.product call checks.
+        For sparse factors, the first product `A*B` has
+        `C = sum over stored A[i, k] of row_nnz(B, k)` candidate scalar
+        products, with `C >= structural nnz >= final nnz` of `A*B`. Each later
+        factor multiplies the previous nnz bound by its largest row nnz. No
+        sparsity-pattern pass is made. A Pauli step multiplies the running
+        M-row product by the next K-row factor and counts the bytes that the
+        Pauli table product checks. The products are checked against
+        `max_products` and the bytes against `max_bytes`.
+
+        Args:
+            max_bytes (int): Byte limit. Default 10 GB (decimal,
+                `10_000_000_000`).
+            max_products (int): Limit on the sparse candidate products.
+                Default `1_000_000_000`.
+
+        Returns:
+            sizes (tuple[int, int, int]): Items, bytes and work of the
+                expansion.
+
+        Raises:
+            ValueError: If a factor has a declared identifier rather than
+                computed from its data, a factor holds metadata only, the
+                factors do not all share one of
+                the Pauli, fermionic or sparse representations, or a limit is
+                exceeded.
         """
         if any(f.manifest.identity_status != "ingested" for f in self.factors):
             raise ValueError("expansion is unavailable for a declared factor")
@@ -132,7 +191,27 @@ class FactorizedOperatorProduct:
         return law
 
     def expand(self, *, max_bytes=DEFAULT_INPUT_BYTES, max_products=1_000_000_000):
-        """Explicit same-representation expansion, with final coalescing only."""
+        """Multiply the factors out into one operator of their shared representation.
+
+        Pauli, ordered fermionic, and CSR or CSC factors can be expanded. The
+        sizes from `expansion_requirements` are checked first. Terms are
+        combined only in the final step: identical Pauli words or fermionic
+        strings are summed and exact zeros removed, and a sparse product is
+        returned in canonical form with duplicate entries summed and zeros
+        removed.
+
+        Args:
+            max_bytes (int): Byte limit. Default 10 GB (decimal,
+                `10_000_000_000`).
+            max_products (int): Limit on the sparse candidate products.
+                Default `1_000_000_000`.
+
+        Returns:
+            operator (OperatorInput): The expanded operator.
+
+        Raises:
+            ValueError: As for `expansion_requirements`.
+        """
         self.expansion_requirements(max_bytes=max_bytes, max_products=max_products)
         representation = self.factors[0].manifest.reference.representation
         if representation in ("csr", "csc"):

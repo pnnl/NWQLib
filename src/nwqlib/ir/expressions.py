@@ -37,19 +37,32 @@ def walk_kept(value, reserve):
 
 
 class AdmissionLimits(Record):
-    """Caps on kept definitions, nesting, context work and integer bit length.
+    """Limits on the size of a Program's stored structure and on the work of checking it.
 
-    Admission and the resource fold run on metadata a caller can make
-    arbitrarily large or deep. These caps make both operations reject before
-    their work or memory grows past a fixed envelope. They bound kept
-    structure and admission work, never the dynamic size of the workload the
-    Program describes. Repeat counts and range lengths are not expanded.
+    Pass it as `limits=` to [`Program`][nwqlib.ir.records.Program]. Every
+    argument is optional. A caller can make a Program's metadata arbitrarily
+    large or deep, and these limits make the structural check and the resource
+    estimate reject it before their work or memory passes a fixed size. They
+    limit the stored structure and the checking work, never the size of the
+    workload the Program describes, and repeat counts and range lengths are not
+    expanded. A Method with a `max_admission_steps` setting uses it as
+    `max_steps` of its Programs, and [Program checks](../development/program_checks.md) explains how planning
+    work is counted.
 
     Attributes:
-        max_definitions: Total kept definitions, expressions, parameters, registers, classical values and signatures. The default, 16,384, is the smallest power of two with at least twofold margin over the 5,951 of a sampled FixedGCIM Plan with a 12-qubit, 200-term observable and four basis states (ENGINEERING_CONSTANTS.md, the Program inventory row).
-        max_depth: Longest reference chain, also the recursion ceiling of lifecycle admission.
-        max_steps: Admission work units per check, and separately the count of kept field slots.
-        max_integer_bits: Largest bit length of any admitted or computed integer.
+        max_definitions: Default `16384`. Positive limit on the stored
+            definitions, expressions, parameters, registers, classical values and
+            signatures together. 16,384 is the smallest power of two with at least
+            a twofold margin over the 5,951 of a sampled FixedGCIM Plan with a
+            12-qubit, 200-term observable and four basis states (the Program
+            inventory row of [Engineering constants](../ENGINEERING_CONSTANTS.md)).
+        max_depth: Default `128`, also the largest accepted value. Limit on the
+            longest chain of references, which is also the recursion limit of the
+            lifecycle check.
+        max_steps: Default `100000`. Positive limit on the checking work units of
+            one check, and separately on the number of stored fields.
+        max_integer_bits: Default `4096`. Positive limit on the bit length of any
+            integer the check accepts or computes.
     """
 
     # See ENGINEERING_CONSTANTS.md: finite planning inventory, not dynamic work limits.
@@ -60,7 +73,25 @@ class AdmissionLimits(Record):
 
 
 class Parameter(Record):
-    """Named integer or finite binary64 domain, with optional inclusive bounds."""
+    """A named integer or real parameter of a Program, with optional inclusive bounds.
+
+    Build it with keyword arguments, for example
+    `Parameter(name="steps", domain="integer", lower=1)`, and pass it in
+    `parameters=` of a [`Program`][nwqlib.ir.records.Program] or a
+    [`BlockSignature`][nwqlib.ir.records.BlockSignature]. `name` and `domain` are
+    required. A real value is a finite binary64 number given as `Float64`.
+
+    Attributes:
+        name: Required. Parameter name.
+        domain: Required. `"integer"` or `"real"`.
+        lower: Default `None`. Inclusive lower bound, an exact integer for an
+            integer domain.
+        upper: Default `None`. Inclusive upper bound, not below `lower`.
+
+    Raises:
+        ValueError: If an integer domain has a non-integer bound, or `lower`
+            exceeds `upper`.
+    """
 
     name: Text
     domain: Literal["integer", "real"]
@@ -78,7 +109,18 @@ class Parameter(Record):
         return self
 
     def admit(self, value):
-        """Reject concrete values outside the declared domain without rounding."""
+        """Check a value against the parameter's domain and bounds, without rounding, and return it as a number.
+
+        Args:
+            value (int | Float64): An exact integer for an integer domain, or a
+                `Float64` for a real domain.
+
+        Returns:
+            value (int | float): The value as a number.
+
+        Raises:
+            ValueError: If the value has the wrong type or lies outside the bounds.
+        """
         if self.domain == "integer" and type(value) is not int:
             raise ValueError(f"parameter {self.name} requires an exact integer")
         if self.domain == "real" and not isinstance(value, Float64):
@@ -96,14 +138,30 @@ def number(value):
 
 
 class Binding(Record):
-    """One concrete parameter assignment, kept in the enclosing identity."""
+    """A concrete value for one parameter, part of the content hash of the record that holds it.
+
+    Build it as `Binding(parameter="steps", value=4)` and pass it in
+    `bindings=` of a Program, a `Setting` or a selected definition. Both
+    arguments are required.
+
+    Attributes:
+        parameter: Required. Parameter name.
+        value: Required. An exact integer or a `Float64`.
+    """
 
     parameter: Text
     value: Value
 
 
 class ExprRef(Record):
-    """A local reference into Program.expressions; never a source-code string."""
+    """A reference to an expression of the Program by its ID, used wherever a width, count or argument may be computed.
+
+    Build it as `ExprRef(expression="width")`. The ID names an entry of
+    `Program.expressions`. It is never source code.
+
+    Attributes:
+        expression: Required. ID of the expression.
+    """
 
     expression: Text
 
@@ -112,17 +170,29 @@ Integer = NonnegativeInt | ExprRef
 
 
 class Constant(Record):
-    """An exact integer or finite Float64 literal."""
+    """An exact integer or finite `Float64` literal, the value of an expression.
+
+    Build it as `Constant(value=3)` and wrap it in an
+    [`Expression`][nwqlib.ir.expressions.Expression].
+
+    Attributes:
+        value: Required. An exact integer or a `Float64`.
+    """
 
     kind: Literal["constant"] = "constant"
     value: Value
 
 
 class ParameterRef(Record):
-    """The value bound to a declared Parameter.
+    """The value of a declared parameter, as an expression.
 
-    While the parameter is unbound, admission treats the value as unknown and
-    the resource fold keeps it symbolic. It is never read as zero.
+    Build it as `ParameterRef(parameter="steps")` and wrap it in an
+    [`Expression`][nwqlib.ir.expressions.Expression]. While the parameter is
+    unbound, the structural check treats the value as unknown and the resource
+    estimate keeps it symbolic. It is never read as zero.
+
+    Attributes:
+        parameter: Required. Name of a declared parameter.
     """
 
     kind: Literal["parameter"] = "parameter"
@@ -130,10 +200,18 @@ class ParameterRef(Record):
 
 
 class Binary(Record):
-    """One operation on two local operands. Its ceildiv is exact and requires a positive denominator.
+    """An operation on two expressions of the Program, such as a sum or an exact ceiling division.
 
-    ``left`` and ``right`` are expression IDs of the same numeric domain.
-    ``eq``, ``lt`` and ``le`` return bool, and ``ceildiv`` requires integers.
+    Build it as `Binary(op="multiply", left="n", right="two")` and wrap it in an
+    [`Expression`][nwqlib.ir.expressions.Expression]. Both operands must have the
+    same numeric domain. `"eq"`, `"lt"` and `"le"` return a bool, and
+    `"ceildiv"` is exact, requires integers and a positive denominator.
+
+    Attributes:
+        op: Required. `"add"`, `"multiply"`, `"ceildiv"`, `"min"`, `"max"`, `"eq"`,
+            `"lt"` or `"le"`.
+        left: Required. ID of the left operand's expression.
+        right: Required. ID of the right operand's expression.
     """
 
     kind: Literal["binary"] = "binary"
@@ -143,7 +221,18 @@ class Binary(Record):
 
 
 class Expression(Record):
-    """A kept expression definition with a unique local ID."""
+    """A named expression of a Program: a constant, a parameter value or an operation on two expressions.
+
+    Build it as `Expression(id="width", value=Constant(value=3))` and pass it in
+    `expressions=` of a [`Program`][nwqlib.ir.records.Program]. Both arguments are
+    required, and the ID is unique within the Program.
+
+    Attributes:
+        id: Required. Unique ID within the Program.
+        value: Required. A [`Constant`][nwqlib.ir.expressions.Constant], a
+            [`ParameterRef`][nwqlib.ir.expressions.ParameterRef] or a
+            [`Binary`][nwqlib.ir.expressions.Binary].
+    """
 
     id: Text
     value: Annotated[Constant | ParameterRef | Binary, Field(discriminator="kind")]

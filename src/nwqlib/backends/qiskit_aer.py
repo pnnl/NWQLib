@@ -1013,8 +1013,8 @@ def _submit_aer_execution(prepared: _PreparedAerExecution) -> BackendRunResult:
     """Submit the already native artifact; no lowering, inventory or readout edits."""
     circuit = prepared.circuit
     # Exact readouts, a trajectory schedule of several points included, run
-    # one pure-state trajectory (ENGINEERING_CONSTANTS.md, "Budgets and
-    # mechanical bounds", row "Aer STATEVECTOR trajectory count"). Counts use
+    # one pure-state trajectory (ENGINEERING_CONSTANTS.md, "Aer
+    # simulator", row "Aer STATEVECTOR trajectory count"). Counts use
     # the selected shot budget.
     job = prepared.simulator.run(circuit, shots=prepared.shots or 1)
     result = job.result()

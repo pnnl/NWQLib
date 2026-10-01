@@ -5,7 +5,8 @@ Martyn, Rossi, Tan, and Chuang, arXiv:2105.02859v5. Equation, lemma and
 theorem numbers refer to these arXiv versions.
 
 Implements Jacobi-Anger evolution using the shared block-encoding records
-and the conventions in FRAMEWORK.md "Block-Encoding and QSP Conventions":
+and the
+[block-encoding and QSP conventions](../../conventions.md#block-encoding-and-qsp-conventions):
 
 - ``build_qsvt_circuit``: projector-controlled phase QSVT ([MRTC]
   arXiv:2105.02859v5, Sec. II.C-II.D, Eq. (27), Fig. 3, Theorems 3-4;
@@ -162,7 +163,7 @@ def _combine_generator_children(
 
     Each branch is ``(child, weight, circuit, label, qubits)`` with real weight.
     The combined normalization is the LCU subnormalization
-    ``sum_j w_j alpha_j`` (FRAMEWORK, Block-Encoding and QSP Conventions),
+    ``sum_j w_j alpha_j`` (docs/conventions.md, "Block encodings and QSP"),
     and the operator-error bound is ``sum_j w_j epsilon_j`` over nonzero
     weights, unknown when any such child bound is unknown. For two branches
     the combine qubit is prepared by ``RY(theta)`` with
@@ -229,10 +230,15 @@ def _combine_generator_children(
 
 @dataclass(frozen=True, kw_only=True)
 class JacobiAngerExpansion:
-    """Truncated Jacobi-Anger expansion of ``exp(-i tau x)`` with tail data.
+    """Truncated Jacobi-Anger expansion of `exp(-i tau x)` with its Bessel tail bounds.
 
-    Args:
-        tau: Effective evolution time ``alpha * t``.
+    [`jacobi_anger_expansion`][nwqlib.subroutines.qsp.evolution.jacobi_anger_expansion]
+    returns it. The polynomial is in `cos_coefficients` and
+    `sin_coefficients`, and its truncation error bound is `tail_bound`. The
+    fields below are read-only.
+
+    Attributes:
+        tau: Effective evolution time `alpha * t`.
         epsilon: Requested truncation tolerance for the combined expansion.
         degree: Smallest feasible degree at the first certified tail terminal.
             This is not a global minimum over all possible terminals.
@@ -341,8 +347,9 @@ def jacobi_anger_expansion(
     leaves error
     at most ``2 sum_{k>d} |J_k(tau)|`` because ``|T_k| <= 1`` on ``[-1, 1]``
     (Eqs. (53)-(54)). The bound adds the Bessel magnitudes through the
-    first admissible terminal ``T`` directly and bounds the rest by
-    ``_analytic_jacobi_anger_remainder``. Each parity tail carries the whole
+    first admissible terminal ``T`` directly and bounds the rest by an
+    analytic remainder (NWQLib's power-series bound, for which [GSLW]
+    Eq. (55) is the sharper real-argument form). Each parity tail carries the whole
     analytic suffix, so the combined ``tail_bound`` counts it twice, which
     is conservative. The scaling of [GSLW] arXiv:1806.01838v1, Cor. 60,
     ``d = Theta(tau + log(1/eps)/log(e + log(1/eps)/tau))``, is the
@@ -351,7 +358,20 @@ def jacobi_anger_expansion(
     is never a constant.
     ``max_degree`` bounds the returned polynomial and the finite search:
     at most ``max_degree + 200`` Bessel orders are explored. ``max_bytes``
-    bounds known numerical arrays, not special-function workspaces or RSS.
+    bounds known numerical arrays, not special-function workspaces or
+    process memory.
+
+    Args:
+        tau (float): Effective evolution time `alpha * t`.
+        epsilon (float): Truncation tolerance for the combined expansion.
+        min_degree (int): Default `1`. Smallest returned degree.
+        max_degree (int): Default `256`. Largest returned degree.
+        max_bytes (int): Default 10 GB (decimal, `10_000_000_000` bytes).
+            Limit on the known numerical arrays.
+
+    Returns:
+        expansion (JacobiAngerExpansion): Cosine and sine Chebyshev
+            coefficients with their tail bounds and `tail_slack`.
     """
 
     tau = finite_real(tau, "tau")
@@ -807,18 +827,18 @@ def build_control_diagonal_generator_encoding(
             ``2**control_qubits`` indexed by the control-register basis.
         h_diagonal: Real diagonal for the ``H`` branch (same length);
             required exactly when ``encoding_h`` is supplied.
-        max_work: Limit on the work of the exact dense syntheses that
-            controlling the two branches makes, and of Qiskit's control of
-            the synthesized gates, in the units of
-            ``_dense_synthesis.dense_synthesis_size``,
-            ``controlled_synthesis_size`` and ``gatewise_control_size``. A
-            ``dense_dilation`` child is synthesized and controlled once. A
+        max_work: Default `1_000_000_000`. Limit on the work of the exact
+            dense syntheses that controlling the two branches makes, and of
+            Qiskit's control of the synthesized gates, in the work units of
+            [Exact dense synthesis](../../development/dense_synthesis.md#admission-of-the-exact-synthesis).
+            A ``dense_dilation`` child is synthesized and controlled once. A
             single active branch is not controlled here.
-        max_bytes: Limit on the working and kept bytes of those syntheses
-            and control steps.
-        dense_control_route: ``"gatewise"``, ``"whole_matrix"`` or
-            ``"auto"``, the route by which the combine qubit controls a
-            ``dense_dilation`` child (``_dense_synthesis.select_dense_control_route``).
+        max_bytes: Default 10 GB (decimal, `10_000_000_000` bytes). Limit on
+            the working and kept bytes of those syntheses and control steps.
+        dense_control_route: Default ``"auto"``. ``"gatewise"``,
+            ``"whole_matrix"`` or ``"auto"``, the route by which the combine
+            qubit controls a ``dense_dilation`` child
+            ([dense control route](../../development/dense_synthesis.md#dense-control-route)).
             ``"auto"`` takes the whole-matrix route for this one control.
             The child's dilation is then synthesized with the control, and
             the branch's diagonal rotation is controlled gate-wise. A child
@@ -992,10 +1012,11 @@ def compiled_select_resource_law(
     sin_degree: int,
     child_count: int = 2,
 ) -> dict[str, int]:
-    """Analytic structural resource law for the compiled LCHS SELECT.
+    """Count the queries, child calls and rotation angles of LCHS's compiled QSP SELECT before gate synthesis.
 
     The compiled SELECT is one QSP Hamiltonian evolution of the joint
-    generator built by :func:`build_control_diagonal_generator_encoding`:
+    generator built by
+    [`build_control_diagonal_generator_encoding`][nwqlib.subroutines.qsp.evolution.build_control_diagonal_generator_encoding]:
     ``3 * (cos_degree + sin_degree)`` queries to the joint block encoding
     (the 3-step OAA over both parity ladders), and each query costs one call
     per child encoding plus one multiplexed RY of ``2**control_qubits``
@@ -1004,10 +1025,14 @@ def compiled_select_resource_law(
 
     Paper cross-check (arXiv:2506.20760v2, Lemma 7, p. 15): each effective-Hamiltonian
     query there uses one ``U_A`` plus one ``U_A^dagger`` call and ``2M``
-    multi-controlled rotations. Here each query uses ``child_count`` child
-    calls and ``child_count * 2**control_qubits >= 2M`` multiplexed rotation
-    angles (power-of-two padding). The paper's GQSP/qubitization query count
-    and amplification constants are not part of this law.
+    multi-controlled rotations, where M is the number of quadrature nodes.
+    Here each query uses ``child_count`` child calls and ``child_count * P``
+    multiplexed rotation angles. ``child_count`` is 2 for the L and H branches
+    and 1 when H = 0, and ``P = 2**control_qubits`` is the number of address
+    slots after power-of-two padding, so ``P >= M``. The comparison
+    ``2P >= 2M`` with the paper therefore holds for two children. The
+    paper's GQSP/qubitization query count and amplification constants are not
+    part of this law.
     """
 
     if control_qubits < 0:
@@ -1068,16 +1093,20 @@ def _target_scale(
 
 @dataclass(frozen=True, kw_only=True)
 class QSPPreparedEvolution:
-    """Actual successful parity phases, target scale and attempted margins.
+    """The solved phases of both parity parts of a QSP evolution, with the common target scale.
 
-    This is selected numerical payload, not an extra validation or native
-    execution receipt. The coefficient/phase tuples are immutable.
+    [`prepare_qsp_evolution`][nwqlib.subroutines.qsp.evolution.prepare_qsp_evolution]
+    returns it, and
+    [`qsp_evolution_error_terms`][nwqlib.subroutines.qsp.evolution.qsp_evolution_error_terms]
+    reads it. It holds numbers only, no circuit. The coefficient and phase
+    tuples are immutable. The fields below are read-only.
 
     Attributes:
         expansion: The Jacobi-Anger truncation whose parity targets were solved.
         cos_solution: Phases realizing ``Re P = cos-series / scale``.
         sin_solution: Phases realizing ``Re P = sin-series / scale``.
-        scale: Common target divisor ``s >= 1`` from ``_target_scale``.
+        scale: Common target divisor
+            `s = max(1, cos bound, sin bound) * (1 + margin) >= 1`.
         target_norming_bounds: Norming bounds on the cos and sin series
             before division by ``scale``.
         margin: The registered target margin that succeeded.
@@ -1119,7 +1148,7 @@ class QSPPreparedEvolution:
 def prepare_qsp_evolution(*, tau, epsilon, expansion=None, max_degree=256,
                           max_evaluations=20000, max_bytes=DEFAULT_INPUT_BYTES,
                           limit_name="max_evaluations"):
-    """Select phases within one cumulative evaluation allowance.
+    """Solve the QSP phases of both parity parts of a Jacobi-Anger expansion within one evaluation limit.
 
     Both parity targets are divided by one common scale
     ``s = max(1, cos bound, sin bound) * (1 + margin)``, so the parity
@@ -1130,9 +1159,32 @@ def prepare_qsp_evolution(*, tau, epsilon, expansion=None, max_degree=256,
     target margin, including failed solves and both starts of each solve.
     Sup-norm and Bessel preprocessing are bounded by degree and known
     numerical-array bytes. A supplied expansion is used directly, without
-    another Bessel selection. ``limit_name`` is the name of the caller's option
-    that sets ``max_evaluations``, used in the exhaustion and validation
-    messages.
+    another Bessel selection. This function and `jacobi_anger_expansion` do
+    not import Qiskit.
+
+    Args:
+        tau (float): Positive effective evolution time `alpha * t`.
+        epsilon (float): Truncation tolerance, strictly between 0 and 1.
+        expansion (JacobiAngerExpansion | None): Default `None`, which
+            computes `jacobi_anger_expansion(tau, epsilon, min_degree=2)`.
+            A supplied expansion must have the same `tau` and `epsilon`.
+        max_degree (int): Default `256`. Largest accepted degree.
+        max_evaluations (int): Default `20000`. Limit on the phase-solver
+            evaluations summed over both parities, both starts of each
+            solve and every attempted margin.
+        max_bytes (int): Default 10 GB (decimal, `10_000_000_000` bytes).
+            Limit on known numerical arrays.
+        limit_name (str): Default `"max_evaluations"`. Name of the caller's
+            option that sets `max_evaluations`, used in the error messages.
+
+    Returns:
+        prepared (QSPPreparedEvolution): Both phase solutions, the scale and
+            the margins tried.
+
+    Raises:
+        ValueError: If `tau <= 0`, `epsilon` is not in `(0, 1)`, the degree
+            exceeds `max_degree`, the evaluations are exhausted, or the
+            phases do not converge at any registered margin.
     """
     tau = finite_real(tau, "tau")
     epsilon = finite_real(epsilon, "epsilon")
@@ -1232,11 +1284,23 @@ def qsp_evolution_error_terms(prepared, *, evolution_time, child_error_bound):
 
     ``error_bound`` is the raw ``BlockEncoding`` bound against
     ``exp(-i t A)``: the amplitude deficit ``1 - (3a - 4a^3)`` plus that
-    residual. A consumer that divides recovered amplitudes by the known
+    residual. Code that divides recovered amplitudes by the known
     factor ``3a - 4a^3`` uses ``compensated_recovery_error_bound``, the
     residual bound times ``recovery_scale``, instead.
     A missing child bound or an unrepresentable Bessel tail makes the
     dependent terms ``None``.
+
+    Args:
+        prepared (QSPPreparedEvolution): Output of `prepare_qsp_evolution`.
+        evolution_time (float): Physical evolution time `t`.
+        child_error_bound (float | None): Operator-norm error bound of the
+            child encoding of `A`, or `None` when unknown.
+
+    Returns:
+        terms (dict): `amplitude` (`a`), `oaa_amplitude_factor`
+            (`3a - 4a^3`), `deficit`, `polynomial_part_error`,
+            `child_error`, `oaa_residual_error_bound`, `recovery_scale`,
+            `compensated_recovery_error_bound` and `error_bound`.
     """
     expansion = prepared.expansion
     cos_solution, sin_solution = prepared.cos_solution, prepared.sin_solution
@@ -1342,24 +1406,22 @@ def build_qsp_evolution_encoding(
             warning. Explicitly non-Hermitian inputs are rejected in either
             mode. This option reads metadata only and never materializes a
             circuit matrix or applies an operator to a state.
-        max_work: Limit on the work of the exact dense syntheses that
-            controlling the two passes makes, and of Qiskit's control of
-            the synthesized gates, in the units of
-            ``_dense_synthesis.dense_synthesis_size`` and
-            ``gatewise_control_size``. A child that holds a dense
+        max_work: Default `1_000_000_000`, the default `max_work` of the
+            block-encoding builders. Limit on the work of the exact dense
+            syntheses that controlling the two passes makes, and of Qiskit's
+            control of the synthesized gates, in the work units of
+            [Exact dense synthesis](../../development/dense_synthesis.md#admission-of-the-exact-synthesis).
+            A child that holds a dense
             ``UnitaryGate``, such as a ``dense_dilation`` encoding, has that
             unitary synthesized once for each pass, and its adjoint once
             for each pass of degree two or more, and the parity control
-            unrolls the synthesized gates at every query of the pass
-            (``qiskit_compat.dense_control_counts``). The parity control
+            unrolls the synthesized gates at every query of the pass. The parity control
             takes the gate-wise route on every route of the joint
             generator, because its controlled object is the whole pass. A gate that an earlier control already synthesized, such
             as a branch of a two-child joint generator, is controlled again
-            outside this count, and the LCHS planning admission charges it.
-            The default is ``DEFAULT_MAX_BLOCK_WORK`` of the block
-            encodings.
-        max_bytes: Limit on the working and kept bytes of those syntheses
-            and control steps.
+            outside this count, and LCHS planning counts it.
+        max_bytes: Default 10 GB (decimal, `10_000_000_000` bytes). Limit on
+            the working and kept bytes of those syntheses and control steps.
 
     GSLW, arXiv:1806.01838v1, Lemma 61 (p. 53), bounds the change in
     evolution by ``abs(t) * ||A - A_encoded||`` when both generators are
@@ -1374,7 +1436,7 @@ def build_qsp_evolution_encoding(
     roundoff asymmetry is rejected. If the intended target is Hermitian, the
     caller can explicitly choose ``(A + A.conj().T)/2`` before encoding.
     That changes the supplied target and belongs to the caller's input model.
-    Admission never performs this projection implicitly.
+    The check never performs this projection implicitly.
 
     Returns:
         BlockEncoding of ``exp(-i t A)`` with subnormalization 1, ancillas

@@ -28,22 +28,49 @@ from .sector import _sector_work, sector_expectations
 
 
 class AdaptVerificationOptions(Record):
-    """Explicit processed-state residual/sector bundle; no reference eigensolve.
+    """Options for checking the Ritz state of an `ADAPT` result.
+
+    Build it with keyword arguments, for example
+    `AdaptVerificationOptions(name="adapt", comparisons=("residual", "sector"))`,
+    and pass it to `result.verify(checks=...)`. `name` and `comparisons` are
+    required. `"residual"` and `"sector"` rebuild the Ritz state of the
+    processed Hamiltonian, and `"supplied_reference_energy"` compares two
+    recorded numbers. No reference eigensolve runs. A zero residual can
+    belong to an excited eigenstate, sector expectations do not prove sector
+    membership, and the signed spin contamination keeps its sign. The
+    [GCiM guide](../../algorithms/gcim.md) gives the work limits of these
+    checks.
 
     Attributes:
-        name: Prefix for the check names of this bundle.
-        comparisons: Distinct selected checks. ``residual`` and ``sector`` rebuild
-            the completed Ritz state. ``supplied_reference_energy`` compares two
-            recorded scalars only.
-        residual_tolerance: Absolute residual threshold in the problem's energy
-            unit for the non-sampled ``residual_threshold_met`` classification.
-        reference_spin: Spin quantum number s whose ``s(s+1)`` defines spin
-            contamination. It must be an integer or half-integer.
-        reference_energy: Supplied framed energy with provenance, required by
-            ``supplied_reference_energy``.
-        reference_tolerance: Absolute comparison threshold for that energy.
-        max_bytes: Cap on known verification workspace bytes.
-        max_products: Cap on counted verification state and operator work, including the exact synthesis of the dense unitaries in a supplied reference circuit.
+        name: Required. Prefix for the check names of these options.
+        comparisons: Required. Distinct nonempty tuple of `"residual"`,
+            `"sector"` and `"supplied_reference_energy"`.
+        residual_tolerance: Default `1.6e-3`, positive. Residual threshold in
+            the problem's energy unit for the non-sampled
+            `residual_threshold_met` classification.
+        reference_spin: Default `0.0`. Spin quantum number s, a nonnegative
+            integer or half-integer, whose `s(s+1)` defines the spin
+            contamination.
+        reference_energy: Default `None`. Supplied reference energy, with the
+            quantity and unit it refers to and its source, required by
+            `"supplied_reference_energy"`. It must be a concrete real scalar
+            without point restrictions.
+        reference_tolerance: Default `None`. Positive absolute comparison
+            threshold for that energy, required by
+            `"supplied_reference_energy"`.
+        max_bytes: Default 10 GB (decimal, `10_000_000_000` bytes). Limit on
+            the known bytes of the verification workspace.
+        max_products: Default `1_000_000_000`. Limit on the counted state and
+            operator work of the verification, including the exact synthesis
+            of the dense unitaries in a supplied reference circuit.
+
+    Raises:
+        ValueError: If `comparisons` is empty or repeats a check, if
+            `reference_spin` is not an integer or half-integer, or if
+            `"supplied_reference_energy"` lacks `reference_energy` or
+            `reference_tolerance`, or has them without that comparison. Also
+            if `reference_energy` is not a concrete real scalar with a source
+            and no point restrictions.
     """
 
     name: Text

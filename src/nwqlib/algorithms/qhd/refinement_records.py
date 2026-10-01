@@ -50,102 +50,123 @@ DEFAULT_LEVEL_GAUSSIAN_WIDTH = 1 / 6
 
 
 class BoxRefinement(Record):
-    """Options of one box refinement, the finite-grid search of Wu et al. arXiv:2605.12066v1, Sec. V.
+    """Options of a box refinement, the finite-grid search of Wu et al. arXiv:2605.12066v1, Sec. V.
 
-    Every level solves QHD on its box, keeps on each axis the index interval
-    that holds the conditional marginal mass ``mass_threshold``, and solves
-    the next level on the box those intervals represent. The defaults are
-    registered in docs/ENGINEERING_CONSTANTS.md ("Box refinement defaults",
-    "Box refinement scaling and potential_gain" and "Box refinement stall
-    split").
+    Build it with keyword arguments, for example
+    `BoxRefinement(max_levels=6, mass_threshold=0.9)`, and pass it to
+    `refine_box(..., options=...)` or `solve_augmented_lagrangian(..., refinement=...)`.
+    Every argument is optional. Every level solves QHD on its box, keeps on each axis
+    the index interval that holds the conditional marginal mass `mass_threshold`, and
+    solves the next level on the box those intervals represent. The defaults are
+    registered as "Box refinement defaults", "Box refinement scaling and potential_gain"
+    and "Box refinement stall split" in the
+    [engineering constants](../../ENGINEERING_CONSTANTS.md#safety-factors-and-workflow-defaults),
+    and the guide's [box refinement](../../algorithms/qhd.md#box-refinement) section
+    gives the evidence behind them.
 
     Attributes:
-        scaling: How a level box becomes a QHD problem. ``"search_model"``
-            solves on the unit box ``u in [0, 1]^d`` the normalized objective
-            ``(F(a + D u) - c)/E`` of ``refinement._level_problem``, the
-            same dimensionless model at every level. ``"physical"`` solves the
-            original objective on the level box in original coordinates, the
-            same physical Hamiltonian on a smaller box. The default is
-            ``"search_model"``. Every level plans its problem with the QHD
-            configuration, so under the search model the center and widths
-            of a ``GaussianState`` given as ``QHD.initial_state`` are unit
-            coordinates of each level box, not original ones.
-        potential_gain: kappa > 0, the dimensionless strength of the search
-            model's normalized potential. Each level solves
-            ``a(t) T_u + kappa b(t) V_z`` with ``V_z = (F - c_z)/E_z``, so
-            kappa multiplies V_z after E_z is formed
-            (``refinement._level_problem``). None selects
-            ``DEFAULT_POTENTIAL_GAIN`` (8) for the search model. The physical
-            model solves the original objective and has no gain, so it
-            rejects any explicit value. ``gain`` resolves the value each level
-            solves.
-        max_levels: Largest number of levels solved.
-        mass_threshold: Conditional marginal mass eta that each axis
-            interval must reach, in (0, 1]. The reported union-bound formula
-            is ``max(0, 1 - sum_j(1 - m_j))`` for the observed conditional
-            marginal masses m_j (``RefinementLevel.joint_mass_bound``).
-            In exact arithmetic, marginal masses at least eta imply joint
-            mass at least ``max(0, 1 - d(1 - eta))``. With counts these are
-            empirical masses conditional on a valid outcome, not a confidence
-            bound for the underlying population.
-        box_rule: ``"centered"``: each kept grid point represents the cell
-            between the midpoints to its neighbors, of width h centered on it
-            on a uniform grid, and an interval that reaches an end of its
-            axis keeps that face of the box (``refinement._next_box``).
-        max_no_improve: Number of consecutive levels without a strict
-            decrease of the best relative objective
-            (``RefinementLevel.relative_objective``) after which refinement
-            stops.
-        point_rule: Point each level reports. ``"most_probable"``, the
-            default, is the most probable valid grid point of the level's QHD
-            result, ``"best_observed"`` the observed valid point with positive
-            weight and the least evaluated binary64 value of the objective
-            solved by that level (``QHDAnalysis.candidate``), and ``"mode_or_mean"`` the
-            conditional mean position when its relative objective is strictly
-            smaller than the most probable point's, and that point otherwise.
-            In the augmented-Lagrangian layer
-            (``constrained.solve_augmented_lagrangian(refinement=...)``) the
-            objective is the round's L_k, this rule reads every level of the
-            round, and it must equal ``AugmentedLagrangian.inner_point``, so
-            that one rule describes every point of the run.
-        stall_split: What a level does when its ordinary next box equals
-            its box. ``"none"`` stops the refinement with ``box_unchanged``.
-            ``"best_region"`` finds the resolved valley with the largest
-            smaller-peak/valley ratio of an axis marginal, scores each
-            strict side of it by the objective at the side's most
-            probable joint grid point, and continues on the lower-scoring
-            side only, together with the valley cell
-            (``refinement._stall_split``, which derives the rule, its cost
-            and its risk). A level without a resolved valley
-            (``refinement._valley_admission``) still stops with
-            ``box_unchanged``. A periodic grid with a positive split budget
-            is refused. The other side's probability
-            is given up, so the kept box no longer holds ``mass_threshold``
-            of that level's distribution. Classical execution needs
-            ``QHD(keep_state=True)`` for it, since the scores read the joint
-            distribution.
-        max_splits: Largest number of stall splits in one refinement. A
-            stall after the last one stops with ``split_limit``, whether or
-            not its level has a valley, and with ``max_splits=0`` the first
-            stall does. It keeps its default with ``stall_split="none"``.
-            In the augmented-Lagrangian layer the budget holds for each
-            round's refinement.
-        level_initial_state: The state each level starts from.
-            ``"configured"``, the default, plans every level with
-            ``QHD.initial_state``. ``"best_point_gaussian"`` plans the first
-            level with ``QHD.initial_state`` and every later level with a
-            ``GaussianState`` centered at the refinement's best point so far,
-            with width ``gaussian_width`` times each side of the level box
-            (``refinement._best_point_gaussian``, which states when it helped
-            and when it hurt). Each such level records its Gaussian
-            (``RefinementLevel.initial_state``). In the augmented-Lagrangian
-            layer the first level of every round uses ``QHD.initial_state``.
-        level_gaussian_width: Width sigma of the best-point Gaussian as a
-            fraction of each side of the level box, which is its width in the
-            search model's unit coordinates. None selects
-            ``DEFAULT_LEVEL_GAUSSIAN_WIDTH`` (1/6) with
-            ``level_initial_state="best_point_gaussian"``. ``"configured"``
-            rejects any value. ``gaussian_width`` resolves it.
+        scaling: Default `"search_model"`. How a level box becomes a QHD problem:
+            `"search_model"`, the normalized objective `(F(a + D u) - c)/E` on the unit
+            box, the same dimensionless model at every level, or `"physical"`, the
+            original objective on the level box. The Scaling note below gives the
+            details.
+        max_levels: Default `3`. Largest number of levels solved, a positive integer.
+        mass_threshold: Default `0.99`, in (0, 1]. Conditional marginal mass eta that
+            each axis interval must reach. Marginal masses at least eta imply joint mass
+            at least `max(0, 1 - d(1 - eta))` in exact arithmetic. The Masses note below
+            says what this does and does not bound.
+        box_rule: Default `"centered"`, the only accepted value. Each kept grid point
+            represents the cell between the midpoints to its neighbors, of width h
+            centered on it on a uniform grid, and an interval that reaches an end of its
+            axis keeps that face of the box.
+        max_no_improve: Default `2`. Positive number of consecutive levels without a
+            strict decrease of the best relative objective
+            (`RefinementLevel.relative_objective`) after which refinement stops.
+        point_rule: Default `"most_probable"`. Point each level reports:
+            `"most_probable"`, the most probable valid grid point, `"best_observed"`,
+            the QHD candidate, or `"mode_or_mean"`, the conditional mean position when
+            its relative objective is strictly smaller, and the most probable point
+            otherwise. The Point rules note below gives the details.
+        potential_gain: Default `None`, which selects 8 for the search model. kappa > 0,
+            the dimensionless strength of the search model's normalized potential. The
+            physical model has no gain and rejects any explicit value. `gain` resolves
+            the value each level solves. The Scaling note below gives the level
+            Hamiltonian.
+        stall_split: Default `"none"`, which stops the refinement with `box_unchanged`
+            when a level's next box equals its box. `"best_region"` instead splits the
+            level at a resolved valley of an axis marginal and continues on one side,
+            giving up the other side's probability. The Stall split note below gives the
+            rule and its requirements.
+        max_splits: Default `1`. Largest number of stall splits in one refinement, a
+            nonnegative integer. A stall after the last one stops with `split_limit`,
+            whether or not its level has a valley, and with `max_splits=0` the first
+            stall does. It keeps its default with `stall_split="none"`. In the
+            augmented-Lagrangian layer the budget holds for each round's refinement.
+        level_initial_state: Default `"configured"`, which plans every level with
+            `QHD.initial_state`. `"best_point_gaussian"` starts every level after the
+            first from a `GaussianState` at the refinement's best point so far, each
+            such level recording it in `RefinementLevel.initial_state`. The Level
+            initial state note below gives the details.
+        level_gaussian_width: Default `None`, which selects 1/6 with
+            `level_initial_state="best_point_gaussian"`. Width sigma of the best-point
+            Gaussian as a fraction of each side of the level box, which is its width in
+            the search model's unit coordinates. `"configured"` rejects any value.
+            `gaussian_width` resolves it.
+
+    Scaling:
+        `"search_model"` solves on the unit box `u in [0, 1]^d` the normalized objective
+        `(F(a + D u) - c)/E`, the same dimensionless model at every level, with a the
+        lower corner and D the diagonal matrix of side lengths of the level box. Each
+        level solves `a(t) T_u + kappa b(t) V_z` with `V_z = (F - c_z)/E_z`, so kappa
+        (`potential_gain`) multiplies V_z after E_z is formed. `"physical"` solves the
+        original objective on the level box in original coordinates, the same physical
+        Hamiltonian on a smaller box. Every level plans its problem with the QHD
+        configuration, so under the search model the center and widths of a
+        `GaussianState` given as `QHD.initial_state` are unit coordinates of each level
+        box, not original ones.
+
+    Masses:
+        The reported union-bound formula is `max(0, 1 - sum_j(1 - m_j))` for the
+        observed conditional marginal masses m_j (`RefinementLevel.joint_mass_bound`).
+        In exact arithmetic, marginal masses at least eta imply joint mass at least
+        `max(0, 1 - d(1 - eta))`. With counts these are empirical masses conditional on
+        a valid outcome, not a confidence bound for the underlying population.
+
+    Point rules:
+        `"most_probable"` is the most probable valid grid point of the level's QHD
+        result. `"best_observed"` is the observed valid point with positive weight and
+        the least evaluated binary64 value of the objective solved by that level
+        (`QHDAnalysis.candidate`). `"mode_or_mean"` is the conditional mean position
+        when its relative objective is strictly smaller than the most probable point's,
+        and that point otherwise. In the augmented-Lagrangian layer
+        (`solve_augmented_lagrangian(refinement=...)`) the objective is the round's L_k,
+        this rule reads every level of the round, and it must equal
+        `AugmentedLagrangian.inner_point`, so that one rule describes every point of the
+        run.
+
+    Stall split:
+        `"best_region"` finds the resolved valley with the largest smaller-peak/valley
+        ratio of an axis marginal, scores each strict side of it by the objective at the
+        side's most probable joint grid point, and continues on the lower-scoring side
+        only, together with the valley cell. A level without a resolved valley still
+        stops with `box_unchanged`. A periodic grid with a positive split budget is
+        refused. The other side's probability is given up, so the kept box no longer
+        holds `mass_threshold` of that level's distribution. Classical execution needs
+        `QHD(keep_state=True)` for it, since the scores read the joint distribution. The
+        guide states the rule's cost and risk.
+
+    Level initial state:
+        `"best_point_gaussian"` plans the first level with `QHD.initial_state` and every
+        later level with a `GaussianState` centered at the refinement's best point so
+        far, with width `gaussian_width` times each side of the level box. The guide
+        states when it helped and when it hurt. Each such level records its Gaussian
+        (`RefinementLevel.initial_state`). In the augmented-Lagrangian layer the first
+        level of every round uses `QHD.initial_state`.
+
+    Raises:
+        ValueError: If `potential_gain` is set with `scaling="physical"`, `max_splits`
+            differs from 1 with `stall_split="none"`, or `level_gaussian_width` is set
+            with `level_initial_state="configured"`.
     """
 
     # The search model solves the same dimensionless problem at every level,
@@ -247,10 +268,9 @@ class BoxRefinement(Record):
 
     @property
     def gaussian_width(self):
-        """Return the width fraction w of the best-point Gaussian, or None with ``level_initial_state="configured"``.
+        """Return the width fraction w of the best-point Gaussian, or None with `level_initial_state="configured"`.
 
-        It is ``level_gaussian_width``, or ``DEFAULT_LEVEL_GAUSSIAN_WIDTH``
-        when that is None (``refinement._best_point_gaussian``).
+        It is `level_gaussian_width`, or 1/6 when that is None.
         """
         if self.level_initial_state == "configured":
             return None
@@ -260,9 +280,8 @@ class BoxRefinement(Record):
     def gain(self):
         """Return kappa, the gain that each level solves, or None for the physical model.
 
-        It is ``potential_gain``, or ``DEFAULT_POTENTIAL_GAIN`` when that is
-        None. ``refinement.refine_box`` solves and records this value
-        (``RefinementLevel.potential_gain``).
+        It is `potential_gain`, or 8 when that is None. `refine_box` solves and records this
+        value (`RefinementLevel.potential_gain`).
         """
         if self.scaling == "physical":
             return None
@@ -286,74 +305,70 @@ class BoxRefinement(Record):
 class RefinementResources(Record):
     """Counted work of one refinement level, or of a whole refinement.
 
-    Acquisition (circuit preparations and attempts, shots, stored Run data)
-    and host work (planning tables, classical kernel invocations,
-    construction, exact synthesis and the refinement's own evaluations) are
-    separate populations and are never added to each other. Each work field
-    has its own unit, so the host-work fields are not summed either. A
-    search-model level plans twice: once for the unscaled level objective,
-    whose support tables give E and c (``table_evaluations``), and once for
-    the normalized objective it solves (``support_evaluations``). A physical
-    level plans once. A count is None when it is unknown, and
-    ``unavailable`` names each such field with its reason. Unknown is never
-    replaced by zero, so a total (``total_resources``) is None when any
-    level's count is. The Run counts are those of ``_outer.run_counts``.
-    The counts are the work of the algorithm, each counted once as in an
-    uninterrupted refinement, and not the host time spent across the calls
-    of a durable refinement (``refinement.resume_box_refinement``), whose
-    completed levels keep their recorded counts and whose continued Run
-    keeps the counts of its own journal. The unscaled table stage of a
-    reopened search-model level, which resume repeats, is not counted again.
+    `RefinementLevel.resources` holds a level's, and `BoxRefinementResult.resources` the
+    refinement's totals. The fields below are read-only. Measurement (circuit
+    preparations and attempts, shots, stored Run data) and host work (planning tables,
+    classical kernel runs, construction, exact synthesis and the refinement's own
+    evaluations) are separate counts and are never added to each other. Each work field
+    has its own unit, so the host-work fields are not summed either. A search-model
+    level plans twice: once for the unscaled level objective, whose support tables give
+    E and c (`table_evaluations`), and once for the normalized objective it solves
+    (`support_evaluations`). A physical level plans once. A count is None when it is
+    unknown, and `unavailable` names each such field with its reason. Unknown is never
+    replaced by zero, so a total is None when any level's count is. The counts are the
+    work of the algorithm, each counted once as in an uninterrupted refinement, and not
+    the host time spent across the calls of a saved refinement
+    (`resume_box_refinement`), whose completed levels keep their recorded counts and
+    whose continued Run keeps the counts of its own run log. The unscaled table stage of
+    a reopened search-model level, which resume repeats, is not counted again.
 
     Attributes:
-        circuit_preparations: Native circuit preparations of the level Runs.
-        circuit_attempts: Native circuit acquisition attempts, of any status.
-        completed_circuit_attempts: Those of them that completed with an
-            observation.
-        shots: Raw shots reserved by the attempts of every status.
+        circuit_preparations: Circuit preparations of the level Runs.
+        circuit_attempts: Circuit attempts, of any status.
+        completed_circuit_attempts: Those of them that completed with an observation.
+        shots: Raw shots set aside by the attempts of every status.
         completed_shots: Raw shots of the completed attempts.
         data_bytes: Run data bytes recorded by the level Runs.
-        evolution_work: Work units that the level Runs charged for classical
-            kernel invocations (restricted evolution and readout summary),
-            zero for native execution.
-        construction_work: Construction work that the level Runs charged,
-            for a native circuit or for the classical kernel's setup.
-        synthesis_work: Exact dense synthesis work reserved by the level Runs.
-        table_evaluations: Grid tuples evaluated for the unscaled level
-            objective's support tables, the extra planning of the search
-            model. Zero for the physical model.
-        support_evaluations: Grid tuples evaluated for the support tables of
-            the solved level objective.
-        objective_evaluations: Evaluations of the original objective by the
-            refinement itself, at the level's own coordinates
-            (``RefinementLevel.objective``), including the two scores of a
-            stall split.
-        joint_mass_reads: Joint-observation read charge. Count and exact-bin
-            entries are charged when the observations are decoded and their
-            decoded data are reused. A kept-state dense grid is charged once
-            by the kept-state length. A streamed kept-state readout charges
-            that length for each started probability pass, one per joint
-            request and two for the paired split modes, even when only valid
-            one-hot entries are gathered or the final pass stops early. These
-            kept-state units are full-state-equivalent charges, not measured
-            memory traffic (``refinement._LevelReadout``).
-        cx: Sum of the selected native blocks' CX upper bounds over the
-            circuits that the level Runs prepared, one circuit per level Run
-            at most, not multiplied by shots (``_outer.law_count``). A level
-            that prepared no circuit, such as one that stopped before its
-            preparation, whose Run's creation raised before its journal
-            header (``_outer.HeaderlessRun``) or that ran classically,
-            contributes 0, and one whose preparation raised after that
-            header or whose preparation count is unknown makes the value
-            unknown.
-        arbitrary_rotations: Sum of the selected native blocks' arbitrary
-            rotations (``resources.rotation_law``, or for the binary encoding
-            the upper bound of ``method.QHD._select_binary_native``), counted
-            as ``cx`` is, so for quantum execution it equals the body total
-            ``arbitrary_rotations`` of ``resources.run_resources``, which also
-            multiplies each level's circuit by its shots and adds T
-            estimates.
-        unavailable: ``(field, reason)`` for every count that is None.
+        evolution_work: Work units that the level Runs counted for classical kernel runs
+            (restricted evolution and readout summary), zero for quantum execution.
+        construction_work: Construction work that the level Runs counted, for a quantum
+            circuit or for the classical kernel's setup.
+        synthesis_work: Exact dense synthesis work set aside by the level Runs.
+        table_evaluations: Grid tuples evaluated for the unscaled level objective's
+            support tables, the extra planning of the search model. Zero for the
+            physical model.
+        support_evaluations: Grid tuples evaluated for the support tables of the solved
+            level objective.
+        objective_evaluations: Evaluations of the original objective by the refinement
+            itself, at the level's own coordinates (`RefinementLevel.objective`),
+            including the two scores of a stall split.
+        joint_mass_reads: Joint-observation read count, in full-state-equivalent units,
+            not measured memory traffic. The Read and circuit counts note below gives
+            what each readout adds.
+        cx: Sum of the CX upper bounds of the circuits that the level Runs prepared, one
+            circuit per level Run at most, not multiplied by shots. The Read and circuit
+            counts note below says when a level counts 0 and when the value is unknown.
+        arbitrary_rotations: Sum of the arbitrary rotations of the same circuits, an
+            upper bound for the binary encoding, counted as `cx` is. For quantum
+            execution it equals the body total `arbitrary_rotations` of
+            [`run_resources`][nwqlib.algorithms.qhd.resources.run_resources].
+        unavailable: `(field, reason)` for every count that is None.
+
+    Read and circuit counts:
+        `joint_mass_reads` counts count and exact-bin entries when the observations are
+        decoded, and their decoded data are reused. A kept-state dense grid is counted
+        once by the kept-state length. A streamed kept-state readout counts that length
+        for each started probability pass, one per joint request and two for the paired
+        split modes, even when only valid one-hot entries are gathered or the final pass
+        stops early. These kept-state units are full-state-equivalent counts, not
+        measured memory traffic.
+
+        A level that prepared no circuit, such as one that stopped before its
+        preparation, whose Run's creation raised before its run-log header or that ran
+        classically, contributes 0 to `cx` and `arbitrary_rotations`, and one whose
+        preparation raised after that header or whose preparation count is unknown makes
+        the value unknown. `run_resources` also multiplies each level's circuit by its
+        shots and adds T estimates.
     """
 
     circuit_preparations: Count | None = 0
@@ -404,41 +419,39 @@ Box = tuple[tuple[Real, Real], ...]
 
 
 class StallSplit(Record):
-    """One stall split of ``BoxRefinement.stall_split="best_region"`` (``refinement._stall_split``).
+    """One stall split of `BoxRefinement(stall_split="best_region")`.
 
-    Masses are conditional on a valid one-hot outcome of the stalled level's
-    distribution. Index 0 of each pair is the lower region, whose side on
-    ``axis`` ends at ``coordinate``, and index 1 the upper region, whose side
-    starts there. Every other side of both regions is the level box's side.
+    `RefinementLevel.split` holds it for a level that split. The fields below are
+    read-only. Masses are conditional on a valid one-hot outcome of the stalled level's
+    distribution. Index 0 of each pair is the lower region, whose side on `axis` ends at
+    `coordinate`, and index 1 the upper region, whose side starts there. Every other
+    side of both regions is the level box's side.
 
     Attributes:
         axis: Variable index of the split axis.
         valley: Grid index of the valley minimum on that axis.
-        coordinate: Original coordinate of the split, the face of the
-            valley's centered cell toward the discarded side, so that the
-            valley cell stays in the chosen region.
+        coordinate: Original coordinate of the split, the face of the valley's centered
+            cell toward the discarded side, so that the valley cell stays in the chosen
+            region.
         regions: The lower and the upper region.
-        point_indices: Grid indices of the most probable joint grid point
-            of each strict side of the valley, the indices below it and those
-            above it on ``axis``, in the level's distribution. The chosen
-            region also holds the valley column, so its most probable point
-            can lie there instead.
+        point_indices: Grid indices of the most probable joint grid point of each strict
+            side of the valley, the indices below it and those above it on `axis`, in
+            the level's distribution. The chosen region also holds the valley column, so
+            its most probable point can lie there instead.
         points: Those grid points in original coordinates, given as
-            ``RefinementLevel.point`` gives a grid point, so for the search
-            model the rounded image ``a + D u`` of the unit point, a display
-            value.
-        scores: Original objective F at each grid point, evaluated in the
-            level's own coordinates as the level's reported grid point is
-            (``RefinementLevel.objective``).
+            `RefinementLevel.point` gives a grid point, so for the search model the
+            rounded image `a + D u` of the unit point, a display value.
+        scores: Original objective F at each grid point, evaluated in the level's own
+            coordinates as the level's reported grid point is
+            (`RefinementLevel.objective`).
         relative_scores: The relative objective F - C at each grid point
-            (``RefinementLevel.relative_objective``), the values the split
-            compares.
+            (`RefinementLevel.relative_objective`), the values the split compares.
         region_masses: Conditional probability each region held.
-        chosen: 0 or 1, the region the refinement continues in, the one
-            whose side has the lower relative score, on equal relative scores
-            the one whose side holds more probability, then the lower one.
-        discarded_mass: Conditional probability of the other region, which
-            the refinement gives up.
+        chosen: 0 or 1, the region the refinement continues in. It is the one whose side
+            has the lower relative score, on equal relative scores the one whose side
+            holds more probability, then the lower one.
+        discarded_mass: Conditional probability of the other region, which the
+            refinement gives up.
     """
 
     axis: Count
@@ -481,126 +494,128 @@ class StallSplit(Record):
 class RefinementLevel(Record):
     """One completed refinement level: its box, QHD solve, reported point and next box.
 
-    Masses are conditional on a valid outcome, which is every outcome of the
-    binary encoding and a one-hot outcome with one excitation per variable.
-    Coordinates are in the original variables, taken from the level's grid
-    (``refinement._coordinates``), except ``unit_point``, which is in the
-    search model's unit coordinates. ``refinement._axis_interval`` defines the
-    intervals and axis masses, ``refinement._joint_mass_bound`` the joint
-    bound and ``refinement._next_box`` the next box.
+    `BoxRefinementResult.levels` lists the completed levels in order, and `best` names
+    the best one. The fields below are read-only. Masses are conditional on a valid
+    outcome, which is every outcome of the binary encoding and a one-hot outcome with
+    one excitation per variable. Coordinates are in the original variables, taken from
+    the level's grid, except ``unit_point``, which is in the search model's unit
+    coordinates. The guide's [box refinement](../../algorithms/qhd.md#box-refinement)
+    section defines the intervals, axis masses, joint bound and next box.
 
     Attributes:
         level: Level number, starting at 1.
         box: The level's box, one ``(lower, upper)`` pair per variable.
-        spacing: Grid spacing h of each variable in original coordinates,
-            the level grid's spacing for the physical model and the side
-            length times the unit grid's spacing, rounded once, for the
-            search model.
-        energy_scale: E, the sum of the ranges of the unscaled level
-            objective's stored support tables, rounded up
-            (``_outer.range_bound``), an upper bound on the objective's
-            range over the level grid. The search model divides by it, and
-            the physical model records it for ``conditioning``.
-        potential_gain: kappa, the factor of the normalized potential that the
-            level solved (``BoxRefinement.gain``). None for the
-            physical model.
-        energy_shift: c, the constant term of the unscaled level objective
-            plus the minima of its stored support tables, summed exactly and
-            rounded once to binary64. The search model subtracts its exact
-            value, so that ``(F - c)/E`` lies in [0, 1] on the grid and the
-            solved potential ``kappa (F - c)/E`` in ``[0, kappa]``, up to the
-            rounding that ``refinement._level_problem`` describes. None for
-            the physical model.
-        table_magnitude: Sum over those support tables of their largest
-            absolute value (``refinement._table_magnitude``).
+        spacing: Grid spacing h of each variable in original coordinates, the level
+            grid's spacing for the physical model and the side length times the unit
+            grid's spacing, rounded once, for the search model.
+        energy_scale: E, the sum of the ranges of the unscaled level objective's stored
+            support tables, rounded up, an upper bound on the objective's range over the
+            level grid. The search model divides by it, and the physical model records
+            it for ``conditioning``.
+        potential_gain: kappa, the factor of the normalized potential that the level
+            solved (``BoxRefinement.gain``). None for the physical model.
+        energy_shift: c, the constant term of the unscaled level objective plus the
+            minima of its stored support tables, summed exactly and rounded once to
+            binary64. None for the physical model. The Points and objectives note below
+            says how the search model uses it.
+        table_magnitude: Sum over those support tables of their largest absolute value.
+            The ratio to ``energy_scale`` is ``conditioning``.
         spawn_key: Spawn key of the level's child of the refinement's
             ``numpy.random.SeedSequence``.
-        plan_id: Content identity of the level's QHD Plan.
-        result_id: Content identity of the level's QHD result.
-        run_id: Identity of the Run that produced it.
-        logical_width: Register width of the level's Plan, ``d*K`` for the
-            one-hot encoding and ``d*b`` with ``K = 2**b`` for the binary one.
+        plan_id: Content hash of the level's QHD Plan.
+        result_id: Content hash of the level's QHD result.
+        run_id: Identifier of the Run that produced it.
+        logical_width: Register width of the level's Plan, ``d*K`` for the one-hot
+            encoding and ``d*b`` with ``K = 2**b`` for the binary one.
         restricted_dimension: Valid grid size ``K**d``.
         valid_mass: Unconditional valid mass of the level's result.
-        valid_count: The result's ``valid_count`` for counts, the integer
-            number S_z of valid decoded outcomes of the finite-shot statement
-            of Proposition 49 in docs/mathematics.md, or None for exact
-            readout.
-        returned_shots: The result's ``returned_shots`` for counts, the raw
-            number of returned draws among which ``valid_count`` decoded to a
-            grid point, or None for exact readout.
+        valid_count: The result's ``valid_count`` for counts, the integer number S_z of
+            valid decoded outcomes of the finite-shot statement of
+            [Proposition 49](../../mathematics.md#r49), or None for exact readout.
+        returned_shots: The result's ``returned_shots`` for counts, the raw number of
+            returned draws among which ``valid_count`` decoded to a grid point, or None
+            for exact readout.
         mode_status: Mode-resolution status of this level's QHD readout among its
-            positive observed valid points. Copied from the inner Result regardless
-            of point_rule. It describes the readout's tie representative, including
-            when this level reports a best-observed point or a mean instead. It does
-            not certify the choice of marginal intervals or a stall-split region.
-        point_indices: Grid indices of the reported point, or None when
-            ``mode_or_mean`` reported the mean position.
-        point: Reported point in original coordinates. For the physical
-            model it is the grid coordinate or mean at which ``objective``
-            was evaluated. For the search model it is ``a + D u`` for
-            ``u = unit_point``, rounded once to binary64, a display value. F
-            at this rounded point can differ from ``objective`` or be
-            undefined.
-        unit_point: Search model only: the unit coordinates u of the
-            reported grid point or mean position, at which the level
-            objective ``F(a + D u)`` was evaluated and whose grid point
-            carries ``point_probability``. None for the physical model.
-        point_probability: Unconditional probability of the reported grid
-            point, or None for the mean position.
-        objective: Original objective F at the reported location, which is
-            ``point`` for the physical model and the exact affine image
-            ``a + D u`` of ``unit_point`` for the search model, up to the
-            evaluation's rounding and, for a ``Float`` coefficient, SymPy's
-            rounding in the substitution (``refinement._unit_objective``).
-            At a grid point both are read from the level's stored tables,
-            and at an off-grid mean both are evaluated term by term
-            (``refinement._tabulated_objective``).
-        relative_objective: F - C at the same location, the value by which
-            the refinement compares points. C is one exact constant for the
-            whole refinement, the constant term of the first level's
-            decomposition of the objective. Each level forms its own constant
-            term minus C exactly and adds it to the term values once, so a
-            large constant of F, which can round the objective's variation
-            out of ``objective``, does not reach this value when every
-            coefficient of F is an exact SymPy number. A binary64 ``Float``
-            coefficient makes SymPy round each constant term at the size of
-            that constant first (``refinement._tabulated_objective``).
-        mean_unavailable: Why ``mode_or_mean`` kept the grid point because
-            the objective at the mean position was not finite and real
-            (``_outer.mean_point``), or None.
+            positive observed valid points. Copied from the inner Result regardless of
+            point_rule. It describes the readout's tie representative, including when
+            this level reports a best-observed point or a mean instead. It does not
+            certify the choice of marginal intervals or a stall-split region.
+        point_indices: Grid indices of the reported point, or None when ``mode_or_mean``
+            reported the mean position.
+        point: Reported point in original coordinates, the evaluation point for the
+            physical model and a display value for the search model, where it is the
+            image `a + D u` of `unit_point` rounded once. F at this rounded point can
+            differ from `objective` or be undefined.
+        unit_point: Search model only: the unit coordinates u of the reported grid point
+            or mean position, at which the level objective ``F(a + D u)`` was evaluated
+            and whose grid point carries ``point_probability``. None for the physical
+            model.
+        point_probability: Unconditional probability of the reported grid point, or None
+            for the mean position.
+        objective: Original objective F at the reported location, read from the level's
+            stored tables at a grid point and evaluated term by term at an off-grid
+            mean. The Points and objectives note below gives the location and its
+            rounding.
+        relative_objective: F - C at the same location, the value by which the
+            refinement compares points, with C one exact constant for the whole
+            refinement. The Points and objectives note below defines C.
+        mean_unavailable: Why ``mode_or_mean`` kept the grid point because the objective
+            at the mean position was not finite and real, or None.
         intervals: Kept index interval ``(first, last)`` of each variable.
         axis_masses: Conditional marginal mass m_j of each interval.
-        joint_mass_bound: ``max(0, 1 - sum_j (1 - m_j))``, a lower bound on
-            the conditional mass of the joint box that holds for every joint
-            distribution with these marginals.
-        joint_mass: Conditional mass of the joint box computed from the
-            joint observations, or None when the result keeps only
-            marginals. The joint box and both masses are those of the
-            intervals, so at a split level they describe the level box, and
-            ``split.region_masses`` gives the chosen region's probability.
+        joint_mass_bound: ``max(0, 1 - sum_j (1 - m_j))``, a lower bound on the
+            conditional mass of the joint box that holds for every joint distribution
+            with these marginals.
+        joint_mass: Conditional mass of the joint box computed from the joint
+            observations, or None when the result keeps only marginals. The joint box
+            and both masses are those of the intervals, so at a split level they
+            describe the level box, and ``split.region_masses`` gives the chosen
+            region's probability.
         joint_mass_kind: ``"exact"`` for exact probabilities or amplitudes,
             ``"empirical"`` for counts, or None with ``joint_mass``.
-        next_box: Box of the next level under the box rule, or the region
-            that ``split`` chose.
-        split: The stall split of this level, or None. A level splits only
-            when its box rule returned the level box itself.
-        split_declined: With ``stall_split="best_region"``, why a level
-            whose box rule returned the level box itself did not split: the
-            level is the last of ``max_levels``, the split budget is spent,
-            the next level cannot run, the readout has no tie window, or no
-            valley passes the resolution screen
-            (``refinement._valley_admission``). None otherwise, and always
-            None with ``stall_split="none"``. It explains the stop and does
-            not replace ``BoxRefinementResult.termination``.
-        initial_state: With ``level_initial_state="best_point_gaussian"``,
-            the ``GaussianState`` that this level's Plan started from, in the
-            coordinates of the level problem, the unit coordinates for the
-            search model (``refinement._best_point_gaussian``). None for the
-            first level and with ``"configured"``, where the level started
-            from ``QHD.initial_state``.
-        resources: Counted work of this level, including the two objective
-            evaluations of a split.
+        next_box: Box of the next level under the box rule, or the region that ``split``
+            chose.
+        split: The stall split of this level, or None. A level splits only when its box
+            rule returned the level box itself.
+        split_declined: With ``stall_split="best_region"``, why a level whose box rule
+            returned the level box itself did not split: the level is the last of
+            ``max_levels``, the split budget is spent, the next level cannot run, the
+            readout has no tie window, or no valley passes the resolution screen. None
+            otherwise, and always None with ``stall_split="none"``. It explains the stop
+            and does not replace ``BoxRefinementResult.termination``.
+        initial_state: With ``level_initial_state="best_point_gaussian"``, the
+            ``GaussianState`` that this level's Plan started from, in the coordinates of
+            the level problem, the unit coordinates for the search model. None for the
+            first level and with ``"configured"``, where the level started from
+            ``QHD.initial_state``.
+        resources: Counted work of this level, including the two objective evaluations
+            of a split.
+
+    Points and objectives:
+        For the physical model `point` is the grid coordinate or mean at which
+        `objective` was evaluated. For the search model it is `a + D u` for
+        `u = unit_point`, rounded once to binary64, a display value. F at this rounded
+        point can differ from `objective` or be undefined.
+
+        `objective` is F at `point` for the physical model and at the exact affine image
+        `a + D u` of `unit_point` for the search model, up to the evaluation's rounding
+        and, for a `Float` coefficient, SymPy's rounding in the substitution. At a grid
+        point both are read from the level's stored tables, and at an off-grid mean both
+        are evaluated term by term.
+
+        `relative_objective` is F - C. C is one exact constant for the whole refinement,
+        the constant term of the first level's decomposition of the objective. Each
+        level forms its own constant term minus C exactly and adds it to the term values
+        once, so a large constant of F, which can round the objective's variation out of
+        `objective`, does not reach this value when every coefficient of F is an exact
+        SymPy number. A binary64 `Float` coefficient makes SymPy round each constant
+        term at the size of that constant first.
+
+        The search model subtracts the exact value of `energy_shift`, so that
+        `(F - c)/E` lies in [0, 1] on the grid and the solved potential
+        `kappa (F - c)/E` in `[0, kappa]`, up to the rounding of the tables. For tables
+        rounded once and simple expressions that rounding is about `4 u kappa` times
+        `conditioning`, with `u = 2**-53`, an estimate and not a bound.
     """
 
     level: PositiveInt
@@ -689,17 +704,14 @@ class RefinementLevel(Record):
 
     @property
     def conditioning(self):
-        """Return ``table_magnitude / energy_scale``, the factor by which table rounding reaches the model.
+        """Return `table_magnitude / energy_scale`, the factor by which table rounding reaches the model.
 
-        The search model divides tables of size up to ``table_magnitude`` by
-        ``energy_scale``, so an evaluation error of a few ``u`` relative to
-        the table values becomes an error of about ``4 u`` times this factor
-        in its normalized potential, with ``u = 2**-53``
-        (``refinement._level_problem``). That estimate illustrates simple
-        expressions and is not a bound. The resolution stop
-        (``refinement._resolution_stop``) does not bound this factor either,
-        so a level can pass it with a factor near ``1/u``. For the physical
-        model it measures how much of the level's potential variation can be
+        The search model divides tables of size up to `table_magnitude` by `energy_scale`,
+        so an evaluation error of a few `u` relative to the table values becomes an error of
+        about `4 u` times this factor in its normalized potential, with `u = 2**-53`. That
+        estimate illustrates simple expressions and is not a bound. The resolution stop does
+        not bound this factor either, so a level can pass it with a factor near `1/u`. For
+        the physical model it measures how much of the level's potential variation can be
         rounding.
         """
         return self.table_magnitude / self.energy_scale
@@ -767,127 +779,91 @@ def _point(values):
 
 
 class BoxRefinementResult(Record):
-    """Completed levels, best point and stopping reason of one box refinement.
+    """Result of a box refinement: completed levels, best point and stopping reason.
 
-    ``best_level`` is the completed level with the least recorded relative
-    objective (``RefinementLevel.relative_objective``), the earlier level on
-    ties. ``objective`` reports its original objective. Levels completed before a
-    stop stay in ``levels``. ``resources`` adds the work of every completed
-    level and of the level that stopped the refinement (``stopped_resources``),
-    so what a failed level's tables and Run charged is counted. A planning
-    that raises reports no work, so its partial work is not counted.
-    ``results`` gives the QHD results of the completed levels. They are live
-    objects, outside the record's identity.
+    `refine_box`, `resume_box_refinement` and `load_box_refinement` return it, and
+    `ALIteration.refinement` holds the refinement of an augmented-Lagrangian round. The
+    answer is `candidate`, the best point in original coordinates, with `objective`, the
+    original objective there, and `termination`, why the refinement stopped.
+    `print(result)` summarizes it, `report()` returns it as JSON-ready data, and
+    `save(path)` writes it with its level Results. The fields below are read-only.
 
-    The reported points are finite-grid search results. Neither the joint
-    mass bound nor a small box certifies that the global minimizer lies in
-    the box or that the best point is a continuous or global optimum.
+    ``best_level`` is the completed level with the least recorded relative objective
+    (``RefinementLevel.relative_objective``), the earlier level on ties. ``objective``
+    reports its original objective. Levels completed before a stop stay in ``levels``.
+    ``resources`` adds the work of every completed level and of the level that stopped
+    the refinement (``stopped_resources``), so what a failed level's tables and Run
+    counted is included. A planning that raises reports no work, so its partial work is
+    not counted. ``results`` gives the QHD results of the completed levels. They are
+    live objects, outside the record's content hash.
 
-    ``str(result)`` and ``report`` read the stored fields only. They plan,
-    evaluate, acquire and load nothing, reconstruct no state and call no
-    resource estimate, so a record validated from JSON alone can be
-    summarized too.
+    The reported points are finite-grid search results. Neither the joint mass bound nor
+    a small box certifies that the global minimizer lies in the box or that the best
+    point is a continuous or global optimum.
 
-    Record size. Count the scalar JSON leaves of the exported record, each
-    number, Boolean, string or null once, including every nested record's
-    schema, parent and content identities and every allowed unknown-count
-    reason pair, and excluding object keys and containers. An unsplit
-    level has at most ``13 d + 74 + s`` leaves for d variables and s entries
-    in its spawn key. Its dimension-dependent fields contribute ``13 d``
-    from ``box`` and ``next_box`` (2d each), ``intervals`` (2d), the center
-    and widths of a best-point ``initial_state`` (d each), and ``spacing``,
-    ``point_indices``, ``point``, ``unit_point`` and ``axis_masses`` (d
-    each). Its 23 other scalar fields include ``mode_status``, the null
-    ``split`` and scalar ``split_declined``, and ``initial_state`` adds at
-    most its kind and 3 identities. There are 3 identity leaves and at most
-    44 resource leaves, from 15 counts, 3 resource identities and at most
-    13 reason pairs. A ``StallSplit`` has ``8 d + 14`` leaves, replacing one
-    null and adding ``8 d + 13``. Standalone refinement has s = 1 and the
-    augmented-Lagrangian layer s = 2, so the unsplit bounds are
-    ``13 d + 75`` and ``13 d + 76``, and the split bounds are ``21 d + 88``
-    and ``21 d + 89``, respectively.
-
-    The fields outside ``levels`` add at most ``2 g + 147`` leaves. This
-    counts 11 for the eight scalar result fields and three identities,
-    14 for the options, 88 for total and stopped resources, and
-    ``34 + 2 g`` for QHD. The QHD term includes 15 direct scalar settings,
-    including ``encoding`` and ``kinetic_model``, 3 identities, 5 schedule
-    leaves, ``4 + 2 g`` initial-state leaves and 7 ``BinarySynthesis``
-    leaves. The binary-synthesis record has 4 settings and 3 identities
-    and is exported for both encodings. Here g is the common length of a
-    ``GaussianState``'s center and widths, or zero for other initial states.
-    With n completed levels, b split levels and spawn keys of length at
-    most two, the bound is
-    ``2 g + 147 + n (13 d + 76) + b (8 d + 13)``. Use 75 in place of 76
-    for standalone refinement. ``options.max_levels`` bounds n, and
-    ``b <= min(n, options.max_splits)``, with b = 0 when splits are disabled.
-    Each completed level admits at least d K running-total work
-    (``QHD._admit_symbolic_work``), where K is ``qhd.num_grid_points``.
-    For d >= 1 and K >= 2, ``13 d + 76 <= 45 d K`` without a split and
-    ``21 d + 89 <= 55 d K`` with a split, since ``45 d K - 13 d >= 77 d >= 76``
-    and ``55 d K - 21 d >= 89 d >= 89``. The fixed fields remain when no
-    level completes. These counts give no byte allowance because text
-    lengths and integer digit counts vary. Identity JSON bytes are
-    unbudgeted, and live QHD results are outside the record's identity.
+    ``str(result)`` and ``report`` read the stored fields only. They plan, evaluate,
+    measure and load nothing, reconstruct no state and call no resource estimate, so a
+    record validated from JSON alone can be summarized too.
 
     Attributes:
-        problem_id: Content identity of the refined Optimization.
+        problem_id: Content hash of the refined Optimization.
         qhd: QHD configuration used at every level.
         options: Refinement options.
         execution: ``"quantum"`` or ``"classical"``, as for ``nwqlib.solve``.
         shots: Shots per level, or None for exact readout.
-        seed_entropy: Entropy of the ``numpy.random.SeedSequence`` whose
-            children seed the levels.
+        seed_entropy: Entropy of the ``numpy.random.SeedSequence`` whose children seed
+            the levels.
         levels: Completed levels in order.
-        best_level: Level number of the best point, or None without a
-            completed level.
-        termination: Why refinement stopped. Before each level it checks, in
-            this order, ``level_limit`` (``max_levels`` levels completed),
-            ``box_unchanged`` (the next box equals the last box, which with
-            ``stall_split="best_region"`` means that no axis of the last
-            level had a resolved valley), ``split_limit`` (the next box
-            equals the last box after ``max_splits`` stall splits),
-            ``width_floor`` (the box to solve has a side at or below its
-            width floor, ``refinement._resolved`` and, for the physical model,
-            the grid owner's admission, ``refinement._level_geometry``),
-            ``no_improvement``
-            (``max_no_improve`` consecutive levels without a strict decrease
-            of the best relative objective) and ``budget_exhausted`` (the remaining
-            cumulative limits cannot fund a level), and reports the first
-            that holds. With ``stall_split="best_region"`` a stalled last
-            level whose next level could not run records no split and
-            reports ``no_improvement`` or ``budget_exhausted``, or
-            ``width_floor`` when neither region of its resolved valley
-            passes the width floor (``refinement.refine_box``). Within a level, ``flat_objective`` means that the level
-            objective's tables show no variation (E = 0),
-            ``unresolved_objective`` that their ranges sum to a positive value
-            at most the units in the last place of the tables' largest
-            values, too small to tell from evaluation error (``refinement._resolution_stop``, a
-            resolution rule), ``inner_failed`` that
-            planning or solving a level after the first raised (the first
-            level's error propagates, ``_outer.inner_failure``), and ``no_valid_point`` that
-            the level's QHD result has no valid grid point.
-        failure: Exception type and message for ``inner_failed``, the
-            result's missing-data reasons for ``no_valid_point``, the limits
-            that fell short for ``budget_exhausted`` (``_outer.round_limits``),
-            otherwise None.
-        stopped_resources: Work spent on the level that stopped the
-            refinement, or None when it stopped before that level began.
+        best_level: Level number of the best point, or None without a completed level.
+        termination: Why refinement stopped, such as `level_limit`, `box_unchanged` or
+            `no_improvement`. The Stopping reasons note below lists every reason in the
+            order of the checks.
+        failure: Exception type and message for ``inner_failed``, the result's
+            missing-data reasons for ``no_valid_point``, the limits that fell short for
+            ``budget_exhausted``, otherwise None.
+        stopped_resources: Work spent on the level that stopped the refinement, or None
+            when it stopped before that level began.
         resources: Work of all levels, completed and stopped.
-        max_plannings: Largest number of QHD plannings that ``options``
-            allows, two per search-model level (the table stage and the
-            solved objective) and one per physical level, known before the
-            first level. Each operation that one planning admits, namely the
-            symbolic expansion, the running total of the initial state and
-            tables (``QHD._admit_symbolic_work``), a kept state, a classical
-            kernel and a native construction, is at most ``qhd.max_work`` units and
-            ``qhd.max_bytes`` bytes, so
-            the table, support, kernel and construction work fields of
-            ``resources`` are each at most ``max_plannings * qhd.max_work``.
-            The refinement's own objective evaluations and joint-mass reads,
-            and the second expansion of each level objective that those
-            evaluations use (``refinement._level_decomposition``), are
-            outside this bound.
+        max_plannings: Largest number of QHD plannings that `options` allows, two per
+            search-model level and one per physical level, known before the first level.
+            The Planning bound note below gives the bound it implies.
+
+    Stopping reasons:
+        Before each level the refinement checks, in this order, ``level_limit``
+        (``max_levels`` levels completed), ``box_unchanged`` (the next box equals the
+        last box, which with ``stall_split="best_region"`` means that no axis of the
+        last level had a resolved valley), ``split_limit`` (the next box equals the last
+        box after ``max_splits`` stall splits), ``width_floor`` (the box to solve has a
+        side at or below its width floor, or for the physical model a box that the grid
+        rejects), ``no_improvement`` (``max_no_improve`` consecutive levels without a
+        strict decrease of the best relative objective) and ``budget_exhausted`` (the
+        remaining cumulative limits cannot fund a level), and reports the first that
+        holds. With ``stall_split="best_region"`` a stalled last level whose next level
+        could not run records no split and reports ``no_improvement`` or
+        ``budget_exhausted``, or ``width_floor`` when neither region of its resolved
+        valley passes the width floor. Within a level, ``flat_objective`` means that the
+        level objective's tables show no variation (E = 0), ``unresolved_objective``
+        that their ranges sum to a positive value at most the units in the last place of
+        the tables' largest values, too small to tell from evaluation error, a
+        resolution rule, ``inner_failed`` that planning or solving a level after the
+        first raised (the first level's error propagates), and ``no_valid_point`` that
+        the level's QHD result has no valid grid point.
+
+    Planning bound:
+        `max_plannings` is the largest number of QHD plannings that ``options`` allows,
+        two per search-model level (the table stage and the solved objective) and one
+        per physical level, known before the first level. Each operation that one
+        planning checks, namely the symbolic expansion, the running total of the initial
+        state and tables, a kept state, a classical kernel and a circuit construction,
+        is at most ``qhd.max_work`` units and ``qhd.max_bytes`` bytes, so the table,
+        support, kernel and construction work fields of ``resources`` are each at most
+        ``max_plannings * qhd.max_work``. The refinement's own objective evaluations and
+        joint-mass reads, and the second expansion of each level objective that those
+        evaluations use, are outside this bound.
+
+    Record size:
+        The bounds on the scalar JSON leaves of this record, with their derivation, are
+        in [Engineering constants](../../ENGINEERING_CONSTANTS.md#refinement-record-size).
     """
 
     problem_id: ContentID
@@ -967,12 +943,11 @@ class BoxRefinementResult(Record):
     def problem(self):
         """The refined Optimization with its live SymPy objects, or None for a record validated from JSON alone.
 
-        ``refine_box``, both paths of ``resume_box_refinement`` and
-        ``load_box_refinement`` attach it. A refinement nested in an
-        augmented-Lagrangian record has neither this problem nor its level
-        Results, which ``ConstrainedQHDResult`` holds and saves with its run.
-        A search-model level Plan solves a transformed objective on the unit
-        box and cannot stand in for the original problem.
+        `refine_box`, both paths of `resume_box_refinement` and `load_box_refinement` attach
+        it. A refinement nested in an augmented-Lagrangian record has neither this problem
+        nor its level Results, which `ConstrainedQHDResult` holds and saves with its run. A
+        search-model level Plan solves a transformed objective on the unit box and cannot
+        stand in for the original problem.
         """
         return self._problem
 
@@ -985,13 +960,14 @@ class BoxRefinementResult(Record):
     def candidate(self):
         """Best point in original coordinates, or None.
 
-        For the search model it is a display value (``RefinementLevel.point``).
+        For the search model it is a display value, the image of the best level's unit point
+        rounded once (`RefinementLevel.point`).
         """
         return None if self.best is None else self.best.point
 
     @property
     def objective(self):
-        """Original objective of the best level, or None, evaluated as ``RefinementLevel.objective`` states."""
+        """Original objective at the best point, or None, evaluated as `RefinementLevel.objective` states."""
         return None if self.best is None else self.best.objective
 
     def __str__(self):
@@ -1172,19 +1148,27 @@ class BoxRefinementResult(Record):
     def report(self, *, failure_probability=None):
         """Return a JSON-ready report of the refinement built only from its stored fields.
 
-        It plans, evaluates, acquires and loads nothing, reconstructs no
-        state and calls no resource estimate. ``levels`` gives each level's
-        readout kind, counts, intervals, masses and the event they describe,
-        its chosen split-region mass and its readout mode status.
-        ``resources`` gives each count with its unavailable reason and its
-        meaning. Without ``failure_probability`` the report states the
-        stored empirical quantities and their meaning, and ``confidence`` is
-        None. With a failure probability alpha, 0 < alpha < 1, fixed before
-        the counts are inspected, ``confidence`` gives the horizon H, the
-        number J of marginal interval events and, for each level with valid
-        draws S_z, the radius of ``_radius``, an approximate evaluation of
-        the conditional confidence formula of Proposition 49 of
-        docs/mathematics.md.
+        It plans, evaluates, measures and loads nothing, reconstructs no state and calls no
+        resource estimate. `levels` gives each level's readout kind, counts, intervals,
+        masses and the event they describe, its chosen split-region mass and its readout
+        mode status. `resources` gives each count with its unavailable reason and its
+        meaning. Without `failure_probability` the report states the stored empirical
+        quantities and their meaning, and `confidence` is None. With a failure probability
+        alpha, 0 < alpha < 1, fixed before the counts are inspected, `confidence` gives the
+        horizon H, the number J of marginal interval events and, for each level with valid
+        draws S_z, the radius `epsilon_z = sqrt((log(A) - log(alpha))/(2 S_z))` with
+        `A = H d K (K + 1) = 2 H J`. It is an approximate binary64 evaluation of the
+        conditional confidence formula of [Proposition 49](../../mathematics.md#r49), not a
+        directed-rounding enclosure.
+
+        Args:
+            failure_probability (float | None): Default `None`. The alpha of the confidence
+                statement, strictly between 0 and 1, fixed before the counts are inspected.
+
+        Returns:
+            report (dict): JSON-ready data with the `summary` text, its `statements`, the
+                `record`, the `levels`, `confidence`, the `resources` and the level Results'
+                content hashes in `inner_results`.
         """
         if failure_probability is not None and (
             isinstance(failure_probability, bool) or not isinstance(failure_probability, (int, float))
@@ -1220,12 +1204,16 @@ class BoxRefinementResult(Record):
     def save(self, path):
         """Write this refinement and its completed level Results to a new directory.
 
-        The archive stores the original Optimization, the portable
-        refinement record and each level Result with its own Plan. Saving
-        requires the live problem and the level Results named by the record.
-        It performs no planning, objective evaluation or acquisition.
-        ``refinement.save_archive`` gives the layout and its checks, and
-        ``load_box_refinement`` reads the archive back.
+        The directory holds `refinement.json` (format `qhd.refinement/3`) with the portable
+        refinement record and the problem record, which keeps the bounds, units and content
+        hash of the original problem, and `problem.pickle` with its live SymPy objective and
+        variables. Each completed level z keeps its Result, saved by its own archive with
+        its own Plan, under `levels/<z>/result/`. A refinement without a completed level has
+        no `levels/` folder. Saving requires the live problem and the level Results named by
+        the record, and a record without them is refused before the directory is created. It
+        performs no planning, objective evaluation or measurement. A failed save removes the
+        directory. This is a result archive, which `load_box_refinement` reads back, not a
+        directory that `resume_box_refinement` continues.
 
         Args:
             path (str | Path): A directory that does not exist yet.

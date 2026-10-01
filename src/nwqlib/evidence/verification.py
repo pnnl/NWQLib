@@ -13,19 +13,35 @@ from .records import Evidence, Fact
 
 @dataclass(frozen=True)
 class ProjectedDiagnostics:
-    """Borrowed immutable coordinates already produced by a projected solver.
+    """The stored diagnostics of a projected eigenvalue solve: overlap matrix, its spectrum and two error values.
 
-    overlap uses the producing method's actual Gram convention; spectrum is the
-    raw pre-filter spectrum. Missing diagnostics do not launch another solve.
+    `result.projected_diagnostics()` returns it for a Lanczos, FixedGCIM or
+    ADAPT Result, and the checks of
+    [`ProjectedVerificationOptions`][nwqlib.evidence.verification.ProjectedVerificationOptions]
+    read it. It holds values the solve already produced, in the Method's
+    own coordinates, so getting it runs no solve, reconstruction or
+    decomposition. A value the Result did not store is `None`. The fields
+    below are read-only.
 
     Attributes:
-        overlap: Existing raw projected overlap matrix in its original coordinates.
-        spectrum: Existing overlap eigenvalues, preserving negative modes before filtering.
-        normalization: Stored generalized-vector overlap-normalization error, or None if unavailable.
-        backward_error: Stored projected generalized-eigenpair backward error, or None if unavailable.
-            Lanczos computes it on its normalized pencil (K, S) and GCIM on
-            the physical pencil (H, S), so equal thresholds mean different
-            things for the two producers.
+        overlap: The overlap (Gram) matrix S of the trial basis, as rows:
+            the raw Chebyshev Gram matrix of Lanczos, with float entries, or
+            the acquired matrix of FixedGCIM and ADAPT, completed from its
+            upper triangle by conjugation, with `Complex128` entries. `None`
+            when unavailable.
+        spectrum: The eigenvalues of S before the overlap cutoff, negative
+            ones included. `None` when unavailable.
+        normalization: `abs(c† S c - 1)` for the coefficient vector c of the
+            reported, lowest Ritz pair, or `None`.
+        backward_error: The dimensionless backward error
+            `||A c - x S c|| / ((||A||_F + |x| ||S||_F) ||c||)` of the lowest
+            Ritz pair (x, c), or `None`. Lanczos states it on the normalized
+            pencil (K, S) of its solve, with `K = (H - center S) / alpha` and
+            `x = (E - center) / alpha`. FixedGCIM and ADAPT state it on the
+            physical pencil (H, S) in the Problem's energy unit, with `x = E`.
+            Equal thresholds therefore mean different things for Lanczos and
+            for FixedGCIM and ADAPT ([verification
+            guide](../verification.md#projected-quantities)).
     """
 
     overlap: tuple | None
@@ -41,13 +57,45 @@ _PROJECTED_SOURCE = Source(name="stored_projected_checks", version="1",
 
 
 class ProjectedVerificationOptions(Record):
-    """Selected dimensionless criteria; tolerance is acceptance, never repair.
+    """Options of the projected checks of a Lanczos, FixedGCIM or ADAPT Result.
+
+    Build it with keyword arguments, for example
+    `ProjectedVerificationOptions(name="projected",
+    comparisons=("gram_psd_deficit",), tolerance=1e-10)`, and pass it to
+    `result.verify(checks=...)` or
+    [`verify_projected`][nwqlib.evidence.verification.verify_projected].
+    `name`, `comparisons` and `tolerance` are required. Each criterion is a
+    dimensionless value on `[0, inf)`, compared with `tolerance` as an
+    acceptance threshold. Nothing is repaired, and the values are read from
+    what the Result already stores (`result.projected_diagnostics()`), so no
+    solve runs again:
+
+    - `overlap_normalization`: the stored absolute error of the coefficient
+      vector's normalization in the overlap (Gram) matrix S.
+    - `gram_psd_deficit`: `max(0, -min(spectrum))` of the raw overlap
+      spectrum, before positive-subspace filtering.
+    - `gram_hermiticity`: the largest absolute real or imaginary component of
+      `S - S†` of the stored overlap matrix.
+    - `projected_backward_error`: the stored backward error of the
+      projected generalized eigenproblem, on the normalized pencil (K, S)
+      for Lanczos and on the physical pencil (H, S) for FixedGCIM and ADAPT.
+      Equal thresholds mean different things for the two, so compare values
+      only within one family (formula in the [verification
+      guide](../verification.md#projected-quantities)).
+
+    The criteria concern the projected problem only. They give no
+    full-state residual, ground-state identification or total physical-error
+    bound.
 
     Attributes:
-        name: Prefix of the check names.
-        comparisons: Distinct selected criteria among ``overlap_normalization``, ``gram_psd_deficit``, ``gram_hermiticity`` and ``projected_backward_error``.
-        tolerance: Nonnegative threshold shared by the selected criteria.
-        source: Implementation source of the stored projected checks.
+        name: Required. Prefix of the check names, which are
+            `name + "." + criterion`.
+        comparisons: Required. Nonempty tuple of distinct criteria from the
+            list above.
+        tolerance: Required. Nonnegative threshold shared by the criteria.
+
+    Raises:
+        ValueError: If `comparisons` is empty or repeats a criterion.
     """
 
     name: Text
@@ -190,12 +238,29 @@ def witness_check_facts(receipt, result, checks):
 
 
 def verify_projected(result, *, options: ProjectedVerificationOptions, max_integer_bits=DEFAULT_MAX_INTEGER_BITS):
-    """Read selected existing scalar/spectrum/Gram diagnostics, never solve again.
+    """Run the projected checks on a Result's stored diagnostics, without solving again.
 
-    result must supply projected_diagnostics(). The return value is
-    (receipt, facts), one VerificationReceipt and one fact per selected
-    criterion. The criteria concern the projected problem only, not a
-    full-state residual or ground-state identity.
+    `result.verify(checks=options)` calls this for Lanczos, FixedGCIM and
+    ADAPT. The Result must supply `projected_diagnostics()`. The criteria
+    concern the projected problem only, not a full-state residual or
+    ground-state identification.
+
+    Args:
+        result (Result): A Lanczos, FixedGCIM or ADAPT Result with its Plan.
+        options (ProjectedVerificationOptions): The selected criteria.
+        max_integer_bits (int): Bit limit of the exact arithmetic. Default
+            4096.
+
+    Returns:
+        verification (tuple): `(receipt, facts)`: the `VerificationReceipt`
+            of this computation, and one
+            [`FramedFact`][nwqlib.evidence.error_model.FramedFact] per
+            criterion that cites it. A criterion whose stored value is
+            missing gives an unknown fact.
+
+    Raises:
+        TypeError: If `options` is not a `ProjectedVerificationOptions`, or
+            the Result supplies no projected diagnostics.
     """
     if type(options) is not ProjectedVerificationOptions:
         raise TypeError("projected verification requires concrete selected options")

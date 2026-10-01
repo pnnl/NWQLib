@@ -50,7 +50,7 @@ whole run (``_outer.round_limits``). ``problem.pickle`` and ``noise-model.json``
 are written once. ``controller.json`` holds the arguments and the records of the completed rounds and levels,
 which name their Runs and repeat none of their observations, so its size is that of those records, whose
 number of JSON values grows linearly with the completed rounds and levels
-(``constrained_records.AugmentedLagrangianRecord``, "Record size"). It is rewritten after each completed
+(``docs/ENGINEERING_CONSTANTS.md``, "Augmented-Lagrangian record size"). It is rewritten after each completed
 round or level, so the bytes written over a run grow with the square of their number, while the directory
 keeps one copy.
 The per-level `tables.json` files contain generated table-stage data. Their total stored size is the sum of
@@ -73,8 +73,8 @@ RECORD = "controller.json"
 PROBLEM = "problem.pickle"
 NOISE = "noise-model.json"
 # One format per layer. They change with the fields of the outer record, and a directory of another
-# format is refused rather than converted, since this unreleased package keeps no development-schema
-# compatibility (docs/FRAMEWORK.md, "Package Import Surface").
+# format is refused rather than converted, since NWQLib owes no compatibility with the development
+# schemas that preceded release 1.0 (docs/FRAMEWORK.md, "API stability").
 FORMATS = {"constrained": "qhd.constrained_run/4", "refinement": "qhd.refinement_run/5"}
 RESUME = {"constrained": "resume_augmented_lagrangian", "refinement": "resume_box_refinement"}
 
@@ -316,7 +316,7 @@ class Directory:
 class Frontier:
     """The durable part of one refinement, namely its directory, its level folders and its committed levels.
 
-    The name follows the execution frontier of docs/CODE_TOUR.md, the resumable state of a Run, and
+    The name follows the execution frontier of docs/glossary.md, the resumable state of a Run, and
     applies it to a refinement, whose resumable state is its completed levels and the stop that the last
     of them decided.
 

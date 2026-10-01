@@ -585,138 +585,142 @@ class QHDReconstruction(Record):
 
 
 class QHDAnalysis(Result):
-    """Best observed candidate, most probable point and unconditional mass; optimum remains unknown.
+    """Readout of a QHD run: best observed point, most probable point and probability masses.
 
-    The candidate minimizes the evaluated binary64 objective among valid
-    points with positive observed weight, with the smallest grid index on
-    objective ties. For exact readout these are positive-probability
-    points, and for counts they are sampled points. Exact probability
-    readout does not make objective evaluation exact or guarantee that
-    every grid point has positive probability. The most-probable point
-    describes concentration of the observed distribution under the stated
-    tie rule. Its fields are unavailable exactly when the candidate is.
+    [`solve`][nwqlib.scientist.solve] returns it for a `QHD` method, and `load_result`
+    reopens a saved one. The answer is `candidate`, the valid grid point with positive
+    observed weight that has the least evaluated objective, and `objective`, the
+    objective there from the stored support tables, in the Problem's objective unit.
+    `most_probable_coordinates` is the grid point where the evolution concentrated
+    probability, which the augmented-Lagrangian and refinement layers read by default.
+    The two points can differ. Both are None when no valid outcome was observed, and
+    neither establishes a continuous or global optimum. `print(result)` shows both
+    points, the mode status and the valid probability. The fields below are read-only.
+    The fields of [`Result`][nwqlib.core.analysis.Result] are present too. The guide's
+    [readout](../../algorithms/qhd.md#readout) section explains both points and the tie
+    window.
 
-    Mode status. Write O for the valid points with positive observed
-    weight, q_i for the stored probability of point i (for counts the exact
-    empirical frequency ``N_i/R`` of the pooled integer count N_i and the
-    integer ``returned_shots`` R, compared through N_i), M for the largest
-    q_i over O, m for the computed probability maximizer (the
-    ``probability_maximizer_*`` fields) and s for the tie representative
-    (the ``most_probable_*`` fields). Under an available window W the
-    representative is the lexicographically first point passing the
-    maximum-to-point tie test ``fl(M - q_i) <= W``, with ``fl`` the binary64
-    subtraction, and for counts the lexicographically first point with the
-    largest pooled count, W = 0. Without a window the stored probabilities
-    are compared exactly, so s = m. ``mode_status`` is ``unavailable`` when O
-    is empty or W is unavailable, ``unresolved`` when W is available and a
-    point of O other than s passes the same test, and ``resolved``
-    otherwise, that is when exactly one point passes it. A zero deficit
-    occurs both at a well-separated maximum and at a tie, so the status is
-    evaluated from the observed weights with the selection
-    (``method._summarize``) and cannot be reconstructed from the deficit.
-
-    Guarantee. Suppose W bounds the pairwise errors of the chosen reference
-    population, ``abs((q_i - q_j) - (p_i - p_j)) <= W`` for every compared
-    i, j. If exactly one point passes the test, it is m, hence s = m, and
-    ``fl(q_m - q_t) > W`` for every other t. Rounding is monotone and fixes
-    the stored binary64 W, so an exact difference at most W would round to
-    at most W, and the rejection implies the exact real difference
-    ``q_m - q_t > W``, so ``p_m - p_t >= q_m - q_t - W > 0``. ``resolved``
-    therefore certifies a unique maximum of the stored q and, under the
-    stated pairwise error model, a unique maximum of p on O. Exact
-    subtraction, including Sterbenz's condition ``q_t >= q_m/2``, suffices
-    for this conclusion but is not necessary for it. Rounding can make the
-    status conservatively unresolved, since a rounded subtraction can admit
-    an exact gap slightly above W, and it cannot make it falsely resolved
-    under the pairwise premise. For counts, a single largest integer N_i
-    gives a unique maximum of the exact empirical frequencies N_i/R, and a
-    count tie is unresolved. Neither result is a confidence statement about
-    an underlying distribution. ``unresolved`` says that this window does
-    not separate the representative from every competitor. It does not
-    prove equal probabilities, multiple exact modes, a large actual
-    numerical error or an inferior objective. ``resolved`` says nothing
-    about optimization quality, a continuous minimizer, physical-model
-    discrepancy, hardware bias or finite-shot uncertainty. The population is
-    O. If an exact readout completely represents a valid grid distribution,
-    an omitted known-zero q_i cannot exceed the positive maximum, so m is
-    also a computed maximizer on the full valid grid, but a certificate
-    about p on O extends to omitted points only when their pairwise error
-    bounds apply and ``fl(M - 0) > W``, namely M > W. An incomplete
-    observation does not make omitted probabilities known zero.
+    The candidate minimizes the evaluated binary64 objective among valid points with
+    positive observed weight, with the smallest grid index on objective ties. For exact
+    readout these are positive-probability points, and for counts they are sampled
+    points. Exact probability readout does not make objective evaluation exact or
+    guarantee that every grid point has positive probability. The most probable point
+    describes concentration of the observed distribution under the tie rule of the Mode
+    status note below. Its fields are unavailable exactly when the candidate is.
 
     Attributes:
-        value: Objective at the candidate, read from the stored support
-            tables, or None when no valid outcome was observed.
+        value: Objective at the candidate, read from the stored support tables, or None
+            when no valid outcome was observed. The same as `objective`.
         candidate_indices: Grid index of the candidate for each variable.
-        candidate_coordinates: Candidate grid point in the original
-            coordinates.
+        candidate_coordinates: Candidate grid point in the original coordinates. The
+            same as `candidate`.
         candidate_probability: Unconditional probability of the candidate.
-        most_probable_indices: Grid index for each variable of the most
-            probable valid point. Among the valid points with positive
-            observed probability, it is the lexicographically smallest index tuple
-            whose probability lies within ``most_probable_tie_window`` of the
-            computed maximum. Counts compare pooled integer counts exactly.
+        most_probable_indices: Grid index for each variable of the most probable valid
+            point. Among the valid points with positive observed probability, it is the
+            lexicographically smallest index tuple whose probability lies within
+            `most_probable_tie_window` of the computed maximum. Counts compare pooled
+            integer counts exactly.
         most_probable_coordinates: That point in the original coordinates.
         most_probable_probability: Its unconditional probability.
-        most_probable_objective: Objective at that point, read from the
-            stored support tables.
+        most_probable_objective: Objective at that point, read from the stored support
+            tables.
         most_probable_deficit: Computed maximum probability minus
-            ``most_probable_probability``, at most the tie window. A positive
-            value means a point within the window was chosen over the
-            computed maximum. Other points can lie within the window even
-            when it is zero, so the selection does not identify a unique mode.
-        most_probable_tie_window: Derived bound on the error of a computed
-            difference of two probabilities on this readout path, 0 for
-            counts, or None when no bound was derived. The classical
-            ``split_step`` kernel derives it from the state budget it
-            observed on its trajectory, at most the Plan's window.
-        most_probable_tie_window_unavailable: Why no tie window was derived,
-            for example a receipt outside the roundoff derivation. The
-            selection then compared the computed probabilities exactly, so
-            roundoff can decide between points that the model makes equal.
-        probability_maximizer_indices: Lexicographically first valid grid-index
-            tuple attaining the largest positive observed weight. Exact readout
-            compares the computed probabilities. Counts compare pooled integers
-            before division by returned_shots. None without a positive valid outcome.
+            `most_probable_probability`, at most the tie window. A positive value means
+            a point within the window was chosen over the computed maximum. Other points
+            can lie within the window even when it is zero, so the selection does not
+            identify a unique mode.
+        most_probable_tie_window: Derived bound on the error of a computed difference of
+            two probabilities on this readout path, 0 for counts, or None when no bound
+            was derived. The classical `split_step` kernel derives it from the state
+            budget it observed on its trajectory, at most the Plan's window.
+        most_probable_tie_window_unavailable: Why no tie window was derived, for example
+            a preparation record outside the roundoff derivation. The selection then
+            compared the computed probabilities exactly, so roundoff can decide between
+            points that the model makes equal.
+        probability_maximizer_indices: Lexicographically first valid grid-index tuple
+            attaining the largest positive observed weight. Exact readout compares the
+            computed probabilities. Counts compare pooled integers before division by
+            `returned_shots`. None without a positive valid outcome.
         probability_maximizer_coordinates: Coordinates of the computed probability
-            maximizer on the selected Plan's grid, or None with its indices.
+            maximizer on the Plan's grid, or None with its indices.
         probability_maximizer_probability: Unconditional computed probability, or
-            empirical frequency rounded once from its pooled count and returned_shots,
+            empirical frequency rounded once from its pooled count and `returned_shots`,
             at the computed probability maximizer. None with its indices.
-        probability_maximizer_objective: Evaluated objective from the selected Plan's
-            support tables at the computed probability maximizer. None with its indices.
-        mode_status: Resolution of the most-probable selection among positive
-            observed valid points. With an available window, resolved means only
-            one point passes the existing maximum-to-point tie test, and unresolved
-            means another point passes it. Counts use equality of pooled integer
-            counts. Unavailable means no positive valid outcome or no derived
+        probability_maximizer_objective: Evaluated objective from the Plan's support
+            tables at the computed probability maximizer. None with its indices.
+        mode_status: Resolution of the most-probable selection among positive observed
+            valid points, `resolved`, `unresolved` or `unavailable`. With an available
+            window, resolved means only one point passes the maximum-to-point tie test,
+            and unresolved means another point passes it. Counts use equality of pooled
+            integer counts. Unavailable means no positive valid outcome or no derived
             numerical window. This status supplies no sampling-error or optimization
             guarantee.
         expected_objective: Objective mean conditional on a valid outcome.
-        marginals: Unconditional probability of each grid index per
-            variable, a ``FrozenArray`` whose ``.array`` is the read-only
-            float64 array of shape (d, K) in variable order and grid order.
-            Each row sums to ``valid_mass``. Analysis accumulates
-            it from the observed points (``method._summarize``), and for
-            classical execution reads it from the kernel's
-            ``marginal_{j}_{i}`` scalars (``method._host_summary``).
-        valid_mass: Probability of outcomes that encode a grid point, one
-            excitation per register for one-hot and every outcome for binary.
-        invalid_mass: Probability of all other register outcomes, zero for
-            binary.
+        marginals: Unconditional probability of each grid index per variable, a
+            `FrozenArray` whose `.array` is the read-only float64 array of shape (d, K)
+            in variable order and grid order. Each row sums to `valid_mass`. Analysis
+            accumulates it from the observed points, and for classical execution reads
+            it from the marginals that the kernel returns.
+        valid_mass: Probability of outcomes that encode a grid point, one excitation per
+            register for one-hot and every outcome for binary. The same as
+            `valid_probability`.
+        invalid_mass: Probability of all other register outcomes, zero for binary.
         observed_mass: Total observed probability.
-        valid_count: For counts, the number of returned outcomes that encode
-            a grid point, summed as integers over all chunks. None for exact
-            readout. With positive ``returned_shots``, ``valid_mass`` is
-            ``valid_count/returned_shots`` rounded once.
-        returned_shots: For counts, the shots that the chunks returned,
-            summed as integers, which can be fewer than the Plan requested.
-            None for exact readout.
-        missing: Reasons the observation is incomplete or yields no valid
-            candidate.
-        applications: Host-kernel application records for classical
-            execution.
-        artifact: Stored final state, when ``keep_state`` requested it.
+        valid_count: For counts, the number of returned outcomes that encode a grid
+            point, summed as integers over all chunks. None for exact readout. With
+            positive `returned_shots`, `valid_mass` is `valid_count/returned_shots`
+            rounded once.
+        returned_shots: For counts, the shots that the chunks returned, summed as
+            integers, which can be fewer than the Plan requested. None for exact
+            readout.
+        missing: Reasons the observation is incomplete or yields no valid candidate.
+        applications: Records of the classical kernel's run, for classical execution.
+        artifact: Saved final state, when `keep_state` requested it.
+
+    Mode status:
+        Write O for the valid points with positive observed weight, q_i for the stored
+        probability of point i (for counts the exact empirical frequency `N_i/R` of the
+        pooled integer count N_i and the integer `returned_shots` R, compared through
+        N_i), M for the largest q_i over O, m for the computed probability maximizer
+        (the `probability_maximizer_*` fields) and s for the tie representative (the
+        `most_probable_*` fields). Under an available window W the representative is the
+        lexicographically first point passing the maximum-to-point tie test
+        `fl(M - q_i) <= W`, with `fl` the binary64 subtraction, and for counts the
+        lexicographically first point with the largest pooled count, W = 0. Without a
+        window the stored probabilities are compared exactly, so s = m. `mode_status` is
+        `unavailable` when O is empty or W is unavailable, `unresolved` when W is
+        available and a point of O other than s passes the same test, and `resolved`
+        otherwise, that is when exactly one point passes it. A zero deficit occurs both
+        at a well-separated maximum and at a tie, so the status is evaluated from the
+        observed weights together with the selection and cannot be reconstructed from
+        the deficit.
+
+    Guarantee:
+        Suppose W bounds the pairwise errors of the chosen reference population,
+        `abs((q_i - q_j) - (p_i - p_j)) <= W` for every compared i, j. If exactly one
+        point passes the test, it is m, hence s = m, and `fl(q_m - q_t) > W` for every
+        other t. Rounding is monotone and fixes the stored binary64 W, so an exact
+        difference at most W would round to at most W, and the rejection implies the
+        exact real difference `q_m - q_t > W`, so `p_m - p_t >= q_m - q_t - W > 0`.
+        `resolved` therefore certifies a unique maximum of the stored q and, under the
+        stated pairwise error model, a unique maximum of p on O. Exact subtraction,
+        including Sterbenz's condition `q_t >= q_m/2`, suffices for this conclusion but
+        is not necessary for it. Rounding can make the status conservatively unresolved,
+        since a rounded subtraction can accept an exact gap slightly above W, and it
+        cannot make it falsely resolved under the pairwise assumption. For counts, a
+        single largest integer N_i gives a unique maximum of the exact empirical
+        frequencies N_i/R, and a count tie is unresolved. Neither result is a confidence
+        statement about an underlying distribution. `unresolved` says that this window
+        does not separate the representative from every competitor. It does not prove
+        equal probabilities, multiple exact modes, a large numerical error or an
+        inferior objective. `resolved` says nothing about optimization quality, a
+        continuous minimizer, physical-model discrepancy, hardware bias or finite-shot
+        uncertainty. The population is O. If an exact readout completely represents a
+        valid grid distribution, an omitted known-zero q_i cannot exceed the positive
+        maximum, so m is also a computed maximizer on the full valid grid, but a
+        certificate about p on O extends to omitted points only when their pairwise
+        error bounds apply and `fl(M - 0) > W`, namely M > W. An incomplete observation
+        does not make omitted probabilities known zero.
     """
 
     value: Real | None
@@ -828,25 +832,21 @@ class QHDAnalysis(Result):
     def position_mean(self):
         """Mean grid coordinate of each variable conditional on a valid outcome, or None without valid mass.
 
-        ``<x_j> = sum_i x_j(i) m_j(i) / valid_mass``, with m_j the stored
-        unconditional marginal of variable j and x_j(i) the Plan's grid
-        coordinates. Liu et al. arXiv:2607.16996v1 Eq. (94) define the mean
-        over the whole final state. Dividing by ``valid_mass`` conditions it
-        on a valid outcome, NWQLib's choice, because an invalid one-hot
-        outcome encodes no position. It is derived on
-        demand from the marginals and the attached Plan's grid only, with no
-        evolution, decoding, objective evaluation or acquisition, and is not
-        stored. The mean and ``position_standard_deviation`` describe the
-        observed distribution. They are no criterion for agreement of two
-        states or for optimization success, because two distributions can
-        share mean and variance at total-variation distance 1: {-1, +1} with
-        probability 1/2 each and {-2, 0, +2} with {1/8, 3/4, 1/8} both have
-        mean 0 and variance 1, and put probability 0 and 3/4 on the point 0.
-        On the periodic grid the coordinates are those of the chart
-        ``[lower, upper)``, so both moments depend on where the period is cut.
-        Mass split between ``x_0`` and ``x_(K-1)``, which are neighbors
-        through the wrap link, gives a mean near the middle of the box, where
-        it may have no mass.
+        ``<x_j> = sum_i x_j(i) m_j(i) / valid_mass``, with m_j the stored unconditional
+        marginal of variable j and x_j(i) the Plan's grid coordinates. Liu et al.
+        arXiv:2607.16996v1 Eq. (94) define the mean over the whole final state. Dividing by
+        ``valid_mass`` conditions it on a valid outcome, NWQLib's choice, because an invalid
+        one-hot outcome encodes no position. It is computed on demand from the marginals and
+        the attached Plan's grid only, with no evolution, decoding, objective evaluation or
+        measurement, and is not stored. The mean and ``position_standard_deviation``
+        describe the observed distribution. They are no criterion for agreement of two
+        states or for optimization success, because two distributions can share mean and
+        variance at total-variation distance 1. For example, {-1, +1} with probability 1/2
+        each and {-2, 0, +2} with {1/8, 3/4, 1/8} both have mean 0 and variance 1, and put
+        probability 0 and 3/4 on the point 0. On the periodic grid the coordinates are those
+        of the chart ``[lower, upper)``, so both moments depend on where the period is cut.
+        Mass split between ``x_0`` and ``x_(K-1)``, which are neighbors through the wrap
+        link, gives a mean near the middle of the box, where it may have no mass.
         """
         moments = self._position_moments()
         return None if moments is None else moments[0]
@@ -855,12 +855,11 @@ class QHDAnalysis(Result):
     def position_standard_deviation(self):
         """Standard deviation of each variable's grid coordinate conditional on a valid outcome, or None.
 
-        ``sigma_j = sqrt(sum_i (x_j(i) - <x_j>)**2 m_j(i) / valid_mass)`` with
-        ``<x_j>`` from ``position_mean``, conditioned on a valid outcome as
-        the mean is. Liu et al. arXiv:2607.16996v1 Eq. (94) define the
-        standard deviation over the whole final state. The deviations are scaled by their largest magnitude before
-        squaring, so coordinates far from the origin do not overflow. None
-        when ``valid_mass`` is zero.
+        ``sigma_j = sqrt(sum_i (x_j(i) - <x_j>)**2 m_j(i) / valid_mass)`` with ``<x_j>``
+        from ``position_mean``, conditioned on a valid outcome as the mean is. Liu et al.
+        arXiv:2607.16996v1 Eq. (94) define the standard deviation over the whole final
+        state. The deviations are scaled by their largest magnitude before squaring, so
+        coordinates far from the origin do not overflow. None when ``valid_mass`` is zero.
         """
         moments = self._position_moments()
         return None if moments is None else moments[1]
@@ -892,20 +891,18 @@ class QHDAnalysis(Result):
     def pooled_summation_roundoff(chunks):
         """First-order roundoff of pooling the bin values of ``chunks`` into QHD's masses.
 
-        Analysis divides each of the M stored bin values by the chunk count (one
-        rounding), adds it into running sums (at most M additions per value)
-        and forms the valid mass with one ``fsum`` (one more rounding), so each
-        mass moves by at most (M + 2)*u. Each chunk's own total lies within its
-        receipt's window, which bounds the simulator and readout roundoff.
-        This allowance widens the mass check only. The tie window of the most
-        probable point has its own pooling term ``gamma_C = C u/(1 - C u)``
-        for the C roundings of each point's pooled probability
-        (``method._readout_window``).
+        Analysis divides each of the M stored bin values by the chunk count (one rounding),
+        adds it into running sums (at most M additions per value) and forms the valid mass
+        with one ``fsum`` (one more rounding), so each mass moves by at most ``(M + 2)*u``,
+        with ``u = 2**-53``. Each chunk's own total lies within the window of its
+        preparation record, which bounds the simulator and readout roundoff. This allowance
+        widens the mass check only. The tie window of the most probable point has its own
+        pooling term ``gamma_C = C u/(1 - C u)`` for the C roundings of each point's pooled
+        probability.
 
-        M counts the stored entries of each probabilities or counts chunk
-        (``Histogram.entries``), which include stored zero values, so M is
-        not the number of nonzero values. Another chunk adds its number of
-        stored values.
+        M counts the stored entries of each probabilities or counts chunk, which include
+        stored zero values, so M is not the number of nonzero values. Another chunk adds its
+        number of stored values.
         """
         from nwqlib._validation import UNIT_ROUNDOFF
 
@@ -1252,32 +1249,44 @@ def validate_selection(plan):
 
 
 class QHDVerification(Record):
-    """Explicit finite-grid or stored-state comparison; never run by solve.
+    """Options of an explicit QHD check: grid minimum, or fidelity against a reference evolution.
 
-    Replaying the original classical flavor checks consistency, not independent
-    accuracy. Each receipt identifies the actual producer/reference relation.
-
-    Default tolerances are registered in docs/ENGINEERING_CONSTANTS.md.
+    Build it with keyword arguments, for example
+    `QHDVerification(comparisons=("grid_minimum",))`, and pass it to
+    `result.verify(checks=...)`, which returns `(receipt, facts)`. `comparisons` is the
+    only required argument. `solve` never runs these checks. Replaying the original
+    classical flavor checks consistency, not independent accuracy, and the receipt names
+    what produced the result and the reference it compares. The guide's
+    [explicit verification](../../algorithms/qhd.md#explicit-verification) section
+    describes what each comparison checks and what it does not establish. The default
+    tolerances are untuned, and the
+    [engineering constants](../../ENGINEERING_CONSTANTS.md#explicit-workflow-and-reference-controls)
+    register them.
 
     Attributes:
-        comparisons: Distinct selected checks. ``grid_minimum`` evaluates the
-            original objective on every grid point. The fidelity choices run
-            one restricted evolution each against the stored state.
-        objective_gap_tolerance: Pass threshold for the candidate's evaluated gap to
-            the least reevaluated binary64 value, in objective units.
-        schrodinger_infidelity_tolerance: Pass threshold for infidelity
-            against the restricted Schrodinger evolution.
-        ir_product_infidelity_tolerance: Pass threshold for the computed
-            infidelity against the numerical IR reference of the selected
-            blocks. Binary phase reconstruction and reference-evolution
-            error are not propagated into this tolerance decision.
-        minimum_tolerance: Window around the least reevaluated binary64
-            objective value used by ``minimum_success_mass``. Zero counts
-            ties in the evaluated table. It counts exactly the mathematical
-            minimizers when the evaluations are exact and this tolerance
-            is zero.
-        max_bytes: Known-array limit for this explicit reference work.
-        max_work: Known-work limit for this explicit reference work.
+        comparisons: Required. Distinct checks to run, a nonempty tuple of
+            `"grid_minimum"`, `"schrodinger_fidelity"` and `"ir_product_fidelity"`.
+            `grid_minimum` evaluates the original objective on every grid point. Each
+            fidelity choice runs one restricted evolution against the stored state.
+        objective_gap_tolerance: Default `1e-12`. Pass threshold, in objective units,
+            for the candidate's evaluated gap to the least reevaluated binary64 value.
+        schrodinger_infidelity_tolerance: Default `0.1`, between 0 and 1. Pass threshold
+            for the infidelity against the restricted Schrodinger evolution.
+        ir_product_infidelity_tolerance: Default `1e-9`, between 0 and 1. Pass threshold
+            for the computed infidelity against the numerical reference of the compiled
+            product. Binary phase reconstruction and reference-evolution error are not
+            propagated into this tolerance decision.
+        minimum_tolerance: Default `0.0`. Window around the least reevaluated binary64
+            objective value that `minimum_success_mass` uses. Zero counts ties in the
+            evaluated table. It counts exactly the mathematical minimizers when the
+            evaluations are exact and this tolerance is zero.
+        max_bytes: Default 10 GB (decimal, `10_000_000_000` bytes). Positive limit on
+            the known array bytes of this check, separate from the QHD Method's limits.
+        max_work: Default `1_000_000_000`. Positive limit on the known work of this
+            check, separate from the QHD Method's limits.
+
+    Raises:
+        ValueError: If `comparisons` is empty or repeats a choice.
     """
 
     comparisons: tuple[Literal["grid_minimum", "schrodinger_fidelity", "ir_product_fidelity"], ...]

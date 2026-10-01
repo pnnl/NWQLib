@@ -5,7 +5,7 @@
 #
 # As in the paper, the optimization runs are classical evolutions of the grid model with exact probabilities, and Section 6 runs one 4-qubit circuit of the same construction.
 #
-# Install with `python -m pip install -e ".[aer,notebook]"` from the repository root · 8- and 10-qubit models evolved classically, one 4-qubit circuit simulated · about 65 s on a laptop.
+# Install with `python -m pip install "nwqlib[aer,notebook]"`. To work on NWQLib itself, run `python -m pip install -e ".[aer,notebook]"` in a clone of the repository instead. The notebook evolves 8- and 10-qubit models classically, simulates one 4-qubit circuit and runs in about 54 s on an Apple M3 Max with 36 GiB of memory (Python 3.12.14, Qiskit 2.5.2, Aer 0.17.2).
 #
 # > **How to read this notebook.** The next cells solve Ackley and show the answer with its cost.
 # >
@@ -128,8 +128,8 @@ def lbfgsb_restarts():
 
 
 def show_ackley_card(result, control, lbfgsb, targets, seconds):
-    """Show the result card: the answer against the targets, the baseline with its budget, the cost of both
-    ledgers, the refinement figure, what NWQLib did and, collapsed, the gain-1 control."""
+    """Show the result card: the answer against the targets, the baseline with its budget, the quantum and
+    classical cost, the refinement figure, what NWQLib did and, collapsed, the gain-1 control."""
     level = result.levels[0]
     grid = result.qhd.num_grid_points
     error = distance(result.candidate, SHIFT)
@@ -150,7 +150,7 @@ def show_ackley_card(result, control, lbfgsb, targets, seconds):
         f"{'lower' if classical['objective'] < result.objective else 'higher'} than this run.</p>"
         f"<p><strong>Cost.</strong> Quantum: the runs prepared {result.resources.circuit_preparations} "
         f"circuits and took {result.resources.shots} shots. On a quantum computer each of the {len(result.levels)} "
-        f"solves would be one {level.logical_width}-qubit circuit plus its shots (Section 3). Classical: known host "
+        f"solves would be one {level.logical_width}-qubit circuit plus its shots (Section 3). Classical: known "
         f"workspace {max(run.plan.reconstruction.workspace_bytes for run in result.results):,} bytes per solve, "
         f"stated by the plan before it runs, evolution work {result.resources.evolution_work:,} units over the "
         f"{len(result.levels)} solves (a planning quantity, not seconds), each solve within max_work = "
@@ -178,7 +178,7 @@ def show_ackley_card(result, control, lbfgsb, targets, seconds):
         f"level solves a dimensionless problem of the same strength (the search model, Section 11).",
         f"Evolved the {grid * grid} grid amplitudes numerically through {result.qhd.num_steps:,} symmetric split steps "
         f"of the QHD Hamiltonian and read out the most probable grid point. A binary circuit of this construction with "
-        f"{level.logical_width} qubits realizes the same product, with additional angle-formation and lowering errors "
+        f"{level.logical_width} qubits implements the same product, with additional angle-formation and circuit-construction errors "
         f"(Section 6).",
         f"Kept, for each variable, the grid cells around the peak of its probability that hold "
         f"{result.options.mass_threshold:.0%} of it, took their product as the next box, and selected the completed "
@@ -256,7 +256,7 @@ show_table([(row["ftol"], row["objective"], row["distance"], row["successes"], r
 #
 # The distance 0.01 therefore corresponds to a gap of about 0.18, so the gap target 0.2 and the distance target 0.01 ask for about the same accuracy, far inside the basin.
 #
-# After the collapsed helpers, one cell defines the problem and computes the known optimum for the evaluation. The next runs the three AL runs and SLSQP, in about 55 s.
+# After the collapsed helpers, one cell defines the problem and computes the known optimum for the evaluation. The next runs the three AL runs and SLSQP, in about 47 s.
 
 # %% jupyter={"source_hidden": true}
 # Helpers for the constrained comparison: independent NumPy evaluations of the problem, the SLSQP baseline, a
@@ -373,7 +373,7 @@ def show_al_verdict(summaries, targets, options):
         text += "Every run meets both targets. "
     largest = max(summary["largest_penalty"] for summary in summaries.values())
     text += (f"The largest penalty any round enters with is {largest:g}, "
-             f"{'below' if largest < options.max_penalty else 'at'} the ceiling {options.max_penalty:g}. The stop "
+             f"{'below' if largest < options.max_penalty else 'at'} the upper limit {options.max_penalty:g}. The stop "
              f"does not test the projected stationarity, which Appendix B lists for every round, so it does not "
              f"certify a stationary point either. The known optimum has inactive constraints, "
              f"g = {constraint_values(X_STAR)[0]:.3g}.")
@@ -392,7 +392,7 @@ CONSTRAINTS = (sp.Rational(1, 2) - x + (y - sp.Rational(1, 2)) ** 2 / 50,
 rastrigin_problem = ConstrainedOptimization(objective=RASTRIGIN, variables=(x, y), bounds=BOX,
                                             inequalities=CONSTRAINTS)
 rastrigin_qhd = qhd.revise(num_grid_points=32, num_steps=8192)  # 5 qubits per variable, 1,024 grid points
-al_options = AugmentedLagrangian(max_iterations=15, max_penalty=1024.0,  # a ceiling on the penalty, Section 11
+al_options = AugmentedLagrangian(max_iterations=15, max_penalty=1024.0,  # an upper limit on the penalty, Section 11
                                  feasibility_tolerance=1e-9, complementarity_tolerance=1e-9, stationarity=True)
 LEVELS_PER_ROUND = (1, 3, 4)  # Z, the refinement levels in each round
 
@@ -631,7 +631,7 @@ display(HTML(f"<p><strong>{escape(lead)}</strong></p><ul>"
 #
 # - **Input.** A real SymPy objective, its variables and one finite interval per variable. Constraints are written as `g <= 0` (Section 10).
 # - **Output.** A point in the original coordinates and its objective, read from exact probabilities here.
-# - **Size.** $d$ variables with $K$ grid points each use $d\log_2K$ qubits. The classical evolution stores $K^d$ amplitudes, and its charged work grows about as the number of steps times $K^d\log_2K$.
+# - **Size.** $d$ variables with $K$ grid points each use $d\log_2K$ qubits. The classical evolution stores $K^d$ amplitudes, and its counted work grows about as the number of steps times $K^d\log_2K$.
 # - **Limit.** `QHD(max_work=...)` caps the work of each solve. The default, 1,000,000,000, covers the 32 × 32 levels of Section 2.
 #
 # The cell repeats the first Rastrigin call with `max_work` set to 100,000,000 for this demonstration (the default is 1,000,000,000). Planning refuses it before any evolution, and the message names the amount. The remedy is the default `max_work`, which the runs of Section 2 use.
@@ -647,15 +647,15 @@ try:
 except ValueError as refusal:
     print(f"Refused after {perf_counter() - started:.2f} s, before any evolution:\n{refusal}\n")
 first_rastrigin_level = rastrigin_runs[min(LEVELS_PER_ROUND)].iterations[0].refinement.levels[0]
-print(f"Remedy, the default of Section 2: max_work = {rastrigin_qhd.max_work:,}. Evolution work charged for one "
+print(f"Remedy, the default of Section 2: max_work = {rastrigin_qhd.max_work:,}. Evolution work counted for one "
       f"32 × 32 level: {first_rastrigin_level.resources.evolution_work:,} units")
 
 # %% [markdown]
 # ## 6. What it costs
 #
-# **The optimization runs used host arithmetic only, so their quantum ledger is empty. On a quantum computer each solve would be one circuit of the listed width.**
+# **The optimization runs used classical arithmetic only, so they have no quantum cost. On a quantum computer each solve would be one circuit of the listed width.**
 #
-# The table counts the solves and their steps. Their evolution work counts host arithmetic, not quantum gates. A run on hardware would also need the shots of Section 3 for every solve.
+# The table counts the solves and their steps. Their evolution work counts classical arithmetic, not quantum gates. A run on hardware would also need the shots of Section 3 for every solve.
 
 # %%
 cost_rows = [(f"Ackley, gain {run.levels[0].potential_gain:g}", len(run.levels), run.qhd.num_steps,
@@ -671,15 +671,15 @@ cost_rows += [(f"Rastrigin, Z = {levels}", summaries[levels]["solves"], rastrigi
                run.resources.evolution_work, rastrigin_seconds[levels])
               for levels, run in rastrigin_runs.items()]
 show_table(cost_rows, headers=("Run", "QHD solves", "Steps per solve", "Evolution steps", "Qubits per circuit",
-                               "Circuits prepared / shots", "Known host workspace per solve [bytes]",
+                               "Circuits prepared / shots", "Known classical workspace per solve [bytes]",
                                "Evolution work units", "Time [s]"))
 
 # %% [markdown]
-# - **Known host workspace** is the size of the buffers that the plan of each solve counts before it runs. It is not process memory.
+# - **Known classical workspace** is the size of the buffers that the plan of each solve counts before it runs. It is not process memory.
 # - **Work units** are a planning quantity, not seconds. The time column is measured on this computer.
 # - **Not estimated:** physical qubits, error correction, run time on hardware and price.
 #
-# **A 4-qubit circuit of the same construction.** `estimate` predicts the CX count and an upper bound on the arbitrary rotations from the resource laws of the selected construction, without building the circuit.
+# **A 4-qubit circuit of the same construction.** `estimate` predicts the CX count and an upper bound on the arbitrary rotations from the resource formulas of the selected construction, without building the circuit.
 #
 # The cell plans one QHD solve of the Ackley objective itself on the original box, without refinement and the normalization of the search model, on a 4 × 4 binary grid with 8 steps and total time 0.5.
 #
@@ -693,8 +693,8 @@ from nwqlib.resources import ResourceContext
 
 tiny_qhd = qhd.revise(num_grid_points=4, num_steps=8, total_time=0.5)
 tiny_plan = plan(ackley_problem, method=tiny_qhd, execution="quantum", seed=7)  # plans, runs nothing
-predicted = estimate(tiny_plan, context=ResourceContext(basis="cx"))           # resource laws, no circuit
-# The CX law is stated in the cx basis and the rotation law in the default basis, so the full estimate reads both.
+predicted = estimate(tiny_plan, context=ResourceContext(basis="cx"))           # resource formulas, no circuit
+# The CX formula is stated in the cx basis and the rotation formula in the default basis, so the full estimate reads both.
 default_laws = {(item.metric, item.location): item for item in estimate(tiny_plan).quantities}
 covered = [item if item.fact.availability == "concrete" else default_laws[item.metric, item.location]
            for item in predicted.quantities]
@@ -734,17 +734,17 @@ show_table([
 show_table([
     ("Circuit state − classical split-step state", state_gap, "Phase-aligned 2-norm"),
     ("Probability difference", probability_gap, "Total variation distance"),
-    ("Circuit shots / native runs", (0, 1), "One exact statevector readout"),
+    ("Circuit shots / simulator runs", (0, 1), "One exact statevector readout"),
     ("Prepare, compile and simulate [s]", circuit_seconds, "Simulator time, not a hardware time estimate"),
 ], digits=3)
 display(HTML(
-    f"<p>The predicted CX count sums the resource law of each block of the selected construction without building "
+    f"<p>The predicted CX count sums the gate-count formula of each block of the selected construction without building "
     f"the circuit. It is {'equal to' if predicted_cx == compiled_cx else f'{predicted_cx / compiled_cx:.3g} times'} "
     f"the compiled count at optimization level 0, before routing to a device's connectivity.</p>"))
 show_table([(item.metric, item.fact.value.numerator, item.interpretation.replace("_", " "))
             for item in covered if item.fact.availability == "concrete"],
            headers=("Metric", "Value", "Kind"), details="Full resource estimate of the 4-qubit plan")
-display(HTML("<p>Not covered by the resource laws of this construction: "
+display(HTML("<p>Not covered by the resource formulas of this construction: "
              + escape(", ".join(item.metric for item in covered if item.fact.availability != "concrete"))
              + ".</p>"))
 
@@ -762,8 +762,8 @@ show_table([
     ("4-qubit circuit state − classical split-step state", state_gap, "Measured, phase-aligned 2-norm (Section 6)"),
     ("Time discretization of the split steps", "Appendix E",
      "Empirical step-doubling checks of the finite model, not a bound"),
-    ("Circuit angle-formation and lowering errors", "Reported by circuit_resources(plan)",
-     "Available allowances and missing components, in its error ledger"),
+    ("Circuit angle-formation and circuit-construction errors", "Reported by circuit_resources(plan)",
+     "Available allowances and missing components, in its error sources"),
     ("Distance of a returned point to the continuous optimum", None,
      "Unavailable: the selection rules do not certify a grid or continuous minimum"),
 ], headers=("Quantity", "Value", "Kind of number"))
@@ -779,7 +779,7 @@ show_table([(levels, summaries[levels]["solves"], summaries[levels]["gap"], summ
 # %% [markdown]
 # ## 8. How large can I go?
 #
-# **The classical evolution holds all $K^d$ grid amplitudes, so the grid sets the limit on a laptop.** Section 5 gives the qubits and the work of a grid, and Appendix E reports a 64 × 64 Rastrigin study that takes up to about 100 s per run.
+# **The classical evolution holds all $K^d$ grid amplitudes, so the grid sets the limit.** Section 5 gives the qubits and the work of a grid, and Appendix E reports a 64 × 64 Rastrigin study that takes up to about 100 s per run.
 #
 # The [resource estimation notebook](resource_estimation_at_scale.ipynb) plans problems of other algorithm families at 80 to 100 qubits and labels each count as exact, an upper bound, an estimate or unavailable.
 #
@@ -870,7 +870,7 @@ print(f"point {my_result.candidate}, objective {my_result.objective:.3g}, "
 #
 # Each of the `num_steps` steps applies $e^{-i\Delta t\,b_kV/2}\,e^{-i\Delta t\,a_kT}\,e^{-i\Delta t\,b_kV/2}$ with the weights $a_k,b_k$ at the step's midpoint time and $V=\kappa(F-c_z)/E_z$. The kinetic factor is exact in the Fourier basis.
 #
-# A binary register of $\log_2K$ qubits per variable holds the $K^2$ grid amplitudes, and a quantum Fourier transform diagonalizes $T$. A binary circuit therefore realizes the same product, with additional angle-formation and lowering errors (Section 6). `circuit_resources(plan)` reports their available allowances and missing components in its error ledger ([QHD guide](../docs/algorithms/qhd.md#fault-tolerant-resources)).
+# A binary register of $\log_2K$ qubits per variable holds the $K^2$ grid amplitudes, and a quantum Fourier transform diagonalizes $T$. A binary circuit therefore implements the same product, with additional angle-formation and circuit-construction errors (Section 6). `circuit_resources(plan)` reports their available allowances and missing components in its error sources ([QHD guide](../docs/algorithms/qhd.md#fault-tolerant-resources)).
 #
 # **The constrained problem.** Round $k$ of the augmented Lagrangian refines the box of
 #
@@ -937,7 +937,7 @@ show_table([
 # | Start of each level | uniform state (Sec. VI), and in the scripts a Gaussian centered on the best point so far from the second level on, in the constrained script with its center clipped to $[0.01, 0.99]$ | uniform state at every level, the kinetic ground state of this periodic grid | The clipping constant has no derivation and pulls the start inward. `BoxRefinement(level_initial_state="best_point_gaussian")` offers the Gaussian start without clipping. In the comparisons of the QHD guide it lowered the error on a one-variable quadratic with `max_no_improve=6`, stopped after three levels there with the default `max_no_improve=2`, raised the error on a two-variable double well, and the kinetic ground state at every level gave the smallest error in all six two-variable cases. |
 # | Point read from each distribution | most probable point (Sec. V), in the scripts the most probable point or the mean, whichever is lower | most probable grid point | The mean usually lies off the grid, and on a periodic grid it depends on where the period is cut, since probability near both faces gives a mean near the middle of the box. |
 # | AL penalty and stop | largest penalty $10^9$, in the scripts doubled in every round, stop when the violation is below $10^{-9}$ | largest penalty 1024, doubled only when the constraint measure falls by less than a factor of 4, stop on normalized violation and complementarity | The rules of Birgin and Martínez, Algorithm 4.1 and Eqs. (10.7)–(10.8). The complementarity test also requires a zero multiplier where a constraint is inactive. Section 2 reports the largest penalty the runs reach. |
-# | Encoding | one-hot registers for the resource estimates (Sec. IV), classical split-step simulation for the results | binary registers of $\log_2 K$ qubits per variable | The quantum Fourier transform diagonalizes the paper's spectral kinetic energy, so the binary circuit realizes the simulated product with $2\log_2K$ qubits, with additional angle-formation and lowering errors. The paper's one-hot gate counts do not describe this circuit. |
+# | Encoding | one-hot registers for the resource estimates (Sec. IV), classical split-step simulation for the results | binary registers of $\log_2 K$ qubits per variable | The quantum Fourier transform diagonalizes the paper's spectral kinetic energy, so the binary circuit implements the simulated product with $2\log_2K$ qubits, with additional angle-formation and circuit-construction errors. The paper's one-hot gate counts do not describe this circuit. |
 
 # %% [markdown]
 # ## Appendix
@@ -1051,7 +1051,7 @@ show_table([("Python", platform.python_version()), ("NumPy", np.__version__), ("
 #
 # An independently written propagator, a two-dimensional NumPy FFT with separately assembled energies, schedule weights and PHR potential, reproduced every level of the selected runs. Historical time-resolution comparisons use their recorded experiment revision and fixed boxes.
 #
-# Step-doubling differences are empirical checks of that finite model, not rigorous continuous-time error bounds. A new execution can change adaptive boxes, selected points, numerical windows or admitted work and needs its own revision and timing.
+# Step-doubling differences are empirical checks of that finite model, not rigorous continuous-time error bounds. A new execution can change adaptive boxes, selected points, numerical windows or the work that planning accepts, and needs its own revision and timing.
 #
 # <details><summary>Time-step checks of the selected runs</summary>
 #
@@ -1095,15 +1095,15 @@ show_table([("Python", platform.python_version()), ("NumPy", np.__version__), ("
 #
 # Between 16,384 and 32,768 steps the Z = 3 run keeps all 30 boxes and subproblems, but a level's distribution still changes by total variation 4.2 × 10⁻³. That is above the 10⁻³ criterion, so the time resolution of the 64 × 64 model is unresolved at that cost.
 #
-# These runs were made with `max_work=5_000_000_000`. A historical configuration can need a larger current allowance after a work-law change.
+# These runs were made with `max_work=5_000_000_000`. A historical configuration can need a larger current allowance after a change to the work formulas.
 #
-# Replan it and use its current stage-specific refusal or admitted charge when choosing the limit. A refusal names the stage, its charge and the exceeded limit. To repeat one, for example the 32,768-step run with Z = 3:
+# Plan it again and choose the limit from the work that planning now counts for each stage, as an accepted plan records it or a refusal reports it. A refusal names the stage, its counted work and the exceeded limit. To repeat one, for example the 32,768-step run with Z = 3:
 #
 # ```python
 # k64 = solve_augmented_lagrangian(
 #     rastrigin_problem,
 #     qhd=rastrigin_qhd.revise(num_grid_points=64, num_steps=32768,
-#                              max_work=5_600_000_000),  # admits the current charge of these levels
+#                              max_work=5_600_000_000),  # covers the work now counted for these levels
 #     options=al_options, refinement=refinement.revise(max_levels=3, max_no_improve=3),
 #     execution="classical", seed=7, progress=False)
 # ```

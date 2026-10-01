@@ -6,8 +6,8 @@ replays assessment, folds resources, fits models, or interprets scientific outpu
 A residual ``observed - predicted`` is formed only for the assessment bound to
 an attempt before it started, a completed acquisition and an exact timing of
 the forecast's scope. Every other pairing is kept with its reason, so
-failures and censored timings stay visible. docs/profiles.md, "Original
-forecasts and observed telemetry", defines this contract.
+failures and censored timings stay visible. docs/profiles.md, "Compare
+forecasts with measured times", defines this contract.
 """
 
 from math import isfinite
@@ -27,10 +27,24 @@ from nwqlib.execution import (
 
 
 class AttemptTiming(Record):
-    """A supplied measurement associated with one actual run/attempt/receipt.
+    """A timing that the caller measured for one attempt of a Run, to pair with its forecast.
 
-    timing preserves its exact duration or right-censored lower bound and source.
-    Distinct attempts remain distinct even when timing values happen to agree.
+    Build it with keyword arguments, for example
+    `AttemptTiming(run_id=..., attempt=..., prepared_id=..., timing=...)`,
+    and pass it in `timings=` of
+    [`align_telemetry`][nwqlib.backends.telemetry.align_telemetry]. Every field is
+    required. The timing is either an exact duration or a right-censored lower
+    bound, with its source. Distinct attempts stay distinct even when their
+    timings agree.
+
+    Attributes:
+        run_id: Required. ID of the Run.
+        attempt: Required. ID of the attempt in the Run's execution record.
+        prepared_id: Required. Content hash of the preparation record the attempt
+            used.
+        timing: Required. The `TimingObservation`: scope, nonnegative seconds,
+            `"exact"` or `"right_censored"`, and source. A right-censored timing
+            needs the reason for its cutoff.
     """
 
     run_id: Text
@@ -106,16 +120,30 @@ class TelemetryRow(Record):
 
 
 class PredictionLedger(Record):
-    """Immutable bounded data snapshot, referencing the single execution history.
+    """The forecasts of one Run paired with its observed timings, attempt by attempt.
 
-    trace_id/run_id/plan_id identify its source. assessment_ids and predictions
-    keep original forecast identities/values; rows keep every attempted event
-    including failures, partial collections and censored timing. result_id names
-    the optional actual analysis record, without inferring scientific validity.
-    Use Record.revise for new supplied data versions; this never fits coefficients
-    or modifies old assessments, model domains, calibration status or coverage.
-    Forecast validity concerns its original assessment time. A historical
-    residual does not establish calibration validity at execution time.
+    [`align_telemetry`][nwqlib.backends.telemetry.align_telemetry] returns it. The
+    fields below are read-only. Each row holds one attempt's execution event, its
+    timings, the observations it collected and its forecast comparisons, where
+    `residual_seconds` is the signed `observed - predicted` seconds or `None`
+    with the reasons. Collected observations and the contributions of the
+    Result stay separate lists. Use `revise` to record a new version of supplied
+    data. It never fits coefficients or changes the original
+    assessments, model domains, calibration status or coverage. A forecast is
+    valid at its original assessment time, and a historical residual does not
+    establish that calibration was valid when the job ran.
+
+    Attributes:
+        trace_id: Content hash of the Run's execution record.
+        run_id: ID of the Run.
+        plan_id: Content hash of the Plan.
+        assessment_ids: Content hashes of the forecasts used.
+        predictions: The original
+            [`TimePrediction`][nwqlib.backends.assessment.TimePrediction] records.
+        rows: One row per attempt, failures, partial collections and
+            right-censored timings included.
+        result_id: Content hash of the analysis Result, or `None`. It does not
+            imply that the Result is scientifically valid.
     """
 
     trace_id: ContentID
@@ -161,7 +189,20 @@ class PredictionLedger(Record):
         return self
 
     def validate_context(self, *, trace, assessments):
-        """Validate source membership after interchange, without replay or fitting."""
+        """Check that a saved `PredictionLedger` still matches its execution record and forecasts, without recomputing anything.
+
+        Args:
+            trace (ExecutionTrace): The Run's execution record.
+            assessments (tuple[ProfileAssessment, ...]): The forecasts the record
+                used.
+
+        Returns:
+            record (PredictionLedger): This record.
+
+        Raises:
+            ValueError: If the record differs from the execution record, uses a
+                forecast of another Plan or attempt, or changed its predictions.
+        """
         if (
             self.trace_id != trace.content_id
             or self.plan_id != trace.plan_id
@@ -202,13 +243,52 @@ def align_telemetry(
     # explicit inspection bounds"), an output-size control, not a model domain.
     max_comparisons: int = 100_000,
 ) -> PredictionLedger:
-    """Align existing bounded evidence without assessment, execution or fitting.
+    """Pair the forecasts of a Run with its observed timings and return the signed residuals.
 
-    Only a pre-attempt assessment_id permits forecast residuals. Missing receipts
-    or assessments keep the event with reasons. Foreign supplied run/attempt
-    timings and conflicting identities are rejected instead of silently dropped.
-    max_comparisons bounds this projection's actual forecast/timing pairs.
-    Native payloads and histograms are not copied into the returned ledger.
+    Pass a Run or a completed Result, for example `align_telemetry(run)`, to read
+    its execution record, preparation records, observations and the forecast it
+    was prepared with. The returned `PredictionLedger` keeps every attempt, failures and
+    partial collections included. A residual `observed_seconds - predicted_seconds`
+    is formed only when the attempt was bound to its forecast before it started,
+    its data collection completed, and an exact timing of the forecast's scope
+    exists. Every other attempt keeps its forecast with the reason it has no
+    residual, so a runtime or compiler mismatch, a missing scope or preparation
+    record, a failed collection or a right-censored timing stays visible. A
+    right-censored timing is a lower bound, never an exact residual. Nothing is
+    executed, assessed again or fitted, no provider is contacted, and no
+    histogram or backend payload is copied into it. A residual makes no
+    coverage claim, and a historical residual does not establish that the device
+    calibration was valid when the job ran. The
+    [telemetry section of the profiles guide](../profiles.md#original-forecasts-and-observed-telemetry)
+    describes the pairing rules.
+
+    Args:
+        run_or_result (Run | Result | None): The Run or Result to read. With
+            `None`, pass `trace` and the other records explicitly.
+        trace (ExecutionTrace | None): Execution record, when no Run or Result is
+            given.
+        assessments (tuple[ProfileAssessment, ...]): Forecasts to pair. Empty
+            uses the forecast the Run was prepared with.
+        receipts (tuple[PreparedArtifact, ...]): Preparation records, when no Run
+            or Result is given.
+        observations (ObservationView | None): Observations, when no Run or Result
+            is given.
+        timings (tuple[AttemptTiming, ...]): Additional supplied timings. Each
+            must belong to an attempt of this run. Identical timings of one
+            attempt count once, and different attempts stay distinct.
+        result (Record | None): The analysis Result whose contributions are
+            recorded, when no Run or Result is given.
+        max_comparisons (int): Positive limit on the forecast
+            and timing pairs formed.
+
+    Returns:
+        record (PredictionLedger): The forecasts paired with the timings.
+
+    Raises:
+        TypeError: If no execution record or `RunData` is available.
+        ValueError: If a Run or Result is mixed with explicit records, a timing
+            or record belongs to another run, attempt or Plan, identities
+            conflict, or the pairs exceed `max_comparisons`.
     """
     if type(max_comparisons) is not int or max_comparisons < 1:
         raise ValueError("max_comparisons must be a positive integer")

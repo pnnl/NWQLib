@@ -1,57 +1,72 @@
-# Scientific records
+# Record contracts
 
-Start with a scientific input such as `Eigenproblem(A=...)`, `LinearDynamics(A=..., initial_state=..., time=...)`, or `Expectation(state=..., observable=...)`, imported from `nwqlib`. The [scientist workflow](../scientist.md) selects a Method, creates its Plan, and produces an attached Result. [Input access](../inputs.md) describes the actual operator and state handles.
+<a id="scientific-records"></a>NWQLib's scientific inputs, output definitions, accuracy criteria, error facts and limits are records, frozen Pydantic models derived from `nwqlib.core.records.Record`. This page gives the rules every record follows and the script that checks them. [Choose a problem and output](../problems.md) describes the Problem types, their outputs and units for users, and [Supply inputs](../inputs.md) describes the operator and state handles.
 
-Importing the scientific input classes does not load vendor SDKs or execute algorithms. Core metadata uses Pydantic and standard-library code; admitting and using numerical or symbolic inputs can use the base NumPy, SciPy and SymPy dependencies. Native execution dependencies are loaded at their selected operation boundaries.
+Importing the scientific input classes, such as `Eigenproblem`, `LinearDynamics` or `Expectation` from `nwqlib`, does not load vendor SDKs or execute algorithms. Record metadata uses Pydantic and standard-library code. Checking and using numerical or symbolic inputs can use the base NumPy, SciPy and SymPy dependencies. Native execution dependencies are loaded only by the operation that uses them.
 
-## Ownership and scientific meaning
+## Where each record is defined {#ownership-and-scientific-meaning}
 
-Core owns immutable records, exact scalar encodings, units, references and limits. Evidence owns facts, frames and assessment. Problems owns scientific questions and output definitions; the selected Method owns its applicability, numerical choices, execution and analysis.
+| Code | Defines |
+| --- | --- |
+| `nwqlib.core` | Immutable records, exact scalar encodings, units, references and limits |
+| `nwqlib.evidence` | Facts, error frames and accuracy assessment |
+| `nwqlib.problems` | Scientific questions (Problems) and their output definitions |
+| The Method that planning chose | Its applicability, numerical choices, execution and analysis |
 
-| Problem | Scientific question | Default output |
-| --- | --- | --- |
-| Eigenproblem | Smallest eigenvalue of a Hermitian operator, optionally in an explicit subspace or sector | Eigenvalue |
-| LinearDynamics | Time-independent `du/dt = -A u + source` from the given initial time and state | Solution |
-| LinearSystem | Physical solution of `A x = b` | Solution |
-| Expectation | Normalized expectation of the given Hermitian observable in the given state | NormalizedExpectation |
-| SpectralEstimation | Phase information for a Hamiltonian or unitary, with a given initial state | Eigenphase |
-| Optimization | A SymPy objective on ordered real variables with finite box bounds | OptimizationCandidate |
-| ConstrainedOptimization | The Optimization question subject to at least one equality `h_i(x) = 0` or inequality `g_j(x) <= 0` | OptimizationCandidate |
-
-ConstrainedOptimization stores each constraint as its residual. `Eq(a, b)` is stored as the equality residual `a - b`, `Le(a, b)` as the inequality residual `a - b` and `Ge(a, b)` as `b - a`. A plain SymPy expression is taken as the residual itself. Strict relations are rejected because `g(x) <= 0` cannot express strictness, so state a margin explicitly. `Ne`, relations that SymPy has already evaluated to True or False, matrices and constraints with symbols outside `variables` are also rejected. ConstrainedOptimization is not an Optimization, so a box-only Method such as QHD refuses it at planning instead of ignoring its constraints. The QHD family solves it with `solve_augmented_lagrangian`, a sequence of QHD box problems ([QHD guide](../algorithms/qhd.md#constrained-problems)).
-
-A valid record is not a promise that every Method supports it. Hermitian admission, dimensions and coordinate order are checked by the informed input owners. Method-specific premises remain at the selected Method; for example, a descriptive unitary input record does not itself prove unitarity. JSON stores symbolic descriptions without evaluating source strings.
-
-Input admission preserves physical magnitude, complex phase and original coordinates. A full-space eigenvalue and a value in an explicitly supplied subspace keep distinct scientific identities. Output scope comes from the Problem, while output-specific conditioning identifies such relations as a nonzero norm or a selected subspace.
-
-`NormalizedExpectation` means `u† O u / (u† u)` for nonzero `u`; `QuadraticForm` means `u† O u`; `NormSquared` means `u† u`. These are separate quantities. On an Expectation input, `problem.unit` labels the normalized observable expectation. It does not supply the missing amplitude unit for a physical quadratic form, norm or vector. Their default frame unit therefore remains unspecified unless the output declares it explicitly.
-
-For LinearDynamics and LinearSystem, `problem.unit` labels the physical solution amplitude: Solution and physical StateVector inherit it, and NormSquared uses its squared unit. A unit-normalized StateVector has a dimensionless error frame. There is no automatic conversion between unit systems. An explicit output unit records the caller's convention rather than proving it.
-
-Solution uses physical coordinates and `l2` error. StateVector explicitly chooses physical or unit normalization and physical phase or equivalence modulo global phase; the latter uses `phase_aligned_l2`. Samples uses total variation between distributions. Eigenphase uses circular distance in dimensionless turns, with `U v = exp(2 pi i phase) v`. OptimizationCandidate uses objective gap and does not imply an optimality certificate. Declaring an output creates neither acquired data nor a live quantum state handle.
+The Problem table, the output definitions, the unit rules and the residual convention of `ConstrainedOptimization` are in [Choose a problem and output](../problems.md#problem-types).
 
 ## Accuracy and facts
 
-Accuracy specifies exactly one positive, finite absolute or relative tolerance, confidence strictly between zero and one, and either the total or sampling component. It contains no achieved-accuracy status. Its criterion is separate from the quantity, unit, scope and conditioning supplied by the output's error frame. Relative assessment needs supported reference-scale evidence; zero or unknown reference norm cannot become an implicit denominator. See [error evidence](../error_evidence.md) for explicit reference and absolute-fallback assessment.
+`Accuracy` holds three things:
 
-A Fact separates availability, evidence kind, optional composition role, quantity, unit, scope and assumptions. Concrete zero is distinct from unknown. Unknown and not-applicable facts carry a reason without an invented value or evidence basis. Symbolic facts use inert Symbol and Source references. Concrete values use Float64, Complex128, Rational or an explicit boolean.
+- exactly one tolerance, absolute or relative, positive and finite
+- a confidence strictly between zero and one
+- the error component it applies to, total or sampling
 
-Evidence records its source, version, domain and acquisition-work provenance where applicable. A witnessed receipt also requires an artifact, subject identity and scope. Evidence witnessed by a verification receipt also names the content identity of the options record that produced the value. Receipt of a user assertion preserves `user_assertion`; neither a receipt nor schema validation proves the assertion. FramedFact can carry the failure probability actually supported by its evidence. This does not turn an unknown fact into a bound or borrow a confidence level from a later Accuracy criterion.
+It holds no achieved-accuracy status. The quantity, unit, scope and conditioning that the tolerance refers to come from the output's error frame, separately from `Accuracy`. A relative tolerance needs supported evidence of the reference scale, and a zero or unknown reference norm never becomes an implicit denominator. [Relative criteria](../verification.md#relative-criteria) describes assessment with an explicit reference and an absolute fallback.
 
-## Immutability, identity and payloads
+A `Fact` keeps availability, evidence kind, an optional composition role, quantity, unit, scope and assumptions as separate fields. A concrete zero is distinct from unknown. An unknown or not-applicable fact carries a reason and no invented value or evidence basis. A symbolic fact uses inert `Symbol` and `Source` references. A concrete value is a `Float64`, `Complex128`, `Rational` or an explicit boolean.
 
-Nested Record fields are frozen, typed containers detach caller-owned collections, and public JSON/dict descriptions are detached. `revise(...)` and `model_copy(update=...)` validate changes and leave the original untouched. Core and evidence records record revision ancestry through `parent_id`. Scientific Problem, output and Accuracy inputs omit revision and schema bookkeeping fields from their public field set. Unchecked `model_construct` and Pydantic `.copy(...)` are disabled; public admission rejects undeclared fields even with an extra-field override.
+`Evidence` records its source, version, domain and, where applicable, the provenance of the work that produced the value. Witnessed evidence, whose `status` is `"witnessed"`, must also name the receipt that witnesses it, which consists of an artifact, the content hash of the witnessed subject and the witnessed scope. Evidence witnessed by a verification receipt also names the content hash of the options record that produced the value. A user assertion recorded with a receipt keeps the kind `user_assertion`, and neither the receipt nor schema validation proves the assertion. A `FramedFact` can carry the failure probability that its evidence actually supports. This does not turn an unknown fact into a bound or borrow a confidence level from a later `Accuracy` criterion.
 
-Record identity is the SHA-256 digest of a compact, sorted-key UTF-8 envelope containing `nwqlib.record/1`, the fully qualified record type and declared fields. Computed IDs are excluded from the digest input. Ordered collections remain ordered. Loading checks all supplied IDs, including nested ones, after domain validation and scalar normalization. Omitting an ID does not bypass admission. An identity is a content association, not source authentication or proof of an external payload. Unit compatibility compares symbol and dimension independently of revision ancestry.
+## Immutability, content hashes and payloads {#immutability-identity-and-payloads}
 
-Float64 uses finite binary64 values; Complex128 stores two such components. Signed zero canonicalizes to positive zero. Rational uses exact integers in reduced form with a positive denominator: `1/3` remains distinct from its binary64 approximation. Nonfinite values, boolean numbers and coercion from numeric strings are rejected by these scalar encodings.
+### Immutability
 
-Actual operator/state ingestion owns read-only numerical snapshots. Their JSON descriptions preserve identities and preparation metadata but do not recreate executable numerical access. Use the existing Method archive hooks through [saved evidence](../saved_evidence.md) to save and reopen Plans, Runs and Results with their required payloads.
+Nested record fields are frozen, typed containers detach caller-owned collections, and the public JSON and dict descriptions are detached copies. `revise(...)` and `model_copy(update=...)` validate the changes and leave the original record untouched. Core and evidence records keep their revision ancestry in `parent_id`. The scientific Problem, output and `Accuracy` inputs leave the revision and schema bookkeeping fields out of their public field set. The unchecked `model_construct` and Pydantic's `.copy(...)` are disabled. Public validation rejects undeclared fields even with an extra-field override.
 
-InputRef declares a representation and identity without creating data access.
+### Content hash
 
-Limit identifies stage, metric, unit, kind, scope and nonnegative finite value. Memory and stored bytes are capacity stocks; transfer/materialization bytes and CPU seconds are consumption; wall seconds are elapsed-duration deadlines. Byte and count limits require exact integers, including beyond binary64's exact-integer range. The record does not execute, authorize or enforce work. Actual operation controls and ExecutionLimits are enforced by their respective execution owners.
+A record's identity, `content_id`, is the SHA-256 digest of a compact, sorted-key UTF-8 JSON envelope that contains `nwqlib.record/1`, the fully qualified record type and the declared fields. Computed IDs are excluded from the digest input, and ordered collections keep their order. Loading checks every supplied ID, including nested ones, after domain validation and scalar normalization. Omitting an ID does not skip validation. A content hash associates data with content. It does not authenticate a source or prove an external payload. Unit compatibility compares symbol and dimension independently of revision ancestry.
 
-## Current validation
+### Exact scalar encodings
 
-Run `docs/scripts/check_core_records.py` using the checked-command procedure in [maintenance](../MAINTENANCE.md). Its fresh subprocess installs an import-attempt blocker before NWQLib imports, then performs real scientific-input admission, a two-entry operator action, schema and JSON checks, Program binding, selected-resource estimation, selected-block construction JSON round trips and Pauli readout selection. A deliberately caught forbidden import must still fail the audit. This checks dependency isolation and current record behavior without vendor SDKs or algorithm execution; it does not validate scientific method accuracy or authenticate external payloads.
+| Encoding | Stores |
+| --- | --- |
+| `Float64` | One finite binary64 value |
+| `Complex128` | Two finite binary64 components |
+| `Rational` | Exact integers in reduced form with a positive denominator |
+
+Both binary64 encodings turn signed zero into positive zero. A `Rational` is exact, so `1/3` stays distinct from its binary64 approximation. These encodings reject nonfinite values, boolean numbers and coercion from numeric strings.
+
+### Operator and state payloads
+
+Operator and state ingestion keeps read-only numerical snapshots of the data it accepts. Their JSON descriptions keep identities and preparation metadata but do not recreate executable numerical access. To save and reopen Plans, Runs and Results with their required payloads, use the existing Method archive hooks through [Save, load and reanalyze results](../saved_evidence.md).
+
+`InputRef` declares a representation and an `identity` without creating data access.
+
+### Limit records
+
+A `Limit` names its stage, metric, unit, kind, scope and a nonnegative finite value. Each metric has one unit and one kind, and the kind fixes how the limit is compared:
+
+| Kind | Metrics | Compared as |
+| --- | --- | --- |
+| `capacity_stock` | Memory and stored bytes | A peak |
+| `consumption` | Transfer and materialization bytes, CPU seconds, the count metrics (evaluations, shots, jobs, host invocations, host work) and currency | A sum over the work |
+| `deadline` | Wall seconds | An elapsed duration |
+
+Byte and count limits require exact integers, including values beyond binary64's exact-integer range. A `Limit` record does not execute, authorize or enforce work. Operation controls and `ExecutionLimits` are enforced by the code that runs the operation.
+
+## Check the record contracts {#current-validation}
+
+Run `docs/scripts/check_core_records.py` with the checked-command procedure in [Maintenance](../MAINTENANCE.md). The script starts a fresh subprocess that installs an import-attempt blocker before NWQLib is imported. It then runs, on real inputs, the checks of a scientific input, a two-entry operator action, schema and JSON checks, Program binding, resource estimation of the chosen construction, JSON round trips of the chosen block construction and Pauli readout selection. A forbidden import that the code catches must still fail the script. The script checks dependency isolation and current record behavior without vendor SDKs or algorithm execution. It does not validate the accuracy of a scientific method or authenticate external payloads.

@@ -108,30 +108,62 @@ class _PreparedIBM:
 
 
 class IBMRuntimeBackend(Record):
-    """Explicit IBM device/instance and bounded wrapper I/O configuration.
+    """IBM Quantum Runtime connection for sampled counts and provider expectation estimates.
 
-    account_name selects a saved SDK account; otherwise token_env is read only
-    during an explicit preparation/retrieval action. No credential is stored.
-    mode is job by default; batch/session require an already created container_id.
-    options_json selects the requested primitive options, not a claim about
-    unknown server defaults. max_input_bytes bounds optional stored QPY output;
-    a live run without a journal does not create that archive. SDK transport
-    serialization remains the SDK's operation.
-    Experimental option overrides are unsupported because they can bypass the
-    selected readout and uncertainty semantics.
-    Estimator defaults resilience_level to zero unless explicitly selected;
-    this does not silently enable mitigation work. Its Plan owns precision.
-    The Run bounds explicit serialized buffers and decoded arrays;
-    internal SDK HTTP buffering, retries, compilation memory and billing remain
-    unknown. It is not a native RSS, wall-time or provider-spend bound.
-    Refresh preserves completed PUB observations before a later decode error.
-    RuntimeJobV2.result still fetches the whole job payload on a resumed read;
-    already published PUBs skip local statistics decoding, not SDK transfer.
-    optimization_level selects the preset pass manager; a level other than the
-    default 1 is recorded as the receipt exclusion "optimization_level", which
-    marks a circuit compiled at a non-default level. The target has no derived
-    roundoff constant, so state_error() gives no bound at any level. The
-    operation count describes the compiled circuit.
+    Build it with keyword arguments, for example
+    `IBMRuntimeBackend(device="ibm_example", instance="my-instance", max_input_bytes=65_536)`,
+    and pass it as `backend=` to [`prepare`][nwqlib.scientist.prepare].
+    `device`, `instance` and `max_input_bytes` are required. It needs the `ibm`
+    extra. Counts use SamplerV2 and a provider estimate uses EstimatorV2.
+    Construction reads no credential and contacts no service. Preparation and
+    retrieval use the saved SDK account named by `account_name`, or otherwise the
+    token in the environment variable named by `token_env`, and no credential is
+    stored in the configuration or the Run's files.
+
+    Preparation compiles each circuit for the device with the Plan's runtime seed
+    and keeps the logical-to-physical layout. The Estimator's resilience level is
+    zero unless `options_json` selects another, so no error mitigation runs
+    implicitly, and the Plan sets the precision. The Run bounds serialized
+    buffers and decoded arrays. SDK HTTP buffering, retries, compilation memory,
+    wall time and billing are not bounded. A refresh keeps the results already
+    decoded when a later result fails to decode. A resumed read fetches the
+    whole job payload again, and results already saved skip only the local
+    decoding. Only offline SDK and transport checks qualify this backend, and live
+    accounts, queues and devices are unqualified. The [IBM Runtime guide](../ibm.md)
+    describes jobs, retrieval and cancellation.
+
+    Attributes:
+        device: Required. IBM device name.
+        instance: Required. IBM instance. `"auto"` is rejected, because retrieval
+            and job recovery compare it with the job's own instance.
+        account_name: Default `None`. Name of a saved IBM SDK account. With
+            `None`, the token is read from the variable `token_env` names.
+        token_env: Default `"NWQLIB_IBM_RUNTIME_TOKEN"`. Environment variable that
+            holds the API token, read only during preparation or retrieval.
+        mode: Default `"job"`. `"batch"` or `"session"` attaches every job to the
+            existing container `container_id`.
+        container_id: Default `None`. ID of an existing Batch or Session. Required
+            in batch and session mode, and must be `None` in job mode.
+        calibration_id: Default `None`. Device calibration ID passed to the IBM
+            SDK when the device is opened.
+        options_json: Default `"{}"`. JSON object of the requested primitive
+            options. It states the requested options, not the server's defaults.
+            Experimental option overrides are rejected, because they can bypass the
+            requested readout and its uncertainty.
+        optimization_level: Default `1`. Qiskit preset pass-manager level, 0 to 3.
+            A level other than 1 is recorded as the exclusion
+            `"optimization_level"` in the preparation record, and the operation
+            count describes the compiled circuit. The IBM target has no derived
+            roundoff constant, so `state_error()` gives no bound at any level.
+        initial_layout: Default `None`. Physical qubit for each logical qubit,
+            without repeats.
+        max_input_bytes: Required. Positive. Limit in bytes on the QPY copy of
+            each prepared circuit, which only a Run saved to a directory writes.
+
+    Raises:
+        ValueError: If `container_id` is given in job mode or missing in batch or
+            session mode, if `instance` is `"auto"`, or if `initial_layout`
+            repeats a qubit.
     """
 
     qualification_notice: ClassVar[str] = (

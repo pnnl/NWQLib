@@ -9,6 +9,10 @@ from pydantic import Field, StrictInt
 from nwqlib.core.records import Basis, InputRef, Record, Text
 
 Count = Annotated[StrictInt, Field(ge=0)]
+"""Nonnegative integer field: a Python `int` that is 0 or larger.
+
+A `bool` or a float such as `2.0` is rejected, not converted.
+"""
 DEFAULT_INPUT_BYTES = DEFAULT_MAX_BYTES
 
 
@@ -66,25 +70,34 @@ def refuse_known_need(family, field, cap, known_need, later):
 
 
 class InputManifest(Record):
-    """Immutable metadata; exports never read native payloads.
+    """Metadata of an accepted operator or state: content hash, representation, basis, size and checks.
 
-    Identity status distinguishes an ingestion digest from a caller assertion.
-    Access lists executable classical operations only. Quantum access is
-    declared separately by a selected preparation specification.
+    `OperatorInput.manifest` and `StateInput.manifest` hold it. Reading or
+    saving it never reads the numerical data. `access` lists the classical
+    operations of the handle only. How a state can be prepared on qubits is
+    recorded separately, in
+    [`StatePreparationSpec`][nwqlib.problems.inputs.StatePreparationSpec].
+    The fields below are read-only.
 
     Attributes:
-        reference: Input identity, representation and ingestion source.
-        basis: Computational basis, dimension and coordinate ordering.
-        identity_status: ``ingested`` for a digest of the admitted bytes,
-            ``declared`` for a caller-supplied identity.
-        dtype: Stored numerical dtype, when the input has one.
-        shape: Stored array or table shape.
-        byte_order: Byte order of the stored numbers.
-        payload_bytes: Stored native bytes.
-        access: Classical operations this handle can perform.
-        checked: Structural facts established at admission, such as finite
-            entries or exact Hermitian equality.
-        work_law: Admission and action cost law of this representation.
+        reference: Reference of the input: identifier, representation (for
+            example `"dense"`, `"csr"`, `"pauli"` or `"vector"`) and source.
+        basis: Computational basis, dimension and coordinate order.
+        identity_status: `"ingested"` when the identifier is a SHA-256 hash of
+            the stored data with its representation, dtype, shape and order,
+            `"declared"` when the caller supplied it, as for a preparation
+            circuit.
+        dtype: Stored numerical dtype, or `None` when the input has none.
+        shape: Stored array or table shape, or `None`.
+        byte_order: `"little"` or `"big"` for stored numbers,
+            `"not_applicable"` for one-byte data, or `None`.
+        payload_bytes: Bytes of the stored data, or `None` when unknown.
+        access: Classical operations of the handle, among `"matvec"`,
+            `"entries"`, `"pauli_terms"` and `"fermion_terms"`.
+        checked: Properties checked when the input was accepted, such as
+            finite entries or exact equality with the conjugate transpose.
+        work_law: Text form of the cost of accepting and applying this
+            representation.
     """
 
     reference: InputRef
@@ -100,11 +113,20 @@ class InputManifest(Record):
 
 
 class ProductManifest(Record):
-    """Preserved ordered factors; inspection never reads their native payloads.
+    """Metadata of a [`FactorizedOperatorProduct`][nwqlib.operators._factorized.FactorizedOperatorProduct]: its ordered factors, basis and sizes.
 
-    payload_bytes describes only the tuple's logical metadata. Referenced
-    factor payload bytes are summed separately, or unknown if any is unknown;
-    repeated references are counted per occurrence, not deduplicated RSS.
+    Reading it never reads the factors' numerical data. The fields below are
+    read-only.
+
+    Attributes:
+        factors: References of the factors, in product order.
+        basis: The basis that every factor shares.
+        structure: Always `"general"`.
+        payload_bytes: Bytes of the factor-reference tuple only.
+        referenced_payload_bytes: Sum of the factors' stored bytes, counted
+            once per occurrence, so a repeated factor counts each time. This
+            is not a measurement of deduplicated memory. `None` when the size
+            of any factor is unknown.
     """
 
     factors: tuple[InputRef, ...]

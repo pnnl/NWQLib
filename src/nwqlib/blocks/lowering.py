@@ -44,18 +44,24 @@ def _local_method_context(max_direct_amplitudes=DEFAULT_MAX_DIRECT_AMPLITUDES):
 
 @dataclass(frozen=True)
 class LogicalCircuit:
-    """Selected artifact and complete little-endian register/measurement layout.
+    """A Qiskit circuit built from a selected construction, with its register and measurement layouts, before compilation.
+
+    [`lower_qiskit`][nwqlib.blocks.lowering.lower_qiskit] returns it. The fields
+    below are read-only. Bit and qubit indices are little-endian, index 0 being
+    the least significant.
 
     Attributes:
-        construction_id: Exact portable selected construction consumed.
-        circuit: Native Qiskit circuit; no compilation or execution occurred.
-        quantum_layout: Ordered (register, physical logical-qubit indices) pairs.
-        measurement_layout: Ordered (result, classical-bit indices) pairs.
-        dynamic_visits: Admitted dynamic IR visits, not native gate count.
-        construction_work: Sum of selected construction size laws, not measured work or a funding limit.
-        defined_selections: Used native definition templates, including shared bases.
-            Exact per-call arguments belong to the selected Program; several
-            specializations can use the same template identity.
+        construction_id: Content hash of the construction the circuit was built from.
+        circuit: The Qiskit circuit. It is not compiled or run.
+        quantum_layout: `(register, qubit indices)` pairs in declaration order.
+        measurement_layout: `(classical value, bit indices)` pairs.
+        dynamic_visits: Program node visits counted while building the circuit,
+            not a gate count.
+        construction_work: Sum of the size rules of the selected definitions, not
+            measured work or a limit.
+        defined_selections: Content hashes of the gate definitions used, base
+            definitions included. Several calls with different arguments can share
+            one definition.
     """
 
     construction_id: str
@@ -74,34 +80,50 @@ def lower_qiskit(construction: SelectedConstruction, *, blocks: tuple[SelectedBl
                  max_operations=100_000, max_qubits=4096, max_clbits=4096,
                  max_direct_amplitudes=DEFAULT_MAX_DIRECT_AMPLITUDES,
                  max_synthesis_work=1_000_000_000) -> LogicalCircuit:
-    """Lower static Sequence/Repeat/coherent calls plus allocate/release/measure/reset.
+    """Build the Qiskit circuit of one experiment of a selected construction, after checking its size.
 
-    All admission, native binding, widths, direct-preparation sizes,
-    supported-node checks and compact dynamic work accounting precede SDK
-    import. A lifetime cannot be split across
-    jobs, and reallocation is explicitly unsupported here. No QASM fallback.
-    A selected terminal MeasurementBatch materializes one logical body regardless
-    of acquisition repetitions/kind. Its receipt covers that template; acquisition
-    readiness and repeated submission belong to the execution consumer.
-
-    Lowering reads the same Program and selected definitions as the resource
-    fold, so the circuit and the estimate describe one construction. Each
-    BlockCall is emitted from the SelectedBlock whose record identity equals
-    the selection named by the Program. A counting pass first admits every
-    reachable binding and charges Repeat multiplicity arithmetically, so an
-    oversized or unbound construction rejects before Qiskit is imported.
+    The construction's root must be one static experiment, for example from
+    [`Program.select_experiment`][nwqlib.ir.records.Program.select_experiment].
+    It supports sequences, bound repeats, block calls, coherent regions,
+    allocation, release, computational measurement and reset. Reallocation and a
+    register lifetime split across jobs are not supported, and there is no
+    OpenQASM fallback. A counting pass first checks every reachable binding,
+    width, direct-preparation size and supported node and counts the repeats
+    arithmetically, so an oversized or unbound construction is rejected before
+    Qiskit is imported. It reads the same Program and selected definitions
+    as the resource estimate, so the circuit and the estimate describe one
+    construction. Each block call is built by the `SelectedBlock` whose record
+    is the selection the Program names. A final measurement batch gives one
+    circuit, whatever its repetitions or observation kind, and running it is the
+    Run's task.
 
     Args:
-        construction: Selected Program and definitions.
-        blocks: Live SelectedBlocks for the reachable selections, matched by exact record identity.
-        max_operations: Inclusive limit on dynamic IR visits, Repeat multiplicity included.
-        max_qubits: Limit on the total declared quantum register width.
-        max_clbits: Limit on the total declared classical bit width.
-        max_direct_amplitudes: Limit on the amplitude count of each reachable direct state preparation, whose synthesis grows as q*2**q.
-        max_synthesis_work: Limit on the total work, in the units of ``_dense_synthesis.dense_synthesis_size``, of the exact syntheses and Qiskit's control of them that the controlled transformed blocks of this lowering make (``transform_block``). The work of each controlled base is added and compared before its synthesis starts.
+        construction (SelectedConstruction): The Program and its selected
+            definitions.
+        blocks (tuple[SelectedBlock, ...]): The bound blocks of the reachable
+            selections, matched to them by their exact records.
+        max_operations (int): Positive, inclusive limit on the
+            Program node visits, repeat counts included.
+        max_qubits (int): Limit on the total declared qubits.
+        max_clbits (int): Limit on the total declared classical
+            bits.
+        max_direct_amplitudes (int): Default `65536`. Positive limit on the
+            amplitudes of each reachable direct state preparation, whose synthesis
+            work grows as `q * 2**q`.
+        max_synthesis_work (int): Positive limit on the
+            total work of the exact dense-unitary syntheses, and Qiskit's control
+            of them, that the controlled blocks of this circuit make, in the work
+            units of the dense synthesis size rule
+            ([Circuit-free synthesis laws](../ENGINEERING_CONSTANTS.md#circuit-free-synthesis-laws)).
+            Each synthesis is counted before it starts.
 
     Returns:
-        The LogicalCircuit with its register and measurement layouts.
+        circuit (LogicalCircuit): The circuit with its register and measurement layouts.
+
+    Raises:
+        ValueError: If a limit is invalid or exceeded, the root is not one static
+            experiment, a block is missing or does not match its selection, or a
+            node is outside the supported subset.
     """
     if type(max_synthesis_work) is not int or max_synthesis_work < 1:
         raise ValueError("lowering max_synthesis_work must be a positive integer")

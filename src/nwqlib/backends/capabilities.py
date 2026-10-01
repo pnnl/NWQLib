@@ -56,38 +56,63 @@ class InstructionSupport(Record):
 
 
 class BackendTarget(Record):
-    """Description of a simulator, cloud provider, or export target.
+    """What a simulator, cloud provider or export target supports, for profile assessment.
 
-    Args:
-        name: Backend or target name.
-        provider: Provider family, such as ``"qiskit_aer"`` or ``"ionq"``.
-        capabilities: Supported coarse execution capabilities; None is unknown.
-        description: Human-readable description for reports.
-        native_basis_gates: Native or preferred basis gates when known.
-        max_qubits: Optional advertised or configured qubit limit.
-        artifacts: Accepted artifact formats; None is unknown, empty is unsupported.
-        readouts: Supported native observation kinds, separately from coarse
-            capabilities. ``trajectory`` is the exact multi-position schedule
-            kind; each of its points also needs its own readout kind listed.
-        readout_features: Trajectory features the target executes:
-            ``multi_position`` (several observation points of one coherent
-            state in one acquisition) and ``views`` (reversible readout tails
-            with their exact inverses, for Pauli and probability points).
-            None is unknown.
-        reducers: The registered acquisition-time reducers
-            (``core.planning.READOUT_REDUCERS``, looked up with
-            ``core.planning.registered_reducer``, which also resolves a
-            built-in reducer whose module is not yet imported) that the target
-            executes at a trajectory point: a tuple of reducer names, or
-            ``"registered"`` for every reducer registered in that registry, which a target
-            declares when it hands each registered reducer its saved state
-            and runs the reducer's own registered execution function. None is
-            unknown.
-        host_dependencies: Packages available to host kernels on this target.
-            Profile assessment requires every dependency a selected kernel
-            declares to be listed. None is unknown.
-        instructions: Exact instruction subset, including controls and adjoints.
-        program_nodes: Supported shared IR node kinds for selected-construction input.
+    Pass it as `target=` to a
+    [`DeviceConfiguration`][nwqlib.backends.profiles.DeviceConfiguration].
+    Start from a built-in target such as
+    [`AER_STATEVECTOR_TARGET`][nwqlib.backends.targets.AER_STATEVECTOR_TARGET]
+    and change fields with `revise`, or build one with keyword arguments,
+    for example `BackendTarget(name="my_target", provider="my_provider")`.
+    `name` and `provider` are required. For each optional collection,
+    `None` means unknown and an empty tuple means none, so profile
+    assessment can tell an undeclared subset from an unsupported one. A
+    coarse capability never certifies a readout or instruction that the
+    target does not list. The [profiles guide](../profiles.md) shows how
+    these declarations decide the capability check.
+
+    Attributes:
+        name: Required. Backend or target name.
+        provider: Required. Provider family, such as `"qiskit_aer"` or
+            `"ionq"`.
+        capabilities: Default `None`, unknown. Coarse execution
+            capabilities, such as `"statevector"`, `"counts"` or
+            `"noise_model"`.
+        description: Default `""`. Text for reports.
+        native_basis_gates: Default `()`. Native or preferred basis gates
+            when known, in the given order.
+        max_qubits: Default `None`. Advertised or configured qubit limit.
+        artifacts: Default `None`, unknown. Accepted input forms, such as
+            `"selected_construction"` (a Plan's construction), which profile
+            assessment requires.
+        readouts: Default `None`, unknown. Supported observation kinds among
+            `"pauli_expectation"`, `"counts"`, `"probabilities"`,
+            `"host_scalars"`, `"amplitudes"`, `"estimated_observable"` and
+            `"trajectory"`, declared separately from `capabilities`.
+            `"trajectory"` is the exact schedule with several observation
+            points, and each point also needs its own readout kind listed.
+        readout_features: Default `None`, unknown. Trajectory features the
+            target executes: `"multi_position"` (several observation points
+            of one coherent state in one execution) and `"views"`
+            (reversible basis changes before a Pauli or probability point,
+            undone exactly afterwards).
+        reducers: Default `None`, unknown. The registered reducers that the
+            target runs at a trajectory point, which turn a saved state into
+            statistics during execution: a tuple of reducer names, or
+            `"registered"` for every reducer in
+            `nwqlib.core.planning.READOUT_REDUCERS`.
+        host_dependencies: Default `None`, unknown. Packages available to
+            classical routines on this target. Profile assessment requires
+            every dependency that a chosen routine declares to be listed.
+        instructions: Default `None`, unknown. Exact instruction subset,
+            including controls and adjoints, as `InstructionSupport`
+            records, each naming one primitive gate or one implementation
+            `Source` and its width.
+        program_nodes: Default `None`, unknown. Supported `Program` node
+            kinds.
+
+    Raises:
+        ValueError: If a collection declares a value twice.
     """
 
     name: Text

@@ -2243,149 +2243,202 @@ def _best_and_last(iterations, tolerance):
 
 def solve_augmented_lagrangian(problem, *, qhd, options=AugmentedLagrangian(), refinement=None, backend=None,
                                execution=None, shots=None, seed=None, limits=None, progress=None, directory=None):
-    """Solve a ConstrainedOptimization on QHD's finite grid by an augmented-Lagrangian sequence of QHD solves.
+    """Minimize a constrained objective by an augmented-Lagrangian sequence of QHD solves.
 
-    Round k builds the normalized effective objective L_k
-    (``_effective_objective``) with multipliers lambda-bar^k, mu-bar^k and
-    penalty rho_k, plans ``Optimization(objective=L_k, variables, bounds=the
-    preprocessed box, unit=problem.unit)`` with ``qhd``, executes it with
-    ``prepare`` and ``submit``, reads a point x_{k+1} (``_choose``), evaluates
-    f, h and g there with functions lambdified once for the run, and updates
-    the multipliers and the penalty (``_update``). Under
-    ``options.inequality_form="slack"`` or ``"auto"`` the round first fixes
-    how its kept inequalities enter (``_round_problem``, Proposition 54 of
-    docs/mathematics.md): a converted inequality adds a slack variable, after
-    the problem's variables and with the box ``[0, U]`` of its cap, and the
-    round plans its inner objective L(x, s) (``_inner_objective``) instead,
-    reads a joint point and projects it to x, where the update above is
-    unchanged (``ALIteration.representation``). It stops when the
-    normalized tests of ``options.termination`` hold: with
-    ``feasibility_and_complementarity``, complementarity <= epsilon_c and
-    infeasibility <= epsilon_f (Algencan's Eqs. (10.7)-(10.8)), and with
-    ``feasibility``, infeasibility <= epsilon_f. Otherwise it stops after
-    ``options.max_iterations`` rounds, when an inner result has no valid
-    point, when the cumulative ``limits`` cannot fund a round, or when an
-    inner planning, preparation or execution raises after the first round
-    (``AugmentedLagrangianRecord`` lists the statuses). No round is retried.
-    In the first round such an error propagates unchanged, because no round
-    has completed and a configuration that QHD rejects should surface at
-    once. That includes a first round whose Run refuses the limits, while
-    limits that the layer's own test finds unable to fund the first round's
-    circuit or shots end the run with ``budget_exhausted`` after zero
-    rounds (``_outer.round_limits`` describes both).
+    `solve_augmented_lagrangian(problem, qhd=QHD(...))` solves a
+    `ConstrainedOptimization`, the box problem with equalities `h_i(x) = 0` and
+    inequalities `g_j(x) <= 0`. Round k builds the normalized effective objective
+    `L_k(x) = F + sum_i lambda_bar_i H_i + (rho/2) sum_i H_i**2 + sum_j ([mu_bar_j + rho G_j]_+**2 - mu_bar_j**2)/(2 rho)`
+    with `F = f/s_f`, `H_i = h_i/s_{h_i}`, `G_j = g_j/s_{g_j}`, the round's multipliers
+    lambda_bar = lambda-bar^k, mu_bar = mu-bar^k and penalty rho = rho_k. The equality
+    part is Eq. (6) of Wu et al., arXiv:2605.12066v1, and the inequality part the
+    Powell-Hestenes-Rockafellar (PHR) term (Rockafellar, doi:10.1007/BF01580138). The
+    round plans
+    `Optimization(objective=L_k, variables, bounds=the preprocessed box, unit=problem.unit)`
+    with `qhd`, runs it with `prepare` and `submit`, reads a point x_{k+1} by
+    `options.inner_point`, evaluates f, h and g there with numerical functions formed
+    once for the run (SymPy `lambdify`), and updates the multipliers to
+    `lambda+ = lambda + rho h` and `mu+ = max(0, mu + rho g)` and the penalty (Birgin
+    and Martinez, doi:10.1137/1.9781611973365, Algorithm 4.1 and Eqs. (4.7)-(4.9)). The
+    guide's [constrained problems](../../algorithms/qhd.md#constrained-problems) section
+    explains each step.
 
-    With ``refinement``, round k instead runs box refinement
-    (``refinement.refine_box``) on its inner problem, from the preprocessed
-    box and the round's slack boxes, with ``qhd``, and takes the projection
-    of the point of the level with the least recorded relative value of the
-    inner objective, the earlier level on ties, as x_{k+1}
-    (``_refined_choice``). The round compares its inner objective, L_k under
-    the PHR policy and L(x, s) with an inequality representation. A physical
-    level solves this objective, and a search-model level solves its positive
-    normalization. The point rules act in the inner coordinates.
-    best_observed chooses the least observed table value. most_probable
-    chooses a joint mode. mode_or_mean compares the joint mode with the joint
-    conditional mean using the inner objective, with a tie going to the grid
-    point. Refinement compares recorded relative values of the inner
-    objective across levels and takes the earlier level on a tie. The outer
-    point is the projection onto the original variables, and effective_value
-    is the PHR value L_k evaluated at that projection when a representation
-    is present. This is the order of the reproduction scripts of Wu et al.
-    arXiv:2605.12066v1: refinement inside each multiplier round. f, h and g
-    are then evaluated at that point in the original coordinates, and the
-    update is unchanged. The point is the level's reported point
-    (``RefinementLevel.point``), for the search model the image ``a + D u``
-    of the level's unit point u rounded once to binary64, while the level
-    evaluated its objective at the exact image. f, h and g are evaluated at
-    the rounded point because it is the point that the round and the run
-    return to the user, and the recorded residuals and objective must
-    describe that point. Each refinement level checks the original objective
-    and constraints at the original-coordinate projection of every compared
-    point. If an off-grid mean makes an original function nonfinite or
-    undefined, the level records mean_unavailable and uses its valid grid
-    point. The level's inner-value comparison keeps its existing table and
-    coordinate-transformation conventions (``_level_check``). When an
-    original function is not finite and real at a level's grid point, or at
-    a point that a stall split scores, that level fails as a level whose Run
-    raised does, before a split or a next box is decided: in a round after
-    the first, or after a completed level, the refinement stops with ``inner_failed``
-    and the run ends after the round, and in the first level of round 0 the
-    error propagates. Without refinement ``_choose`` keeps the grid point
-    when the mean fails, and a failure at the grid point ends a round after
-    the first with ``inner_failed`` and propagates in round 0.
-    ``refinement.point_rule`` reads every level and must equal
-    ``options.inner_point``, which has no second role, and two different
-    rules are rejected before any work, as are stall-split and level
-    initial-state options that the QHD configuration cannot carry out
-    (``refinement.check_refinement_options``).
-    A stall split, when the options ask for one, acts within each round's
-    refinement with the options' budget. ``limits`` stays cumulative over
-    all rounds and levels, and each level's Run gets what the earlier rounds
-    and levels left (``_outer.round_limits``). A refinement that completed a
-    level always gives the round its point. ``_outer.refinement_stop`` states
-    how its stopping reason ends the run. After ``budget_exhausted``,
-    ``inner_failed`` or ``no_valid_point`` the run records the round and
-    stops, with the success status when the round's point met the stopping
-    test and with the refinement's reason otherwise, and a refinement that
-    completed no level ends the run with its own reason. An error of the
-    first level of round 0 propagates. Any later error of a level ends the
-    run after keeping the completed rounds and levels, with ``inner_failed``
-    or, when its round kept a point that met the stopping test, with the
-    success status. The best and last points are chosen among rounds by the
-    rules above, not among levels.
-    The configuration fixes before the first round at most
-    ``max_iterations * refinement.max_levels`` inner solves and the host-work
-    bound ``AugmentedLagrangianRecord.admitted_work_bound``
-    (``_admitted_bounds``).
-
-    Every round's random streams come from ``SeedSequence(seed).spawn``,
-    through ``RandomStreams.from_sequence`` as ``nwqlib.scientist.compare``
-    does, and the round records its child's entropy and spawn key. With
-    refinement, level z of round k plans from the z-th child of the round's
-    child, whose spawn key ``(k, z - 1)`` its level record keeps.
-
-    With ``directory`` every inner Run is durable, under
-    ``iterations/<k>/run/``, or ``iterations/<k>/levels/<z>/run/`` with
-    refinement, and the outer record is rewritten after each completed round
-    or level and once more at the end (``_durable``), so that
-    ``resume_augmented_lagrangian`` can continue an interrupted run. The
-    outer record stores the configuration of the backend of every inner
-    Run, and the model of a noisy Aer backend is saved once in the
-    directory. The rounds are the same as without a directory, except that a
-    durable Run also stores its journal and selected inputs, which count
-    against ``max_data_bytes``, so a run whose data limit binds can stop
-    earlier, and that a round whose preparation raised reads its counts
-    from its closed Run folder (``_durable.closed_trace``).
+    The run stops when the normalized tests of `options.termination` hold. With
+    `feasibility_and_complementarity` these are complementarity <= epsilon_c and
+    infeasibility <= epsilon_f (Algencan's Eqs. (10.7)-(10.8)), and the status is
+    `feasible_complementary`. With `feasibility` the test is infeasibility <= epsilon_f,
+    and the status is `feasible`. Otherwise it stops after `options.max_iterations`
+    rounds, when an inner result has no valid point, when the cumulative `limits` cannot
+    fund a round, or when an inner planning, preparation or execution raises after the
+    first round
+    ([`AugmentedLagrangianRecord`][nwqlib.algorithms.qhd.constrained_records.AugmentedLagrangianRecord]
+    lists the statuses). No round is retried. A stopping status does not assess
+    optimality. Like QHD itself, the layer is not a global optimizer. The rounds read
+    points of a finite grid of the box, except an off-grid mean under `mode_or_mean`,
+    and no status is a statement about the continuous problem. Read feasibility,
+    complementarity and `termination` alongside the objective. In the first round an
+    error propagates unchanged, because no round has completed and a configuration that
+    QHD rejects should surface at once. That includes a first round whose Run refuses
+    the limits, while limits that the layer's own test finds unable to fund the first
+    round's circuit or shots end the run with `budget_exhausted` after zero rounds.
 
     Args:
-        problem (ConstrainedOptimization): The problem, with live SymPy
-            expressions.
+        problem (ConstrainedOptimization): The problem, with live SymPy expressions.
         qhd (QHD): The QHD configuration of every round.
-        options (AugmentedLagrangian): The layer's options.
-        refinement (BoxRefinement | None): Box refinement of every round's
-            inner objective, L_k or L(x, s), or None for one QHD solve per
+        options (AugmentedLagrangian): The layer's options. Default
+            `AugmentedLagrangian()`.
+        refinement (BoxRefinement | None): Box refinement of every round's inner
+            objective, L_k or L(x, s), or None (the default) for one QHD solve per
             round, which leaves every result as without this argument.
-        backend (object | None): Passed to every round's ``prepare``, as in
-            ``nwqlib.solve``.
-        execution (str | None): ``quantum`` (the default) or ``classical``,
-            as in ``nwqlib.solve``.
+        backend (object | None): Passed to every round's `prepare`, as in
+            `nwqlib.solve`.
+        execution (str | None): `"quantum"` (the default) or `"classical"`, as in
+            `nwqlib.solve`.
         shots (int | None): Shots per round, or None for exact readout.
         seed (int | None): Nonnegative root seed of the run.
-        limits (ExecutionLimits | None): Cumulative limits of the whole run,
-            the defaults when None. Each round's Run, or each level's Run with
-            refinement, gets the remaining circuits, shots, data bytes and
-            synthesis work (``_outer.round_limits``) and the per-Run caps
-            unchanged.
-        progress (object | None): Passed to every round's Run, as in
-            ``nwqlib.solve``.
-        directory (str | Path | None): A new directory for a durable run,
-            or None to keep every inner Run in memory. It must not exist, and
-            missing parents are created.
+        limits (ExecutionLimits | None): Cumulative limits of the whole run, the
+            defaults when None. Each round's Run, or each level's Run with refinement,
+            gets the remaining circuits, shots, data bytes and synthesis work and the
+            per-Run caps unchanged.
+        progress (object | None): Passed to every round's Run, as in `nwqlib.solve`.
+        directory (str | Path | None): A new directory for a saved run that
+            `resume_augmented_lagrangian` can continue, or None to keep every inner Run
+            in memory. It must not exist, and missing parents are created.
 
     Returns:
-        result (ConstrainedQHDResult): The record of the run and the live
-            inner results. The function never calls
-            ``constrained_grid_minimum``.
+        result (ConstrainedQHDResult): The run. `candidate` and `objective` give the
+            best point and f there in original units, `termination` the stopping status,
+            `multipliers()` the last round's multiplier estimates in original units, and
+            `record` the full record. The function never calls
+            `constrained_grid_minimum`.
+
+    Raises:
+        TypeError: If `options` is not an `AugmentedLagrangian` or `refinement` is
+            neither a `BoxRefinement` nor None.
+        ValueError: If `refinement.point_rule` differs from `options.inner_point`, if
+            the refinement options ask for what the QHD configuration cannot carry out,
+            or if the first round fails as described above.
+        FileExistsError: If `directory` exists. The message names
+            `resume_augmented_lagrangian`, which continues it.
+
+    Inequality representation:
+        Under `options.inequality_form="slack"` or `"auto"` the round first fixes how
+        its kept inequalities enter (Proposition 54 of
+        [the mathematics page](../../mathematics.md#r54)). A converted inequality adds a
+        slack variable, after the problem's variables and with the box `[0, U]` of its
+        cap, and the round plans its inner objective L(x, s) instead, reads a joint
+        point and projects it to x, where the update above is unchanged
+        (`ALIteration.representation`).
+
+    Point selection with refinement:
+        With `refinement`, round k instead runs box refinement
+        ([`refine_box`][nwqlib.algorithms.qhd.refinement.refine_box]) on its inner
+        problem, from the preprocessed box and the round's slack boxes, with `qhd`. This
+        is the order of the reproduction scripts of Wu et al., arXiv:2605.12066v1, which
+        refine inside each multiplier round. `refinement.point_rule` reads every level
+        and must equal `options.inner_point`, which has no second role, and two
+        different rules are rejected before any work, as are stall-split and level
+        initial-state options that the QHD configuration cannot carry out. A stall
+        split, when the options ask for one, acts within each round's refinement with
+        the options' budget.
+
+        The round takes as x_{k+1} the projection of the point of the level with the
+        least recorded relative value of the inner objective, the earlier level on ties.
+        The round compares its inner objective, L_k under the PHR policy and L(x, s)
+        with an inequality representation, by the point rules that the Point rules note
+        of [`AugmentedLagrangian`][nwqlib.algorithms.qhd.constrained_records.AugmentedLagrangian]
+        describes. The outer point is the projection onto the original variables, and
+        effective_value is the PHR value L_k evaluated at that projection when a
+        representation is present. The best and last points are chosen among rounds by
+        the rules above, not among levels.
+
+        f, h and g are then evaluated at the outer point in the original coordinates,
+        and the update is unchanged. The point is the level's reported point
+        (`RefinementLevel.point`), for the search model the image `a + D u` of the
+        level's unit point u rounded once to binary64, while the level evaluated its
+        objective at the exact image. f, h and g are evaluated at the rounded point
+        because it is the point that the round and the run return to the user, and the
+        recorded residuals and objective must describe that point.
+
+        Each refinement level checks the original objective and constraints at the
+        original-coordinate projection of every compared point. If an off-grid mean
+        makes an original function nonfinite or undefined, the level records
+        `mean_unavailable` and uses its valid grid point. The level's inner-value
+        comparison keeps its existing table and coordinate-transformation conventions.
+
+    Failures and stopping with refinement:
+        When an original function is not finite and real at a level's grid point, or at
+        a point that a stall split scores, that level fails as a level whose Run raised
+        does, before a split or a next box is decided. In a round after the first, or
+        after a completed level, the refinement stops with `inner_failed` and the run
+        ends after the round, and in the first level of round 0 the error propagates.
+        Without refinement the round keeps the grid point when the mean fails, and a
+        failure at the grid point ends a round after the first with `inner_failed` and
+        propagates in round 0.
+
+        A refinement that completed a level always gives the round its point. After
+        `budget_exhausted`, `inner_failed` or `no_valid_point` the run records the round
+        and stops, with the success status when the round's point met the stopping test
+        and with the refinement's reason otherwise, and a refinement that completed no
+        level ends the run with its own reason.
+
+        An error of the first level of round 0 propagates. Any later error of a level
+        ends the run after keeping the completed rounds and levels, with `inner_failed`
+        or, when its round kept a point that met the stopping test, with the success
+        status.
+
+    Limits with refinement:
+        `limits` stays cumulative over all rounds and levels, and each level's Run gets
+        what the earlier rounds and levels left. The configuration fixes before the
+        first round at most `max_iterations * refinement.max_levels` inner solves and the
+        host-work bound `AugmentedLagrangianRecord.admitted_work_bound`.
+
+    Random streams:
+        Every round's random streams come from `SeedSequence(seed).spawn`, as
+        [`compare`][nwqlib.scientist.compare] seeds its candidates, and the round
+        records its child's entropy and spawn key. With refinement, level z of round k
+        plans from the z-th child of the round's child, whose spawn key `(k, z - 1)` its
+        level record keeps.
+
+    Saved runs:
+        With `directory` every inner Run is saved under `iterations/<k>/run/`, or
+        `iterations/<k>/levels/<z>/run/` with refinement, and the outer record is
+        rewritten after each completed round or level and once more at the end, so that
+        `resume_augmented_lagrangian` can continue an interrupted run. The outer record
+        stores the configuration of the backend of every inner Run, and the model of a
+        noisy Aer backend is saved once in the directory. The rounds are the same as
+        without a directory, except that a saved Run also stores its run log and inputs,
+        which count against `max_data_bytes`, so a run whose data limit binds can stop
+        earlier, and that a round whose preparation raised reads its counts from its
+        closed Run folder.
+
+    Examples:
+        This is the unit-disk example of the guide. On the 4-point grid of each axis the
+        first two rounds read the infeasible point (0.8, 0.8), raise the multiplier to
+        0.56 and the penalty to 2, and the third round reads (0.6, 0.8) on the circle,
+        the least evaluated objective among the feasible grid points, so the gap to the
+        explicit grid reference is 0.
+
+        >>> import sympy as sp
+        >>> from nwqlib.problems import ConstrainedOptimization
+        >>> from nwqlib.algorithms.qhd import (
+        ...     QHD, AugmentedLagrangian, constrained_grid_minimum,
+        ...     solve_augmented_lagrangian)
+        >>> x, y = sp.symbols("x y", real=True)
+        >>> problem = ConstrainedOptimization(
+        ...     objective=(x - 1)**2 + (y - 1)**2, variables=(x, y),
+        ...     bounds=((0.0, 1.0), (0.0, 1.0)), inequalities=(x**2 + y**2 - 1,))
+        >>> result = solve_augmented_lagrangian(
+        ...     problem, qhd=QHD(num_grid_points=4, num_steps=80, total_time=10.0),
+        ...     options=AugmentedLagrangian(stationarity=True),
+        ...     execution="classical", seed=7)
+        >>> print(result.termination, [round(v, 6) for v in result.candidate],
+        ...       round(result.objective, 6))
+        feasible_complementary [0.6, 0.8] 0.2
+        >>> print(len(result.iterations), round(result.penalty, 6))
+        3 2.0
+        >>> print(constrained_grid_minimum(result).gap)
+        0.0
     """
     import numpy as np
 
@@ -2420,61 +2473,57 @@ def solve_augmented_lagrangian(problem, *, qhd, options=AugmentedLagrangian(), r
 
 
 def plan_augmented_lagrangian(problem, *, qhd, options=AugmentedLagrangian(), execution=None, shots=None, seed=None):
-    """Plan round 0 of ``solve_augmented_lagrangian`` without creating a Run, for its preprocessing and resources.
+    """Plan round 0 of `solve_augmented_lagrangian` without a Run, to inspect its preprocessing and cost.
 
-    The call makes what ``solve_augmented_lagrangian`` makes before its
-    first inner Run, with the same arguments: the checks and the support-wise
-    preprocessing of ``_setup``, the representation of the kept inequalities
-    in round 0 under ``options.inequality_form`` (``_round_problem``), with
-    its automatic selection when chosen, and the Plan of round 0's inner
-    problem, planned from the first child of ``SeedSequence(seed)`` as the
-    solve plans it. The returned Plan is therefore the Plan that the solve's
-    round 0 would prepare, and ``nwqlib.estimate(plan)`` and
-    ``nwqlib.algorithms.qhd.circuit_resources(plan)`` apply to it. Its width,
-    restricted dimension and CX law describe the inner problem with its
-    slack variables. Nothing is prepared, executed or acquired, no state is
-    evolved, and neither a classical reference nor
-    ``constrained_grid_minimum`` runs, so the call also serves problems whose
-    evolution cannot be simulated. A resource-only QHD with
-    ``initial_state_preparation="none"`` is admitted, since no round runs.
+    The call does what `solve_augmented_lagrangian` does before its first inner Run,
+    with the same arguments: the checks and the support-wise preprocessing of the
+    problem, the representation of the kept inequalities in round 0 under
+    `options.inequality_form`, with its automatic selection when chosen, and the Plan of
+    round 0's inner problem, planned from the first child of `SeedSequence(seed)` as the
+    solve plans it. The returned Plan is therefore the Plan that the solve's round 0
+    would prepare, and [`nwqlib.estimate(plan)`][nwqlib.scientist.estimate] and
+    [`circuit_resources(plan)`][nwqlib.algorithms.qhd.resources.circuit_resources] apply
+    to it. Its width, restricted dimension and CX count describe the inner problem with
+    its slack variables. Nothing is prepared, executed or measured, no state is evolved,
+    and neither a classical reference nor `constrained_grid_minimum` runs, so the call
+    also serves problems whose evolution cannot be simulated. A resource-only QHD with
+    `initial_state_preparation="none"` is accepted, since no round runs.
 
-    A planning-only call reports the first round only: the preprocessing,
-    with the inequality ranges on the grid, round 0's representation, with
-    its slack caps and its slack-grid error bound for the initial
-    multipliers and penalty, and round 0's inner Plan. Later rounds'
-    multipliers and penalties depend on the points that executed rounds
-    read, so their representations, Plans and costs are not known here. The
-    declared structural bounds of a whole run, at most
-    ``options.max_iterations`` rounds within the prior host-work and byte
-    envelopes of ``AugmentedLagrangianRecord.admitted_work_bound``
-    (``_admitted_bounds``), hold for every round. They are envelopes, not an
-    executed trajectory or the exact costs of later rounds. Box refinement
-    is not planned here. A refined round keeps the PHR form where the
-    branch tests do not apply, and its first level plans the inner problem
-    on the same box with the physical scaling, or its unit-box normalization
-    with the search model.
+    A planning-only call reports the first round only: the preprocessing, with the
+    inequality ranges on the grid, round 0's representation, with its slack caps and its
+    slack-grid error bound for the initial multipliers and penalty, and round 0's inner
+    Plan. Later rounds' multipliers and penalties depend on the points that executed
+    rounds read, so their representations, Plans and costs are not known here. The
+    structural bounds of a whole run, at most `options.max_iterations` rounds within the
+    work and byte bounds of `AugmentedLagrangianRecord.admitted_work_bound`, hold for
+    every round. They are upper bounds, not an executed trajectory or the exact costs of
+    later rounds. Box refinement is not planned here. A refined round keeps the PHR form
+    where the branch tests do not apply, and its first level plans the inner problem on
+    the same box with the physical scaling, or its unit-box normalization with the
+    search model.
 
     Args:
-        problem (ConstrainedOptimization): The problem, with live SymPy
-            expressions.
+        problem (ConstrainedOptimization): The problem, with live SymPy expressions.
         qhd (QHD): The QHD configuration of every round.
-        options (AugmentedLagrangian): The layer's options.
-        execution (str | None): ``quantum`` (the default) or ``classical``,
-            as in ``solve_augmented_lagrangian``. Automatic selection
-            converts on the quantum route only.
+        options (AugmentedLagrangian): The layer's options. Default
+            `AugmentedLagrangian()`.
+        execution (str | None): `"quantum"` (the default) or `"classical"`, as in
+            `solve_augmented_lagrangian`. Automatic selection converts inequalities on
+            the quantum route only.
         shots (int | None): Shots per round, or None for exact readout.
         seed (int | None): Nonnegative root seed of the run.
 
     Returns:
-        planned (tuple): ``(preprocessing, representation, plan)``, the
-            ``ConstraintPreprocessing`` of the run, round 0's
-            ``InnerRepresentation`` or None under ``inequality_form="phr"``,
-            and round 0's inner QHD Plan.
+        planned (tuple): `(preprocessing, representation, plan)`, the
+            [`ConstraintPreprocessing`][nwqlib.algorithms.qhd.constrained_records.ConstraintPreprocessing]
+            of the run, round 0's
+            [`InnerRepresentation`][nwqlib.algorithms.qhd.constrained_records.InnerRepresentation]
+            or None under `inequality_form="phr"`, and round 0's inner QHD Plan.
 
     Raises:
-        ValueError: As ``solve_augmented_lagrangian`` before its first Run,
-            including a round-0 planning that QHD refuses, which a solve
-            would raise from its first round.
+        ValueError: As `solve_augmented_lagrangian` before its first Run, including a
+            round-0 planning that QHD refuses, which a solve would raise from its first
+            round.
     """
     import numpy as np
 
@@ -2849,21 +2898,28 @@ _COMPARED_TEXT = (
 
 @dataclass(frozen=True)
 class ConstrainedQHDResult:
-    """Record of an augmented-Lagrangian run with its live problem and inner QHD results.
+    """Result of an augmented-Lagrangian run: its record, live problem and inner QHD results.
 
-    ``best`` and ``last`` are separate rounds. ``candidate`` and ``objective``
-    describe ``best``. The multipliers and the penalty belong to ``last``:
-    the tentative multipliers lambda+ and mu+ of the last round, which are the
-    run's multiplier estimates, next to the multipliers that round used. They
-    do not form a KKT pair with ``best``.
+    `solve_augmented_lagrangian`, `resume_augmented_lagrangian` and
+    `load_augmented_lagrangian` return it. The answer is `candidate`, the best point in
+    original coordinates, with `objective`, f there in original units, and
+    `termination`, the stopping status. Read the feasibility and complementarity of that
+    point in `best.evaluation`, and the multiplier estimates with `multipliers()`. A
+    stopping status does not assess optimality. `best` and `last` are separate rounds.
+    `candidate` and `objective` describe `best`. The multipliers and the penalty belong
+    to `last`. They are the tentative multipliers lambda+ and mu+ of the last round,
+    which are the run's multiplier estimates, next to the multipliers that round used,
+    and they do not form a KKT pair with `best`. `print(result)` summarizes the run,
+    `report()` returns it as JSON-ready data, and `save(path)` writes it to a new
+    directory.
 
     Attributes:
-        record: The portable AugmentedLagrangianRecord.
+        record: The portable
+            [`AugmentedLagrangianRecord`][nwqlib.algorithms.qhd.constrained_records.AugmentedLagrangianRecord].
         problem: The live ConstrainedOptimization.
-        results: The inner QHDAnalysis of each round in ``record.iterations``,
-            or None for a round whose inner solve raised. With refinement,
-            each round's entry is the tuple of the QHDAnalysis of its
-            completed levels, in level order.
+        results: The inner QHDAnalysis of each round in `record.iterations`, or None for
+            a round whose inner solve raised. With refinement, each round's entry is the
+            tuple of the QHDAnalysis of its completed levels, in level order.
     """
 
     record: AugmentedLagrangianRecord
@@ -2909,7 +2965,11 @@ class ConstrainedQHDResult:
 
     @property
     def termination(self):
-        """The run's termination status (``AugmentedLagrangianRecord`` lists them)."""
+        """The run's stopping status, such as ``feasible_complementary``.
+
+        ``AugmentedLagrangianRecord`` lists the statuses. A status does not assess
+        optimality.
+        """
         return self.record.termination
 
     @property
@@ -2924,7 +2984,11 @@ class ConstrainedQHDResult:
 
     @property
     def best(self):
-        """The ALIteration of the reported best point, or None."""
+        """The ALIteration of the reported best point, or None when no round chose a point.
+
+        It is the feasible round with the least f, or the round with the least violation
+        when no round is feasible.
+        """
         return None if self.record.best is None else self.record.iterations[self.record.best]
 
     @property
@@ -2948,19 +3012,18 @@ class ConstrainedQHDResult:
         return None if self.last is None else self.last.penalty
 
     def multipliers(self, *, tentative=True):
-        """Return the last round's ``(equality, inequality)`` multipliers in original units, or None.
+        """Return the last round's `(equality, inequality)` multipliers in original units, or None.
 
-        The layer's multipliers belong to the scaled problem, and
-        ``_original_multiplier`` converts each to original units,
-        ``lambda_i = (s_f/s_{h_i}) lambda~_i`` and
-        ``mu_j = (s_f/s_{g_j}) mu~_j``, raising ValueError for a value outside
-        the normal binary64 range. ``tentative=True`` converts lambda+ and mu+
-        of the last round, the run's estimates, and False the multipliers that
-        round used, the initial multipliers when it is round 0. The equality
-        tuple follows the problem's equalities, and the inequality tuple
-        follows ``record.preprocessing.inequalities``, the problem positions
-        of the inequalities that the rounds use, so an inequality absorbed
-        into the box has no entry.
+        The layer's multipliers belong to the scaled problem, and each is converted to
+        original units, `lambda_i = (s_f/s_{h_i}) lambda~_i` and
+        `mu_j = (s_f/s_{g_j}) mu~_j`, formed exactly and rounded once. A value outside the
+        normal binary64 range raises ValueError. `tentative=True`, the default, converts
+        lambda+ and mu+ of the last round, the run's estimates, and False the multipliers
+        that round used, the initial multipliers when it is round 0. The equality tuple
+        follows the problem's equalities, and the inequality tuple follows
+        `record.preprocessing.inequalities`, the problem positions of the inequalities that
+        the rounds use, so an inequality absorbed into the box has no entry. None when no
+        round chose a point.
         """
         if self.last is None:
             return None
@@ -3154,20 +3217,18 @@ class ConstrainedQHDResult:
         return str(self)
 
     def report(self):
-        """Return a JSON-ready report built only from the stored record and the inner results' identities.
+        """Return a JSON-ready report built only from the stored record and content hashes.
 
-        It evaluates, plans and acquires nothing. ``multipliers`` maps each
-        constraint's problem position, as a string, to its original-unit
-        multiplier estimate (``multipliers``), separately for equalities and
-        inequalities, and is None when no round chose a point or a value lies
-        outside the normal binary64 range, which a statement then names.
-        ``inner_results`` holds one identity per round, or with refinement one
-        list of level identities per round, and ``refinement`` the number of
-        levels and the stopping reason of each round's refinement, None without
-        refinement. ``inequality_forms`` holds, per round, the form of each
-        kept inequality by problem position, the round's slack-grid error
-        bound and why the policy chose the forms (``InnerRepresentation``),
-        and is None under ``inequality_form="phr"``.
+        It evaluates, plans and measures nothing. `multipliers` maps each constraint's
+        problem position, as a string, to its original-unit multiplier estimate
+        (`multipliers()`), separately for equalities and inequalities, and is None when no
+        round chose a point or a value lies outside the normal binary64 range, which a
+        statement then names. `inner_results` holds one content hash per round, or with
+        refinement one list of level hashes per round, and `refinement` the number of levels
+        and the stopping reason of each round's refinement, None without refinement.
+        `inequality_forms` holds, per round, the form of each kept inequality by problem
+        position, the round's slack-grid error bound and why the policy chose the forms
+        (`InnerRepresentation`), and is None under `inequality_form="phr"`.
         """
         multipliers = self._positioned_multipliers()[0]
         refined = self.record.refinement is not None
@@ -3191,17 +3252,21 @@ class ConstrainedQHDResult:
     def save(self, path):
         """Write the run to a new directory and return its path.
 
-        The directory holds ``constrained.json`` (format ``qhd.constrained/3``)
-        with the record, ``problem.pickle`` with the live SymPy objective,
-        variables and constraints, and ``iterations/<k>/result/``, each inner
-        Result saved by its own archive. With refinement each completed level
-        z of round k has its Result under ``iterations/<k>/levels/<z>/result/``
-        instead, and the record nests the refinement records. One format,
-        ``qhd.constrained/3``, covers both shapes, because the record itself
-        says which shape a folder has. ``load_augmented_lagrangian`` reads it
-        back. The layer's archive stores the problem itself, because no Plan
-        holds a ConstrainedOptimization, so the shared Plan problem reader
-        never needs its kind. A failed save removes the directory.
+        The directory holds `constrained.json` (format `qhd.constrained/3`) with the record,
+        `problem.pickle` with the live SymPy objective, variables and constraints, and
+        `iterations/<k>/result/`, each inner Result saved by its own archive. With
+        refinement each completed level z of round k has its Result under
+        `iterations/<k>/levels/<z>/result/` instead, and the record nests the refinement
+        records. One format, `qhd.constrained/3`, covers both shapes, because the record
+        itself says which shape a folder has. `load_augmented_lagrangian` reads it back. The
+        archive stores the problem itself, because no Plan holds a ConstrainedOptimization.
+        A failed save removes the directory.
+
+        Args:
+            path (str | Path): A directory that does not exist yet. Its parent must exist.
+
+        Returns:
+            path (Path): The written directory.
         """
         from nwqlib._choice_archive import ArchiveFiles
         from nwqlib._limits import DEFAULT_MAX_BYTES
@@ -3231,23 +3296,29 @@ class ConstrainedQHDResult:
 
 
 def load_augmented_lagrangian(path):
-    """Load a saved augmented-Lagrangian run without planning, evaluating or acquiring.
+    """Load a saved augmented-Lagrangian run without planning, evaluating or measuring.
 
-    The record is validated with its content identities. The SymPy objects
-    come back through ``archive._SymbolicReader``, which resolves SymPy
-    classes only, and ``ConstrainedQHDResult`` requires the rebuilt problem
-    to have the record's problem identity. Each inner Result is loaded with ``load_result`` and must have
-    the recorded result and Plan identities, and its Plan's objective the
-    recorded identity of L_k, or of the inner objective of the round's
-    representation over the problem's variables and the slack variables
-    that ``_slack_symbols`` names (``_belongs``). With refinement each level's Result must have
-    the result and Plan identities of its ``RefinementLevel``. A level Plan
-    solves the level's own objective, for the search model the normalized
-    one on the unit box, so it is checked by these identities and not
-    against the identity of L_k.
-    A saved standalone refinement is refused with the name of
-    ``load_box_refinement``, and a durable directory with the function that
-    continues it.
+    `load_augmented_lagrangian(path)` reads the directory that
+    `ConstrainedQHDResult.save` wrote and returns the `ConstrainedQHDResult`. The record
+    is validated with its content hashes. The SymPy objects come back through a reader
+    that resolves SymPy classes only, and the rebuilt problem must have the record's
+    problem hash. Each inner Result is loaded with `load_result` and must have the
+    recorded result and Plan hashes, and its Plan's objective the recorded hash of L_k,
+    or of the inner objective of the round's representation over the problem's variables
+    and the slack variables. With refinement each level's Result must have the result
+    and Plan hashes of its `RefinementLevel`. A level Plan solves the level's own
+    objective, for the search model the normalized one on the unit box, so it is checked
+    by these hashes and not against the hash of L_k. A saved standalone refinement is
+    refused with the name of `load_box_refinement`, and a saved-run directory of
+    `solve_augmented_lagrangian(..., directory=...)` with the name of
+    `resume_augmented_lagrangian`, which continues it.
+
+    Args:
+        path (str | Path): The directory that `ConstrainedQHDResult.save` wrote.
+
+    Returns:
+        result (ConstrainedQHDResult): The saved run, with its problem and inner Results
+            attached.
     """
     from nwqlib._choice_archive import ArchiveFiles
     from nwqlib.scientist import load_result
@@ -3349,89 +3420,82 @@ def _run_results(path, iterations, backend, problem):
 
 
 def resume_augmented_lagrangian(directory, *, backend, progress=None, end_at_unfinishable=False):
-    """Continue a durable run of ``solve_augmented_lagrangian(..., directory=...)``, or return it when it has ended.
+    """Continue an interrupted saved run of `solve_augmented_lagrangian`, or return it when it has ended.
 
-    The outer record of the directory (``_durable``) holds the run's
-    problem, QHD configuration, options, refinement options, execution,
-    shots, root entropy, cumulative limits and backend configuration, and
-    its completed rounds and levels. The layer wrote every file of the
-    directory, and resume reads them as they are. A directory is read-only
-    like a saved Run folder (docs/run_archives.md, "Saved folders are
-    read-only"), and resume does not detect edits. Before any new work,
-    ``backend`` must have the stored configuration, and for a noisy Aer run
-    resume binds the noise model saved in the directory to its own copy of
-    ``backend`` (``_durable.Directory.bind``), so that the Runs it creates
-    run the original model in a new process too. Another backend raises
-    ValueError before anything is reopened, planned or committed. The
-    problem rebuilt from ``problem.pickle`` (``archive._SymbolicReader``)
-    must have the content identity of the stored problem record, or
-    ValueError is raised before any completed Result is read or the run
-    advances, since an expression that the reader cannot reproduce would
-    otherwise continue the run as another problem. The
-    completed rounds' and levels' Results are read from their Runs with
-    ``load_run`` (``_durable.saved_result``), and the layer's preprocessing
-    and check counts are read from the setup that the first call saved
-    (``_setup``), without recomputing them to detect an edit.
+    Pass the directory and the backend of the original call. The directory's outer
+    record holds the run's problem, QHD configuration, options, refinement options,
+    execution, shots, root entropy, cumulative limits and backend configuration, and its
+    completed rounds and levels. The layer wrote every file of the directory, and resume
+    reads them as they are. A directory is read-only like a saved Run folder
+    ([Saved folders are read-only](../../saved_evidence.md#saved-folders-are-read-only)),
+    and resume does not detect edits. Before any new work, `backend` must have the stored
+    configuration,
+    and for a noisy Aer run resume binds the noise model saved in the directory to its
+    own copy of `backend`, so that the Runs it creates run the original model in a new
+    process too. Another backend raises ValueError before anything is reopened, planned
+    or committed. The problem rebuilt from `problem.pickle` must have the content hash
+    of the stored problem record, or ValueError is raised before any completed Result is
+    read or the run advances, since an expression that the reader cannot reproduce would
+    otherwise continue the run as another problem. The completed rounds' and levels'
+    Results are read from their Runs with `load_run`, and the layer's preprocessing and
+    check counts are read from the setup that the first call saved, without recomputing
+    them to detect an edit.
 
-    The rounds then continue from the last completed round, with the state
-    and the random stream of the uninterrupted run (``_rounds``). A round in
-    progress reuses the inequality representation that it committed before
-    its first inner Run (``InnerRepresentation``), after checking that it
-    rebuilds the committed inner objective, so automatic selection is not
-    repeated, and a completed round's Result must belong to its recorded
-    inner Plan (``_belongs``). A round or
-    level whose Run exists continues that Run with ``load_run(...).wait()``,
-    and none gets a second Run, so completed work is read from the records
-    and a continued Run is charged once, by its own journal. When that Run
-    cannot finish without new work, because the interruption stopped a local
-    preparation, acquisition or classical evolution whose outcome nothing can
-    retrieve, its error propagates with a note (``_durable.unrecoverable``),
-    and the outer record keeps its committed rounds and levels unchanged.
-    With ``end_at_unfinishable=True`` the run instead ends there with
-    ``inner_failed``, keeps its completed rounds and records the Run's error
-    as the failure. This option handles an unfinishable continuation after a
-    Run has reopened. A headerless folder fails during reopen and is not
-    handled by ``end_at_unfinishable``. Reopen does not remove or recreate
-    that folder automatically. Before a completed round or level exists,
-    an inner failure still propagates. Resume covers an interrupted process,
-    not a power loss (``_durable``).
+    The rounds then continue from the last completed round, with the state and the
+    random stream of the uninterrupted run. A round in progress reuses the inequality
+    representation that it committed before its first inner Run, after checking that it
+    rebuilds the committed inner objective, so automatic selection is not repeated, and
+    a completed round's Result must belong to its recorded inner Plan. A round or level
+    whose Run exists continues that Run with `load_run(...).wait()`, and none gets a
+    second Run, so completed work is read from the records and a continued Run is
+    counted once, by its own run log. When that Run cannot finish without new work,
+    because the interruption stopped a local preparation, measurement or classical
+    evolution whose outcome nothing can retrieve, its error propagates with a note, and
+    the outer record keeps its committed rounds and levels unchanged. With
+    `end_at_unfinishable=True` the run instead ends there with `inner_failed`, keeps its
+    completed rounds and records the Run's error as the failure. This option handles an
+    unfinishable continuation after a Run has reopened. A Run folder without a committed
+    run-log header fails during reopen and is not handled by `end_at_unfinishable`.
+    Reopen does not remove or recreate that folder automatically. Before a completed
+    round or level exists, an inner failure still propagates. Resume covers an
+    interrupted process, not a power loss.
 
-    A directory whose run has ended returns its result, with the inner
-    Results read from their Runs, and plans, evaluates and acquires nothing.
+    A directory whose run has ended returns its result, with the inner Results read from
+    their Runs, and plans, evaluates and measures nothing.
 
-    Resuming gives the records of an uninterrupted durable run with the same
-    root entropy, apart from the fields that differ between any two durable
-    executions, namely the identities of the Runs and Results, which every
-    Run draws anew, the stored-data byte counts, whose text of wall times
-    and measured timings varies in length from run to run, and the content
-    identities that include these fields. Those byte counts enter the
-    remainder of ``max_data_bytes``, so a run whose data limit is almost
-    spent can stop at another round, as two uninterrupted durable runs can.
+    Resuming gives the records of an uninterrupted saved run with the same root entropy,
+    apart from the fields that differ between any two saved executions, namely the
+    identifiers of the Runs and Results, which every Run draws anew, the stored-data
+    byte counts, whose text of wall times and measured timings varies in length from run
+    to run, and the content hashes that include these fields. Those byte counts enter
+    the remainder of `max_data_bytes`, so a run whose data limit is almost spent can
+    stop at another round, as two uninterrupted saved runs can.
 
     Args:
         directory (str | Path): The directory of
-            ``solve_augmented_lagrangian(..., directory=...)``.
-        backend (object): The backend of the original call, whose
-            configuration the directory stores. None stands for
-            ``AerBackend()`` under quantum execution, as in the original call.
-            For a noisy Aer run in a new process,
-            ``AerBackend(noise_model_id=...)`` with the identity of the
-            original binding, which the error for another backend names.
-        progress (object | None): Progress callback of the inner Runs that
-            this call creates or continues, as in ``nwqlib.solve``.
-        end_at_unfinishable (bool): Whether to end the run with
-            ``inner_failed`` at a round or level whose Run cannot finish
-            without new work, instead of raising the Run's error. False by
-            default, which leaves the directory as it is for a later resume.
-            This option handles an unfinishable continuation after a Run has
-            reopened. A headerless folder fails during reopen and is not
-            handled by ``end_at_unfinishable``. Reopen does not remove or
-            recreate that folder automatically. Before a completed round or
-            level exists, an inner failure still propagates.
+            `solve_augmented_lagrangian(..., directory=...)`.
+        backend (object): The backend of the original call, whose configuration the
+            directory stores. None stands for `AerBackend()` under quantum execution, as
+            in the original call. For a noisy Aer run in a new process,
+            `AerBackend(noise_model_id=...)` with the identifier of the original
+            binding, which the error for another backend names.
+        progress (object | None): Progress callback of the inner Runs that this call
+            creates or continues, as in `nwqlib.solve`.
+        end_at_unfinishable (bool): Default `False`, which raises the Run's error and
+            leaves the directory as it is for a later resume. True ends the run with
+            `inner_failed` at a round or level whose Run cannot finish without new work.
+            It handles an unfinishable continuation after a Run has reopened, not a Run
+            folder without a committed run-log header, which fails during reopen. Before
+            a completed round or level exists, an inner failure still propagates.
 
     Returns:
-        result (ConstrainedQHDResult): The run, as ``solve_augmented_lagrangian``
-            returns it.
+        result (ConstrainedQHDResult): The run, as `solve_augmented_lagrangian` returns
+            it.
+
+    Raises:
+        TypeError: If `end_at_unfinishable` is not a bool.
+        ValueError: If `backend` differs from the stored configuration, or the rebuilt
+            problem differs from the stored record.
     """
     import numpy as np
     from nwqlib.execution import ExecutionLimits
@@ -3471,99 +3535,89 @@ def resume_augmented_lagrangian(directory, *, backend, progress=None, end_at_unf
 
 
 def constrained_grid_minimum(result, *, max_work=GRID_MINIMUM_MAX_WORK, max_bytes=GRID_MINIMUM_MAX_BYTES):
-    """Evaluate f, h and g in binary64 on the grid and report the least evaluated feasible value and a signed gap.
+    """Find the least evaluated feasible objective on the run's grid and its gap to the best point.
 
-    The explicit grid reference evaluates the original objective and
-    required constraints on the declared original-variable grid. It chooses
-    the lexicographically first point attaining the least computed feasible
-    objective. Feasibility uses the normalized residual test at the stored
-    tolerance. All reported reference values come from the same evaluated
-    table. The result describes this finite numerical grid and supplies
-    neither a continuous optimum nor an expression-evaluation error
+    `constrained_grid_minimum(result)` evaluates f, h and g in binary64 at every point
+    of the preprocessed box's grid and returns a
+    [`ConstrainedGridMinimum`][nwqlib.algorithms.qhd.constrained_records.ConstrainedGridMinimum].
+    Its `gap` is the run's stored best objective minus the least evaluated feasible
+    objective, in original units. The solver never calls it.
+
+    The explicit grid reference evaluates the original objective and required
+    constraints on the declared original-variable grid. It chooses the lexicographically
+    first point attaining the least computed feasible objective. Feasibility uses the
+    normalized residual test at the stored tolerance. All reported reference values come
+    from the same evaluated table. The result describes this finite numerical grid and
+    supplies neither a continuous optimum nor an expression-evaluation error
     certificate.
 
-    The constrained grid reference evaluates original functions in admitted
-    C-order slabs, streams constraint values into the feasibility test and
-    keeps the first feasible minimum. Its work counts every evaluated
-    function and its byte allowance includes expression intermediates,
-    coordinate arrays and masked-reduction buffers.
+    The reference evaluates the original functions in C-order slabs, streams constraint
+    values into the feasibility test and keeps the first feasible minimum. Its work
+    counts every evaluated function and its byte allowance includes expression
+    intermediates, coordinate arrays and masked-reduction buffers.
 
-    Selection. Given a finite reference objective array f and a Boolean
-    feasible mask, ``argmin(where(feasible, f, inf))`` returns the first
-    feasible minimum in C order, which is the lexicographically first tuple.
-    For each original equality value h and inequality value g, the stored
-    positive scale is applied before comparing with the tolerance: the
-    violation is ``max(max(abs(h/s_h)), max(max(g/s_g, 0)))``, with an empty
-    maximum zero. All raw values must pass finite-real admission even at
-    infeasible points. Division may overflow if a scale is tiny, which gives
-    infinite infeasibility and rejects that point as infeasible. Slabs are
-    processed in increasing global C order and the running minimum is
-    updated only on a strictly smaller value, which keeps the first tie
-    across slab boundaries. Counts of feasible points use Python integers
-    across slabs. Vectorized expression evaluation may change the reference
-    table's entries relative to scalar evaluation and can change a minimum
-    or feasibility decision near a threshold, so this is one consistent
-    array-evaluated reference table, and re-evaluating only the selected
-    point scalarly would not restore a scalar ranking.
+    Selection. Given a finite reference objective array f and a Boolean feasible mask,
+    ``argmin(where(feasible, f, inf))`` returns the first feasible minimum in C order,
+    which is the lexicographically first tuple. For each original equality value h and
+    inequality value g, the stored positive scale is applied before comparing with the
+    tolerance: the violation is ``max(max(abs(h/s_h)), max(max(g/s_g, 0)))``, with an
+    empty maximum zero. All raw values must be finite and real, even at infeasible
+    points. Division may overflow if a scale is tiny, which gives infinite infeasibility
+    and rejects that point as infeasible. Slabs are processed in increasing global C
+    order and the running minimum is updated only on a strictly smaller value, which
+    keeps the first tie across slab boundaries. Counts of feasible points use Python
+    integers across slabs. Vectorized expression evaluation may change the reference
+    table's entries relative to scalar evaluation and can change a minimum or
+    feasibility decision near a threshold, so this is one consistent array-evaluated
+    reference table, and re-evaluating only the chosen point scalarly would not restore
+    a scalar ranking.
 
-    The signed gap compares a stored objective with a fresh grid minimum
-    and can be negative. Let G be the nonempty grid subset passing this
-    check's computed feasibility test, and let the selected point a lie
-    in G. Suppose a finite E >= 0 bounds the absolute error of the stored
-    objective at a and of every fresh objective evaluation on G, relative
-    to exact values at those same coordinates. For finite reported gap r
-    and u = 2**-53, the exact gap F(a)-min_G F is at most
-    r/(1-u)+2*E when r >= 0, and r/(1+u)+2*E when r < 0.
-    These are real-arithmetic inequalities under round-to-nearest
-    binary64 with gradual underflow. This function establishes neither
-    E nor equality of G with the mathematically feasible grid set.
+    The signed gap compares a stored objective with a fresh grid minimum and can be
+    negative. Let G be the nonempty grid subset passing this check's computed
+    feasibility test, and let the chosen point a lie in G. Suppose a finite E >= 0
+    bounds the absolute error of the stored objective at a and of every fresh objective
+    evaluation on G, relative to exact values at those same coordinates. For finite
+    reported gap r and u = 2**-53, the exact gap `F(a) - min_G F` is at most
+    `r/(1-u) + 2*E` when r >= 0, and `r/(1+u) + 2*E` when r < 0. These are
+    real-arithmetic inequalities under round-to-nearest binary64 with gradual underflow.
+    This function establishes neither E nor equality of G with the mathematically
+    feasible grid set.
 
-    The reference enumerates the original variables only, also for a run
-    whose rounds added slack variables, and applies the original
-    feasibility test. It evaluates f, h and g in their written form. This
-    can raise ValueError at a grid point where the original binary64
-    evaluation fails, for example through intermediate overflow on a term
-    whose initial check used only its support tables. Neither this reference
-    nor the initial check certifies the exact real domain or bounds
-    expression-evaluation error.
+    The reference enumerates the original variables only, also for a run whose rounds
+    added slack variables, and applies the original feasibility test. It evaluates f, h
+    and g in their written form. This can raise ValueError at a grid point where the
+    original binary64 evaluation fails, for example through intermediate overflow on a
+    term whose initial check used only its support tables. Neither this reference nor
+    the initial check certifies the exact real domain or bounds expression-evaluation
+    error.
 
-    A run with box refinement is refused. Its rounds search nested grids
-    that each run chooses from its own distributions, and the preprocessed
-    box's grid is only the first of them, so a feasible minimum of that grid
-    is not the finite-grid reference of the points the run compared, and the
-    gap would mix points of different grids.
+    A run with box refinement is refused. Its rounds search nested grids that each run
+    chooses from its own distributions, and the preprocessed box's grid is only the
+    first of them, so a feasible minimum of that grid is not the finite-grid reference
+    of the points the run compared, and the gap would mix points of different grids.
 
-    Admission, before the first evaluation. With C kept constraints, tree
-    sizes N_f and N_j (``objective.node_count``) and ``D = K**d`` grid
-    points, the work is ``W_min = D{d + N_f + sum_j N_j + 8C + 12}`` in a
-    declared node/coordinate/reduction-input unit: the constraints add
-    normalization, absolute or positive-part/max operations, finite checks
-    and the final feasibility comparison, and the fixed 12 visits fund
-    objective validation, mask/selection and running-minimum updates. With
-    sequential constraint evaluation a sufficient slab law is
-    ``B_min(b) = B_axes + H_eval + max_j W_eval,j(b) + (8d + 96) b`` with
-    ``B_axes = 8dK``: the rate covers coordinate/index construction, the
-    objective and violation arrays, finite-real conversion,
-    absolute/maximum/normalization temporaries, a feasibility mask and a
-    ``where`` result, and each constraint is scaled in place on its private
-    buffer. ``W_eval,j(b) = 8 b (N_j + 2)`` for f and each kept constraint is
-    an engineering allowance, not a derived bound, on the premise that the
-    NumPy-printed callable holds at most one slab-sized temporary per
-    expression node, plus the output and one broadcast input.
-    ``H_eval = compiler.H0`` is an allowance until measured. The slab b is
-    the largest that fits ``max_bytes`` after the axes and headers. No
-    D-entry reference table is kept: the running best value and index, the
-    feasible count and the selected value are streamed.
+    Before the first evaluation, the reference checks its work and slab bytes against
+    `max_work` and `max_bytes` by the laws in
+    [Engineering constants](../../ENGINEERING_CONSTANTS.md#qhd-augmented-lagrangian-defaults).
+    It keeps no reference table of all `K**d` grid points.
 
     Args:
-        result (ConstrainedQHDResult): A run from ``solve_augmented_lagrangian``
-            or ``load_augmented_lagrangian``.
-        max_work (int): Work limit of this reference.
-        max_bytes (int): Byte limit of this reference.
+        result (ConstrainedQHDResult): A run from ``solve_augmented_lagrangian`` or
+            ``load_augmented_lagrangian``.
+        max_work (int): Work limit of this reference. Default `1_000_000_000`.
+        max_bytes (int): Byte limit of this reference. Default 10 GB (decimal,
+            `10_000_000_000` bytes).
 
     Returns:
-        reference (ConstrainedGridMinimum): The least evaluated feasible
-            value, the signed gap and the admitted work.
+        reference (ConstrainedGridMinimum): The least evaluated feasible value in
+            `objective`, its point, the signed gap in `gap` and the checked work.
+
+
+    Raises:
+        TypeError: If `result` is not a `ConstrainedQHDResult`.
+        ValueError: If the run used box refinement, if the work or the bytes of a
+            one-point slab exceed `max_work` or `max_bytes`, or if the original binary64
+            evaluation fails at a grid point.
     """
     import numpy as np
 

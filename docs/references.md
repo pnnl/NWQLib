@@ -16,7 +16,7 @@ Each page below gives the paper, equation or section behind the implemented step
 | GCiM and ADAPT-GCiM | [GCiM guide](algorithms/gcim.md#source-and-code-map), [Fermionic pools](api/subroutines/fermionic_pool.md#compact-generator-circuits) |
 | QHD, its augmented-Lagrangian layer and box refinement | [QHD guide](algorithms/qhd.md#source-map) |
 | Block encodings, LCU, state preparation, Pauli decomposition and Pauli evolution | [Block encoding](api/subroutines/block_encoding.md#source-map), [LCU](api/subroutines/lcu.md#source-map), [State preparation](api/subroutines/state_preparation.md#source-map), [Pauli decomposition](api/subroutines/pauli_decomposition.md#source-map), [Hamiltonian evolution](api/subroutines/hamiltonian_evolution.md#source-map) |
-| Selected blocks, CX laws and fault-tolerant resource models | [Selected blocks](blocks.md#source-map), [Resource estimates](resources.md#source-map), [Backends](backends.md#source-map) |
+| Selected blocks, CX laws and fault-tolerant resource models | [Compose blocks](blocks.md#source-map), [Exact dense synthesis](development/dense_synthesis.md#source-map), [Estimate resources](resources.md#source-map), [Estimate fault-tolerant resources](fault-tolerant-resources.md#models-and-sources) |
 | Bounds, resource laws and error budgets, with the proof or source of each | [Mathematics](mathematics.md) |
 | Operator conventions: Pauli order, Jordan–Wigner images, double factorization | [Inputs](inputs.md#conventions-and-derivations) |
 | Scientific example notebooks | [Examples](examples.md#scientific-notebooks) and [Scientific examples](#scientific-examples) below |
@@ -344,11 +344,11 @@ Sources listed in other sections:
  - Draper, T. G. (2000). Addition on a quantum computer. [quant-ph/0008033v1](https://arxiv.org/abs/quant-ph/0008033v1)
     - The QFT adder behind the shift operators of the banded block encoding.
  - Motlagh, D., & Wiebe, N. (2024). Generalized Quantum Signal Processing. PRX Quantum, 5(2), 020368. [10.1103/PRXQuantum.5.020368](https://doi.org/10.1103/PRXQuantum.5.020368) [arXiv 2308.01501v2](https://arxiv.org/abs/2308.01501v2)
-    - Background for the planned LCHS construction in the [roadmap](ROADMAP.md#scalable-lchs-select).
+    - Background for the planned LCHS construction in the [Limitations and open work page](ROADMAP.md#scalable-lchs-select).
 
 ## Testing
 
-The metamorphic relations of the [maintenance runbook](MAINTENANCE.md#metamorphic-relations-and-their-premises) follow the testing approach of MorphQ, which checks Qiskit by transforming quantum programs in ways whose effect on the output is known. NWQLib's relations and their acceptance limits come from its own contracts.
+The metamorphic relations of the [Maintenance page](MAINTENANCE.md#metamorphic-relations-and-their-premises) follow the testing approach of MorphQ, which checks Qiskit by transforming quantum programs in ways whose effect on the output is known. NWQLib's relations and their acceptance limits come from its own contracts.
 
  - Paltenghi, M., & Pradel, M. (2023). MorphQ: Metamorphic Testing of the Qiskit Quantum Computing Platform. 2023 IEEE/ACM 45th International Conference on Software Engineering (ICSE), 2413–2424. [10.1109/ICSE48619.2023.00202](https://doi.org/10.1109/ICSE48619.2023.00202) [arXiv 2206.01111v2](https://arxiv.org/abs/2206.01111v2)
 
@@ -365,5 +365,6 @@ The three scientific notebooks develop problems from the first two papers below 
     - Eq. (3) of the published article: the forward-Euler history-state system with padding steps.
     - The Appendix with Fig. 2 of the published article: the single-node D1Q3 collision at relaxation time τ = 1 and time step τ/10 that `examples/qls_scientific.ipynb` reduces to a 15-dimensional system.
     - arXiv:2303.16550v3 numbers them Eq. (2), Appendix A and Fig. 3.
- - Krovi, H. (2023). Improved quantum algorithms for linear and nonlinear differential equations. Quantum, 7, 913. [DOI](https://doi.org/10.22331/q-2023-02-02-913), arXiv:2202.01054
+ - Krovi, H. (2023). Improved quantum algorithms for linear and nonlinear differential equations. Quantum, 7, 913. [DOI](https://doi.org/10.22331/q-2023-02-02-913), [arXiv 2202.01054v4](https://arxiv.org/abs/2202.01054v4)
     - Li et al. use its linear-ODE algorithm in their complexity analysis, which `examples/qls_scientific.ipynb` does not reproduce.
+    - The Quantum article's journal page names arXiv v4 as its published version.

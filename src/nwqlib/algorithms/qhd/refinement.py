@@ -79,8 +79,8 @@ from .refinement_records import (
 
 # The saved standalone refinement (BoxRefinementResult.save). The format
 # changes with the fields of the record, and another format is refused rather
-# than converted, since this unreleased package keeps no development-schema
-# compatibility (docs/FRAMEWORK.md, "Package Import Surface").
+# than converted, since NWQLib owes no compatibility with the development
+# schemas that preceded release 1.0 (docs/FRAMEWORK.md, "API stability").
 ARCHIVE_FORMAT = "qhd.refinement/3"
 ARCHIVE_RECORD = "refinement.json"
 
@@ -1726,122 +1726,144 @@ def refine_box(
     progress=None,
     directory=None,
 ):
-    """Refine the box of ``problem`` by repeated QHD solves, following Wu et al. arXiv:2605.12066v1, Sec. V.
+    """Refine the box of an optimization problem by repeated QHD solves, following Wu et al. arXiv:2605.12066v1, Sec. V.
 
-    Level z solves one QHD Plan on its box ``B_z`` (``_level_problem``, by
-    ``options.scaling``). Each level reports a point by ``options.point_rule``
-    and records the original objective evaluated in the level's coordinates.
-    For the search model this is the transformed expression ``F(a + D u)``
-    evaluated at the selected unit point, before rounding its affine image
-    for display. From the level's marginals it keeps an index interval on
-    every axis (``_axis_interval``), records the joint mass bound
-    (``_joint_mass_bound``) and, when the result has joint observations, the
-    directly computed joint mass (``_joint_mass``), and forms ``B_{z+1}``
-    (``_next_box``). The best point is the reported point with the least
-    recorded relative objective F - C, the earlier level on ties, where C is one
-    exact constant for the whole refinement (``_tabulated_objective``).
-    Before each level, refinement stops at ``max_levels`` levels, an
-    unchanged box, a box at its width floor (``_resolved``, and for the
-    physical model the grid owner's admission, ``_level_geometry``),
-    ``max_no_improve`` levels without a strict decrease of the best relative
-    objective, or remaining limits that cannot fund a level
-    (``_outer.round_limits``), checked in this order. With
-    ``options.stall_split="best_region"`` a level whose next box equals its
-    box, and which is not the last of ``max_levels``, is split instead of
-    stopping the refinement while fewer than ``max_splits`` splits have been
-    made (``_stall_split``), and the next level solves the chosen region.
-    A split is made only when the next level could run, decided before any
-    score or read for it. When the no-improvement count after this level
-    reaches ``max_no_improve``, or the limits left after this level cannot
-    fund one, the level records no split and the refinement stops with
-    ``no_improvement`` or ``budget_exhausted``, without a valley search.
-    Otherwise the level looks for a resolved valley (``_valley_admission``,
-    ``_clearest_valley``). Without one it stops with ``box_unchanged``, and
-    when neither region a split at the valley can keep (``_kept_regions``)
-    passes the width floor it stops with ``width_floor``. When only one of
-    the two regions fails the width floor and the split keeps it, the
-    refinement stops with ``width_floor`` after the split. The
-    no-improvement count continues across a split. An unchanged box after
-    the last split stops with ``split_limit``. A stalled level that does not
-    split records why in ``RefinementLevel.split_declined``. A split budget
-    on a periodic
-    grid raises ValueError before the first level, since one cut does not
-    divide a periodic axis into two regions. A level whose tables show no
-    variation or no resolvable variation, whose planning or Run raises, or
-    whose result has no valid point also stops it, and completed levels are
-    kept for every one of these stops (``_resolution_stop``). These stops
-    end the refinement and never lead to a split. When the first
-    box is one that the grid owner rejects, or the planning or Run of the
-    first level raises, nothing has completed, and the original exception
-    propagates (``_outer.inner_failure``). An exception from the refinement's own
-    evaluation of a solved level, such as a nonreal objective value at the
-    reported grid point, propagates.
-
-    Point rules: ``_outer.grid_point`` reads the rule's grid point. For
-    ``mode_or_mean``, ``_outer.mean_point`` compares F at that point with F at
-    the valid-mass mean position of the level's own coordinates. Refinement
-    compares its points by F - C and reports F, both of which each level
-    reads from its stored tables at a grid point and evaluates term by term
-    at an off-grid mean (``_tabulated_objective``). C is the
-    constant term of the first level's decomposition, so an additive
-    constant of F leaves every comparison unchanged when the constant and
-    every coefficient of F are exact SymPy numbers, while F itself can round
-    the objective's variation away next to a large constant. A physical level takes F at its grid
-    coordinate or mean. A search-model level takes ``F(a + D u)`` at the
-    unit point u (``_unit_objective``), for exact coefficients F at the exact
-    affine image of u, and records u as ``RefinementLevel.unit_point``. Its reported point
-    is that image rounded once (``_coordinates``), a display value.
-
-    Initial state: every level plans its level problem with ``qhd``, so
-    ``QHD.initial_state`` is read in the coordinates of the level problem.
-    For the search model these are the unit coordinates u, so the center and
-    widths of a ``GaussianState`` there are unit coordinates, fixed relative
-    to every level box, and not original ones. With
-    ``options.level_initial_state="best_point_gaussian"`` every level after
-    the first instead starts from a Gaussian at the best point so far
-    (``_best_point_gaussian``), written in the same coordinates.
-
-    Each level plans from its own child of ``SeedSequence(seed)``
-    (``_outer.plan_round``) and runs its Plan with ``prepare`` and
-    ``submit``. This is an orchestration of QHD Plans, not a Method. It never
-    retries a level. The best point is the best of the reported finite-grid
-    points, not a continuous or global optimum.
-
-    With ``directory`` every level Run is durable, under
-    ``levels/<z>/run/``, each level writes its table-stage data once to
-    ``levels/<z>/tables.json`` (``_LevelTables``), and the outer record is
-    rewritten after each completed level and once more at the end
-    (``_durable``), so that ``resume_box_refinement`` can continue an
-    interrupted refinement. The
-    outer record stores the configuration of the backend of every level
-    Run, and the model of a noisy Aer backend is saved once in the
-    directory.
+    `refine_box(problem, qhd=QHD(...), options=BoxRefinement())` solves level z as one
+    QHD Plan on its box `B_z`, as `options.scaling` maps the box to a QHD problem. Each
+    level reports a point by `options.point_rule` and records the original objective
+    evaluated in the level's coordinates. For the search model this is the transformed
+    expression `F(a + D u)` evaluated at the chosen unit point, before rounding its
+    affine image for display. From the level's marginals it keeps an index interval on
+    every axis that holds the conditional mass `options.mass_threshold`, records the
+    joint mass bound and, when the result has joint observations, the directly computed
+    joint mass, and forms `B_{z+1}` from the cells of the kept intervals. The best point
+    is the reported point with the least recorded relative objective F - C, the earlier
+    level on ties, where C is one exact constant for the whole refinement. It is the
+    best of the reported finite-grid points, not a continuous or global optimum. The
+    guide's [box refinement](../../algorithms/qhd.md#box-refinement) section explains
+    each rule and its evidence.
 
     Args:
         problem (Optimization): Objective, ordered variables and the initial box.
         qhd (QHD): QHD configuration of every level. With
-            ``options.level_initial_state="best_point_gaussian"`` a
-            best-point Gaussian replaces its initial state after the first
-            level.
-        options (BoxRefinement): Refinement options, including the required scaling.
-        execution (str | None): ``"quantum"`` (the default) or ``"classical"``, as for ``nwqlib.solve``.
+            `options.level_initial_state="best_point_gaussian"` a best-point Gaussian
+            replaces its initial state after the first level.
+        options (BoxRefinement): Refinement options, including the scaling.
+        execution (str | None): `"quantum"` (the default) or `"classical"`, as for
+            `nwqlib.solve`.
         shots (int | None): Shots per level, or None for exact readout.
-        backend (object | None): Backend of every level Run, as for ``nwqlib.solve``.
-        seed (int | None): Nonnegative seed of a ``numpy.random.SeedSequence``.
-            Each level plans with its own spawned child, as ``nwqlib.compare``
-            seeds its candidates.
-        limits (ExecutionLimits | None): Cumulative limits of the whole
-            refinement. Each level Run receives what the earlier levels left
-            (``_outer.round_limits``). None uses the ExecutionLimits defaults.
-        progress (object | None): Progress callback of every level Run, as for ``nwqlib.solve``.
-        directory (str | Path | None): A new directory for a durable
-            refinement, or None to keep every level Run in memory. It must
-            not exist, and missing parents are created.
+        backend (object | None): Backend of every level Run, as for `nwqlib.solve`.
+        seed (int | None): Nonnegative seed of a `numpy.random.SeedSequence`. Each level
+            plans with its own spawned child, as `nwqlib.compare` seeds its candidates.
+        limits (ExecutionLimits | None): Cumulative limits of the whole refinement. Each
+            level Run receives what the earlier levels left. None uses the
+            ExecutionLimits defaults.
+        progress (object | None): Progress callback of every level Run, as for
+            `nwqlib.solve`.
+        directory (str | Path | None): A new directory for a saved refinement that
+            `resume_box_refinement` can continue, or None to keep every level Run in
+            memory. It must not exist, and missing parents are created.
 
     Returns:
-        result (BoxRefinementResult): Completed levels, best point, stopping
-            reason and resources, with the level QHD results in ``results``
-            and the original problem in ``problem``, which ``save`` stores.
+        result (BoxRefinementResult): The refinement. `candidate` and `objective` give
+            the best point and the original objective there, `termination` why it
+            stopped, `levels` the completed levels, `results` their QHD results and
+            `problem` the original problem, which `save` stores.
+
+    Raises:
+        ValueError: If the options ask for what the QHD configuration cannot carry out,
+            such as a split budget on a periodic grid, or if the first level fails as
+            described above.
+        FileExistsError: If `directory` exists. The message names
+            `resume_box_refinement`, which continues it.
+
+    Stops:
+        Before each level, refinement stops at `max_levels` levels, an unchanged box, a
+        box at its width floor (for the physical model also a box that the grid
+        rejects), `max_no_improve` levels without a strict decrease of the best relative
+        objective, or remaining limits that cannot fund a level, checked in this order.
+        With `options.stall_split="best_region"` a level whose next box equals its box,
+        and which is not the last of `max_levels`, is split instead of stopping the
+        refinement while fewer than `max_splits` splits have been made, and the next
+        level solves the chosen region. A split is made only when the next level could
+        run, decided before any score or read for it. When the no-improvement count
+        after this level reaches `max_no_improve`, or the limits left after this level
+        cannot fund one, the level records no split and the refinement stops with
+        `no_improvement` or `budget_exhausted`, without a valley search. Otherwise the
+        level looks for a resolved valley. Without one it stops with `box_unchanged`,
+        and when neither region that a split at the valley can keep passes the width
+        floor it stops with `width_floor`. When only one of the two regions fails the
+        width floor and the split keeps it, the refinement stops with `width_floor`
+        after the split. The no-improvement count continues across a split. An unchanged
+        box after the last split stops with `split_limit`. A stalled level that does not
+        split records why in `RefinementLevel.split_declined`. A split budget on a
+        periodic grid raises ValueError before the first level, since one cut does not
+        divide a periodic axis into two regions. A level whose tables show no variation
+        or no resolvable variation, whose planning or Run raises, or whose result has no
+        valid point also stops it, and completed levels are kept for every one of these
+        stops. These stops end the refinement and never lead to a split. When the grid
+        rejects the first box, or the planning or Run of the first level raises, nothing
+        has completed, and the original exception propagates. An exception from the
+        refinement's own evaluation of a solved level, such as a nonreal objective value
+        at the reported grid point, propagates.
+
+    Point rules:
+        Each level reads the rule's grid point. For `mode_or_mean` it compares F at that
+        point with F at the valid-mass mean position of the level's own coordinates.
+        Refinement compares its points by F - C and reports F, both of which each level
+        reads from its stored tables at a grid point and evaluates term by term at an
+        off-grid mean. C is the constant term of the first level's decomposition, so an
+        additive constant of F leaves every comparison unchanged when the constant and
+        every coefficient of F are exact SymPy numbers, while F itself can round the
+        objective's variation away next to a large constant. A physical level takes F at
+        its grid coordinate or mean. A search-model level takes `F(a + D u)` at the unit
+        point u, for exact coefficients F at the exact affine image of u, and records u
+        as `RefinementLevel.unit_point`. Its reported point is that image rounded once,
+        a display value.
+
+    Initial state:
+        Every level plans its level problem with `qhd`, so `QHD.initial_state` is read
+        in the coordinates of the level problem. For the search model these are the unit
+        coordinates u, so the center and widths of a `GaussianState` there are unit
+        coordinates, fixed relative to every level box, and not original ones. With
+        `options.level_initial_state="best_point_gaussian"` every level after the first
+        instead starts from a Gaussian at the best point so far, written in the same
+        coordinates.
+
+    Levels and seeds:
+        Each level plans from its own child of `SeedSequence(seed)` and runs its Plan
+        with `prepare` and `submit`, as `solve` runs a Plan. This is an orchestration of
+        QHD Plans, not a Method. It never retries a level.
+
+    Saved refinements:
+        With `directory` every level Run is saved under `levels/<z>/run/`, each level
+        writes its table-stage data once to `levels/<z>/tables.json`, and the outer
+        record is rewritten after each completed level and once more at the end, so that
+        `resume_box_refinement` can continue an interrupted refinement. The outer record
+        stores the configuration of the backend of every level Run, and the model of a
+        noisy Aer backend is saved once in the directory.
+
+    Examples:
+        The minimizer of `(x - 3/10)**2` on `[-1, 1]` is not a grid point of the first
+        level. Three levels shrink the box around it, and the best point lies within
+        0.015 of 0.3.
+
+        >>> import sympy as sp
+        >>> from nwqlib.problems import Optimization
+        >>> from nwqlib.algorithms.qhd import QHD, BoxRefinement, refine_box
+        >>> x = sp.Symbol("x", real=True)
+        >>> problem = Optimization(objective=(x - sp.Rational(3, 10))**2,
+        ...                        variables=(x,), bounds=((-1.0, 1.0),))
+        >>> result = refine_box(
+        ...     problem, qhd=QHD(num_grid_points=8, num_steps=80, total_time=10.0,
+        ...                      theory_flavor="split_step"),
+        ...     options=BoxRefinement(), execution="classical", seed=7)
+        >>> print(result.termination, len(result.levels))
+        level_limit 3
+        >>> print([[round(v, 4) for v in level.box[0]] for level in result.levels])
+        [[-1.0, 1.0], [0.0, 1.0], [0.1667, 0.6111]]
+        >>> print([round(v, 6) for v in result.candidate])
+        [0.314815]
     """
     import numpy as np
 
@@ -1866,75 +1888,64 @@ def refine_box(
 
 
 def resume_box_refinement(directory, *, backend, progress=None, end_at_unfinishable=False):
-    """Continue a durable refinement of ``refine_box(..., directory=...)``, or return it when it has ended.
+    """Continue an interrupted refinement of `refine_box(..., directory=...)`, or return it when it has ended.
 
-    The outer record of the directory (``_durable``) names the problem, the
-    QHD configuration, the options, execution, shots, root entropy,
-    cumulative limits and backend configuration of the refinement, and holds
-    its completed levels. As in ``constrained.resume_augmented_lagrangian``,
-    ``backend`` must have the stored configuration, a noisy Aer run gets the
-    noise model saved in the directory bound to a copy of ``backend``
-    (``_durable.Directory.bind``), and another backend raises ValueError
-    before any work. The problem comes back from ``problem.pickle`` and must
-    have the content identity of the stored problem record, as in
-    ``constrained.resume_augmented_lagrangian``, or ValueError is raised
-    before any level Result is read or the refinement advances. Each
-    completed level's Result is read from its Run with ``load_run``. The
-    directory is read as the layer wrote it, and edits are not detected
-    (docs/run_archives.md, "Saved folders are read-only"). The refinement
-    then continues from its last completed level with
-    the state that the uninterrupted run had there (``_refine``). The level
-    in progress reads its persisted unscaled tables and their evaluation
-    count instead of evaluating its tables again, and the refinement's
-    constant C comes from the first level's persisted data when it is
-    rational (``_LevelTables``). A level
-    whose Run exists continues that Run with ``load_run(...).wait()``, and
-    no level gets a second Run. When that Run cannot finish without new work,
-    because the interruption stopped a local preparation, acquisition or
-    classical evolution whose outcome nothing can retrieve, its error
-    propagates with a note (``_durable.unrecoverable``), and the outer record
-    keeps its committed levels unchanged. With ``end_at_unfinishable=True``
-    the refinement instead ends there with ``inner_failed``, keeps its
-    completed levels and records the Run's error as the failure. This option
-    handles an unfinishable continuation after a Run has reopened. A
-    headerless folder fails during reopen and is not handled by
-    ``end_at_unfinishable``. Reopen does not remove or recreate that folder
-    automatically. Before a completed round or level exists, an inner
-    failure still propagates.
+    Pass the directory and the backend of the original call. The directory's outer
+    record names the problem, the QHD configuration, the options, execution, shots, root
+    entropy, cumulative limits and backend configuration of the refinement, and holds
+    its completed levels. As in `resume_augmented_lagrangian`, `backend` must have the
+    stored configuration, a noisy Aer run gets the noise model saved in the directory
+    bound to a copy of `backend`, and another backend raises ValueError before any work.
+    The problem comes back from `problem.pickle` and must have the content hash of the
+    stored problem record, as in `resume_augmented_lagrangian`, or ValueError is raised
+    before any level Result is read or the refinement advances. Each completed level's
+    Result is read from its Run with `load_run`. The directory is read as the layer
+    wrote it, and edits are not detected
+    ([Saved folders are read-only](../../saved_evidence.md#saved-folders-are-read-only)).
+    The refinement then continues from its last completed level with the state that the
+    uninterrupted
+    run had there. The level in progress reads its saved unscaled tables and their
+    evaluation count instead of evaluating its tables again, and the refinement's
+    constant C comes from the first level's saved data when it is rational. A level
+    whose Run exists continues that Run with `load_run(...).wait()`, and no level gets a
+    second Run. When that Run cannot finish without new work, because the interruption
+    stopped a local preparation, measurement or classical evolution whose outcome
+    nothing can retrieve, its error propagates with a note, and the outer record keeps
+    its committed levels unchanged. With `end_at_unfinishable=True` the refinement
+    instead ends there with `inner_failed`, keeps its completed levels and records the
+    Run's error as the failure. This option handles an unfinishable continuation after a
+    Run has reopened. A Run folder without a committed run-log header fails during
+    reopen and is not handled by `end_at_unfinishable`. Reopen does not remove or
+    recreate that folder automatically. Before a completed round or level exists, an
+    inner failure still propagates.
 
-    A directory whose refinement has ended returns its result, with the
-    level Results read from their Runs and the problem from
-    ``problem.pickle`` attached, and plans, evaluates and acquires nothing.
-    Either returned result can be saved to a separate result archive
-    (``BoxRefinementResult.save``).
+    A directory whose refinement has ended returns its result, with the level Results
+    read from their Runs and the problem from `problem.pickle` attached, and plans,
+    evaluates and measures nothing. Either returned result can be saved to a separate
+    result archive (`BoxRefinementResult.save`).
 
-    Resuming gives the records of an uninterrupted durable refinement with
-    the same root entropy, apart from the fields that differ between any two
-    durable executions, which ``constrained.resume_augmented_lagrangian``
-    lists with their reasons.
+    Resuming gives the records of an uninterrupted saved refinement with the same root
+    entropy, apart from the fields that differ between any two saved executions, which
+    `resume_augmented_lagrangian` lists with their reasons.
 
     Args:
-        directory (str | Path): The directory of ``refine_box(..., directory=...)``.
-        backend (object): The backend of the original call, whose
-            configuration the directory stores. None stands for
-            ``AerBackend()`` under quantum execution, as in the original call.
-            For a noisy Aer refinement in a new process,
-            ``AerBackend(noise_model_id=...)`` with the identity of the
-            original binding, which the error for another backend names.
-        progress (object | None): Progress callback of the level Runs that
-            this call creates or continues, as for ``nwqlib.solve``.
-        end_at_unfinishable (bool): Whether to end the refinement with
-            ``inner_failed`` at a level whose Run cannot finish without new
-            work, instead of raising the Run's error. False by default, which
-            leaves the directory as it is for a later resume.
-            This option handles an unfinishable continuation after a Run has
-            reopened. A headerless folder fails during reopen and is not
-            handled by ``end_at_unfinishable``. Reopen does not remove or
-            recreate that folder automatically. Before a completed round or
-            level exists, an inner failure still propagates.
+        directory (str | Path): The directory of `refine_box(..., directory=...)`.
+        backend (object): The backend of the original call, whose configuration the
+            directory stores. None stands for `AerBackend()` under quantum execution, as
+            in the original call. For a noisy Aer refinement in a new process,
+            `AerBackend(noise_model_id=...)` with the identifier of the original
+            binding, which the error for another backend names.
+        progress (object | None): Progress callback of the level Runs that this call
+            creates or continues, as for `nwqlib.solve`.
+        end_at_unfinishable (bool): Default `False`, which raises the Run's error and
+            leaves the directory as it is for a later resume. True ends the refinement
+            with `inner_failed` at a level whose Run cannot finish without new work. It
+            handles an unfinishable continuation after a Run has reopened, not a Run
+            folder without a committed run-log header, which fails during reopen. Before
+            a completed level exists, an inner failure still propagates.
 
     Returns:
-        result (BoxRefinementResult): The refinement, as ``refine_box`` returns it.
+        result (BoxRefinementResult): The refinement, as `refine_box` returns it.
     """
     import numpy as np
     from nwqlib.execution import ExecutionLimits
@@ -2077,30 +2088,27 @@ def save_archive(result, path):
 
 
 def load_box_refinement(path):
-    """Load a saved standalone refinement without planning, objective evaluation or acquisition.
+    """Load a saved standalone refinement without planning, objective evaluation or measurement.
 
-    Validate the original problem identity and each completed level's Result
-    and Plan identities. Each Plan describes that level's own objective and
-    coordinate box. Return a BoxRefinementResult with its original problem
-    and level Results attached.
-
-    The archive is the one ``BoxRefinementResult.save`` writes
-    (``save_archive``). The record is validated with its content identities
-    and its own validators, the SymPy objects come back through
-    ``archive._SymbolicReader``, which resolves SymPy classes only, and the
-    rebuilt problem must have the identity of the stored problem record and
-    of the refinement record. Each level Result is loaded with
-    ``load_result``, which validates it with its own Plan and archive, and
-    the checks of ``_check_attachments`` follow. No backend is needed. A
-    durable controller directory is refused with the function that
-    continues it, and a saved augmented-Lagrangian result with
-    ``load_augmented_lagrangian``.
+    `load_box_refinement(path)` reads the directory that `BoxRefinementResult.save`
+    wrote. It validates the original problem's content hash and each completed level's
+    Result and Plan hashes, and returns a `BoxRefinementResult` with its original
+    problem and level Results attached. Each Plan describes that level's own objective
+    and coordinate box. The record is validated with its content hashes and its own
+    checks, the SymPy objects come back through a reader that resolves SymPy classes
+    only, and the rebuilt problem must have the hash of the stored problem record and of
+    the refinement record. Each level Result is loaded with `load_result`, which
+    validates it with its own Plan and archive. No backend is needed. A saved-refinement
+    directory of `refine_box(..., directory=...)` is refused with the name of
+    `resume_box_refinement`, which continues it, and a saved augmented-Lagrangian result
+    with the name of `load_augmented_lagrangian`.
 
     Args:
-        path (str | Path): The directory that ``BoxRefinementResult.save`` wrote.
+        path (str | Path): The directory that `BoxRefinementResult.save` wrote.
 
     Returns:
-        result (BoxRefinementResult): The saved refinement, with ``problem`` and ``results`` attached.
+        result (BoxRefinementResult): The saved refinement, with `problem` and `results`
+            attached.
     """
     from nwqlib._choice_archive import ArchiveFiles
     from nwqlib.scientist import load_result

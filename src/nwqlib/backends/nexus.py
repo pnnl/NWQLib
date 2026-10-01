@@ -7,8 +7,8 @@ operation or waits through the provider queue. Each remote resource is named
 ``nwqlib:<stage>:<identity>``, and each compile or execute job carries a
 description of its programs, shots and target. Reconciliation finds the
 original resource by exact name within the project and, for a job, checks
-that description. docs/nexus.md gives the stage table and the qualification
-scope.
+that description. docs/development/execution.md ("Backend adapter contract")
+gives the stage table, and docs/nexus.md the qualification scope.
 """
 
 from dataclasses import dataclass, replace
@@ -66,18 +66,43 @@ class _PreparedNexus:
 
 
 class NexusBackend(Record):
-    """Explicit Nexus project and H2 device, without import/login on construction.
+    """Quantinuum Nexus connection for sampled counts on an H2 device or emulator.
 
-    credential_name refers to a Nexus-linked credential, never a secret.
-    Authentication uses the user's existing qnexus configuration. max_cost_hqc
-    is per submitted program in Hardware Quantum Credits; None requests no cap.
-    The Run bounds stored wrapper data, not HTTP buffering, billing or SDK RSS.
-    qnexus 0.49 has no public per-request timeout; refresh avoids queue waits
-    but one HTTP request can still block indefinitely.
-    optimization_level is the Nexus compile level; a level other than the
-    default 1 is recorded as the receipt exclusion "optimization_level", which
-    marks a circuit compiled at a non-default level. The target has no derived
-    roundoff constant, so state_error() gives no bound at any level.
+    Build it with keyword arguments, for example
+    `NexusBackend(project="<project UUID>", device="H2-1", max_input_bytes=1_000_000)`,
+    and pass it as `backend=` to [`prepare`][nwqlib.scientist.prepare].
+    `project`, `device` and `max_input_bytes` are required. It needs the `nexus`
+    extra. Construction imports no SDK and does not log in. Authentication uses the
+    user's existing qnexus configuration.
+
+    Preparation uploads and compiles each circuit as separate remote steps, and
+    execution sends one job per batch. The Run bounds the data it stores, not HTTP
+    buffering, billing or SDK memory. qnexus 0.49 has no public per-request
+    timeout, so a refresh avoids waiting in the provider queue but one HTTP
+    request can still block indefinitely. Only offline SDK and converter checks
+    qualify this backend, and live compilation and execution are unqualified. The
+    [Nexus guide](../nexus.md) gives the preparation boundary, costs and the
+    qnexus dependency conflict.
+
+    Attributes:
+        project: Required. UUID of an existing Nexus project.
+        device: Required. An H2 device name, `H2-<n>`, with suffix `E` or `LE` for
+            the emulators. Helios devices take HUGR or QIR programs, a separate
+            route that this backend does not submit.
+        target_region: Default `"us"`. Execution region, `"us"` or `"sg"`.
+        credential_name: Default `None`. Name of a Nexus-linked credential, never
+            a secret.
+        optimization_level: Default `1`. Nexus compile level, 0 to 3. A level
+            other than 1 is recorded as the exclusion `"optimization_level"` in
+            the preparation record. The H2 target has no derived roundoff
+            constant, so `state_error()` gives no bound at any level.
+        max_cost_hqc: Default `None`, no cap. Nonnegative. Cost cap per submitted
+            program, in Hardware Quantum Credits.
+        max_input_bytes: Required. Positive. Limit in bytes on the JSON encoding
+            of each prepared pytket circuit.
+
+    Raises:
+        ValueError: If `device` is not an H2 device name.
     """
 
     qualification_notice: ClassVar[str] = (

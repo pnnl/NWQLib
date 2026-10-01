@@ -19,7 +19,25 @@ PAULI_LABEL_PATTERN = re.compile(r"([xyz])(\d+)")
 
 
 def make_pauli_label(ops: Mapping[int, str]) -> str:
-    """Return a compact label such as ``"x0z2"`` from qubit-indexed Paulis."""
+    """Return a compact label such as `"x0z2"` from qubit-indexed Paulis.
+
+    Args:
+        ops (Mapping[int, str]): Nonempty map from nonnegative qubit index to
+            `"X"`, `"Y"` or `"Z"` (either case).
+
+    Returns:
+        label (str): Lowercase letters followed by their qubit indices, in
+            increasing qubit order.
+
+    Raises:
+        ValueError: If `ops` is empty, an index is negative or an operator is
+            not X, Y or Z.
+
+    Examples:
+        >>> from nwqlib.subroutines.hamiltonian_evolution import make_pauli_label
+        >>> make_pauli_label({2: "Z", 0: "X"})
+        'x0z2'
+    """
 
     if not ops:
         # Every consumer (parse_pauli_label, apply_pauli_rotation, ...) rejects
@@ -38,10 +56,20 @@ def make_pauli_label(ops: Mapping[int, str]) -> str:
 
 
 def parse_pauli_label(label: str) -> dict[int, str]:
-    """Parse a compact Pauli label into ``{qubit: op}``.
+    """Parse a compact Pauli label into `{qubit: op}`.
 
     The compact convention uses zero-based qubit indices and requires strictly
     increasing qubit order so that labels have a stable canonical form.
+
+    Args:
+        label (str): Nonempty compact label such as `"x0z2"`.
+
+    Returns:
+        ops (dict[int, str]): Map from qubit index to `"X"`, `"Y"` or `"Z"`.
+
+    Raises:
+        ValueError: If the label is empty, malformed or not in strictly
+            increasing qubit order.
     """
 
     if not label:
@@ -67,7 +95,20 @@ def parse_pauli_label(label: str) -> dict[int, str]:
 
 
 def pauli_label_to_qiskit_string(label: str, num_qubits: int) -> str:
-    """Convert compact labels to Qiskit's full-string Pauli convention."""
+    """Convert a compact label to Qiskit's dense Pauli string, with qubit 0 in the rightmost character.
+
+    Args:
+        label (str): Compact label such as `"x0z2"`.
+        num_qubits (int): Positive length of the dense string.
+
+    Returns:
+        pauli (str): Dense label, for example `"IZIX"` for `"x0z2"` on four
+            qubits.
+
+    Raises:
+        ValueError: If `num_qubits` is not positive or the label names a
+            qubit outside it.
+    """
 
     if num_qubits <= 0:
         raise ValueError("num_qubits must be positive")
@@ -84,7 +125,17 @@ def sparse_pauli_op_from_terms(
     terms: Sequence[Mapping[str, object]],
     num_qubits: int,
 ) -> SparsePauliOp:
-    """Build a Qiskit ``SparsePauliOp`` from compact Pauli-term records."""
+    """Build a Qiskit `SparsePauliOp` from compact Pauli-term records.
+
+    Args:
+        terms (Sequence[Mapping]): Records `{"pauli": label, "coefficient": c}`
+            with compact labels.
+        num_qubits (int): Positive number of qubits.
+
+    Returns:
+        operator (SparsePauliOp): `sum_j c_j P_j` on `num_qubits` qubits, or
+            the zero operator for no terms.
+    """
 
     from qiskit.quantum_info import SparsePauliOp
 

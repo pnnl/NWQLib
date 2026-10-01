@@ -73,38 +73,44 @@ _OMEGA = 1.7976931348623157e308
 
 
 class BinarySynthesis(Record):
-    """Circuit synthesis choices of the binary encoding.
+    """Circuit choices of the binary encoding: phase diagonals, QFT bit reversal and AQFT cutoff.
 
-    Every choice builds the same exact operator unless ``aqft_cutoff`` or a
-    positive ``QHD.rotation_threshold`` selects an approximation, whose
-    operator-norm bound the Plan's reconstruction records
-    (``aqft_error_bound`` and ``pruning_error_bound``).
+    Build it with keyword arguments and pass it as
+    `QHD(encoding="binary", binary_synthesis=BinarySynthesis(...))`. Every argument is
+    optional, and the defaults build exact circuits. Every choice builds the same exact
+    operator unless `aqft_cutoff` or a positive `QHD.rotation_threshold` selects an
+    approximation, whose operator-norm bound the Plan records as `aqft_error_bound` and
+    `pruning_error_bound`. The
+    [circuit synthesis](../../algorithms/qhd.md#circuit-synthesis) section of the guide
+    gives the CX counts of each choice.
 
     Attributes:
-        potential: Synthesis of each support table's phase diagonal.
-            ``"dense_diagonal"`` is the exact phase diagonal of
-            ``subroutines._multiplexors.append_control_diagonal_phases``,
-            ``2**n - 2`` CX on n qubits for a nonzero table and none for an
-            all-zero one. ``"walsh_rotations"`` applies one parity-ladder Z
-            rotation per nonzero Walsh coefficient, ``2 (w - 1)`` CX for a
-            weight-w string. ``"min_cx"``, the default, compares the two
-            emitted CX counts of each table at its actual step exponent and
-            takes the smaller, preferring ``"walsh_rotations"`` on a tie. It
-            minimizes that CX count table by table, not the Rz or T count, the
-            depth, routed CX on limited connectivity, or the CX of a jointly
-            synthesized potential.
-        kinetic_phase: The same choice for each variable's kinetic phase
-            diagonal in the Fourier basis.
-        qft_bit_reversal: ``"relabel"``, the default, omits the swap layers of
-            both QFTs and applies the phase table permuted by bit reversal
-            between the swap-free QFT and its exact inverse, which is the same
-            operator (``kinetic_table``). ``"swap"`` keeps Qiskit's swap
-            layers, ``3 floor(b/2)`` CX per QFT.
-        aqft_cutoff: None, the default, keeps every controlled phase of the
-            QFT. An integer m keeps the controlled phases between wires at
-            distance ``r <= m``, whose angles are ``pi/2**r``, and drops the
-            rest, Qiskit's ``approximation_degree = max(0, b - 1 - m)``
-            (``qft_gates``). m = 0 drops every controlled phase.
+        potential: Default `"min_cx"`. Synthesis of each support table's phase diagonal:
+            `"dense_diagonal"`, `"walsh_rotations"`, or `"min_cx"`, the one of the two
+            with fewer CX for each table, Walsh rotations on a tie. The Synthesis
+            choices note below gives their CX counts and what `"min_cx"` does not
+            minimize.
+        kinetic_phase: Default `"min_cx"`. The same choice for each variable's kinetic
+            phase diagonal in the Fourier basis.
+        qft_bit_reversal: Default `"relabel"`, which omits the swap layers of both QFTs
+            and applies the phase table permuted by bit reversal between the swap-free
+            QFT and its exact inverse, the same operator. `"swap"` keeps Qiskit's swap
+            layers, `3 floor(b/2)` CX per QFT.
+        aqft_cutoff: Default `None`, which keeps every controlled phase of the QFT. A
+            nonnegative integer m keeps the controlled phases between wires at distance
+            `r <= m`, whose angles are `pi/2**r`, and drops the rest, Qiskit's
+            `approximation_degree = max(0, b - 1 - m)`. m = 0 drops every controlled
+            phase.
+
+    Synthesis choices:
+        `"dense_diagonal"` is the exact phase diagonal of Shende, Bullock and Markov,
+        quant-ph/0406176v5, Theorem 7, `2**n - 2` CX on n qubits for a nonzero table and
+        none for an all-zero one. `"walsh_rotations"` applies one parity-ladder Z
+        rotation per nonzero Walsh coefficient, `2 (w - 1)` CX for a weight-w string.
+        `"min_cx"` compares the two emitted CX counts of each table at its step exponent
+        and takes the smaller, preferring `"walsh_rotations"` on a tie. It minimizes
+        that CX count table by table, not the Rz or T count, the depth, routed CX on
+        limited connectivity, or the CX of a jointly synthesized potential.
     """
 
     potential: SynthesisChoice = "min_cx"

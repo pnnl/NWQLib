@@ -1,10 +1,10 @@
-# Add a Method
+# Add a method
 
-For block composition first, follow the [selected blocks guide](blocks.md): operator input, PREP–SELECT–unPREP wiring, the projected A/alpha relation and explicit native lowering. A Method consumes the same selected blocks and Program. Continue below to connect a new scientific operation to the shared lifecycle.
+A Method turns a Problem into a Plan (the Program and the experiments to run) and turns the observations into a Result. This page states what a Method must provide, its optional hooks, how to register a Method and how to check it with `check-method`. [Run your own circuit](own_circuit.md) shows the smallest Method, which needs only `descriptor`, `plan` and `analyze`, and [Compose blocks](blocks.md) shows how to build the subroutines a Program calls, such as PREP and SELECT.
 
-A Method that builds one circuit and returns its counts needs only `descriptor`, `plan` and `analyze`. [Run your own circuit](own_circuit.md) shows that smallest form and when the archive hooks below become necessary.
+## The reference Method {#the-reference-method}
 
-A configured `Method` selects one scientific `Problem`, returns the common `Plan` and interprets its actual `RunData` into a `Result`. The external Hadamard Method described here uses `Expectation(state=..., observable=...)` and the same public operations as builtin methods. Its complete implementation is `tests/_hadamard_method.py`, with its inert registration in `tests/_hadamard_method_metadata.py`. The test suite uses it as its reference external Method. Put your own Method in an importable module of your package, here called `my_methods`:
+The examples on this page use NWQLib's reference external Method, which estimates the normalized expectation of one Pauli term for an `Expectation` Problem with a Hadamard test. It uses the same public operations as the built-in Methods. Its complete implementation is [`tests/_hadamard_method.py`](https://github.com/pnnl/NWQLib/blob/main/tests/_hadamard_method.py), and its registration, which does not import the implementation, is [`tests/_hadamard_method_metadata.py`](https://github.com/pnnl/NWQLib/blob/main/tests/_hadamard_method_metadata.py). Both files are in the source repository and are not installed with the package, and the test suite uses them as its reference external Method. Put your own Method in an importable module of your package, here called `my_methods`:
 
 ```python
 from nwqlib import Expectation, plan, prepare, submit
@@ -29,37 +29,75 @@ Define a `case()` factory next to the Method, as the reference implementation do
 python -m nwqlib check-method my_methods:case
 ```
 
-The Hadamard Method supports one nonzero real Pauli term `A=cP` and a normalized preparation of the matching dimension. It rejects multiple terms, unsupported representations and another output target before construction. Its Program contains actual system PREP, ancilla H, controlled signed Pauli SELECT and inverse H calls. With ancilla first in register order, its final Pauli label is `I...IZ`. For `A=cP`, the ancilla mean is `sign(c) <psi|P|psi>`; multiplication by `abs(c)` recovers the original normalized expectation. The existing selected-subroutine factories own native construction, control, global phase and restoration. The Method supplies their ordered ports and scientific interpretation.
+The Hadamard Method supports one nonzero real Pauli term `A=cP` and a normalized preparation of the matching dimension. It rejects several terms, unsupported representations and another output before building anything. Its Program calls system PREP, ancilla H, controlled signed Pauli SELECT and inverse H. With the ancilla first in register order, its final Pauli label is `I...IZ`. For `A=cP`, the ancilla mean is `sign(c) <psi|P|psi>`, and multiplication by `abs(c)` recovers the original normalized expectation. The block functions of `nwqlib.blocks` build the circuits, their control, global phase and restoration, and the Method supplies their ordered ports and the scientific interpretation.
 
-The independent witnesses are `|0>, Z -> 1`, `|+>, Z -> 0`, and `|+i>, Y -> 1`. The complex case rejects a Y-sign error. A negative coefficient tests controlled phase; explicit counts and an HZH preparation demonstrate a lawful alternative selection. This Method illustrates the extension contract and is not a claim of a new SOTA algorithm. The witnesses use at most two qubits, and the Method performs no reference state construction or eigensolve.
+Its tests check three answers known independently of the Method: `|0>, Z -> 1`, `|+>, Z -> 0`, and `|+i>, Y -> 1`. The complex case catches a sign error in Y. A negative coefficient tests the controlled phase, and explicit counts with an HZH preparation show a valid alternative choice of block. These checks use at most two qubits, and the Method builds no reference state and solves no eigenproblem. The Method shows how to write a Method and is not a new algorithm.
 
-## Configuration and selected science
+The Hadamard Method returns `NormalizedExpectation` through a small Result subclass whose `.value` has the same output frame (quantity, metric, unit and scope) as that built-in output. Its Plan and Result check covers the inputs, alpha, the control, the ancilla wire and the reconstruction. Its data check ties the reported mean to the completed observation. Another scalar with the same Plan is valid on its own but fails that pair check, and the original observation remains available for reanalysis. These checks neither reconstruct a state nor recompute the quantum experiment.
 
-Subclass `nwqlib.algorithms.Method`, the immutable Record owner. Declare constant `descriptor: ClassVar[AlgorithmDescriptor]` metadata and actual scientific configuration fields on that class. Required inputs remain required; schema inspection does not fabricate them. A descriptor states scope and references; it does not prove scientific applicability or qualify a backend.
+## Configure the Method {#configuration-and-selected-science}
 
-The Method's content identity is part of every Plan it selects, so changing a configuration field produces a new Plan rather than altering an existing one. Execution, analysis and archives then consume that one selection without running `plan` again, which keeps each Result and observation tied to the construction it came from.
+Subclass `nwqlib.algorithms.Method`, an immutable Record. Declare the constant `descriptor: ClassVar[AlgorithmDescriptor]` and the Method's scientific configuration fields on that class. Required inputs stay required, and schema inspection does not invent values for them. A descriptor states scope and references, and it neither proves scientific applicability nor qualifies a backend.
 
-| Responsibility | Actual contract |
+The Method's content hash is part of every Plan it makes, so changing a configuration field gives a new Plan instead of altering an existing one. Execution, analysis and saved archives then use that one Plan without running `plan` again, which keeps each Result and observation tied to the construction it came from.
+
+### What every Method provides {#required-hooks}
+
+| Part | What your Method must do |
 | --- | --- |
-| Selection | `plan(problem, *, output, execution, shots, rng, accuracy=None)` returns the common Plan, preserving the original scientific input, configured Method, output and final RNG state. |
-| Construction | Plan binds the selected Program and actual `SelectedBlock` or host-kernel capabilities. Resource estimates and native lowering consume the same selections. |
-| Execution | Static methods inherit common prepare/execute behavior. Adaptive methods advance their actual controller through the same Run. `prepare(plan, settings="all")` first calls `method.prepare_all_refusal()`, before a Run exists, and raises ValueError with the returned reason when it is not None, so a refusal leaves no Run folder. The `prepare(plan, *, run)` hook receives the `settings` keyword only for `"all"`, so an override without that keyword keeps working for the default, and the inherited `prepare_all_refusal` refuses `"all"` for it. A Method whose controller chooses later settings from earlier outcomes overrides `prepare_all_refusal` to return why and what can be prepared instead. Otherwise the inherited static preparation would prepare and charge every Plan experiment, including ones its controller never submits. |
-| Reduction allowance | A Method whose Plan declares an acquisition-time reduction defines `reduction_allowance(plan, point, *, observation, width, run)`. It runs the family's workspace check, raising ValueError to refuse, and returns the Method's remaining work allowance as a Python `int`. Preparation calls it before native work and may call it again on submission and after a reopen, so it reads its ledger without changing it. With `prepare(plan, settings="all")` each preparation is admitted separately, so a cumulative limit subtracts the work of the reductions the Run has already completed. |
-| Reducer registration | A reducer is registered by name in `core.planning.READOUT_REDUCERS` with its shape function and, when it executes, its work and execution functions. A reducer that ships with NWQLib registers itself when its module is imported, and that module is listed in `core.planning.BUILTIN_REDUCER_MODULES`, so that a saved record naming the reducer validates in a process that has not imported the module (`core.planning.registered_reducer`). A reducer registered with `receives_context=True` also receives a read-only `ReductionContext` of the producing receipt: its probability window, its exclusions and its qualified state errors. The receipt's state-error budget bounds the computed state only up to a common global phase. A saved-state reduction receives a qualified native estimate modulo global phase when its declared outputs are invariant under that phase. Phase-defined state uncertainty is unavailable unless a separate phase-error model supplies it. The context reports that reason. A host phase correction adds its finite multiplication and modulus error to every consumer of the corrected array. Projected mass checks can use the modulo-phase estimate even when other diagnostics from the same reducer depend on phase. If native premises remain unavailable, they use the propagated probability-window convention and report the original exclusions. In the context, `state_error` is the modulo-phase estimate for a reducer registered with `phase_invariant=True`, and it is None with a `state_error_reason` for any other reducer. `modulo_phase_state_error` gives every reducer the modulo-phase estimate, and `probability_window` is the receipt's window propagated through the host phase correction, or None when the backend did not assess that correction. `state_error_resolutions`, empty by default, names the receipt exclusion labels whose effects the reducer's own arithmetic bounds, and the context's state errors are computed with those labels resolved. A Method that publishes or validates the reducer's statistics again must pass the same labels to the receipt's `saved_state_error` and use its `saved_state_probability_window`, so that acquisition, publication and any later validation use the same branch. |
-| Analysis | `analyze(plan, data, *, settings)` returns the scientific Result attached to that Plan and sufficient data. It does not acquire observations. |
-| Error information | `error_model(plan)` exposes the selected method's framed known and unavailable sources; the default returns `plan.error_model`. |
-| Explicit verification | Override `verify` only for supported explicitly selected checks at their actual cost owners. |
-| Persistence | `result_type` names the actual Result class. `save_archive(plan, files)` and `load_archive(data, files)` save/restore selected input data and native bindings without replanning. |
+| Selection: `plan(problem, *, output, execution, shots, rng, accuracy=None)` | Return the common Plan, keeping the original Problem, the configured Method, the output and the final RNG state. |
+| Construction | Put the Program and its block records in the Plan's `construction`, and bind the live `SelectedBlock` objects or host-kernel capabilities with `Plan._bind`. Resource estimates and circuit building read the same blocks. |
+| Analysis: `analyze(plan, data, *, settings)` | Return the scientific Result, attached to that Plan and to the data it needs. It does not collect observations. |
 
-An external method adds no common family switch. It also does not replace backend accounting, durable journals or transport. Input conversion and selected native work keep their concrete size controls; Run limits govern cumulative acquisition and stored data. An unknown SDK cost remains unknown.
+### Optional hooks {#optional-hooks}
 
-The Hadamard Method selects `NormalizedExpectation`, with a small Result subclass whose `.value` has that existing output frame. Its Plan/result validator checks actual inputs, alpha, control, ancilla wire and reconstruction. Its data validator joins the reported mean to the actual completed observation. A different same-Plan scalar is intrinsically valid metadata but fails that scientific pair. The original observation remains usable for reanalysis. These validators do not reconstruct a state or recompute the quantum experiment.
+Leave out the hooks your Method does not support. Do not add placeholder archive or sampling methods to make capability inspection succeed.
 
-## Explicit trusted registration
+| Hook | What your Method must do |
+| --- | --- |
+| Error information: `error_model(plan)` | Return the Method's known and unavailable error sources, each with its `ErrorFrame`. The default returns `plan.error_model`. |
+| Explicit verification: `verify` | Override it only for supported checks that the caller requests explicitly. Each check's cost is counted where its work runs. |
+| Persistence: `result_type`, `save_archive(plan, files)`, `load_archive(saved, files)` | `result_type` names the Result class. The two hooks save and restore the input data and the live blocks without planning again. [Run your own circuit](own_circuit.md#when-the-archive-hooks-are-required) says when they are needed. |
+| Shots from an accuracy request: `sampling_shots(self, problem, *, output, accuracy, execution, shots)` | Return the shot count. It runs before planning. Without it, automatic shot selection is unavailable, and explicitly supplied shots and a Method's own adaptive iteration keep their own rules for the shots they request. |
+| Adaptive execution: `prepare_all_refusal()` | Override it when your Method chooses later settings from earlier outcomes, as [Adaptive Methods](#adaptive-methods) describes. |
+| Continuing an interrupted analysis: `recover_analysis` | A separate, explicitly called hook that continues a saved interrupted analysis. It does not resubmit earlier circuits. |
 
-`AlgorithmRegistry()` starts empty. `builtin_registrations()` reads the actual builtin Method types and descriptors from the same owner map as public exports. It can import builtin configuration modules, but constructs no Method, performs no planning and imports no quantum SDK. `options_schema(registration)` reads the actual configured Method's `model_json_schema()`. Explicit builtin inventory can therefore load NumPy, SciPy and configuration dependencies. Its promise of no SDK import and no planning is not a promise of zero import cost.
+### Adaptive Methods {#adaptive-methods}
 
-A `Registration` contains an exact Source, a trusted `module:attribute` factory, and optionally an already known descriptor and Method type. Inventory does not execute a factory. Declare the registration in a module that does not import the Method implementation, as `tests/_hadamard_method_metadata.py` does. For example, with a module `my_methods_metadata` whose factory is `my_methods:HadamardPauliExpectation`:
+Static Methods inherit the common preparation and execution. Adaptive Methods advance their iteration state through the same Run. `prepare(plan, settings="all")` first calls `method.prepare_all_refusal()`, before a Run exists, and raises ValueError with the returned reason when it is not None, so a refusal leaves no Run folder. The `prepare(plan, *, run)` hook receives the `settings` keyword only for `"all"`. An override without that keyword therefore keeps working for the default, and the inherited `prepare_all_refusal` refuses `"all"` for it. A Method whose iteration chooses later settings from earlier outcomes overrides `prepare_all_refusal` to return why, and what can be prepared instead. Otherwise the inherited static preparation would prepare every experiment of the Plan and count it against the Run's limits, including experiments the iteration never submits.
+
+### Only for reductions during data collection {#reduction-hooks}
+
+A Plan can declare a reduction that a backend applies to readout data, such as a saved state, while the circuits run. Only such a Method needs these two parts.
+
+| Part | What your Method must do |
+| --- | --- |
+| Reduction allowance: `reduction_allowance(plan, point, *, observation, width, run)` | Run the family's workspace check, raising ValueError to refuse, and return the Method's remaining work allowance as a Python `int`. Preparation calls it before any backend work and may call it again on submission and after a reopen, so it reads its record of work already used without changing it. With `prepare(plan, settings="all")` each preparation is checked separately, so a cumulative limit subtracts the work of the reductions the Run has already completed. |
+| Reducer registration | Register the reducer by name, as [Reducer registration](#reducer-registration) describes. |
+
+### Reducer registration {#reducer-registration}
+
+A reducer is registered by name in `core.planning.READOUT_REDUCERS` with its shape function and, when it executes, its work and execution functions. A reducer that ships with NWQLib registers itself when its module is imported. That module is listed in `core.planning.BUILTIN_REDUCER_MODULES`, so that a saved record naming the reducer validates in a process that has not imported the module (`core.planning.registered_reducer`).
+
+A reducer registered with `receives_context=True` also receives a read-only `ReductionContext` of the preparation record that produced the data: its probability window, its exclusions and its qualified state errors. The record's state-error budget bounds the computed state only up to a common global phase. A saved-state reduction receives a qualified native estimate modulo global phase when its declared outputs are invariant under that phase. Phase-defined state uncertainty is unavailable unless a separate phase-error model supplies it, and the context reports that reason. A host phase correction adds its finite multiplication and modulus error to every consumer of the corrected array. Projected mass checks can use the modulo-phase estimate even when other diagnostics from the same reducer depend on phase. If native premises remain unavailable, those checks use the propagated probability-window convention and report the original exclusions.
+
+The context gives three values:
+
+- `state_error`: the modulo-phase estimate for a reducer registered with `phase_invariant=True`, and None with a `state_error_reason` for any other reducer.
+- `modulo_phase_state_error`: the modulo-phase estimate, for every reducer.
+- `probability_window`: the preparation record's window propagated through the host phase correction, or None when the backend did not assess that correction.
+
+The registration field `state_error_resolutions`, empty by default, names the exclusion labels of the preparation record whose effects the reducer's own arithmetic bounds, and the context's state errors are computed with those labels resolved. A Method that stores the reducer's statistics in its results, or validates them again, must pass the same labels to the preparation record's `saved_state_error` and use its `saved_state_probability_window`, so that data collection, storage and any later validation use the same branch.
+
+### What the shared code keeps {#what-the-shared-code-keeps}
+
+An external Method needs no change to NWQLib's shared code, and it keeps NWQLib's backend accounting, Run logs and transport. Input conversion and circuit building keep their own size limits, and the Run's limits bound the total data collected and stored. An unknown SDK cost stays unknown.
+
+## Register a Method {#explicit-trusted-registration}
+
+`AlgorithmRegistry()` starts empty. `builtin_registrations()` reads the built-in Method types and descriptors from the same map as the public exports. It can import built-in configuration modules, but it constructs no Method, does no planning and imports no quantum SDK. `options_schema(registration)` reads the configured Method's `model_json_schema()`. Listing the built-in Methods can therefore load NumPy, SciPy and configuration dependencies, so it has an import cost even though it imports no SDK and does no planning.
+
+A `Registration` contains an exact Source, a trusted `module:attribute` factory, and optionally an already known descriptor and Method type. Listing registrations does not run a factory. Declare the registration in a module that does not import the Method implementation, as `tests/_hadamard_method_metadata.py` does. For example, with a module `my_methods_metadata` whose factory is `my_methods:HadamardPauliExpectation`:
 
 ```python
 from nwqlib.algorithms import AlgorithmRegistry
@@ -71,45 +109,48 @@ print(registry.discover())  # my_methods remains unloaded
 method = registry.resolve(REGISTRATION.source, preparation_choice="native")
 ```
 
-Resolution invokes only that selected factory with the supplied configuration. `expected_type=MyMethod` optionally preserves a caller's concrete type at this dynamic boundary. `direct_method(instance)` checks the supplied Method without a factory. No cache silently reuses a prior configuration.
+`resolve` calls only that factory, with the supplied configuration. `expected_type=MyMethod` optionally checks that the Method is an instance of the caller's type and returns it with that type. `direct_method(instance)` checks a Method you already constructed, without a factory. No cache reuses an earlier configuration.
 
-`third_party_registrations()` enumerates installed `nwqlib.algorithms` entry points named `method@version`. It reads metadata without loading entry-point code. Unknown external descriptors and schemas remain unknown. Duplicate versions are rejected, and an absent version does not fall back. Discovery is explicit; builtin inventory does not automatically discover installed extensions.
+`third_party_registrations()` lists installed `nwqlib.algorithms` entry points named `method@version`. It reads metadata without loading entry-point code. Unknown external descriptors and schemas remain unknown. Duplicate versions are rejected, and a missing version does not fall back to another. Discovery is explicit, and listing the built-in Methods does not discover installed extensions.
 
-A saved Source is lookup data, never an import instruction. Resolution requires an exact in-process registration, including provenance. Selected factories and Method hooks are trusted Python code, not a security sandbox. Full external Result loading requires `load_result(path, method=MyMethod)`; archive strings cannot authorize loading arbitrary modules.
+A saved Source is lookup data, never an import instruction. Resolution requires an exact registration in the current process, including where the Method came from. Factories and Method hooks are trusted Python code and run without a security sandbox. Loading the saved Result of an external Method requires `load_result(path, method=MyMethod)`, and strings in an archive cannot cause an arbitrary module to be loaded.
 
-## Author cases and their limits
+## Check a Method with an author case {#author-cases-and-their-limits}
 
-`MethodCase` contains the actual method/problem, optional selected output, execution/shots/seed, and three explicit callbacks:
+`MethodCase` holds the Method and Problem, an optional output, the execution, shots and seed, and three callbacks:
 
-- `evaluate(plan)` executes the bounded declared acquisition through `prepare`/`submit`, or analyzes explicitly supplied data, and returns the actual selected Plan's attached Result.
-- `accepts(result)` checks an independently expected scientific relation.
-- `invalid_result(result)` changes a scientific field while preserving the concrete Result type and Plan identity. It must remain intrinsically valid.
+- `evaluate(plan)` runs the declared, bounded data collection through `prepare` and `submit`, or analyzes data you supply, and returns the Result attached to that Plan.
+- `accepts(result)` checks a scientific relation that is expected independently of the Method.
+- `invalid_result(result)` changes a scientific field while keeping the Result's concrete type and Plan content hash. The changed Result must remain valid on its own.
 
-`check_method` exercises selection and the supplied evaluation, checks the oracle and method-owned error information, and writes/reopens one temporary Result archive with explicit external Method loading. It tests that altered scientific result metadata fails against the same saved selection/data, then restores and rechecks the legal result. Normal archive byte limits still apply. No generic reference solve, array reconstruction or verification campaign is added. Round-trip comparison uses persistent scientific records and identities, not the object identity of reopened native handles. The explicit `accepts` callback still owns the independent relation, including array meaning when relevant.
+`check_method` runs planning and the supplied evaluation, checks the expected relation and the Method's error information, and saves and reopens one temporary Result archive, loading the external Method explicitly. It tests that the changed Result fails against the same saved Plan and data, then restores and rechecks the valid Result. The usual archive byte limits apply. The check adds no reference solve, array reconstruction or verification campaign of its own. The round-trip comparison uses the saved scientific records and their content hashes, not the Python identity of reopened circuit objects. The `accepts` callback alone checks the independent relation, including the meaning of arrays when relevant.
 
-The test-only identity case uses the existing Expectation Method and the relation `<psi|2I|psi>/<psi|psi>=2`, with no acquisition. A false oracle, ineffective falsifier, or disabled pair validation fails the checker. `CONFORMANT` means this one explicit case passed; it does not certify arbitrary callbacks, all inputs, physical accuracy, provider support or general execution cost. Use an explicit case whose cost and independent oracle you understand.
+A test-only identity case uses the built-in Expectation Method and the relation `<psi|2I|psi>/<psi|psi>=2`, without running circuits. A false expected relation, an `invalid_result` that does not make the check fail, or disabled pair validation makes the checker fail. `CONFORMANT` means this one case passed. It does not certify other callbacks, other inputs, physical accuracy, provider support or general execution cost. Use a case whose cost and independent expected relation you understand.
 
-## API owners
+## API reference
 
-::: nwqlib.algorithms.authoring.MethodCase
+<a id="api-owners"></a>The API entries for `MethodCase`, `check_method`, `AlgorithmRegistry` and `Registration` are in [Extending NWQLib](api/extending.md):
 
-::: nwqlib.algorithms.authoring.check_method
-
-::: nwqlib.algorithms.registry.AlgorithmRegistry
-
-::: nwqlib.algorithms.registry.Registration
+- <a id="nwqlib.algorithms.authoring.MethodCase"></a>[`MethodCase`][nwqlib.algorithms.authoring.MethodCase]
+- <a id="nwqlib.algorithms.authoring.check_method"></a>[`check_method`][nwqlib.algorithms.authoring.check_method]
+- <a id="nwqlib.algorithms.registry.AlgorithmRegistry"></a>[`AlgorithmRegistry`][nwqlib.algorithms.registry.AlgorithmRegistry]
+- <a id="nwqlib.algorithms.registry.AlgorithmRegistry.discover"></a>[`AlgorithmRegistry.discover`][nwqlib.algorithms.registry.AlgorithmRegistry.discover]
+- <a id="nwqlib.algorithms.registry.AlgorithmRegistry.resolve"></a>[`AlgorithmRegistry.resolve`][nwqlib.algorithms.registry.AlgorithmRegistry.resolve]
+- <a id="nwqlib.algorithms.registry.Registration"></a>[`Registration`][nwqlib.algorithms.registry.Registration]
 
 ## Supported protected extension hooks
 
-The following existing underscore-prefixed hooks are supported for Method and Result implementations. Their role is to bind and validate selected science; calling them does not authorize a second computation or a different archive format.
+These names start with an underscore but are supported for Method and Result implementations. They bind and check the Plan's construction and Result. Calling them does not run a second computation and does not permit a different archive format.
 
-| Owner and exact hook | Implementation obligation |
+| Hook | What your implementation must do |
 | --- | --- |
-| `Plan._bind(self, *, blocks=(), **native)` | Bind the actual selected block handles and named live inputs once; return that Plan. Restore the same bindings on load instead of replanning. |
-| `Result._attach(self, plan, data)` | Attach the original Plan and RunData after checking identity, observation membership and `validate_plan`. It returns the same Result and refuses rebinding. |
-| `Result._validate_common_plan(self, plan, plan_type)` | Call from a concrete `validate_plan` to check exact Plan type, Plan identity and recorded Method lineage, then check the Method-specific scientific relation. |
-| `Result._summary_lines(self)` | Return a finite sequence of readable lines from existing scalar records. No acquisition, reference solve, artifact materialization or reanalysis is permitted. |
+| `Plan._bind(self, *, blocks=(), **native)` | Bind the live block handles and named live inputs once, and return that Plan. On load, restore the same bindings instead of planning again. |
+| `Result._attach(self, plan, data)` | Attach the original Plan and RunData after checking content hashes, observation membership and `validate_plan`. It returns the same Result and refuses a second attachment. |
+| `Result._validate_common_plan(self, plan, plan_type)` | Call it from a concrete `validate_plan` to check the exact Plan type, the Plan's content hash and the recorded Method, then check the Method-specific scientific relation. |
+| `Result._summary_lines(self)` | Return a finite sequence of readable lines from existing scalar fields. It must not collect data, solve a reference problem, write arrays or reanalyze. |
+| `nwqlib.blocks._archive.write_blocks(blocks, files)` | Call it in `save_archive` to write the Plan's blocks into the archive. It supports the library's trusted block factories, not arbitrary Python callables. |
+| `nwqlib.blocks._archive.read_blocks(data, records, files)` | Call it in `load_archive` to restore the saved blocks. It binds only the library's known constructors, so loading never imports or calls code named in the archive. |
 
-`result_type`, `save_archive(plan, files)`, and `load_archive(saved, files)` are provided by a persistable Method. They are not callable archive stubs on the base Method. The `files` argument is the supplied archive capability, not a filename: its `write_plan`/`read_plan`, input/output and selected-block operations keep actual native bindings, and writes are charged to their normal byte caps. The reference Hadamard Method shows how its selected blocks are written and restored through `nwqlib.blocks._archive.write_blocks` and `read_blocks`. This protected serializer supports the existing trusted block factories, not arbitrary Python callables. Use the passed `ArchiveFiles` object rather than constructing a parallel serializer. Cache loaders must register every file dependency through `files.read_path(name)` during restore, including files whose contents stay lazy. Registration reads only file metadata, and a missing file raises there. It does not scan the payload. Reopening protects registered dependencies before reclaiming unpublished files in the reserved cache namespace.
+A Method that can be saved defines `result_type`, `save_archive(plan, files)` and `load_archive(saved, files)`. The base Method has no callable archive stubs. The `files` argument is an `ArchiveFiles` object, not a filename. Its `write_plan` and `read_plan`, input and output, and block operations keep the live bindings, and each write counts against the archive's usual byte limits. Use the `ArchiveFiles` object you receive rather than writing a parallel serializer. The reference Hadamard Method writes and restores its blocks with `write_blocks` and `read_blocks`, as the [GHZ example](own_circuit.md#when-the-archive-hooks-are-required) does.
 
-A Method selecting shots from an Accuracy request additionally supplies `sampling_shots(self, problem, *, output, accuracy, execution, shots)` and returns the selected shot count. This optional hook runs before planning. Omission means automatic shot selection is unavailable; explicitly supplied shots and a method-specific adaptive controller keep their own population contracts. Do not add placeholder archive or sampling methods just to make capability inspection succeed. `recover_analysis` is a separate explicit continuation hook for a saved interrupted analysis, not permission to resubmit earlier acquisitions.
+A loader that caches data must register every file it depends on with `files.read_path(name)` during restore, including files whose contents are read later. Registration reads only file metadata, raises for a missing file and does not scan the contents. Reopening a Run protects the registered files before it removes uncommitted files from the reserved cache namespace.

@@ -885,32 +885,42 @@ def clifford_distance(angle):
 class QHDSynthesisProjection(Record):
     """Budgeted Clifford replacement and a leading-order T estimate for one QHD circuit.
 
-    The projection describes an approximated construction. The emitted
-    circuit is unchanged, and replaced rotations are Cliffords only in the
-    construction this record prices. ``synthesis_projection`` states the
-    rule.
+    `circuit_resources(plan, synthesis_epsilon=E)` returns it as `synthesis`. The fields
+    below are read-only. The projection describes an approximated construction. The
+    emitted circuit is unchanged, and replaced rotations are Cliffords only in the
+    construction this record prices. With N arbitrary rotations, every rotation whose
+    distance from the nearest Clifford rotation is at most `q = E/N` becomes that
+    Clifford, and the remaining budget is split evenly over the M rotations left. The T
+    estimate is `T_exact + 3 M log2(1/epsilon_rot)`, the leading term of the typical
+    Ross-Selinger count (arXiv:1403.2975v3) with intercept zero. It treats the circuit's
+    angles as typical Ross-Selinger instances. QHD's angles repeat and are structured,
+    so a large rotation count gives the estimate no statistical support, and it carries
+    no error bar. The guide's
+    [fault-tolerant resources](../../algorithms/qhd.md#fault-tolerant-resources) section
+    derives the rule.
 
     Attributes:
-        epsilon: E, the total operator-norm allowance of one circuit
-            execution for Clifford replacement plus rotation synthesis.
+        epsilon: E, the total operator-norm allowance of one circuit execution for
+            Clifford replacement plus rotation synthesis.
         candidates: N, the arbitrary rotations of the emitted circuit.
-        threshold: ``q = E/N``, the initial per-rotation allowance, rounded
-            downward, None when N is zero.
-        replaced: Candidates whose distance bound (``clifford_distance``)
-            is at most q, replaced by Cliffords.
-        replacement_error: ``E_C``, the exact sum of their distance bounds,
-            rounded upward.
-        rotations: ``M = N - replaced``, the projected synthesis population.
-        rotation_epsilon: Per-rotation allowance obtained by rounding
-            E minus the published replacement_error downward, dividing
-            that remaining allowance by M exactly, and rounding downward
-            again. None when M is zero. The published replacement charge
-            plus M times this allowance is at most E.
-        exact_t: T and T-inverse occurrences of the emitted circuit, which
-            need no synthesis and spend no budget.
-        t: The T estimate as a ``ResourceLaw`` (metric ``t``, basis
-            ``clifford_t``, interpretation ``estimate``, precision E), or None.
-        t_unavailable: Why there is no estimate, or None.
+        threshold: `q = E/N`, the initial per-rotation allowance, rounded downward, None
+            when N is zero.
+        replaced: Candidates whose distance bound `2 sin(|delta|/4)`, with delta the
+            angle minus the nearest multiple of `pi/2`, is at most q, replaced by
+            Cliffords.
+        replacement_error: `E_C`, the exact sum of their distance bounds, rounded
+            upward.
+        rotations: `M = N - replaced`, the rotations left to synthesize.
+        rotation_epsilon: Per-rotation allowance obtained by rounding E minus the stored
+            `replacement_error` downward, dividing that remaining allowance by M
+            exactly, and rounding downward again. None when M is zero. The stored
+            replacement error plus M times this allowance is at most E.
+        exact_t: T and T-inverse occurrences of the emitted circuit, which need no
+            synthesis and spend no budget.
+        t: The T estimate as a `ResourceLaw` (metric `t`, basis `clifford_t`,
+            interpretation `estimate`, precision E), or None.
+        t_unavailable: Why there is no estimate, for example a per-rotation budget of 1
+            or more, where the logarithmic model does not apply, or None.
     """
 
     epsilon: Nonnegative
@@ -1055,21 +1065,23 @@ ErrorSourceName = Literal[
 class QHDErrorSource(Record):
     """One source of error of a QHD circuit against its finite model, with its own status.
 
-    The ``kinetic_model`` source instead compares that finite model with the
-    finite-difference one (``circuit_resources``). A ``bound`` is an upper bound on the operator-norm change that the
-    source causes, or on the state 2-norm change for the preparation. An
-    ``estimate`` is a value without that guarantee, which ``description``
-    explains. A ``requested`` value is a budget the user asked for, never an
-    achieved error. An ``unavailable`` source has no value and says why, and
-    ``not_applicable`` names a source that this construction does not have.
-    The sources add by telescoping only when each compares adjacent stages
-    of one chain, and the record forms no combined total
-    (``circuit_resources``).
+    `circuit_resources` returns one per source in `error_sources`. The fields below are
+    read-only. The `kinetic_model` source instead compares that finite model with the
+    finite-difference one. A `bound` is an upper bound on the operator-norm change that
+    the source causes, or on the state 2-norm change for the preparation. An `estimate`
+    is a value without that guarantee, which `description` explains. A `requested` value
+    is a budget the user asked for, never an achieved error. An `unavailable` source has
+    no value and says why, and `not_applicable` names a source that this construction
+    does not have. The sources add by telescoping only when each compares adjacent
+    stages of one chain, and the record forms no combined total
+    ([`circuit_resources`][nwqlib.algorithms.qhd.resources.circuit_resources] lists the
+    stages).
 
     Attributes:
-        name: The source.
-        status: One of the statuses above.
-        value: The value, None exactly for ``unavailable`` and ``not_applicable``.
+        name: The source, one of the stages that `circuit_resources` lists.
+        status: `bound`, `estimate`, `requested`, `unavailable` or `not_applicable`, as
+            above.
+        value: The value, None exactly for `unavailable` and `not_applicable`.
         description: What the value compares and on what it rests.
     """
 
@@ -1087,29 +1099,32 @@ class QHDErrorSource(Record):
 
 
 class QHDCircuitResources(Record):
-    """Fault-tolerant resources and error sources of one native QHD circuit.
+    """Fault-tolerant resources and error sources of one QHD circuit, from `circuit_resources`.
 
-    All counts are per circuit execution. Shots and outer rounds multiply
-    them (``run_resources``).
+    [`circuit_resources`][nwqlib.algorithms.qhd.resources.circuit_resources] returns it
+    for a quantum QHD Plan. All counts are per circuit execution. Shots and outer rounds
+    multiply them, which
+    [`run_resources`][nwqlib.algorithms.qhd.resources.run_resources] totals. The fields
+    below are read-only.
 
     Attributes:
-        plan_id: Content identity of the Plan.
-        arbitrary_rotations: Arbitrary rotations of the emitted circuit,
-            classified exactly by angle (``rotation_population`` for one-hot,
-            the computed block angles for binary). For one-hot this is the
-            value of ``rotation_law``.
+        plan_id: Content hash of the Plan.
+        arbitrary_rotations: Arbitrary rotations of the emitted circuit, classified
+            exactly by angle, from the stored blocks for one-hot and from the computed
+            block angles for binary. For one-hot this is the value of `rotation_law`.
         exact_t: Exact T and T-inverse occurrences of the emitted circuit.
-        rotation_law: The Plan's ``arbitrary_rotations`` law. The binary
-            encoding's law (``method.QHD._select_binary_native``) counts the
-            rotation gates before angle classification, including exact T
-            gates and the omitted zero angles of dense diagonals, so it is an
-            upper bound on ``arbitrary_rotations``.
-        synthesis: The budgeted replacement and T estimate, None without a
-            synthesis budget.
-        evolution: Splitting and schedule bounds (``evolution_bound``).
-        error_sources: The replacement of the finite-difference kinetic,
-            then every error source of the circuit against the finite model,
-            in stage order.
+        rotation_law: The Plan's `arbitrary_rotations` count, a `ResourceLaw`. The
+            binary encoding's count includes the rotation gates before angle
+            classification, exact T gates and the omitted zero angles of dense
+            diagonals, so it is an upper bound on `arbitrary_rotations`.
+        synthesis: The budgeted Clifford replacement and T estimate, a
+            [`QHDSynthesisProjection`][nwqlib.algorithms.qhd.resources.QHDSynthesisProjection],
+            or None without a synthesis budget.
+        evolution: Splitting and schedule bounds, a
+            [`QHDEvolutionBound`][nwqlib.algorithms.qhd.evolution_bounds.QHDEvolutionBound].
+        error_sources: The replacement of the finite-difference kinetic, then every
+            error source of the circuit against the finite model, in stage order, each a
+            [`QHDErrorSource`][nwqlib.algorithms.qhd.resources.QHDErrorSource].
     """
 
     plan_id: ContentID
@@ -1221,122 +1236,150 @@ def _binary_sources(entry, r, method, grid, model):
 
 
 def circuit_resources(plan, *, synthesis_epsilon=None):
-    """Return the rotations, the optional T estimate and the separate error sources of one native QHD circuit.
+    """Count the rotations of one QHD circuit, estimate its T gates and list its error sources.
 
-    ``plan`` is a QHD Plan with ``execution="quantum"`` and the structured or
-    no initial-state preparation, in either encoding. ``synthesis_epsilon``
-    is the total operator-norm allowance E of one circuit execution for
-    Clifford replacement plus rotation synthesis. It has no default because a
-    budget is a user's accuracy choice (module docstring), and without it the
-    record has no projection or T estimate.
+    `circuit_resources(plan, synthesis_epsilon=E)` reads a QHD Plan with
+    `execution="quantum"` and the structured or no initial-state preparation, in either
+    encoding, and builds, transpiles and compiles no circuit. The record holds the
+    arbitrary rotations and exact T gates of the emitted circuit, the
+    [`evolution_bound`][nwqlib.algorithms.qhd.evolution_bounds.evolution_bound] of its
+    product formula and every error source against the finite model, each with its
+    status. With a synthesis budget E it also replaces by Clifford gates the rotations
+    that the budget pays for and estimates the T count of the rest, the leading term
+    `T_exact + 3 M log2(1/epsilon_rot)` of the typical Ross-Selinger count
+    (arXiv:1403.2975v3). The guide's
+    [fault-tolerant resources](../../algorithms/qhd.md#fault-tolerant-resources) section
+    gives the replacement rule, the budget split and a comparison with a compiled count.
 
-    Error sources, in the order of the stages they compare
-    (``evolution_bounds``, ``circuit_errors``). The finite model uses the
-    exact schedule functions with the stored tables, constant and binary64
-    spacings on the Plan's grid, and the compiled product uses the stored
-    step weights.
+    Error sources, in the order of the stages they compare. The finite model uses the
+    exact schedule functions with the stored tables, constant and binary64 spacings on
+    the Plan's grid, and the compiled product uses the stored step weights.
 
-    - ``kinetic_model``: the replacement of the finite-difference stencil by
-      the finite model's kinetic operator. Not applicable to the
-      finite-difference model, which every one-hot circuit applies.
-      Unavailable for the spectral model of a binary circuit, against which
-      every later entry is measured. The two kinetic operators differ by a
-      norm that grows as ``1/h**2``, and Duhamel's formula bounds the change
-      of the state only through the momentum content of the whole
-      trajectory (``split_step.kinetic_eigenvalues``, docs/algorithms/qhd.md,
-      "Split-step classical flavor"), which the ledger does not have.
-    - ``time_ordering``, ``midpoint_quadrature`` (not applicable under the
-      integrated coefficient rule), ``coefficient_rounding`` and
-      ``product_formula``: the stages of ``evolution_bound``. The
-      coefficient residual is exact except for the quadratic (gamma > 0) and
-      cubic kinetic integrals, whose first-order estimate makes it an
+    - `kinetic_model`: the replacement of the finite-difference stencil by the finite
+      model's kinetic operator. Not applicable to the finite-difference model, which
+      every one-hot circuit applies. Unavailable for the spectral model of a binary
+      circuit, against which every later entry is measured. The two kinetic operators
+      differ by a norm that grows as `1/h**2`, and Duhamel's formula bounds the change
+      of the state only through the momentum content of the whole trajectory
+      ([Split-step classical evaluation](../../algorithms/qhd.md#split-step-classical-flavor)),
+      which the record does not have.
+    - `time_ordering`, `midpoint_quadrature` (not applicable under the integrated
+      coefficient rule), `coefficient_rounding` and `product_formula`: the stages of
+      `evolution_bound`. The coefficient residual is exact except for the quadratic
+      (gamma > 0) and cubic kinetic integrals, whose first-order estimate makes it an
       estimate.
-    - ``angle_formation``: one-hot, the stored angles of the kept blocks
-      against their intended exponents, exact (``circuit_errors.block_errors``).
-      Binary, every computed Walsh angle before pruning, the dense phases and
-      the QFT angles formed from binary64 pi against the exact stored-weight
-      split product (``circuit_errors.binary_angle_formation``), under the
-      one-ulp premise for ``math.sin``, ``math.cos`` and NumPy's ``sin``,
-      Walsh coefficients omitted below the normal range included.
-    - ``aqft``: not applicable to the one-hot circuit, which applies no
-      Fourier transform, and to a binary circuit with exact QFTs. With a
-      cutoff it is the reconstruction's ``aqft_error_bound``, which bounds
-      the full stored-angle QFTs against their truncation.
-    - ``rotation_pruning``: one-hot, the blocks the circuit omits, pruned by
-      ``rotation_threshold`` or omitted below the normal binary64 range,
-      charged at their exact intended exponents. Binary, the
-      reconstruction's ``pruning_error_bound``, half the dropped ``Rz``
-      angles plus the exact charges of the rotations and dense phase entries
-      omitted below the normal range (``records.QHDRangeOmissions``).
-    - ``gate_parameters``: one-hot, the fused hopping gate's own parameter
-      against twice the stored angle, zero since the builder doubles the
-      stored angle's own product, with the projector and chain rotations
-      exact power-of-two scalings of their stored angles, which the census
-      admits in the normal binary64 range (``rotation_population``). Binary,
-      zero, since every angle reaches its gate unchanged or halved exactly.
-    - ``diagonal_wrap``: the phase wrap ``angle(exp(-i a))`` of a phase
-      diagonal, the one-hot projectors on 4 to 7 qubits or the binary dense
-      diagonals, whose lowering then forms recursive means and Gray-code
-      angles. NumPy documents no uniform error constant for its complex
-      exponential and argument, so it is unavailable when the circuit has
-      such a block and not applicable otherwise.
-    - ``identity_phase``: the native global-phase bookkeeping against the
-      exact identity phase (``circuit_errors.phase_allowance``,
-      ``circuit_errors.binary_phase_allowance``), the identity actions
-      omitted below the normal range included.
-    - ``state_preparation``: one-hot, the prepared state against the exact
-      target (``circuit_errors.preparation_error``), a first-order estimate
-      whose chain cutoff charge is exact.
-      Binary, zero, since the H layer prepares the uniform state exactly. Not
-      applicable without preparation.
-    - ``clifford_replacement``: ``E_C`` of the synthesis projection, an
-      outward bound (``clifford_distance``) describing the approximated
-      construction, not the emitted circuit.
-    - ``synthesis``: the requested allowance ``E - E_C``, rounded downward, of the remaining
-      rotations. NWQEC 0.1.2 applies a fixed ``1e-4`` angle cleanup, groups
-      angles to four significant digits and passes them as decimal strings,
-      all outside the requested GridSynth tolerance, so an achieved
-      synthesis error is unavailable (docs/algorithms/qhd.md,
-      "Fault-tolerant resources").
-    - ``compiler``: other compiler transformations, unavailable.
+    - `angle_formation`: one-hot, the stored angles of the kept blocks against their
+      intended exponents, exact. Binary, every computed Walsh angle before pruning, the
+      dense phases and the QFT angles formed from binary64 pi against the exact
+      stored-weight split product, under the one-ulp assumption for `math.sin`,
+      `math.cos` and NumPy's `sin`, Walsh coefficients omitted below the normal range
+      included.
+    - `aqft`: not applicable to the one-hot circuit, which applies no Fourier transform,
+      and to a binary circuit with exact QFTs. With a cutoff it is the Plan's
+      `aqft_error_bound`, which bounds the full stored-angle QFTs against their
+      truncation.
+    - `rotation_pruning`: one-hot, the blocks the circuit omits, pruned by
+      `rotation_threshold` or omitted below the normal binary64 range, counted at their
+      exact intended exponents. Binary, the Plan's `pruning_error_bound`, half the
+      dropped `Rz` angles plus the exact contributions of the rotations and dense phase
+      entries omitted below the normal range.
+    - `gate_parameters`: one-hot, the fused hopping gate's own parameter against twice
+      the stored angle, zero since the builder doubles the stored angle's own product,
+      with the projector and chain rotations exact power-of-two scalings of their stored
+      angles, which planning checks to lie in the normal binary64 range. Binary, zero,
+      since every angle reaches its gate unchanged or halved exactly.
+    - `diagonal_wrap`: the phase wrap `angle(exp(-i a))` of a phase diagonal, the
+      one-hot projectors on 4 to 7 qubits or the binary dense diagonals, whose circuit
+      construction then forms recursive means and Gray-code angles. NumPy documents no
+      uniform error constant for its complex exponential and argument, so it is
+      unavailable when the circuit has such a block and not applicable otherwise.
+    - `identity_phase`: the circuit's global-phase bookkeeping against the exact
+      identity phase, the identity actions omitted below the normal range included.
+    - `state_preparation`: one-hot, the prepared state against the exact target, a
+      first-order estimate whose chain-cutoff contribution is exact. Binary, zero, since
+      the H layer prepares the uniform state exactly. Not applicable without
+      preparation.
+    - `clifford_replacement`: `E_C` of the synthesis projection, an outward bound of the
+      replaced rotations' distances from their Clifford gates, describing the
+      approximated construction, not the emitted circuit.
+    - `synthesis`: the requested allowance `E - E_C`, rounded downward, of the remaining
+      rotations. NWQEC 0.1.2 applies a fixed `1e-4` angle cleanup, groups angles to four
+      significant digits and passes them as decimal strings, all outside the requested
+      GridSynth tolerance, so an achieved synthesis error is unavailable
+      ([fault-tolerant resources](../../algorithms/qhd.md#fault-tolerant-resources)).
+    - `compiler`: other compiler transformations, unavailable.
 
-    For a normalized input these add by telescoping to a bound on the final
-    state's 2-norm error when every entry is a bound on adjacent stages,
-    against the finite model without ``kinetic_model`` and against the
-    finite-difference model with it. Each entry compares two adjacent whole
-    evolutions, so the entries add by the triangle inequality through the
-    intermediate evolutions, with no independence assumption. Within an
-    entry, for ideal factors U_j and their implementations U~_j, the
-    identity
-    ``U~_L ... U~_1 - U_L ... U_1 = sum_j U~_L ... U~_(j+1) (U~_j - U_j) U_(j-1) ... U_1``
-    bounds the product's error by the sum of the factors' errors, because
-    the unitaries around each difference have norm one. The preparation
-    error adds once, because later unitaries keep its norm. Any common
-    measurement then changes by at most that amount in total variation,
-    capped at 1, because measurement cannot increase the trace distance
-    ``sqrt(1 - |<psi|psi~>|**2)`` of two pure states, which is at most
-    their phase-aligned 2-norm distance. An entry built from an estimate
-    makes such a sum conditional on it, and an unavailable entry leaves it
-    unavailable, so the record forms no total. Sampling, device noise and
-    the optimization gap are outside this ledger. The one-hot work is one pass over the stored
-    blocks with a few exact rational operations per block, and the bound's
-    pass over tables and steps. The binary work reads the stored Walsh phase
-    terms (``QHDReconstruction.walsh_phase``), synthesizes each distinct
-    stored block once for its angles, with the table transforms of planning,
-    adds the ``O(n 2**n)`` Gray-code angles of each distinct dense-diagonal
-    block on n qubits and two upward reductions per table for the angle
-    formation, and builds no circuit. The binary rotation census is admitted
-    first against the Plan's ``QHD.max_work`` and ``QHD.max_bytes``
-    (``_admit_inspection``).
+    For a normalized input these add by telescoping to a bound on the final state's
+    2-norm error when every entry is a bound on adjacent stages, against the finite
+    model without `kinetic_model` and against the finite-difference model with it. Each
+    entry compares two adjacent whole evolutions, so the entries add by the triangle
+    inequality through the intermediate evolutions, with no independence assumption.
+    Within an entry, for ideal factors U_j and their implementations U~_j, the identity
+    `U~_L ... U~_1 - U_L ... U_1 = sum_j U~_L ... U~_(j+1) (U~_j - U_j) U_(j-1) ... U_1`
+    bounds the product's error by the sum of the factors' errors, because the unitaries
+    around each difference have norm one. The preparation error adds once, because later
+    unitaries keep its norm. Any common measurement then changes by at most that amount
+    in total variation, capped at 1, because measurement cannot increase the trace
+    distance `sqrt(1 - |<psi|psi~>|**2)` of two pure states, which is at most their
+    phase-aligned 2-norm distance. An entry built from an estimate makes such a sum
+    conditional on it, and an unavailable entry leaves it unavailable, so the record
+    forms no total. Sampling, device noise and the optimization gap are outside these
+    error sources.
+
+    Cost. The one-hot work is one pass over the stored blocks with a few exact rational
+    operations per block, and the bound's pass over tables and steps. The binary work
+    reads the stored Walsh phase terms, synthesizes each distinct stored block once for
+    its angles, with the table transforms of planning, adds the `O(n 2**n)` Gray-code
+    angles of each distinct dense-diagonal block on n qubits and two upward reductions
+    per table for the angle formation, and builds no circuit. The binary rotation count
+    is first checked against the Plan's `QHD.max_work` and `QHD.max_bytes`.
+
+    Args:
+        plan (Plan): A QHD Plan from `nwqlib.plan(problem, method=QHD(...))` with
+            `execution="quantum"`, the default, and `initial_state_preparation`
+            `"structured"` or `"none"`.
+        synthesis_epsilon (float | None): Total operator-norm allowance E of one circuit
+            execution for Clifford replacement plus rotation synthesis, positive and
+            finite. It has no default, because a budget is the user's accuracy choice.
+            Without it the record has no synthesis projection or T estimate.
 
     Returns:
-        record (QHDCircuitResources): The rotations, the optional projection,
-            the evolution bound and the error sources of the Plan's circuit.
+        record (QHDCircuitResources): Per circuit execution, the rotation counts in
+            `arbitrary_rotations` and `exact_t`, the T estimate in `synthesis.t`, the
+            evolution bound in `evolution` and the error sources in `error_sources`.
 
     Raises:
-        ValueError: The binary rotation census exceeds the Plan's QHD work
-            or byte limit, with the model's baseline (``_admit_inspection``,
-            ``binary.BinaryModel``).
+        ValueError: If the Plan is classical, if its state preparation has no rotation
+            count (`"qiskit_state_preparation"`), if the binary rotation count exceeds
+            the Plan's QHD work or byte limit with the model's baseline, or if a budget
+            leaves a per-rotation tolerance that rounds down to zero.
+
+    Examples:
+        One first-order step of `(x - 1/5)**2` on three interior grid points of
+        `[-1, 1]` has 8 arbitrary rotations and 2 exact T gates. At `E = 1e-4` no
+        rotation is replaced, so `epsilon_rot = 1e-4/8` and the estimate is
+        `2 + 24 log2(8e4) = 392.9` T. The evolution bound is the splitting term alone,
+        because `QuadraticSchedule(gamma=0.0)` makes the Hamiltonian constant.
+
+        >>> import sympy as sp
+        >>> from nwqlib import plan
+        >>> from nwqlib.problems import Optimization
+        >>> from nwqlib.algorithms.qhd import (
+        ...     QHD, QuadraticSchedule, UniformState, circuit_resources)
+        >>> x = sp.Symbol("x", real=True)
+        >>> problem = Optimization(objective=(x - sp.Rational(1, 5))**2,
+        ...                        variables=(x,), bounds=((-1.0, 1.0),))
+        >>> method = QHD(num_grid_points=3, total_time=0.17, trotter_order=1,
+        ...              schedule=QuadraticSchedule(gamma=0.0),
+        ...              initial_state=UniformState())
+        >>> record = circuit_resources(plan(problem, method=method),
+        ...                            synthesis_epsilon=1e-4)
+        >>> print(record.arbitrary_rotations, record.exact_t)
+        8 2
+        >>> print(round(record.synthesis.t.value.value, 1))
+        392.9
+        >>> print(record.evolution.evolution, record.evolution.evolution_status)
+        0.07225000000000002 bound
     """
     from .method import _grid
 
@@ -1408,19 +1451,22 @@ def circuit_resources(plan, *, synthesis_epsilon=None):
 class QHDRunEntry(Record):
     """The circuit of one augmented-Lagrangian round or refinement level and its multiplicities.
 
+    `run_resources` returns one per started round or level in `entries`. The fields
+    below are read-only.
+
     Attributes:
-        label: ``"round k"``, ``"level z"`` or, for a round with box
-            refinement, ``"round k level z"``.
-        plan_id: Content identity of the inner Plan, or None when no Plan was
-            selected or the record does not name one.
+        label: `"round k"`, `"level z"` or, for a round with box refinement,
+            `"round k level z"`.
+        plan_id: Content hash of the inner Plan, or None when no Plan was chosen or the
+            record does not name one.
         circuits: Circuit preparations of its Run, the compiled bodies.
-        shots: Raw shots reserved by its attempts of every status, which
-            bound the shots it executed from above.
-        arbitrary_rotations: Arbitrary rotations of its circuit, the law
-            value that its resources recorded, which for the binary encoding
-            counts rotation gates before angle classification.
-        t_estimate: T estimate of its circuit (``synthesis_projection``).
-        unavailable: ``(field, reason)`` for every per-circuit value that is None.
+        shots: Raw shots set aside by its attempts of every status, which bound the
+            shots it executed from above.
+        arbitrary_rotations: Arbitrary rotations of its circuit, the value that its
+            resources recorded, which for the binary encoding counts rotation gates
+            before angle classification.
+        t_estimate: T estimate of its circuit, as `circuit_resources` forms it.
+        unavailable: `(field, reason)` for every per-circuit value that is None.
     """
 
     label: Text
@@ -1435,42 +1481,41 @@ class QHDRunEntry(Record):
 class QHDRunResources(Record):
     """Rotation and T totals of an augmented-Lagrangian run or a box refinement over its circuits and shots.
 
-    Two populations are kept apart. The body totals count every compiled
-    circuit once (``circuits`` of each entry), the static inventory of what a
-    compiler synthesizes. The shot totals weight each circuit by the raw
-    shots reserved by its attempts of every status, ``sum_e shots_e R_e``,
-    because each executed shot runs the whole circuit, state preparation
-    included, and reserved shots bound the executed ones from above. Exact
-    readout acquires no shots, while hardware would need some, so its shot
-    totals are None and ``unavailable`` says to multiply each entry's
-    per-circuit values by the intended shots. Per circuit the
-    counts are those of ``circuit_resources``. Each round and level uses its
-    own tables, spacing and exponents, so its own circuit is counted rather
-    than the first one multiplied. A total is None when an entry with a
-    positive or unknown multiplicity has no per-circuit value, and
-    ``unavailable`` names it. An entry with zero multiplicity contributes
-    zero. A sum of T estimates is an estimate.
+    [`run_resources`][nwqlib.algorithms.qhd.resources.run_resources] returns it. The
+    fields below are read-only. Two totals are kept apart. The body totals count every
+    compiled circuit once (`circuits` of each entry), the static inventory of what a
+    compiler synthesizes. The shot totals weight each circuit by the raw shots set aside
+    for its attempts of every status, `sum_e shots_e R_e`, because each executed shot
+    runs the whole circuit, state preparation included, and the shots set aside bound
+    the executed ones from above. Exact readout uses no shots, while hardware would need
+    some, so its shot totals are None and `unavailable` says to multiply each entry's
+    per-circuit values by the intended shots. Per circuit the counts are those of
+    `circuit_resources`. Each round and level uses its own tables, spacing and
+    exponents, so its own circuit is counted rather than the first one multiplied. A
+    total is None when an entry with a positive or unknown multiplicity has no
+    per-circuit value, and `unavailable` names it. An entry with zero multiplicity
+    contributes zero. A sum of T estimates is an estimate.
 
-    The rotation totals add the recorded laws. For the binary encoding the
-    law (``method.QHD._select_binary_native``) counts the rotation gates
-    before angle classification, exact T gates and the omitted zero angles
-    of dense diagonals included, so those totals are upper bounds, while the
-    T estimates use the exact angle classification of ``circuit_resources``.
+    The rotation totals add the recorded rotation counts. For the binary encoding the
+    count includes the rotation gates before angle classification, exact T gates and the
+    omitted zero angles of dense diagonals included, so those totals are upper bounds,
+    while the T estimates use the exact angle classification of `circuit_resources`.
 
     Attributes:
         synthesis_epsilon: The per-circuit budget E of the T estimates, or None.
-        rotation_interpretation: ``"upper_bound"`` when the run uses the
-            binary encoding, a live Plan's law is an upper bound, or a round
-            or level without a live result adds a positive recorded count
-            with a positive or unknown multiplicity, because its record does
-            not keep the interpretation of that law. ``"exact"`` otherwise.
-        entries: One entry per started round, or per started level of a
-            refinement, in order.
-        arbitrary_rotations: ``sum_e circuits_e R_e``.
-        shot_arbitrary_rotations: ``sum_e shots_e R_e``, None under exact readout.
-        t_estimate: ``sum_e circuits_e T_e``.
-        shot_t_estimate: ``sum_e shots_e T_e``, None under exact readout.
-        unavailable: ``(total, reason)`` for every total that is None.
+        rotation_interpretation: `"upper_bound"` when the run uses the binary encoding,
+            a live Plan's rotation count is an upper bound, or a round or level without
+            a live result adds a positive recorded count with a positive or unknown
+            multiplicity, because its record does not keep the interpretation of that
+            count. `"exact"` otherwise.
+        entries: One [`QHDRunEntry`][nwqlib.algorithms.qhd.resources.QHDRunEntry] per
+            started round, or per started level of a refinement, in order.
+        arbitrary_rotations: `sum_e circuits_e R_e`, with R_e the entry's arbitrary
+            rotations.
+        shot_arbitrary_rotations: `sum_e shots_e R_e`, None under exact readout.
+        t_estimate: `sum_e circuits_e T_e`, with T_e the entry's T estimate.
+        shot_t_estimate: `sum_e shots_e T_e`, None under exact readout.
+        unavailable: `(total, reason)` for every total that is None.
     """
 
     synthesis_epsilon: Nonnegative | None
@@ -1537,29 +1582,40 @@ def _total(entries, multiplicity, value):
 
 
 def run_resources(result, *, synthesis_epsilon=None):
-    """Return the rotation and T totals of a quantum augmented-Lagrangian run or box refinement.
+    """Total the rotations and T estimates of a quantum augmented-Lagrangian run or box refinement.
 
-    ``result`` is a ``ConstrainedQHDResult``, with or without box refinement
-    in each round, or a ``BoxRefinementResult``, with
-    ``execution="quantum"``. Each started round, or each started level of a
-    round's refinement, contributes the circuit preparations, reserved shots
-    and per-circuit rotation count that its resources recorded
-    (``ALResources``, ``RefinementResources``), and the T estimate of its
-    live inner result's Plan. A round or level
-    whose Run raised, and a refinement level that stopped the run, keep
-    their recorded counts but have no inner result, so their T estimate is
-    unknown when they prepared a circuit. A Plan with Qiskit's state
-    preparation has no rotation law, which its resources record as unknown.
-    ``synthesis_epsilon`` is the per-circuit budget of ``circuit_resources``.
-    Nothing is planned, compiled or executed. The work is one pass over each
-    inner Plan's stored blocks, which for the binary encoding synthesizes
-    each distinct block's diagonal once more to read its angles, after the
-    census is admitted against that Plan's QHD limits (``_admit_inspection``).
+    `run_resources(result, synthesis_epsilon=E)` reads a
+    [`ConstrainedQHDResult`][nwqlib.algorithms.qhd.constrained.ConstrainedQHDResult],
+    with or without box refinement in each round, or a
+    [`BoxRefinementResult`][nwqlib.algorithms.qhd.refinement_records.BoxRefinementResult],
+    run with `execution="quantum"`. Each started round, or each started level of a
+    round's refinement, contributes the circuit preparations, the shots set aside and
+    the per-circuit rotation count that its resources recorded (`ALResources`,
+    `RefinementResources`), and the T estimate of its live inner result's Plan. A round
+    or level whose Run raised, and a refinement level that stopped the run, keep their
+    recorded counts but have no inner result, so their T estimate is unknown when they
+    prepared a circuit. A Plan with Qiskit's state preparation has no rotation count,
+    which its resources record as unknown. Nothing is planned, compiled or executed. The
+    work is one pass over each inner Plan's stored blocks, which for the binary encoding
+    synthesizes each distinct block's diagonal once more to read its angles, after the
+    rotation count is checked against that Plan's QHD limits.
+
+    Args:
+        result (ConstrainedQHDResult | BoxRefinementResult): The run with its inner
+            results, as `solve_augmented_lagrangian`, `refine_box` or their load and
+            resume functions return it.
+        synthesis_epsilon (float | None): The per-circuit budget E of
+            `circuit_resources`, or None for rotation totals without T estimates.
+
+    Returns:
+        record (QHDRunResources): The body totals `arbitrary_rotations` and
+            `t_estimate`, the shot-weighted totals `shot_arbitrary_rotations` and
+            `shot_t_estimate`, and one entry per started round or level.
 
     Raises:
-        ValueError: The run used classical execution, which selects no circuit,
-            or an inner binary Plan's rotation census exceeds that Plan's QHD
-            work or byte limit.
+        ValueError: If the run used classical execution, which selects no circuit, or if
+            an inner binary Plan's rotation count exceeds that Plan's QHD work or byte
+            limit.
     """
     from .constrained import ConstrainedQHDResult
 

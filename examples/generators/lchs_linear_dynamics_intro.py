@@ -3,7 +3,7 @@
 #
 # A dye pulse circulates in a closed channel, carried by the flow and spread by diffusion, and on 8 grid points its concentration solves the linear ODE $du/dt=-Au$. This notebook computes $u(T)$ with NWQLib's Linear Combination of Hamiltonian Simulation (LCHS) on a quantum circuit and checks it against `scipy.linalg.expm`.
 #
-# Install with `python -m pip install -e ".[aer,notebook,tensor]"` from the repository root · at most 12 simulated qubits · about 30 s on a laptop.
+# Install with `python -m pip install "nwqlib[aer,notebook,tensor]"` and add `scikit_tt`, which is not on PyPI, with `python -m pip install "scikit_tt @ git+https://github.com/PGelss/scikit_tt.git"`. To work on NWQLib itself, run `python -m pip install -e ".[aer,notebook,tensor]"` in a clone of the repository instead of the first command. The notebook simulates at most 12 qubits and runs in about 22 s on an Apple M3 Max with 36 GiB of memory (Python 3.12.14, Qiskit 2.5.2, Aer 0.17.2).
 #
 # > **How to read this notebook.** The next cells solve the channel and show the answer with its cost.
 # >
@@ -93,7 +93,7 @@ def quantity(estimate_result, metric, **where):
 
 
 def show_card(result, reference, initial, predicted, seconds):
-    """Show the result card: the answer against the reference, the cost of both ledgers, the plot and the steps."""
+    """Show the result card: the answer against the reference, the quantum and classical cost, the plot and the steps."""
     rec, u = result.plan.reconstruction, np.asarray(result.solution)
     error = np.linalg.norm(u - reference) / np.linalg.norm(reference)
     qubits = len(rec.success_bits) + len(rec.system_bits)
@@ -141,7 +141,7 @@ from nwqlib import estimate
 from nwqlib.resources import ResourceContext
 
 reference = expm(-FINAL_TIME * A) @ u0                               # the classical answer, used only for comparison
-predicted = estimate(selected, context=ResourceContext(basis="cx"))  # counts from the resource laws, no circuit built
+predicted = estimate(selected, context=ResourceContext(basis="cx"))  # counts from the resource formulas, no circuit built
 show_card(result, reference, u0, predicted, seconds)
 
 # %% [markdown]
@@ -181,7 +181,7 @@ show_table([
 # %% [markdown]
 # ## 2. What it costs
 #
-# **`estimate` predicts the quantum ledger before the circuit exists, and the run records the classical ledger.** The quantum ledger counts qubits, gates and shots. The classical ledger counts memory, work and time on this computer.
+# **`estimate` predicts the quantum cost before the circuit exists, and the run records the classical cost.** Quantum cost means qubits, gates and shots, and classical cost means memory, work and time on this computer.
 #
 # `estimate` adds up a gate-count formula for each block of the selected construction without building a circuit. `prepare` builds the circuit without running it, and `inspect_resources` compiles a copy with Qiskit. The circuit has more operations than the 100,000 that `inspect_resources` reads by default, so the cell raises `max_operations`.
 
@@ -202,7 +202,7 @@ show_table([
     ("Single-qubit gates", "not predicted", compiled["operations"].get("u", 0)),
     ("Depth", "not predicted", compiled["depth"]),
     ("T gates", "not predicted", "Not in the cx and u basis"),
-], headers=("Quantum ledger", "Predicted by estimate", "Compiled circuit"))
+], headers=("Quantum cost", "Predicted by estimate", "Compiled circuit"))
 print(f"Compiled CX / predicted CX = {compiled['operations'].get('cx', 0) / predicted_cx:.3f} "
       f"(Qiskit optimization level 1).")
 
@@ -211,17 +211,17 @@ trace = result.data.trace
 show_table([
     ("Memory of the arrays counted before the run", format_bytes(quantity(predicted, "known_memory", location="host")),
      "Not measured"),
-    ("Total host memory", "Not predicted: a host workspace of the construction has no byte count", "Not measured"),
+    ("Total classical memory", "Not predicted: a classical workspace of the construction has no byte count", "Not measured"),
     ("Work [units, a planning quantity, not seconds]", quantity(predicted, "construction_work"),
      trace.construction_work_reserved),
     ("Stored run data", "Not predicted", format_bytes(trace.data_bytes)),
     ("Time on this computer", "Not predicted", f"{seconds:.2f} s for plan and solve, "
      f"{sum(event.timing.seconds for event in trace.events):.3f} s of it in the simulator call"),
-], headers=("Classical ledger", "Before the run", "Measured or recorded by the run"))
+], headers=("Classical cost", "Before the run", "Measured or recorded by the run"))
 
 # %% [markdown]
-# - **Memory.** `estimate` counts the bytes of the arrays whose size it knows. A host workspace of the construction has no byte count, so the total stays unknown.
-# - **Work.** The two figures are different counts. `estimate` states an upper bound from the resource laws of the selected blocks, and the run records the construction work it charged before execution.
+# - **Memory.** `estimate` counts the bytes of the arrays whose size it knows. A classical workspace of the construction has no byte count, so the total stays unknown.
+# - **Work.** The two figures are different counts. `estimate` states an upper bound from the resource formulas of the selected blocks, and the run records the construction work it counted before execution.
 # - **Gates.** Nearly all CX gates belong to SELECT, which applies one controlled evolution per node. Go deeper C compares uniform grids, on which SELECT needs one controlled evolution per address bit.
 # - **Not estimated:** physical qubits, error correction, run time on hardware and price.
 #
@@ -229,7 +229,7 @@ show_table([
 #
 # **The error is measured against `scipy.linalg.expm` and set beside the bounds the Plan states.** Each row says which kind of number it is: measured against reference, upper bound, or unavailable with its reason.
 #
-# Two approximations add up. The **kernel and quadrature** replace an integral by a finite sum, and the **product formula** approximates each evolution. The cell evaluates the same finite sum with exact matrix exponentials on the host, one classical evaluation, which isolates the first.
+# Two approximations add up. The **kernel and quadrature** replace an integral by a finite sum, and the **product formula** approximates each evolution. The cell evaluates the same finite sum classically with exact matrix exponentials, which isolates the first.
 
 # %%
 from nwqlib.algorithms.lchs import LCHSVerification
@@ -247,7 +247,7 @@ show_table([
     ("The same, from result.verify", facts[0].fact.value.value, "Measured against reference by NWQLib's check"),
     ("Absolute error ‖u − u_ref‖", np.linalg.norm(u - reference), "Measured against reference"),
     ("Absolute error of the finite sum", quadrature_error * np.linalg.norm(reference),
-     "Measured against reference. Exact exponentials on the host: kernel and quadrature only"),
+     "Measured against reference. Exact exponentials, evaluated classically: kernel and quadrature only"),
     ("Kernel truncation error", terms["kernel_approximation"].value.value, "Upper bound from the Plan, absolute"),
     ("Quadrature error", terms["k_quadrature"].value.value, "Upper bound from the Plan, absolute"),
     ("Product-formula error", None, "Unavailable: " + terms["trotter_synthesis"].reason),
@@ -273,9 +273,9 @@ show_table([(count, quantity(estimate(run.plan, context=ResourceContext(basis="c
 # %% [markdown]
 # ## 4. How large can I go?
 #
-# **On a laptop the simulator sets the limit. Beyond it, `plan` and `estimate` still give the cost.** The table lists the limits this run had and the channel's use of them.
+# **The local simulator sets the limit. Beyond it, `plan` and `estimate` still give the cost.** The table lists the limits this run had and the channel's use of them.
 #
-# `solve(..., execution="classical")` with `hamiltonian_evolution_backend="dense_exact"` evaluates the finite sum on the host, for systems too large to simulate. Its plan states the memory and work before anything runs. [Planning at scale](resource_estimation_at_scale.ipynb) plans circuits far beyond any simulator.
+# `solve(..., execution="classical")` with `hamiltonian_evolution_backend="dense_exact"` evaluates the finite sum classically, for systems too large to simulate. Its plan states the memory and work before anything runs. [Planning at scale](resource_estimation_at_scale.ipynb) plans circuits far beyond any simulator.
 
 # %%
 limits = trace.limits
@@ -286,9 +286,9 @@ show_table([
      f"Default. This channel uses {len(rec.success_bits) + len(rec.system_bits)}"),
     ("Simulator memory cap", f"{limits.simulator_memory_mb:,} MB", "Default simulator_memory_mb"),
     ("SELECT construction work cap", selected.method.max_select_work, "Default max_select_work"),
-    ("Host evaluation: memory of its arrays", format_bytes(quantity(host_estimate, "known_memory", location="host")),
+    ("Classical evaluation: memory of its arrays", format_bytes(quantity(host_estimate, "known_memory", location="host")),
      "Stated by plan before it runs"),
-    ("Host evaluation: work", quantity(host_estimate, "classical_work"),
+    ("Classical evaluation: work", quantity(host_estimate, "classical_work"),
      f"Units, a planning quantity, not seconds. {host_estimate.quantity('classical_work').interpretation.replace('_', ' ')}"),
 ], headers=("Limit or cost", "Value", "Meaning"))
 
@@ -335,8 +335,8 @@ print(f"relative error {np.linalg.norm(my_u - my_reference) / np.linalg.norm(my_
 # ## 7. What NWQLib adds
 #
 # - **Planning beyond simulation.** `plan` and `estimate` work at sizes no simulator holds ([Planning at scale](resource_estimation_at_scale.ipynb)).
-# - **The law behind every number.** Each predicted count comes from a gate-count formula per block ([Mathematics](../docs/mathematics.md)). Section 2 sets it beside the compiled circuit, and the resource notebook compares the formulas with compiled circuits at small sizes.
-# - **Arguments switch the kernel and the evaluation.** `LCHS(lchs_kernel=..., k_quadrature=...)` selects another published kernel with a quadrature it accepts (Go deeper C). `hamiltonian_evolution_backend="dense_exact"` with `execution="classical"` evaluates the same problem on the host (Section 3).
+# - **The formula behind every number.** Each predicted count comes from a gate-count formula per block ([Mathematics](../docs/mathematics.md)). Section 2 sets it beside the compiled circuit, and the resource notebook compares the formulas with compiled circuits at small sizes.
+# - **Arguments switch the kernel and the evaluation.** `LCHS(lchs_kernel=..., k_quadrature=...)` selects another published kernel with a quadrature it accepts (Go deeper C). `hamiltonian_evolution_backend="dense_exact"` with `execution="classical"` evaluates the same problem classically (Section 3).
 # - **Saved and reloaded.** A saved result reloads with its plan, and its numbers can be recomputed from it (Appendix B).
 #
 # [Why NWQLib](../docs/why_nwqlib.md) compares this workflow with other packages.
@@ -591,7 +591,7 @@ show_table(rows, headers=("Quadrature", "State preparation", "Relative error"))
 #
 # ### A. The full resource estimate
 #
-# Block invocations count the calls of the building blocks: PREP, SELECT, the inverse of PREP and the loading of $u(0)$. The ancilla qubits are the address qubits. The last line names the gate counts that the resource laws of this construction leave unknown.
+# Block invocations count the calls of the building blocks: PREP, SELECT, the inverse of PREP and the loading of $u(0)$. The ancilla qubits are the address qubits. The last line names the gate counts that the resource formulas of this construction leave unknown.
 
 # %% jupyter={"source_hidden": true}
 # Display helpers for Appendix A: labels of the resource metrics and a table of the estimate.
@@ -610,7 +610,7 @@ UNMODELED_LABELS = {
 
 
 def show_estimate(workload):
-    """Show the resource quantities an estimate determines, and name the ones its laws do not cover."""
+    """Show the resource quantities an estimate determines, and name the ones its formulas do not cover."""
     rows = [(RESOURCE_LABELS[q.metric], q.fact.value.numerator if q.fact.value.kind == "rational" else q.fact.value.value,
              q.interpretation.replace("_", " "))
             for q in workload.quantities if q.metric in RESOURCE_LABELS and q.fact.availability == "concrete"]
@@ -618,7 +618,7 @@ def show_estimate(workload):
     missing = sorted({UNMODELED_LABELS[q.metric] for q in workload.quantities
                       if q.metric in UNMODELED_LABELS and q.fact.availability == "unknown"})
     if missing:
-        display(HTML("<p>Not covered by the resource laws of this construction: " + escape(", ".join(missing)) + ".</p>"))
+        display(HTML("<p>Not covered by the resource formulas of this construction: " + escape(", ".join(missing)) + ".</p>"))
 
 # %%
 show_estimate(predicted)

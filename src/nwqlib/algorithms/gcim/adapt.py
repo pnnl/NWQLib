@@ -666,85 +666,150 @@ def _pair_reduction_readout(identity, coefficients, q, *, diagonal):
 
 
 class ADAPT(Method):
-    """Adaptive selected-basis GCiM with explicit pool and stopping controls.
+    """Adaptive GCiM (ADAPT-GCIM) method for the smallest eigenvalue of an `Eigenproblem`.
 
-    Stopping is an operational rule on the selected estimates, not proof of
-    ground-state accuracy. Optional coefficient optimization consumes extra
-    energy evaluations through the same Run.
+    It grows its trial basis from a pool of generators. Build it with
+    keyword arguments and pass it as `method=`, for example
+    `solve(Eigenproblem(A=H), method=ADAPT(initial_state=psi, pool=generators))`.
+    `initial_state` and `pool` are required. The result is an
+    [`ADAPTResult`][nwqlib.algorithms.gcim.adapt_records.ADAPTResult] whose
+    `eigenvalue` is the lowest projected Ritz value in the trial basis the run
+    built.
 
-    The controller follows ADAPT-GCIM of Zheng et al. (2024), npj Quantum Inf.
-    10, 127, arXiv:2312.07691v3. The surrogate product state is screened with
-    the ADAPT gradient ``<[H, A_i]>`` (main text, "Integration of GCIM with
-    ADAPT approach", p. 4, and Grimsley et al. (2019), arXiv:1812.11173v2,
-    Sec. II.B steps 5-7). A selected generator is not screened again, following
-    the paper's QuGCM adapt_gcim.py implementation (c5efcb0, lines 303-398).
-    Grimsley et al. step 7 permits reuse in its ADAPT-VQE ansatz. Each
-    selected generator enters at the fixed angle ``theta``, and the working
-    basis grows by two states per selection (METHODS, p. 9, see
-    ``basis_chains``). Optimization every
-    ``optimize_every_m`` selections is the intermittent, truncated
-    optimization of Appendix H.
+    The method follows ADAPT-GCIM of Zheng et al., npj Quantum Inf. 10, 127
+    (2024), arXiv:2312.07691v3. Each round screens the current product state
+    with the ADAPT gradient `<[H, A_i]>` of every unselected generator (main
+    text, "Integration of GCIM with ADAPT approach", p. 4, and Grimsley et
+    al. (2019), arXiv:1812.11173v2, Sec. II.B, steps 5-7). The selected
+    generator enters at the fixed angle `theta`, and the basis grows by two
+    states per selection (METHODS, p. 9). A selected generator is not
+    screened again, following the paper's QuGCM `adapt_gcim.py`
+    implementation (commit c5efcb0, lines 303-398), whereas Grimsley et al.
+    step 7 permits reuse in its ADAPT-VQE ansatz. Optimization every
+    `optimize_every_m` selections is the intermittent, truncated optimization
+    of Appendix H, and its extra energy evaluations run through the same Run.
+    Because later queries act on generators selected from earlier outcomes,
+    `prepare(plan, settings="all")` is refused.
 
-    METHODS, p. 9, stops after ``T=min(T_auto,T_usr)`` consecutive small
-    energy changes, with ``T_auto`` 20% of the unselected operators.
-    This controller follows that published rule and counts from the first
-    reference-to-basis change. The integer counter reaches a fractional T
-    at its ceiling. QuGCM's code instead uses a max rule with 10% and a
-    warmup. The gradient-norm floor remains an operational exit, without a
-    ground-energy guarantee. docs/ENGINEERING_CONSTANTS.md records the defaults.
-
-    With max_iterations=8 and t_user=10, flat stopping can fire only for
-    pools of at most 42 generators. After k selections a pool of P
-    generators has P - k unselected members and a flat count of at most k,
-    so the stop needs k >= 0.2*(P - k). The iteration cap is checked first
-    and ends the run at the eighth selection, so k <= 7 and P <= 42. Larger
-    pools hit the iteration cap first unless another stopping condition
-    applies.
+    The default flat-counter stop follows METHODS, p. 9: stop after
+    `T = min(T_auto, T_usr)` consecutive energy changes below
+    `energy_change_tolerance`, with `T_auto` equal to `t_auto_fraction`
+    (20%) of the unselected generators and `T_usr = t_user`. Counting starts
+    at the first change from the reference energy, and the integer counter
+    reaches a fractional T at its ceiling. QuGCM's code instead uses a max
+    rule with 10% and a warmup. With `max_iterations=8` and `t_user=10`, the
+    flat counter can fire only for pools of at most 42 generators. After k
+    selections a pool of P generators has `P - k` unselected members and a
+    flat count of at most k, so the stop needs `k >= 0.2*(P - k)`. The
+    iteration cap is checked first and ends the run at the eighth selection,
+    so `k <= 7` and `P <= 42`. Larger pools reach the iteration cap first
+    unless another stop applies. Every stop, including the gradient-norm
+    floor, is an operational rule, not proof of ground-state accuracy.
+    `result.analyze(overlap_cutoff=...)` solves the saved basis again at
+    another cutoff. The [GCiM guide](../../algorithms/gcim.md) describes the
+    screening rule, the pools and the stopping rules.
 
     Attributes:
-        initial_state: Admitted reference preparation in the operator's original basis.
-        pool: Explicit generator pool or supported named fermionic pool recipe.
-        n_spatial_orbitals: Orbital count required by a named fermionic pool; None for explicit pools.
-        theta: Generator exponential rotation parameter in radians.
-        gradient_norm_floor: Pool-gradient norm below which the gradient stop is triggered.
-        energy_change_tolerance: Absolute consecutive-energy change used by the flat counter.
-        t_auto_fraction: Fraction of remaining pool size used to select the flat-counter limit.
-        t_user: User cap on consecutive flat rounds in Zheng et al.'s
-            ``min(T_auto, T_usr)`` rule. A fractional round count is rounded up.
-        max_iterations: Maximum generator-selection rounds. The basis holds
-            at most ``2*min(max_iterations, pool size)`` states, so
-            ``max_basis_size=64`` admits at most 32 for a pool of more than
-            32 members. The default 8 is a cost cap. With exact
-            evaluation and the spin-adapted pool, the eigenvalue example's
-            H4 chain reaches FCI at the eighth selection, and 10-qubit LiH
-            is then 0.46 mHa above its FCI energy. The flat counter would
-            stop them only at selections 18 and 19
-            (docs/ENGINEERING_CONSTANTS.md).
-        overlap_cutoff: Positive eigenvalue cutoff defining the retained Gram subspace.
-        symmetrize_matrices: Request Hermitian averaging in the projected solve; admission still checks raw evidence.
-        stop_criterion: ``flat_counter`` uses repeated small changes. ``residual_norm``
-            uses the full-state residual ``||(H - E) psi||`` of the normalized
-            Ritz state psi of the current basis, which only classical execution
-            can evaluate. It differs from the pencil's ``projected_residual``
-            ``||H c - E S c||`` in basis coordinates.
-        residual_norm_tolerance: Absolute threshold on that full-state residual
-            for the residual stop, in the Hamiltonian's energy unit.
-        optimize_every_m: Run coefficient optimization every m selected generators; None disables it.
-        optimize_rounds_n: Maximum BFGS iterations per optimization invocation; required together with the other optimization controls.
-        optimize_max_evaluations: Maximum energy queries admitted for enabled
-            coefficient optimization, counted as distinct acquired parameter
-            points. A classical point is one energy-and-gradient evaluation,
-            whose work record carries its forward, derivative and reverse
-            Taylor work.
-        max_basis_size: Cap on the growing trial-basis size before matrix construction.
-        max_pool_size: Cap on the admitted generator population before pool expansion.
-        max_bytes: Bound on known pool, matrix, state and readout workspace bytes.
-        max_products: Bound on counted conversion, matrix and operator-product work. It also bounds, separately, the exact synthesis of the dense unitaries in a supplied reference circuit and Qiskit's control of them.
-            Classical query admission sums the reference, generator, Hamiltonian and scalar work of that invocation before it starts. Each later query is admitted afresh against max_products. Packed Pauli tables have one separately admitted construction charge per Plan. The selected kernel records the full invocation allowance, while application counters record the actions actually performed after cache reuse.
-        input_conversion: ``auto`` uses admitted access; ``dense_pauli`` permits explicit dense-to-Pauli conversion.
-        max_conversion_work: Separate work cap for selected input conversion.
-        pauli_coefficient_cutoff: Absolute processing cutoff for operator coefficients; removed mass is recorded.
-        input_symmetry_tolerance: Relative Frobenius window for the anti-Hermitian projection of each pool generator. The Hamiltonian gets no window and must be exactly Hermitian.
+        initial_state: Required. Reference state in the operator's original
+            basis, in a form that `StateData` accepts.
+        pool: Required. A nonempty tuple of anti-Hermitian generators,
+            `FermionicGenerator` records or operators that `operator_input`
+            accepts, or the name of a built-in fermionic pool:
+            `"spin_adapted_sd"`, `"uccsd_sd"`, `"qeb_sd"` or `"ceo_ovp"`.
+            Pools other than `"spin_adapted_sd"` need an occupation-number
+            reference state.
+        n_spatial_orbitals: Default `None`. Number of spatial orbitals,
+            required by a named pool, with twice as many qubits. `None` for
+            an explicit pool.
+        theta: Default `pi/4`, nonzero. Angle in radians of each selected
+            generator's exponential.
+        gradient_norm_floor: Default `1e-8`, nonnegative. The run stops when
+            the norm of the pool gradients falls below it.
+        energy_change_tolerance: Default `1e-6`, positive. Absolute change
+            between consecutive energies below which the flat counter counts
+            a round.
+        t_auto_fraction: Default `0.2`, in (0, 1]. Fraction of the unselected
+            pool size that sets `T_auto`.
+        t_user: Default `10`. Cap `T_usr` on consecutive flat rounds in the
+            rule `min(T_auto, T_usr)`. A fractional round count is rounded up.
+        max_iterations: Default `8`. Largest number of selection rounds. The
+            basis holds at most `2*min(max_iterations, pool size)` states, so
+            `max_basis_size=64` allows at most 32 selections for a pool of
+            more than 32 members. The default is a cost cap. With exact
+            evaluation and the spin-adapted pool, the H4 chain of the eigenvalue example reaches
+            FCI at the eighth selection, and 10-qubit LiH is then 0.46 mHa
+            above its FCI energy. The flat counter would stop them only at
+            selections 18 and 19
+            ([Engineering constants](../../ENGINEERING_CONSTANTS.md)).
+        overlap_cutoff: Default `1e-12`, positive. Overlap eigenvalue cutoff
+            that defines the kept Gram subspace.
+        symmetrize_matrices: Default `True`. Request Hermitian averaging in
+            the projected solve. The raw measured values are still checked.
+        stop_criterion: Default `"flat_counter"`, which counts repeated small
+            changes. `"residual_norm"` uses the full-state residual
+            `||(H - E) psi||` of the normalized Ritz state psi of the current
+            basis, which only classical execution can evaluate. It differs
+            from the pencil's `projected_residual` `||H c - E S c||` in basis
+            coordinates.
+        residual_norm_tolerance: Default `1.6e-3`, positive. Threshold on that
+            full-state residual for the residual stop, in the Hamiltonian's
+            energy unit.
+        optimize_every_m: Default `None`, no optimization. Run coefficient
+            optimization every m selected generators.
+        optimize_rounds_n: Default `None`. Largest number of BFGS iterations
+            per optimization, required together with the other two
+            optimization settings.
+        optimize_max_evaluations: Default `None`. Largest number of energy
+            queries for enabled optimization, counted as distinct measured
+            parameter points. A classical point is one energy-and-gradient
+            evaluation, whose work record includes its forward, derivative
+            and reverse Taylor work.
+        max_basis_size: Default `64`. Limit on the size of the growing trial
+            basis, checked before matrix construction.
+        max_pool_size: Default `1024`. Limit on the number of generators,
+            checked before a pool is expanded.
+        max_bytes: Default 10 GB (decimal, `10_000_000_000` bytes). Limit on
+            the known bytes of the pool, matrices, states and readout
+            workspace.
+        max_products: Default `1_000_000_000`. Limit on the counted work of
+            conversion, matrices and operator products. It also limits,
+            separately, the exact synthesis of the dense unitaries in a
+            supplied reference circuit and Qiskit's control of them. Before a
+            classical query starts, its reference, generator, Hamiltonian and
+            scalar work are summed and checked, and each later query is
+            checked afresh. Packed Pauli tables are checked once per Plan.
+            The recorded allowance covers a whole query, while the counters
+            record the actions performed after cache reuse.
+        input_conversion: Default `"auto"`, which keeps the accepted input
+            access. `"dense_pauli"` permits explicit dense-to-Pauli
+            conversion.
+        max_conversion_work: Default `100_000_000`. Separate limit on the
+            work of the chosen input conversion.
+        pauli_coefficient_cutoff: Default `1e-14`, nonnegative. Operator
+            coefficients at or below it in magnitude are removed, and the
+            removed mass is recorded.
+        input_symmetry_tolerance: Default `1e-12`, nonnegative. Relative
+            Frobenius window for the anti-Hermitian projection of each pool
+            generator. The Hamiltonian gets no window and must be exactly
+            Hermitian.
+
+    Raises:
+        ValueError: If `theta` is zero, if only some of the three
+            optimization settings are given, or if an explicit pool is empty
+            or has more than `max_pool_size` members.
+
+    Examples:
+        `H = Z` has lowest eigenvalue -1. From `|+>`, ADAPT with the
+        one-generator pool `{iY}` returns it after one selection:
+
+        >>> from nwqlib import Eigenproblem, solve
+        >>> from nwqlib.algorithms import ADAPT
+        >>> from nwqlib.operators import ingest_pauli
+        >>> pool = (ingest_pauli((("Y", 1j),), num_qubits=1),)
+        >>> method = ADAPT(initial_state=[1, 1], pool=pool)
+        >>> result = solve(Eigenproblem(A=[[1, 0], [0, -1]]), method=method, seed=7)
+        >>> print(result.selected, result.stop_reason, round(result.eigenvalue, 10))
+        (0,) pool_exhausted -1.0
     """
 
     # max_pool_size, max_products and max_basis_size are untuned workload
@@ -838,14 +903,22 @@ class ADAPT(Method):
     descriptor: ClassVar[AlgorithmDescriptor] = DESCRIPTOR
 
     def plan(self, problem, *, output, execution, shots, rng):
-        """Admit the adaptive pool and select its bounded gradient, matrix-element and energy
-        query families.
+        """Check the generator pool and choose the gradient, matrix-element and energy queries.
 
-        After k selections the basis holds 2k states (``basis_chains``), so
-        ``2 * min(pool size, max_iterations)`` bounds the projected dimension.
-        For an explicit pool this bound is checked before conversion and
-        commutator formation. A named pool is checked after enumeration, whose
-        own byte and product caps apply first.
+        After k selections the basis holds 2k states, so
+        `2*min(pool size, max_iterations)` bounds the projected dimension,
+        which must not exceed `max_basis_size`. For an explicit pool this
+        bound is checked before conversion and commutator formation. A named
+        pool is checked after it is enumerated, under that enumeration's own
+        byte and product limits.
+
+        Raises:
+            ValueError: If `2*min(pool size, max_iterations)` exceeds
+                `max_basis_size`, if classical execution is given shots, or if
+                `stop_criterion="residual_norm"` is used without classical
+                execution.
+            ApplicabilityError: If the Problem names a fixed subspace, which
+                the changing basis of ADAPT does not implement.
         """
         if (
             isinstance(self.pool, tuple)

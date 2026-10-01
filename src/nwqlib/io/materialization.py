@@ -10,12 +10,28 @@ from .streaming import QasmWriteBudget, QasmWriteReceipt, _Prepared, _write
 
 
 class QasmMaterializationBudget(Record):
-    """Finite parser text and source-expansion capacity; no native RSS estimate.
+    """Limits for importing an OpenQASM 3 file back into Qiskit with `materialize_qasm3_file`.
 
-    max_bytes bounds stored ASCII source bytes. max_dynamic_visits also caps
-    identity/empty loops. max_operations counts expanded primitive applications,
-    not synthesized controlled gates. Required hard RSS/native-byte limits are
-    unavailable and reject before import.
+    Build it with keyword arguments, for example
+    `QasmMaterializationBudget(max_bytes=4096, max_qubits=1, max_clbits=0, max_dynamic_visits=100, max_operations=100)`,
+    and pass it as `budget=`. The first five fields are required. The counts are
+    derived from the construction and checked before the file is opened. No limit
+    here estimates the importer's memory.
+
+    Attributes:
+        max_bytes: Required. Limit on the bytes of the file text.
+        max_qubits: Required. Limit on the total declared qubits.
+        max_clbits: Required. Limit on the total declared classical bits.
+        max_dynamic_visits: Required. Limit on Program node visits after
+            expanding loops, empty and identity loops included.
+        max_operations: Required. Limit on primitive gate, measurement and reset
+            applications after expanding loops. Gates that Qiskit synthesizes for
+            controls are not counted.
+        required_max_native_bytes: Default `None`, the only accepted value. Any
+            other value is rejected before import, because this importer cannot
+            bound its memory.
+        required_max_peak_rss: Default `None`, the only accepted value, for the
+            same reason.
     """
 
     max_bytes: Count
@@ -29,14 +45,20 @@ class QasmMaterializationBudget(Record):
 
 @dataclass(frozen=True)
 class QasmMaterialization:
-    """Actual loop-free logical import, without gate decomposition or simulation.
+    """A Qiskit circuit imported from a verified OpenQASM 3 file, with its loops unrolled.
+
+    [`materialize_qasm3_file`][nwqlib.io.materialization.materialize_qasm3_file]
+    returns it. The fields below are read-only. Gates are not decomposed and
+    nothing is simulated.
 
     Attributes:
-        circuit: Imported/unrolled Qiskit circuit; user gates remain logical.
-        source: Verified completed artifact receipt.
-        output_nodes: Actual top-level circuit instruction count after unrolling.
-        native_bytes: Unknown allocation size.
-        peak_rss: Unknown peak process memory.
+        circuit: The imported Qiskit circuit without loops. Gate definitions from
+            the file stay as logical gates.
+        source: The verified [`QasmWriteReceipt`][nwqlib.io.streaming.QasmWriteReceipt].
+        output_nodes: Top-level instructions of `circuit` after unrolling. It can
+            differ from `source.expanded_operations`.
+        native_bytes: Always `None`, because the allocation size is not known.
+        peak_rss: Always `None`, because peak process memory is not known.
     """
 
     circuit: object
@@ -49,15 +71,35 @@ class QasmMaterialization:
 def materialize_qasm3_file(construction, path, receipt: QasmWriteReceipt, *,
                            writer_budget: QasmWriteBudget,
                            budget: QasmMaterializationBudget) -> QasmMaterialization:
-    """Admit source work, verify exact bytes, then import and UnrollForLoops.
+    """Import an OpenQASM 3 file written by `write_qasm3_file` into Qiskit, after checking its bytes against the construction.
 
-    Re-emission only hashes bounded text; it does not reconstruct native gates.
-    Caller-supplied receipts/counts never supply trusted capacity. The same bytes
-    read once and verified are passed to loads, preventing path substitution.
-    User definitions remain logical; controls of Z with at most two controls
-    use the importer's standard gates. Higher arity is rejected before import
-    because the installed importer can eagerly synthesize generic controls. The installed
-    qiskit-qasm3-import dependency must support this documented language subset.
+    The sizes are derived again from the construction and checked against
+    `budget` before the file is opened. The text is then written again into a
+    digest to rebuild the `QasmWriteReceipt`, and the file is read once and its
+    bytes and digest compared with `receipt`, so a `QasmWriteReceipt` alone
+    cannot vouch for other text. Those same bytes go to Qiskit's OpenQASM 3
+    importer and the `UnrollForLoops` pass. Gate definitions stay logical. Z
+    with more than two controls in total is rejected before import, because
+    the installed importer can synthesize such gates eagerly. It needs the
+    `qasm` extra
+    (`pip install "nwqlib[qasm]"`). The checked combination is OpenQASM parser
+    1.0.1, qiskit-qasm3-import 0.6.0 and Qiskit 2.5.2.
+
+    Args:
+        construction (SelectedConstruction): The construction the file was
+            written from.
+        path (str | Path): The file.
+        receipt (QasmWriteReceipt): The record that `write_qasm3_file` returned.
+        writer_budget (QasmWriteBudget): The budget the file was written with.
+        budget (QasmMaterializationBudget): The import limits.
+
+    Returns:
+        materialization (QasmMaterialization): The imported circuit and its verified `QasmWriteReceipt`.
+
+    Raises:
+        ValueError: If the construction exceeds `budget`, `budget` asks for a
+            memory bound, a Z gate has more than two controls, or the
+            `receipt` or the file bytes do not match the construction.
     """
     prepared = _Prepared(construction, writer_budget)
     if budget.required_max_native_bytes is not None or budget.required_max_peak_rss is not None:

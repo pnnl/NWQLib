@@ -115,11 +115,53 @@ def _submission(value):
 
 
 class SlurmProfile(Record):
-    """Explicit allocation, executable identity, binding and shared spool.
+    """Slurm site settings for an NWQ-Sim runner: allocation, runner, binding and shared pending-job directory.
 
-    nodes, ranks_per_node and threads describe requested resources, not measured
-    utilization. build_identity is provenance supplied for the actual executable;
-    it does not qualify a GPU or distributed implementation.
+    Build it with keyword arguments, for example
+    `SlurmProfile(cluster=..., account=..., walltime="00:05:00", nodes=1, ranks_per_node=1, threads=1, executable=..., build_identity=..., spool=...)`,
+    and pass it as `profile=` to [`NWQSimSlurmBackend`][nwqlib.backends.slurm.NWQSimSlurmBackend].
+    `cluster`, `account`, `walltime`, `nodes`, `ranks_per_node`, `threads`,
+    `executable`, `build_identity` and `spool` are required. Node, rank and thread
+    counts describe the requested resources, not measured use. Every option value
+    must be one literal token, so that it cannot end its `#SBATCH` line and add
+    another directive. The [Slurm guide](../slurm.md) gives Perlmutter and
+    Frontier profiles.
+
+    Attributes:
+        cluster: Required. One cluster name, letters, digits, `_` and `-` only.
+            `"all"` and comma lists are rejected, because job lookups name exactly
+            one cluster.
+        account: Required. Slurm account to charge.
+        partition: Default `None`. Slurm partition.
+        qos: Default `None`. Slurm quality of service.
+        constraint: Default `None`. Slurm node constraint, such as `"gpu"`.
+        walltime: Required. Positive time limit in Slurm's
+            `[days-]hours:minutes:seconds` form.
+        nodes: Required. Positive. Number of nodes.
+        ranks_per_node: Required. Positive. MPI ranks per node.
+        threads: Required. Positive. Threads per rank.
+        gpus_per_task: Default `None`. Positive. GPUs per task, given together
+            with `gpu_bind`. The `"NVGPU"` and `"AMDGPU"` routes require exactly 1,
+            and the CPU and MPI routes require `None`.
+        gpu_bind: Default `None`. Slurm GPU binding, given together with
+            `gpus_per_task`.
+        cpu_bind: Default `"cores"`. Slurm CPU binding.
+        modules: Default `()`. Environment modules to load before the run.
+        executable: Required. Absolute path of the runner on the compute nodes.
+        build_identity: Required. Source commit of the runner's NWQ-Sim build. It
+            records which build ran and does not qualify a GPU or distributed
+            implementation.
+        spool: Required. Absolute path of a directory shared with the compute
+            nodes.
+        backend: Default `"CPU"`. NWQ-Sim route, as in
+            [`NWQSimBackend`][nwqlib.backends.nwqsim.NWQSimBackend].
+        method: Default `"SV"`. `"SV"` or `"DM"`, as in `NWQSimBackend`.
+
+    Raises:
+        ValueError: If the route is not supported, `cluster` is not one name, an
+            option value is not one token, `walltime` is malformed or zero,
+            `gpus_per_task` and `gpu_bind` are not given together, or a path is
+            not absolute.
     """
 
     cluster: Text
@@ -193,13 +235,28 @@ class SlurmProfile(Record):
             raise ValueError("CPU/MPI execution cannot consume a GPU allocation")
 
     def script(self, submission_id, *, max_input_bytes):
-        """Render a script without executing it. Rendering does not qualify a site.
+        """Return the Slurm batch script for one submission, without running it.
 
-        The job name ``nwqlib-<submission UUID>`` is what ``reconcile`` searches
-        for. ``--no-requeue`` keeps Slurm from running the same request a second
-        time after a node failure or preemption, and ``srun --kill-on-bad-exit``
-        stops all ranks when one fails. Batch stdout and stderr go to /dev/null,
-        since only the runner's result file is read.
+        Use it to inspect what a submission would send to `sbatch`. Rendering a
+        script does not qualify a site. The job name `nwqlib-<submission UUID>` is
+        what a lost submission acknowledgement is searched for. `--no-requeue` keeps
+        Slurm from running the same request a second time after a node failure or
+        preemption, and `srun --kill-on-bad-exit` stops all ranks when one fails.
+        Batch stdout and stderr go to `/dev/null`, because only the runner's result
+        file is read.
+
+        Args:
+            submission_id (str): Submission UUID that names the job and its
+                subdirectory of `spool`.
+            max_input_bytes (int): Positive limit in bytes on the request file, passed
+                to the runner.
+
+        Returns:
+            script (str): The script text, ending with a newline.
+
+        Raises:
+            ValueError: If `max_input_bytes` is not a positive integer.
+            ValueError: If `submission_id` is not a canonical UUID.
         """
         directory = Path(self.spool) / _submission(submission_id)
         if type(max_input_bytes) is not int or max_input_bytes <= 0:
@@ -490,17 +547,45 @@ def slurm_success_storage_bounds(*, cluster, account, response_bytes, max_bytes,
 
 
 class NWQSimSlurmBackend(Record):
-    """Detached execution of one selected native target through the common journal.
+    """NWQ-Sim run as a Slurm batch job on a cluster.
 
-    profile is the sole executable, build revision and spool configuration.
-    accounting_since/accounting_until bound original-UUID reconciliation in the
-    site's local time; choose a window covering the intended submission period.
-    max_input_bytes, max_output_bytes and max_buffer_bytes keep the native
-    runner's file/array limits. max_response_bytes and timeout_seconds bound
-    each scheduler CLI; the Run bounds actual stored data.
-    optimization_level is the NWQ-Sim adapter's Qiskit transpiler level
-    (``NWQSimBackend.optimization_level``), with the same default 0 and the
-    same receipt exclusion "optimization_level" at any other level.
+    Build it with keyword arguments, for example
+    `NWQSimSlurmBackend(profile=..., accounting_since=..., accounting_until=..., max_input_bytes=..., max_output_bytes=..., max_buffer_bytes=..., max_response_bytes=..., timeout_seconds=...)`,
+    and pass it as `backend=` to [`prepare`][nwqlib.scientist.prepare]. Every
+    argument except `optimization_level` is required. The profile holds the
+    runner, its build and the pending-job directory (`spool`). Submission calls `sbatch` once,
+    and a job whose acknowledgement was lost is found again by its job name in
+    Slurm accounting within the configured time window. Only offline scheduler
+    and protocol checks qualify this backend, and the site allocation, runner and
+    hardware have no live qualification. The [Slurm guide](../slurm.md) shows a
+    complete run.
+
+    Attributes:
+        profile: Required. The [`SlurmProfile`][nwqlib.backends.slurm.SlurmProfile].
+            Its total rank count and GPU request are checked against its route.
+        accounting_since: Required. Start of the accounting search window, an ISO
+            time without a time zone, read in the site's local time. Choose a
+            window that covers the intended submission period.
+        accounting_until: Required. End of that window, later than
+            `accounting_since`.
+        max_input_bytes: Required. Positive. Limit in bytes on each request file,
+            as in [`NWQSimBackend`][nwqlib.backends.nwqsim.NWQSimBackend].
+        max_output_bytes: Required. Positive. Limit in bytes on each result file.
+        max_buffer_bytes: Required. Positive. Limit in bytes on the runner's known
+            arrays per process, as in `NWQSimBackend`.
+        max_response_bytes: Required. Positive. Limit in bytes on the output of
+            each scheduler command. It must cover the `sbatch --parsable` reply,
+            12 bytes plus the cluster name's length (22 bytes for `perlmutter`).
+        timeout_seconds: Required. Positive deadline in seconds for each scheduler
+            command.
+        optimization_level: Default `0`. Qiskit transpiler level of the translation to
+            U and CX gates, as in `NWQSimBackend`, with the same exclusion
+            `"optimization_level"` at any other level.
+
+    Raises:
+        ValueError: If the rank or GPU request does not fit the route, the
+            accounting window has a time zone or is not increasing, or
+            `timeout_seconds` is not positive.
     """
 
     kind: Literal["slurm"] = "slurm"

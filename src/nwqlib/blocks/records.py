@@ -13,12 +13,24 @@ from nwqlib.resources.records import ResourceLaw, Workspace
 
 
 class Primitive(Record):
-    """Exact ordered logical operation. A phase has no targets and is observable under control.
+    """One exact gate in a block's recipe. A global phase has no target qubits and becomes observable under control.
+
+    [`SelectedDefinition.decomposition`][nwqlib.blocks.records.SelectedDefinition]
+    lists these in order. Build it with keyword arguments, for example
+    `Primitive(gate="cx", qubits=(0, 1))`. `gate` is required.
 
     Attributes:
-        gate: ``x``, ``h``, ``z`` or ``sdg`` on one qubit, ``cx`` on (control, target), ``mc_z`` on two or more qubits, or a global ``phase``.
-        qubits: Local qubit indices in the block's ports concatenated in signature order, index 0 being the least significant.
-        angle: Phase angle in radians, nonzero only for ``phase``, which multiplies the block by ``exp(i*angle)``.
+        gate: Required. `"x"`, `"h"`, `"z"` or `"sdg"` on one qubit, `"cx"` on
+            (control, target), `"mc_z"` on two or more qubits, or a global
+            `"phase"` with no qubits.
+        qubits: Default `()`. Distinct local qubit indices in the block's ports
+            concatenated in signature order, index 0 being the least significant.
+        angle: Default `0.0`. Phase angle in radians, nonzero only for `"phase"`,
+            which multiplies the block by `exp(i*angle)`.
+
+    Raises:
+        ValueError: If the qubits repeat, their number does not match the gate,
+            or a gate other than `"phase"` has an angle.
     """
 
     gate: Literal["x", "h", "z", "sdg", "cx", "mc_z", "phase"]
@@ -107,37 +119,49 @@ class BlockSemantics(Record):
 
 
 class SelectedDefinition(Record):
-    """Selected implementation and its law context, never an executable callable.
+    """The portable half of a selected block: its interface, promised action, chosen recipe and cost rules.
 
-    decomposition gives the ordered exact primitive recipe when available;
-    otherwise law points to the selected native kernel. Program owns composition.
-    construction_work bounds the documented size law, not CPU time or RSS.
-    Unknown cost remains an unresolved law; it never becomes a zero inventory.
-
-    A selected definition is the portable half of a block. It holds everything
-    the resource fold, archives and reports need, and its identity covers
-    every field. The executable half is a ``SelectedBlock`` that binds trusted
-    code to this exact identity. Two recipes with the same full operator,
-    such as X and HZH, are different selections with different identities
-    and inventories.
+    Read it as `block.record` of a [`SelectedBlock`][nwqlib.blocks.selection.SelectedBlock],
+    or from `SelectedConstruction.selections`. The `select_*` functions build it.
+    It holds everything resource estimates, saved archives and reports need, and
+    its content hash covers every field. The executable half is the
+    `SelectedBlock` that binds trusted code to this exact record. Two recipes for
+    the same full operator, such as X and HZH, are different selections with
+    different content hashes and gate counts. `decomposition` gives the ordered
+    exact gate recipe when one exists. Otherwise `cost_law` names the cost rule
+    of the circuit construction. An unknown cost stays unresolved and never
+    becomes zero. `construction_work` counts the documented size rule, not CPU
+    time or memory. The fields below are read-only.
 
     Attributes:
-        signature: Declared interface, equal to the Program's signature of the same name.
-        semantics: The promised action and its approximation.
-        implementation: Versioned implementation Source.
-        choice: Recipe label within the implementation. A supplied native circuit gets a fresh unique label.
-        decomposition: Exact ordered primitive recipe, or None when a law describes the cost.
-        cost_law: Source of the selected size or CX law, or None when no law exists.
-        cost_parameters: Exact law arguments for this selection.
-        cost_context: Scope and limits of that law, carried into resource quantities.
-        construction_work: Size-law work units to build the native definition, or None when unknown.
+        signature: Declared interface, equal to the Program's signature of the
+            same name.
+        semantics: The promised action and its approximation: kind, input,
+            relation, normalization `alpha`, projectors, error `epsilon` and its
+            norm, whether control and adjoint are allowed, and the phase
+            convention.
+        implementation: Versioned Source of the implementation.
+        choice: Recipe label within the implementation. A supplied circuit gets a
+            fresh unique label.
+        decomposition: Exact ordered [`Primitive`][nwqlib.blocks.records.Primitive]
+            recipe, or `None` when a cost rule describes the cost.
+        cost_law: Source of the size or CX rule, or `None` when there is none.
+        cost_parameters: Exact arguments of that rule for this selection.
+        cost_context: Scope and limits of the rule, carried into resource
+            quantities.
+        construction_work: Work units of building the block's circuit definition by its
+            size rule, or `None` when unknown.
         controlled: Whether this selection adds one coherent control to its base.
         adjoint: Whether this selection is the adjoint of its base.
-        base_selection_id: Identity of the base selection for a control or adjoint.
-        coefficient_selection_id: Identity of the SELECT whose coefficients this PREP prepares.
-        blocker: Reason the selection cannot execute, for a law-only or unsupported leaf.
-        resource_laws: Per-call ResourceLaw summaries.
-        workspace: Per-invocation workspace byte declarations by location. An empty tuple means unknown, not zero.
+        base_selection_id: Content hash of the base selection of a control or
+            adjoint.
+        coefficient_selection_id: Content hash of the SELECT whose coefficients
+            this PREP prepares.
+        blocker: Why the selection cannot run, for a block with a cost rule only
+            or an unsupported block.
+        resource_laws: Per-call resource rules.
+        workspace: Workspace bytes per call, by location. An empty tuple means
+            unknown, not zero.
     """
 
     signature: BlockSignature
@@ -173,16 +197,24 @@ class SelectedDefinition(Record):
 
 
 class PauliEncoding(Record):
-    """A named PREP/SELECT/PREP-inverse subgraph and its index-zero projection.
+    """Names the PREP, SELECT and PREP-adjoint calls that form one Pauli LCU block encoding in a Program.
 
-    Normalization, physical A, and epsilon come from the checked selected SELECT;
-    this record does not own another independent copy of those quantities.
+    Build it with keyword arguments, for example
+    `PauliEncoding(root="encoding", select="select", prepare="prep", unprepare="unprep")`,
+    and pass it in `encodings=` of
+    [`SelectedConstruction`][nwqlib.blocks.records.SelectedConstruction], which
+    checks the structure. `root` and `select` are required. The normalization,
+    the physical operator A and the error come from the checked SELECT, so this
+    record holds no second copy of them. With the label register in `|0>` the
+    subgraph acts as `A/alpha`.
 
     Attributes:
-        root: Definition ID of the Sequence that forms the encoding.
-        select: Signature name of the signed Pauli SELECT.
-        prepare: Signature name of the coefficient PREP, or None for a single-term encoding.
-        unprepare: Signature name of the adjoint of that PREP, or None for a single-term encoding.
+        root: Required. Definition ID of the Sequence that forms the encoding.
+        select: Required. Signature name of the signed Pauli SELECT.
+        prepare: Default `None`. Signature name of the coefficient PREP, `None`
+            for a single-term encoding.
+        unprepare: Default `None`. Signature name of the adjoint of that PREP,
+            `None` for a single-term encoding.
     """
 
     root: Text
@@ -252,26 +284,38 @@ class SelectedKernel(Record):
 
 
 class SelectedConstruction(Record):
-    """One directly consumable Program and its selected definitions; not a Plan.
+    """A Program with the selected definition of every block it calls: what estimates, circuit building and OpenQASM export read.
 
-    JSON preserves sharing in Program.definitions. Native access is rebound by
-    exact selected-record identity at explicit lowering, never from persisted code.
-
-    The validator requires exactly one selected definition per Program
-    signature, with an identical signature, so every BlockCall resolves to
-    one selection. A host stage must name its exact selected kernel. A Pauli
-    encoding with an index register must be the ordered PREP, SELECT,
-    PREP-inverse Sequence on that register, where the PREP was selected from
-    this SELECT's coefficients and the inverse is the adjoint of that same
-    PREP. A single-term encoding has no index register and is SELECT alone,
-    with no PREP. That structure is what makes ``<0|U|0> = A/alpha`` hold for
-    the subgraph.
+    Build it with keyword arguments, for example
+    `SelectedConstruction(program=program, selections=tuple(b.record for b in blocks))`,
+    or read it as `plan.construction`. `program` and `selections` are required.
+    It is not a Plan, and holds no problem, method or data. Saved JSON keeps the
+    sharing of `Program.definitions`, and executable code is bound again by
+    exact record when the circuit is built, never from saved code.
+    The checks require exactly one selected definition per Program signature,
+    with an identical signature, so every block call resolves to one selection,
+    and every host stage names its exact selected kernel. A Pauli encoding with
+    a label register must be the ordered PREP, SELECT, PREP-adjoint Sequence on
+    that register, where the PREP was selected from this SELECT's coefficients
+    and the adjoint is of that same PREP. A single-term encoding has no label
+    register and is the SELECT alone. That structure is what makes
+    `<0|U|0> = A/alpha` hold for the subgraph.
 
     Attributes:
-        program: The Program that every consumer reads.
-        selections: One SelectedDefinition per Program signature.
-        encodings: Pauli encodings checked as PREP, SELECT and PREP-inverse subgraphs.
-        kernels: Host kernel declarations, each named by one host ClassicalStage.
+        program: Required. The [`Program`][nwqlib.ir.records.Program] that estimates,
+            circuit building and export read.
+        selections: Required. One
+            [`SelectedDefinition`][nwqlib.blocks.records.SelectedDefinition] per
+            Program signature.
+        encodings: Default `()`. [`PauliEncoding`][nwqlib.blocks.records.PauliEncoding]
+            subgraphs, checked as PREP, SELECT and PREP-adjoint.
+        kernels: Default `()`. Host kernel declarations, each named by one host
+            `ClassicalStage`.
+
+    Raises:
+        ValueError: If a signature lacks exactly one matching selection, a host
+            stage and kernel do not match, or an encoding breaks the
+            PREP, SELECT, PREP-adjoint structure.
     """
 
     schema_version: Literal[2] = 2
@@ -332,14 +376,25 @@ class SelectedConstruction(Record):
         return self
 
     def encoding_semantics(self, root: str) -> BlockSemantics:
-        """Derive (A, alpha, index convention, epsilon) from one checked subgraph.
+        """Return the block-encoding promise of one checked Pauli encoding: A, alpha, label convention and error.
 
         The relation is the LCU block encoding of An, Childs and Lin,
         arXiv:2312.03916v2, Appendix A.3, Lemma 24, Eq. (178), in the
         real-coefficient form where both preparation oracles equal PREP and
-        sign(c_j) sits in SELECT. With ``alpha = sum_j |c_j|`` the index-zero
-        block is ``A/alpha``. This is an exact block encoding in the sense of
-        their Definition 23 (Appendix A.2).
+        `sign(c_j)` sits in SELECT. With `alpha = sum_j |c_j|` the label-zero block is
+        `A/alpha`. This is an exact block encoding in the sense of their
+        Definition 23 (Appendix A.2). Measuring the label register in `|0>`
+        succeeds with probability `||A psi||^2 / alpha^2`, and the label register is
+        not restored in general.
+
+        Args:
+            root (str): Definition ID of the encoding's Sequence.
+
+        Returns:
+            semantics (BlockSemantics): The SELECT's promise, restated as a block encoding.
+
+        Raises:
+            ValueError: If no checked encoding has this root.
         """
         encoding = next((item for item in self.encodings if item.root == root), None)
         if encoding is None:

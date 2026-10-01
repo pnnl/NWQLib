@@ -3,7 +3,7 @@
 #
 # A function of two variables has two valleys, and gradient descent from a random start often ends in the shallower one. This notebook minimizes it with NWQLib's quantum Hamiltonian descent (QHD), which moves probability across the barrier, and checks the answer against every grid point and against gradient descent.
 #
-# Install with `python -m pip install -e ".[aer,notebook]"` from the repository root · at most 12 simulated qubits · about 35 s on a laptop.
+# Install with `python -m pip install "nwqlib[aer,notebook]"`. To work on NWQLib itself, run `python -m pip install -e ".[aer,notebook]"` in a clone of the repository instead. The notebook simulates at most 12 qubits and runs in about 30 s on an Apple M3 Max with 36 GiB of memory (Python 3.12.14, Qiskit 2.5.2, Aer 0.17.2).
 #
 # > **How to read this notebook.** The next cells minimize the function and show the answer with its cost.
 # >
@@ -149,7 +149,7 @@ def descent_baseline(objective, variables, bounds, points, starts=500, rate=0.01
 
 
 def show_card(result, baseline, probability, values, predicted, seconds, peak_bytes):
-    """Show the result card: the answer against the references, the cost of both ledgers, the maps and the steps."""
+    """Show the result card: the answer against the references, the quantum and classical cost, the maps and the steps."""
     grid = baseline["grid"]
     start = np.outer(initial_marginal(len(grid[0])), initial_marginal(len(grid[1])))
     best = np.unravel_index(values.argmin(), values.shape)
@@ -209,7 +209,7 @@ grid = baseline["grid"]
 values = baseline["f"](*np.meshgrid(*grid, indexing="ij"))            # the objective at every grid point
 best = np.unravel_index(values.argmin(), values.shape)                # the best grid point, by evaluating all
 probability = grid_probabilities(result, GRID_POINTS)                 # joint probability of each grid point
-predicted = estimate(selected, context=ResourceContext(basis="cx"))   # counts from the resource laws, no circuit built
+predicted = estimate(selected, context=ResourceContext(basis="cx"))   # counts from the resource formulas, no circuit built
 peak_bytes = traced_peak(lambda: solve(plan(problem, method=method, seed=7), progress=False))
 show_card(result, baseline, probability, values, predicted, seconds, peak_bytes)
 
@@ -223,10 +223,10 @@ show_card(result, baseline, probability, values, predicted, seconds, peak_bytes)
 # - **Input.** A SymPy expression that is real everywhere in a box, the tuple of its variables, and one `(lower, upper)` interval per variable.
 # - **Output.** Probabilities of grid points. `result.most_probable_coordinates` is where the probability concentrates, and `result.candidate` the observed grid point with the least evaluated objective.
 # - **Size.** Each variable takes `num_grid_points` interior grid points. The one-hot encoding uses one qubit per grid point and variable, so $d$ variables with $K$ points each need $dK$ qubits for $K^d$ grid points.
-# - **Ceiling.** The local simulator accepts 20 qubits by default, so two variables fit at most 10 grid points each on the circuit route.
+# - **Qubit limit.** The local simulator accepts 20 qubits by default, so two variables fit at most 10 grid points each on the circuit route.
 # - **Work and memory.** `plan` checks the objective tables and the evolution against `max_work` and `max_bytes` and refuses before forming them (Section 4).
 #
-# The cell asks for 11 grid points per variable, 22 qubits. `solve` refuses before building the circuit, and the error names the limit and the amount. The remedy here is `execution="classical"`, which evolves the 121 grid amplitudes on the host, one solve in under a second.
+# The cell asks for 11 grid points per variable, 22 qubits. `solve` refuses before building the circuit, and the error names the limit and the amount. The remedy here is `execution="classical"`, which evolves the 121 grid amplitudes classically, one solve in under a second.
 
 # %%
 wide = QHD(num_grid_points=11, num_steps=STEPS, total_time=TOTAL_TIME, schedule=SCHEDULE)
@@ -237,7 +237,7 @@ try:
 except ValueError as refusal:
     print(f"Refused after {perf_counter() - started:.2f} s, before any circuit existed:\n{refusal}")
 
-host_plan = plan(problem, method=wide, seed=7, execution="classical")  # the remedy: evolve the grid on the host
+host_plan = plan(problem, method=wide, seed=7, execution="classical")  # the remedy: evolve the grid classically
 host_result = solve(host_plan, progress=False)
 wide_grid = [np.linspace(lo, hi, 13)[1:-1] for lo, hi in BOUNDS]       # the 11 interior points per variable
 wide_values = baseline["f"](*np.meshgrid(*wide_grid, indexing="ij"))
@@ -245,8 +245,8 @@ show_table([
     ("Grid points", host_plan.reconstruction.restricted_dimension, "11 per variable"),
     ("Qubits on the circuit route", wide_plan.reconstruction.width,
      f"Above max_simulation_qubits = {result.data.trace.limits.max_simulation_qubits}"),
-    ("Host workspace", format_bytes(host_plan.reconstruction.workspace_bytes), "Stated by plan before the run"),
-    ("Host work", host_plan.reconstruction.size_units, "Units, a planning quantity, not seconds"),
+    ("Classical workspace", format_bytes(host_plan.reconstruction.workspace_bytes), "Stated by plan before the run"),
+    ("Classical work", host_plan.reconstruction.size_units, "Units, a planning quantity, not seconds"),
     ("Most probable grid point", host_result.most_probable_coordinates,
      f"Probability {format_value(host_result.most_probable_probability)}"),
     ("Its objective", host_result.most_probable_objective,
@@ -258,7 +258,7 @@ show_table([
 #
 # ## 2. What it costs
 #
-# **`estimate` predicts the quantum ledger before the circuit exists, and `plan` and the run record the classical ledger.** The quantum ledger counts qubits, gates and shots. The classical ledger counts memory, work and time on this computer.
+# **`estimate` predicts the quantum cost before the circuit exists, and `plan` and the run record the classical cost.** Quantum cost means qubits, gates and shots, and classical cost means memory, work and time on this computer.
 #
 # `estimate` adds up a gate-count formula for each block of the selected construction without building a circuit. `prepare` builds the circuit without running it, and `inspect_resources` compiles a copy with Qiskit. The formulas of this construction give no depth, single-qubit or T count.
 
@@ -278,7 +278,7 @@ show_table([
     ("Single-qubit gates", "not predicted", compiled["operations"].get("u", 0)),
     ("Depth", "not predicted", compiled["depth"]),
     ("T gates", "not predicted", "Not in the cx and u basis"),
-], headers=("Quantum ledger", "Predicted by estimate", "Compiled circuit"))
+], headers=("Quantum cost", "Predicted by estimate", "Compiled circuit"))
 print(f"Compiled CX / predicted CX = {compiled['operations'].get('cx', 0) / predicted_cx:.2f} "
       f"(Qiskit optimization level 1).")
 
@@ -296,11 +296,11 @@ show_table([
      f"{sum(event.timing.seconds for event in trace.events):.3f} s of it in the simulator call"),
     ("Gradient-descent baseline", f"{baseline['runs']} runs of {baseline['iterations']:,} steps",
      f"{baseline['evaluations']:,} gradient evaluations, {baseline['seconds']:.1f} s"),
-], headers=("Classical ledger", "Before the run", "Measured or recorded by the run"))
+], headers=("Classical cost", "Before the run", "Measured or recorded by the run"))
 
 # %% [markdown]
 # - **Peak memory** is the largest total of Python allocations, traced with `tracemalloc` while the card cell repeats plan and solve. Memory that Aer allocates in C++ is not traced. `estimate` counts only the arrays of the selected construction.
-# - **Work.** `estimate` bounds the work of the unique selected block definitions. The run records the work it reserved while building the native circuit, so the two differ.
+# - **Work.** `estimate` bounds the work of each distinct block definition once. The run records the work it counted while building the Qiskit circuit, so the two differ.
 # - **Baseline budget.** The baseline runs 500 descents from random starts, 9 from a 3 × 3 set of starts to locate the minima, and 36 from the grid points to mark the valley of each.
 # - **Not estimated:** physical qubits, error correction, run time on hardware and price.
 #
@@ -343,7 +343,7 @@ show_table([
 #
 # **The total evolution time trades accuracy for circuit size.** At eight steps per unit time, a shorter evolution has fewer steps and fewer CX gates, and leaves less probability at the best grid point.
 #
-# The cell solves once more at T = 2, one solve in about a second. Go deeper C sweeps the time and the schedule.
+# The cell solves once more at T = 2, one solve in under a second. Go deeper C sweeps the time and the schedule.
 
 # %%
 short = solve(plan(problem, method=QHD(num_grid_points=GRID_POINTS, num_steps=16, total_time=2.0, schedule=SCHEDULE),
@@ -357,9 +357,9 @@ show_table([(run.plan.method.total_time, run.plan.method.num_steps,
 # %% [markdown]
 # ## 4. How large can I go?
 #
-# **On a laptop the simulator sets the limit for the circuit. Beyond it, `plan` and `estimate` still give the cost.** The table lists the limits this run had and the grid's use of them.
+# **The local simulator sets the limit for the circuit. Beyond it, `plan` and `estimate` still give the cost.** The table lists the limits this run had and the grid's use of them.
 #
-# `execution="classical"` evolves the $K^d$ grid amplitudes on the host, as in Section 1, and its plan states the workspace and the work before anything runs. Its size grows as $K^d$, so it suits a few variables. [Planning at scale](resource_estimation_at_scale.ipynb) plans circuits far beyond any simulator.
+# `execution="classical"` evolves the $K^d$ grid amplitudes classically, as in Section 1, and its plan states the workspace and the work before anything runs. Its size grows as $K^d$, so it suits a few variables. [Planning at scale](resource_estimation_at_scale.ipynb) plans circuits far beyond any simulator.
 
 # %%
 limits = trace.limits
@@ -368,11 +368,11 @@ show_table([
     ("Qubits the local simulator accepts", limits.max_simulation_qubits,
      f"Default. This grid uses {selected.reconstruction.width}"),
     ("Simulator memory cap", f"{limits.simulator_memory_mb:,} MB", "Default simulator_memory_mb"),
-    ("QHD work cap", method.max_work, "Default max_work, for objective tables, products and host evolution"),
+    ("QHD work cap", method.max_work, "Default max_work, for objective tables, products and classical evolution"),
     ("QHD memory cap", format_bytes(method.max_bytes), "Default max_bytes, for tables, state and workspace"),
-    ("Host evaluation of this grid: workspace", format_bytes(host_main.reconstruction.workspace_bytes),
+    ("Classical evaluation of this grid: workspace", format_bytes(host_main.reconstruction.workspace_bytes),
      "Stated by plan before it runs"),
-    ("Host evaluation of this grid: work", host_main.reconstruction.size_units, "Units, a planning quantity, not seconds"),
+    ("Classical evaluation of this grid: work", host_main.reconstruction.size_units, "Units, a planning quantity, not seconds"),
 ], headers=("Limit or cost", "Value", "Meaning"))
 
 # %% [markdown]
@@ -449,9 +449,9 @@ disk = solve_augmented_lagrangian(disk_problem, qhd=disk_method, execution="clas
 disk_reference = constrained_grid_minimum(disk)  # evaluates f and g at all 16 grid points
 
 # %% [markdown]
-# With `execution="classical"` the rounds evolve the finite-difference grid model on the host and simulate no circuit. A circuit for a round's effective objective also splits the potential, the kinetic operator and the one-hot links, so its distribution can differ at the same step count.
+# With `execution="classical"` the rounds evolve the finite-difference grid model classically and simulate no circuit. A circuit for a round's effective objective also splits the potential, the kinetic operator and the one-hot links, so its distribution can differ at the same step count.
 #
-# The next cell therefore prices that circuit for each round and runs it at the same 80 steps. Its table sets the host work beside the circuit cost and each round's point beside the circuit's probability there.
+# The next cell therefore prices that circuit for each round and runs it at the same 80 steps. Its table sets the classical work beside the circuit cost and each round's point beside the circuit's probability there.
 #
 # Compare the two distributions before reading the circuit cost as the cost of reproducing the classical rounds.
 
@@ -464,7 +464,7 @@ optimum = 3 - 2 * np.sqrt(2)         # f(x*)
 disk_g = disk.best.evaluation.inequality_residuals[0]
 disk_distance = np.linalg.norm(np.array(disk.candidate) - corner)
 # Classical rounds build no circuit. Each round's effective objective is planned again for quantum execution,
-# estimate adds up the CX resource laws of that Plan, and solve runs its 8-qubit circuit with exact readout.
+# estimate adds up the CX formulas of that Plan, and solve runs its 8-qubit circuit with exact readout.
 round_plans = [plan(inner.plan.problem, method=disk_method, seed=7) for inner in disk.results]
 round_cx = [estimate(p, context=ResourceContext(basis="cx")).quantity("cx").fact.value.numerator for p in round_plans]
 round_circuits = [solve(p, progress=False) for p in round_plans]
@@ -503,7 +503,7 @@ show_table([
     ("Final penalty", disk.penalty, "Of the last round"),
     ("Point rule, stopping rule", f"{disk.record.options.inner_point}, {disk.record.options.termination}",
      "Defaults of AugmentedLagrangian"),
-    ("Host work", f"{disk.resources.table_evaluations} objective-table evaluations, "
+    ("Classical work", f"{disk.resources.table_evaluations} objective-table evaluations, "
      f"{disk.resources.evolution_work:,} units of classical-evolution work (a planning quantity, not seconds)",
      f"QHD planning checks each counted part of a round's work against max_work = {disk_method.max_work:,} "
      "before running it"),
@@ -555,14 +555,14 @@ show_table([(item.iteration + 1, item.penalty, item.inequality_multipliers[0], i
 #
 # - **Constraints.** Each entry of `equalities` is a SymPy expression $h$ with $h=0$, and each entry of `inequalities` an expression $g$ with $g\le 0$. A problem with an equality must set `feasibility_tolerance`, because a grid seldom contains a point where $h=0$ exactly.
 # - **Options.** `options=AugmentedLagrangian(...)`, imported from `nwqlib.algorithms`, sets the penalty, the tolerances, scales for constraints in different units, the point rule and the stopping rule. Go deeper D covers slack variables for inequalities.
-# - **Cost.** Each round is one QHD solve on the same grid, and a run makes at most `max_iterations` of them. A larger penalty can increase the effective objective's range and the charged work of classical evolution. The range need not increase monotonically, because the objective, multiplier term and penalty can cancel.
+# - **Cost.** Each round is one QHD solve on the same grid, and a run makes at most `max_iterations` of them. A larger penalty can increase the effective objective's range and the counted work of classical evolution. The range need not increase monotonically, because the objective, multiplier term and penalty can cancel.
 # - **Refusal.** A later round whose planning exceeds `max_work` ends the run with status `inner_failed`.
 #
 # ## 8. What NWQLib adds
 #
 # - **Planning beyond simulation.** `plan` and `estimate` work at sizes no simulator holds ([Planning at scale](resource_estimation_at_scale.ipynb)).
-# - **The law behind every number.** Each predicted count comes from a gate-count formula per block ([Mathematics](../docs/mathematics.md)). Section 2 sets the CX upper bound beside the compiled circuit, and the resource notebook compares the formulas with compiled circuits at small sizes.
-# - **One argument switches the route.** `execution="classical"` evolves the grid on the host instead of simulating the circuit (Sections 1 and 7). `QHD(encoding="binary")` uses $\log_2 K$ qubits per variable on a periodic grid (Go deeper D).
+# - **The formula behind every number.** Each predicted count comes from a gate-count formula per block ([Mathematics](../docs/mathematics.md)). Section 2 sets the CX upper bound beside the compiled circuit, and the resource notebook compares the formulas with compiled circuits at small sizes.
+# - **One argument switches the route.** `execution="classical"` evolves the grid classically instead of simulating the circuit (Sections 1 and 7). `QHD(encoding="binary")` uses $\log_2 K$ qubits per variable on a periodic grid (Go deeper D).
 # - **Saved and reloaded.** A saved result reloads with its plan, and its numbers can be recomputed from it (Appendix B).
 #
 # [Why NWQLib](../docs/why_nwqlib.md) compares this workflow with other packages.
@@ -632,7 +632,7 @@ show_table([
 # %% [markdown]
 # ### C. The Hamiltonian and how the schedule decides success
 #
-# **How do the total time and the schedule strength $\gamma$ change the probability at the best grid point?** The cell repeats the solve for five total times and three schedule strengths, keeping eight product-formula steps per unit time, 15 solves in about 14 s.
+# **How do the total time and the schedule strength $\gamma$ change the probability at the best grid point?** The cell repeats the solve for five total times and three schedule strengths, keeping eight product-formula steps per unit time, 15 solves in about 12 s.
 #
 # QHD evolves a wavefunction $\psi(x,y,t)$ under the time-dependent Hamiltonian
 #
@@ -674,7 +674,7 @@ plt.show()
 #
 # ### D. Slack variables for inequality constraints
 #
-# **When does an inequality become an extra grid variable, and what does it cost?** The first cell plans round 0 of three options and runs nothing. The second solves the disk problem of Section 7 with a slack variable on the host.
+# **When does an inequality become an extra grid variable, and what does it cost?** The first cell plans round 0 of three options and runs nothing. The second solves the disk problem of Section 7 with a slack variable, classically.
 #
 # `AugmentedLagrangian(inequality_form="phr")` is the default. It keeps the Powell–Hestenes–Rockafellar (PHR) term for every kept inequality. `inequality_form="slack"` requests explicit slack coordinates after the eligible quadratic and constant branch tests.
 #
@@ -684,7 +684,7 @@ plt.show()
 #
 # The cell plans the three options for the affine family of the [QHD guide](../docs/algorithms/qhd.md#slack-variables-for-inequality-constraints), $f=\sum_i(x_i-1/2)^2$ and $g=\sum_i x_i-3\le 0$ on $[0,1]^8$. It uses the binary periodic grid with $K=4$ points per variable, one step and total time 0.001.
 #
-# `plan_augmented_lagrangian(problem, *, qhd, options, execution, shots, seed)` returns `(preprocessing, representation, plan)` for an unrefined round 0. It performs preprocessing, representation selection and QHD planning, with no Run, circuit preparation, evolution or grid-reference solve. Its counts are planning and resource-law results, not runtime measurements.
+# `plan_augmented_lagrangian(problem, *, qhd, options, execution, shots, seed)` returns `(preprocessing, representation, plan)` for an unrefined round 0. It performs preprocessing, representation selection and QHD planning, with no Run, circuit preparation, evolution or grid-reference solve. Its counts are planning and resource-formula results, not runtime measurements.
 
 # %%
 from nwqlib.algorithms import AugmentedLagrangian, plan_augmented_lagrangian
@@ -706,7 +706,7 @@ for form, (_, representation, round_plan) in round0.items():
 show_table(rows, headers=("inequality_form", "Form of g", "Inner variables", "Qubits", "Largest support",
                           "Table entries", "CX per circuit, planned"))
 trial, = round0["auto"][1].trials  # the one trial conversion of automatic selection
-show_table([("Planned host work", trial.current_work, trial.trial_work),
+show_table([("Planned classical work", trial.current_work, trial.trial_work),
             ("CX per circuit", trial.current_cx, trial.trial_cx)],
            headers=("Automatic selection, planning only", "Current form: PHR", "Trial: one slack variable"))
 display(HTML(f"<p>Trial accepted: {trial.accepted}, {escape(trial.reason)}.</p>"))
@@ -714,15 +714,15 @@ display(HTML(f"<p>Trial accepted: {trial.accepted}, {escape(trial.reason)}.</p>"
 # %% [markdown]
 # Automatic conversion is enabled only for `execution="quantum"`, including Plans that will run on Aer and quantum planning without execution. It makes one deterministic pass through kept inequalities in original order.
 #
-# Each trial adds one slack to the representation accepted so far. When planning accepts both Plans, the rule accepts the trial only if planned host work and CX per circuit are both no larger and at least one is strictly smaller.
+# Each trial adds one slack to the representation accepted so far. When planning accepts both Plans, the rule accepts the trial only if planned classical work and CX per circuit are both no larger and at least one is strictly smaller.
 #
-# The host-work comparison is the work counted by QHD's symbolic and table checks plus the selected native construction work. It is a planning metric, not a runtime measurement or a sum of all trials' actual work.
+# The classical-work comparison is the work counted by QHD's symbolic and table checks plus the circuit construction work. It is a planning metric, not a runtime measurement or a sum of the work of all trials.
 #
-# Quantum Plans use this native-cost rule even when their eventual backend is a statevector simulator, so a lower CX count alone does not promise a faster Aer run.
+# Quantum Plans use this circuit-cost rule even when their eventual backend is a statevector simulator, so a lower CX count alone does not promise a faster Aer run.
 #
 # For fourteen original variables of the same family, the guide reports that PHR was refused before its table was formed, while forced slack required 1,830 CX per circuit. These are planning numbers from the guide, not runs of this notebook.
 #
-# Under `execution="classical"`, automatic selection keeps every inequality in PHR form for both the Schrödinger and split-step flavors. Their restricted state has `K**d` amplitudes and becomes `K**(d+m_s)` with $m_s$ added slack axes.
+# Under `execution="classical"`, automatic selection keeps every inequality in PHR form for both `theory_flavor="schrodinger"` and `theory_flavor="split_step"`. Their restricted state has `K**d` amplitudes and becomes `K**(d+m_s)` with $m_s$ added slack axes.
 #
 # Forced slack remains available on either route. The next cell therefore solves the disk problem of Section 7 again with `inequality_form="slack"` and `execution="classical"`, and compares its result with `constrained_grid_minimum`.
 
@@ -777,11 +777,11 @@ show_table([(item.iteration + 1, ", ".join(slack_forms[item.iteration]["forms"].
 #
 # For each converted inequality, `SlackAxis.error_bound` stores an upward-rounded evaluation of the slack-grid excess formula, using this round's entering multiplier and penalty.
 #
-# Its interpretation as a bound on the excess from finite-grid rather than continuous slack minimization requires the cap and mesh premises stated in the [QHD guide](../docs/algorithms/qhd.md#slack-variables-for-inequality-constraints). It certifies neither the quality of a QHD-selected point, a probability-distribution error, nor a bound on the continuous constrained optimum.
+# Its interpretation as a bound on the excess from finite-grid rather than continuous slack minimization requires the cap and mesh assumptions stated in the [QHD guide](../docs/algorithms/qhd.md#slack-variables-for-inequality-constraints). It certifies neither the quality of a QHD-selected point, a probability-distribution error, nor a bound on the continuous constrained optimum.
 #
 # `InnerRepresentation.error_bound` sums the stored per-axis bounds and rounds upward again, and `report()` exposes this aggregate slack-grid bound, which the table shows.
 #
-# **What the slack form does not establish.** A finite slack grid, its additional kinetic operator and the selected point can change the projected distribution and multiplier trajectory. They do not establish the inner-minimization premises of the convergence or objective-gap statements in [Result 46 and Proposition 47](../docs/mathematics.md#r46).
+# **What the slack form does not establish.** A finite slack grid, its additional kinetic operator and the selected point can change the projected distribution and multiplier trajectory. They do not establish the inner-minimization assumptions of the convergence or objective-gap statements in [Result 46 and Proposition 47](../docs/mathematics.md#r46).
 #
 # The public default stays `phr`, with `auto` and `slack` as explicit choices, because the automatic rule has no solution-quality criterion.
 #
@@ -791,7 +791,7 @@ show_table([(item.iteration + 1, ", ".join(slack_forms[item.iteration]["forms"].
 #
 # ### A. The full resource estimate
 #
-# The table lists every quantity that the resource laws of the selected construction determine, and the last line names the gate metrics they leave unknown.
+# The table lists every quantity that the resource formulas of the selected construction determine, and the last line names the gate metrics they leave unknown.
 
 # %% jupyter={"source_hidden": true}
 # Display helpers for Appendix A: labels of the resource metrics and a table of the estimate.
@@ -810,7 +810,7 @@ UNMODELED_LABELS = {
 
 
 def show_estimate(workload):
-    """Show the resource quantities an estimate determines, and name the ones its laws do not cover."""
+    """Show the resource quantities an estimate determines, and name the ones its formulas do not cover."""
     rows = [(RESOURCE_LABELS[q.metric], q.fact.value.numerator if q.fact.value.kind == "rational" else q.fact.value.value,
              q.interpretation.replace("_", " "))
             for q in workload.quantities if q.metric in RESOURCE_LABELS and q.fact.availability == "concrete"]
@@ -818,7 +818,7 @@ def show_estimate(workload):
     missing = sorted({UNMODELED_LABELS[q.metric] for q in workload.quantities
                       if q.metric in UNMODELED_LABELS and q.fact.availability == "unknown"})
     if missing:
-        display(HTML("<p>Not covered by the resource laws of this construction: " + escape(", ".join(missing)) + ".</p>"))
+        display(HTML("<p>Not covered by the resource formulas of this construction: " + escape(", ".join(missing)) + ".</p>"))
 
 # %%
 show_estimate(predicted)

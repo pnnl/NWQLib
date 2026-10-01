@@ -89,7 +89,7 @@ def _buffer_bytes(backend, method, ranks, width, observation):
 
     Returns (state bytes, readout bytes). The formulas follow the inspected
     NWQ-Sim constructor and sampler allocations listed in docs/nwqsim.md and
-    ENGINEERING_CONSTANTS.md, "Numerical guards and tolerances". A density
+    ENGINEERING_CONSTANTS.md, "NWQ-Sim runner guards". A density
     matrix stores 4**q entries. The runner applies the same formulas again
     before allocating state.
 
@@ -258,28 +258,59 @@ class NWQSimExecutionError(RuntimeError):
 
 
 class NWQSimBackend(Record):
-    """Explicit native target, local launch and finite file/known-array allowances.
+    """NWQ-Sim simulator run locally as a detached process, with statevector or density-matrix simulation.
 
-    This configuration is inert. Preparation compiles the selected circuit;
-    the common Run owns every launch and the stored-data limit.
-    backend selects CPU, MPI, NVGPU or AMDGPU; method selects SV or DM (MPI
-    requires SV). ranks counts cooperating MPI processes; mpi_launcher names
-    the installed launcher for local MPI execution. max_buffer_bytes covers
-    known state/work/sample arrays per process, including host plus device
-    storage for GPUs, excluding fused gates, SDK workspace and whole-process RSS.
-    optimization_level is the Qiskit transpiler level of the U/CX lowering.
-    A level other than the default 0 is recorded as the receipt exclusion
-    "optimization_level", so the receipt has no certified state error and its
-    error numbers are a reference; its native operation count describes the
-    compiled circuit. Levels 2 and 3 resynthesize two-qubit blocks with
-    Qiskit's own synthesis and receive the logical circuit as given; an exact
-    readout or trajectory is refused when they relabel wires by eliding
-    permutations, since the runner reads the output in logical wire order.
-    At optimization levels 2 and 3, a measured circuit can supply
-    computational-basis probabilities when lowering reports no layout.
-    Amplitude readouts require level 0 or 1, or a circuit without
-    measurements, because removing terminal diagonal gates can change
-    relative phases.
+    Build it with keyword arguments, for example
+    `NWQSimBackend(executable=..., spool=..., max_input_bytes=..., max_output_bytes=..., max_buffer_bytes=...)`,
+    and pass it as `backend=` to [`prepare`][nwqlib.scientist.prepare].
+    `executable`, `spool` and the three byte limits are required. The executable
+    is a runner built for one backend and method pair with
+    `python -m nwqlib.backends.nwqsim` (see the [NWQ-Sim guide](../nwqsim.md)).
+    Construction launches and inspects nothing.
+
+    Preparation translates each circuit to Qiskit's U and CX gates. The runner keeps
+    running after the Python process exits, so the computer that runs it must stay
+    on until the job finishes. The guide records the qualified NWQ-Sim revision
+    and the byte formulas behind `max_buffer_bytes`.
+
+    Attributes:
+        backend: Default `"CPU"`. `"CPU"`, `"MPI"`, `"NVGPU"` or `"AMDGPU"`.
+            `"NVGPU_MPI"` is rejected, because its constructors read an
+            uninitialized GPU memory counter in the inspected NWQ-Sim sources.
+        method: Default `"SV"`. `"SV"` (statevector) or `"DM"` (density matrix).
+            `"MPI"` supports `"SV"` only, because its factory silently substitutes
+            SV for DM.
+        ranks: Default `1`. Positive. Number of cooperating MPI processes. Only
+            `"MPI"` accepts more than one, and it requires a power of two.
+        mpi_launcher: Default `"mpirun"`. Installed launcher for local MPI runs.
+        executable: Required. Absolute path of the built runner.
+        spool: Required. Absolute path of the directory for request and result
+            files. It identifies a detached job after Python exits, so it cannot
+            be relative.
+        max_input_bytes: Required. Positive. Limit in bytes on each request file.
+        max_output_bytes: Required. Positive. Limit in bytes on each result file
+            that NWQLib reads.
+        max_buffer_bytes: Required. Positive. Limit in bytes on the known state,
+            work and sample arrays of each process, including host and device
+            storage on a GPU. It excludes fused gates, SDK workspace and
+            whole-process memory.
+        optimization_level: Default `0`. Qiskit transpiler level, 0 to 3, of the
+            translation to U and CX gates. A level other than 0 is recorded as the exclusion
+            `"optimization_level"` in the preparation record, so the record has no
+            certified state error and its error numbers are a reference, and the
+            operation count describes the compiled circuit. Levels 2 and 3
+            resynthesize two-qubit blocks with Qiskit's own synthesis. At those
+            levels an exact readout or trajectory is refused when transpilation
+            relabels wires by removing permutations, because the runner reads the
+            output in logical wire order, and a measured circuit can still supply
+            computational-basis probabilities when transpilation reports no layout.
+            Amplitude readouts require level 0 or 1, or a circuit without
+            measurements, because removing terminal diagonal gates can change
+            relative phases.
+
+    Raises:
+        ValueError: If the backend, method and rank combination is not supported,
+            or if `executable` or `spool` is not an absolute path.
     """
 
     kind: Literal["nwqsim"] = "nwqsim"

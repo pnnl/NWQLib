@@ -18,25 +18,59 @@ from .verification import _admit_publication, _publish, _validate_result
 
 
 class LCHSRefinement(Record):
-    """Acquire named bounds at the already selected quadrature/PF schedule.
+    """Error-component bounds of an `LCHS` Result at its saved grid and step counts.
 
-    Dense validation evaluates dense commutator norms only when requested.
-    It checks the structural relation and does not replace that relation.
+    Build it with keyword arguments and pass it to
+    `result.verify(checks=...)`, for example
+    `result.verify(checks=LCHSRefinement(components=("duhamel",)))`.
+    `components` is the only required argument. The call returns
+    `(receipt, facts)`. `facts` holds the refined physical L2 components and
+    their sum carried into the requested output, `algorithmic_approximation`,
+    which `result.assess` can use. A request for `"spectral_norms"` alone
+    leaves `facts` empty. The receipt holds every computed value.
+    Refinement defines no pass or fail check.
+
+    Planning leaves two components unknown for a dense A, the Duhamel
+    remainder of a constant source and the synthesis error of fixed-step
+    `"trotter"`. Refinement evaluates them at the saved quadrature, Duhamel
+    nodes and step counts and replaces the planned values of the same name.
+    It never computes a solution vector, chooses a new grid or step count,
+    or converts a compact input to a dense matrix. `algorithmic_approximation`
+    stays `None` while any component is unknown, because a missing term is
+    not zero. It covers the algorithmic components only. Floating-point
+    error of the backend run and sampling error remain separate terms.
 
     Attributes:
-        components: Distinct requested analyses. ``spectral_norms`` evaluates
-            ||A||, ||A + shift*I|| and ||H||. ``duhamel`` evaluates the
-            source-time Gauss-Legendre remainder. ``fixed_pf`` evaluates the
-            product-formula commutator bound at the saved step counts.
-        name: Prefix of the published quantities that answer no error term.
-        dense_validation: Also evaluate dense commutator norms for fixed_pf,
-            as a check of the Pauli-triangle bound.
-        max_bytes: Cap on known arrays of this call.
-        max_dense_work: Cap on counted dense work units of this call.
-        max_structural_work: Cap on counted stored-table read, census preparation and Pauli
-            commutator work of this call.
-        max_node_evaluations: Cap on selected k-node times application evaluations.
-        max_steps: Largest saved product-formula step count this call accepts.
+        components: Required. Distinct analyses, at least one.
+            `"spectral_norms"` evaluates `||A||`, `||A + shift*I||` and
+            `||H||` and needs a dense A. `"duhamel"` evaluates the
+            Gauss–Legendre remainder of the source time integral (DLMF
+            Eqs. 3.5.19 and 3.5.21). `"fixed_pf"` evaluates the
+            product-formula commutator bound at the saved step counts
+            (Childs et al., doi:10.1103/PhysRevX.11.011020, Propositions
+            9-10) and needs the `"trotter"` or `"trotter_error_budgeted"`
+            backend.
+        name: Default `"refinement"`. Prefix of the reported values that are
+            not error components, such as the spectral norms.
+        dense_validation: Default `False`. Also evaluate dense commutator
+            norms for `"fixed_pf"`, as a check of the Pauli-triangle bound
+            that does not replace it. Requires `"fixed_pf"`, and a periodic
+            stencil refuses it.
+        max_bytes: Default 10 GB (decimal, `10_000_000_000` bytes). Upper
+            limit on the known arrays of this call.
+        max_dense_work: Default `1e8` (`100_000_000`). Upper limit on the
+            counted dense work of this call.
+        max_structural_work: Default `1e8`. Upper limit on the counted work
+            of reading the stored node table, preparing the count of Pauli
+            commutator terms and evaluating them.
+        max_node_evaluations: Default `4096`. Upper limit on the number of
+            k nodes times operator applications evaluated.
+        max_steps: Default `100_000`. Largest saved product-formula step
+            count this call accepts.
+
+    Raises:
+        ValueError: If `components` is empty or repeats a name, or if
+            `dense_validation` is set without `"fixed_pf"`.
     """
 
     components: tuple[Literal["spectral_norms", "duhamel", "fixed_pf"], ...]

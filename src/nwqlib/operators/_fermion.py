@@ -41,14 +41,22 @@ def _check(max_bytes, law):
 
 @dataclass(frozen=True, eq=False, init=False, slots=True)
 class FermionTerms:
-    """Immutable ragged strings, left factor first; action is right to left.
+    """Table of M ordered ladder-operator strings with complex coefficients.
+
+    Each string is a product of creation and annihilation operators, written
+    with the left factor first. The rightmost operator acts first. No normal
+    ordering is applied. [`fermion_table`][nwqlib.operators._fermion.fermion_table]
+    and `OperatorInput.fermion_terms()` return it, and constructing it
+    directly raises `TypeError`. `len(table)` is M. The fields below are
+    read-only.
 
     Attributes:
-        num_modes: Nonnegative width; action 0 annihilates and 1 creates.
-        offsets: Native int64 boundaries, length M+1.
-        modes: Native int64 modes, length P.
-        actions: Native uint8 ladder actions, length P.
-        coefficients: Native complex128 coefficients, length M.
+        num_modes: Number of fermionic modes, nonnegative.
+        offsets: int64 array of length M+1. String k uses entries
+            `offsets[k]` to `offsets[k+1] - 1` of `modes` and `actions`.
+        modes: int64 array of length P, the mode of each ladder operator.
+        actions: uint8 array of length P. 0 annihilates and 1 creates.
+        coefficients: complex128 array of length M.
     """
 
     num_modes: int
@@ -74,7 +82,25 @@ class FermionTerms:
         return len(self.coefficients)
 
     def product(self, other, *, max_bytes=DEFAULT_INPUT_BYTES):
-        """Raw ordered concatenation: MK strings, K*P_left+M*P_right entries."""
+        """Return the ordered product table, every string of this table times every string of `other`.
+
+        String `(i, j)` is string i of this table followed by string j of
+        `other`, with coefficient `c_i * d_j`. With M and K strings and
+        `P_left` and `P_right` ladder entries, the product has `M*K` strings
+        and `K*P_left + M*P_right` entries. No term is combined or dropped.
+
+        Args:
+            other (FermionTerms): Table with the same `num_modes`.
+            max_bytes (int): Byte limit, checked before the product is
+                formed. Default 10 GB (decimal, `10_000_000_000`).
+
+        Returns:
+            table (FermionTerms): The product table.
+
+        Raises:
+            ValueError: If the mode counts differ, a product coefficient is
+                not finite, or the product exceeds `max_bytes`.
+        """
         if not isinstance(other, FermionTerms) or self.num_modes != other.num_modes:
             raise ValueError("Fermion product requires equal mode widths")
         m = _count_product(len(self), len(other), max_bytes)
@@ -104,11 +130,31 @@ class FermionTerms:
         return self._snapshot(self.num_modes, offsets, modes, actions, coefficients)
 
     def to_pauli(self, *, mapping, max_bytes=DEFAULT_INPUT_BYTES):
-        """Map explicitly, keeping all candidate contributions until final sum.
+        """Map the strings to qubits and return the Pauli operator as an OperatorInput.
 
-        mapping is 'jw' (lower-mode parity) or 'z_free' (qubit ladders).
-        max_bytes bounds raw candidate tables and their documented conversion
-        frontier. No SDK, pruning or full-state action is used.
+        Mode j goes to qubit j, with `|1>` meaning occupied. With
+        `mapping="jw"` (Jordan–Wigner, with the parity of the lower modes),
+        `a_j† = (prod_{k<j} Z_k) (X_j - i Y_j)/2` and
+        `a_j = (prod_{k<j} Z_k) (X_j + i Y_j)/2`. With `mapping="z_free"` the
+        parity string is omitted, which gives qubit ladder operators. Every
+        product term is kept until the final sum, which adds identical Pauli
+        words and removes only exact zeros. No coefficient is pruned, and no
+        state is formed. The mapping cost is checked against `max_bytes`
+        before the first product (see [Input cost
+        controls](../development/input_contracts.md)).
+
+        Args:
+            mapping (str): `"jw"` or `"z_free"`.
+            max_bytes (int): Byte limit. Default 10 GB (decimal,
+                `10_000_000_000`).
+
+        Returns:
+            operator (OperatorInput): The Pauli operator on `num_modes`
+                qubits.
+
+        Raises:
+            ValueError: If `mapping` is another value, the table has no
+                modes, or the mapping exceeds `max_bytes`.
         """
         if mapping not in ("jw", "z_free"):
             raise ValueError("mapping must be jw or z_free")
@@ -145,13 +191,38 @@ class FermionTerms:
 
 
 def fermion_table(terms, *, num_modes, max_bytes=DEFAULT_INPUT_BYTES):
-    """Admit (coefficient, ordered (mode,action) iterable) rows.
+    """Return the raw table of ordered fermionic strings, keeping duplicates, order and zeros.
 
-    Raw duplicates/order/zeros survive. M rows/P operators use 24M+9P+8
-    bytes; reserve six layouts plus ceil((q+1)/8) dimension bytes for
-    conversion/snapshots/coalescing. Unsized rows and strings use one lookahead,
-    rejecting before storing/traversing an over-limit item. No normal order.
+    Each row is `(coefficient, ops)`, where `ops` lists `(mode, action)`
+    pairs with the left factor first. Action 0 annihilates and 1 creates,
+    and the rightmost operator acts first. No normal ordering is applied.
+    Use [`ingest_fermion`][nwqlib.operators._fermion.ingest_fermion] for an
+    operator with identical strings summed. The table size is checked
+    against `max_bytes` before data is stored (see [Input cost
+    controls](../development/input_contracts.md)). An iterator is read at
+    most one item past the limit, and an over-limit item is rejected before
+    it is stored.
+
+    Args:
+        terms (Iterable[tuple[complex, Iterable[tuple[int, int]]]]): Rows of
+            a finite coefficient and its ordered `(mode, action)` pairs.
+        num_modes (int): Number of modes q, a nonnegative int64 value.
+        max_bytes (int): Byte limit. Default 10 GB (decimal,
+            `10_000_000_000`).
+
+    Returns:
+        table (FermionTerms): The raw table.
+
+    Raises:
+        ValueError: If a mode is outside `0 <= mode < num_modes`, an action
+            is not 0 or 1, a coefficient is not finite, or the table exceeds
+            `max_bytes`.
+        TypeError: If a coefficient is not a number.
     """
+    # Size law. M rows with P ladder operators use 24M+9P+8 bytes. The check
+    # reserves six layouts plus ceil((q+1)/8) dimension bytes for
+    # conversion, snapshots and coalescing. Unsized rows and strings use one
+    # lookahead and reject before storing or traversing an over-limit item.
     if type(num_modes) is not int or not 0 <= num_modes <= np.iinfo(np.int64).max:
         raise ValueError("num_modes must be a nonnegative representable int64 width")
     _check(max_bytes, _fermion_law(0, 0, num_modes))
@@ -207,7 +278,29 @@ def _coalesced_fermion(table, *, max_bytes=DEFAULT_INPUT_BYTES):
 
 
 def ingest_fermion(terms, *, num_modes, max_bytes=DEFAULT_INPUT_BYTES):
-    """Coalesce identical complete ordered strings only, dropping exact zero."""
+    """Return an OperatorInput for a fermionic operator given as ordered ladder strings.
+
+    Rows are read as in [`fermion_table`][nwqlib.operators._fermion.fermion_table].
+    Only strings with the same complete ordered `(mode, action)` sequence are
+    summed, and only an exactly zero sum is removed. No anticommutation or
+    normal ordering is applied, so two orderings of one operator stay
+    separate rows, and the `structure` of the result is `"general"`. Map it
+    to qubits with `operator.fermion_terms().to_pauli(mapping="jw")`.
+
+    Args:
+        terms (Iterable[tuple[complex, Iterable[tuple[int, int]]]]): Rows of
+            a finite coefficient and its ordered `(mode, action)` pairs.
+        num_modes (int): Number of modes q.
+        max_bytes (int): Byte limit. Default 10 GB (decimal,
+            `10_000_000_000`).
+
+    Returns:
+        operator (OperatorInput): The summed fermionic operator.
+
+    Raises:
+        ValueError: As for `fermion_table`.
+        TypeError: If a coefficient is not a number.
+    """
     return _coalesced_fermion(fermion_table(terms, num_modes=num_modes, max_bytes=max_bytes), max_bytes=max_bytes)
 
 

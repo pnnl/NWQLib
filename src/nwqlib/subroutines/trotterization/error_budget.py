@@ -166,7 +166,11 @@ _SYNTHESIS_METHODS = {1: "lie_trotter", 2: "suzuki_trotter"}
 
 @dataclass(frozen=True, kw_only=True)
 class TrotterStepSelection:
-    """Step-count selection record for one product-formula error budget.
+    """The step count chosen for one product-formula error budget, with its error bound.
+
+    [`select_trotter_step_count`][nwqlib.subroutines.trotterization.select_trotter_step_count]
+    returns it. The answer is `step_count`, and `bound_value` is its
+    certified error bound. The fields below are read-only.
 
     Fields mirror the [CSTWZ] (doi:10.1103/PhysRevX.11.011020) quantities:
     ``bound_value`` is the certified
@@ -336,19 +340,19 @@ class TrotterStepSelection:
 
     @property
     def synthesis_method(self) -> str:
-        """Delegated synthesis name, structurally tied to ``formula_order``."""
+        """Qiskit product formula used for the circuit: `"lie_trotter"` at order 1, `"suzuki_trotter"` at order 2."""
 
         return _SYNTHESIS_METHODS[self.formula_order]
 
     @property
     def bound_method(self) -> str:
-        """Production certificate method."""
+        """Name of the bound, `"pauli_triangle"`: commutator norms bounded by the Pauli triangle inequality."""
 
         return "pauli_triangle"
 
     @property
     def bound_value_status(self) -> str:
-        """Production certificate interpretation."""
+        """Meaning of `bound_value`, `"structural_upper_bound"`: an upper bound on the product-formula operator error."""
 
         return "structural_upper_bound"
 
@@ -1330,7 +1334,7 @@ def trotter_bound_coefficient(
     max_work: int = DEFAULT_CENSUS_MAX_WORK,
     max_bytes: int = DEFAULT_MAX_BYTES,
 ) -> float:
-    """Return the time-independent Trotter bound prefactor ``W_up``.
+    """Return the time-independent prefactor `W_up` of the Trotter error bound `W_up * t**(order + 1)`.
 
     ``W_up`` is an outward upper bound on the Pauli-triangle expression
     selected by ``bound_variant``, which bounds the commutator sum of [CSTWZ]
@@ -1339,17 +1343,36 @@ def trotter_bound_coefficient(
     application obeys ``bound(t) = W_up * t**(order + 1)`` and the Sec. V B
     ``r``-step total is ``W_up * t**(order + 1) / r**order``. Exposed for
     direct evaluation without dense matrices. W_up can exceed the exact
-    triangle coefficient, and it is returned rounded upward to binary64
-    (``_upward_float``).
-    The sparse Pauli census checks its work and byte allowances
-    (``max_work``, ``max_bytes``) before converting labels or constructing
-    its index tables, and a requested expression that does not fit raises
-    before the unadmitted stage (``_bound_coefficient_evaluation``).
+    triangle coefficient, and it is returned rounded upward to binary64.
+    The count of anticommuting Pauli pairs and triples checks its work and
+    byte limits (`max_work`, `max_bytes`) before converting labels or
+    building its index tables, and a requested expression that does not fit
+    raises before the stage that would exceed them.
+
+    Args:
+        hamiltonian (SparsePauliOp): `H = sum_j c_j P_j` in the term order of
+            the product formula. Coefficients must be finite and real (an
+            imaginary part of at most 1e-12 in absolute value is accepted),
+            and identity terms are rejected: remove them and keep their
+            global phase `exp(-i t c)` yourself.
+        order (int): Default `1`. Product-formula order, 1 (Lie-Trotter) or
+            2 (second-order Suzuki).
+        bound_variant (str): Default `"exact_census"`, the full
+            Pauli-triangle expression. At order 2, `"relaxed_prefix"` selects
+            the suffix relaxation, which needs pair tests only and can give a
+            larger bound.
+        max_work (int): Default `1_000_000_000`. Work limit of the pair and
+            triple tests.
+        max_bytes (int): Default 10 GB (decimal, `10_000_000_000` bytes).
+            Byte limit of the tests and their index tables.
+
+    Returns:
+        coefficient (float): `W_up`, rounded upward to binary64.
 
     Raises:
         ValueError: W_up exceeds the largest binary64 number, a limit is not
-            a positive integer, or the requested census does not fit
-            ``max_work`` and ``max_bytes``.
+            a positive integer, or the requested pair and triple tests do not
+            fit ``max_work`` and ``max_bytes``.
     """
 
     coefficient = _upward_float(
@@ -1406,7 +1429,7 @@ def trotter_error_bound(
     max_work: int = DEFAULT_CENSUS_MAX_WORK,
     max_bytes: int = DEFAULT_MAX_BYTES,
 ) -> float:
-    """Additive Trotter error bound for one product-formula application.
+    """Return an upper bound on the error `||S_order(time) - exp(-i time H)||` of one product-formula application.
 
     Evaluates ``||S_order(time) - exp(-i * time * H)||`` bounds in spectral
     norm: [CSTWZ] doi:10.1103/PhysRevX.11.011020, Prop. 9, Eq. (120) at
@@ -1416,10 +1439,25 @@ def trotter_error_bound(
     order is ``hamiltonian``'s term order.
     At order two, ``evaluate_trotter_bound(..., steps=1,
     bound_variant="relaxed_prefix")`` gives the relaxed bound.
-    The sparse Pauli census checks its work and byte allowances
-    (``max_work``, ``max_bytes``) before converting labels or constructing
-    its index tables, and a requested expression that does not fit raises
-    before the unadmitted stage (``_bound_coefficient_evaluation``).
+    The count of anticommuting Pauli pairs and triples checks its work and
+    byte limits (`max_work`, `max_bytes`) before converting labels or
+    building its index tables, and a requested expression that does not fit
+    raises before the stage that would exceed them.
+
+    Args:
+        hamiltonian (SparsePauliOp): `H = sum_j c_j P_j` with finite real
+            coefficients and no identity term, in the term order of the
+            product formula, as for `select_trotter_step_count`.
+        time (float): Time of the one application.
+        order (int): Default `1`. Product-formula order, 1 (Lie-Trotter) or
+            2 (second-order Suzuki).
+        max_work (int): Default `1_000_000_000`. Work limit of the pair and
+            triple tests.
+        max_bytes (int): Default 10 GB (decimal, `10_000_000_000` bytes).
+            Byte limit of the tests and their index tables.
+
+    Returns:
+        bound (float): The bound, rounded upward to binary64.
     """
 
     return evaluate_trotter_bound(
@@ -1442,7 +1480,7 @@ def evaluate_trotter_bound(
     max_work: int = DEFAULT_CENSUS_MAX_WORK,
     max_bytes: int = DEFAULT_MAX_BYTES,
 ) -> float:
-    """Evaluate the total product-formula bound at a fixed step count.
+    """Return the error bound `W_up * time**(order + 1) / steps**order` of a product formula with a given step count.
 
     For ``r=steps``, the [CSTWZ] (doi:10.1103/PhysRevX.11.011020)
     triangle-inequality composition gives
@@ -1450,10 +1488,28 @@ def evaluate_trotter_bound(
     outward coefficient W_up of the ``bound_variant`` expression. At fixed
     steps the relaxed expression changes no step count, only a possibly
     larger certified bound.
-    The sparse Pauli census checks its work and byte allowances
-    (``max_work``, ``max_bytes``) before converting labels or constructing
-    its index tables, and a requested expression that does not fit raises
-    before the unadmitted stage (``_bound_coefficient_evaluation``).
+    The count of anticommuting Pauli pairs and triples checks its work and
+    byte limits (`max_work`, `max_bytes`) before converting labels or
+    building its index tables, and a requested expression that does not fit
+    raises before the stage that would exceed them.
+
+    Args:
+        hamiltonian (SparsePauliOp): `H = sum_j c_j P_j` with finite real
+            coefficients and no identity term, in the term order of the
+            product formula, as for `select_trotter_step_count`.
+        time (float): Total evolution time.
+        steps (int): Positive number of product-formula steps.
+        order (int): Default `1`. Product-formula order, 1 (Lie-Trotter) or
+            2 (second-order Suzuki).
+        bound_variant (str): Default `"exact_census"`, or `"relaxed_prefix"`
+            for the second-order suffix relaxation.
+        max_work (int): Default `1_000_000_000`. Work limit of the pair and
+            triple tests.
+        max_bytes (int): Default 10 GB (decimal, `10_000_000_000` bytes).
+            Byte limit of the tests and their index tables.
+
+    Returns:
+        bound (float): The total bound, rounded upward to binary64.
     """
 
     order = _validate_order(order)
@@ -1476,7 +1532,7 @@ def select_trotter_step_count(
     max_work: int = DEFAULT_CENSUS_MAX_WORK,
     max_bytes: int = DEFAULT_MAX_BYTES,
 ) -> TrotterStepSelection:
-    """Select the minimal step count whose total bound meets the budget.
+    """Return the smallest Trotter step count whose error bound meets an error budget.
 
     Applies the rule of [CSTWZ] doi:10.1103/PhysRevX.11.011020, Sec. V B:
     with ``r`` steps the total additive
@@ -1495,15 +1551,51 @@ def select_trotter_step_count(
     With the relaxed expression at order 2,
     ``r_exact <= r_rel <= ceil(alpha * r_exact)`` for
     ``alpha = sqrt(W_2,rel / W_2)`` in exact arithmetic.
-    The sparse Pauli census checks its work and byte allowances
-    (``max_work``, ``max_bytes``) before converting labels or constructing
-    its index tables, and a requested expression that does not fit raises
-    before the unadmitted stage (``_bound_coefficient_evaluation``).
+    The count of anticommuting Pauli pairs and triples checks its work and
+    byte limits (`max_work`, `max_bytes`) before converting labels or
+    building its index tables, and a requested expression that does not fit
+    raises before the stage that would exceed them.
 
-    Returns a :class:`TrotterStepSelection` whose ``bound_value`` is the
-    certified total bound at the selected step count (``<= error_budget``)
-    and whose ``synthesis_method`` names the delegated Qiskit synthesis
-    (``"lie_trotter"`` or ``"suzuki_trotter"``).
+    Args:
+        hamiltonian (SparsePauliOp): `H = sum_j c_j P_j` in the term order of
+            the product formula. Coefficients must be finite and real (an
+            imaginary part of at most 1e-12 in absolute value is accepted),
+            and identity terms are rejected: remove them and keep their
+            global phase `exp(-i t c)` yourself.
+        time (float): Evolution time `t`.
+        error_budget (float): Allowed operator-norm error `epsilon` of the
+            whole evolution.
+        order (int): Default `1`. Product-formula order, 1 (Lie-Trotter) or
+            2 (second-order Suzuki).
+        bound_variant (str): Default `"exact_census"`, the full
+            Pauli-triangle expression. At order 2, `"relaxed_prefix"` selects
+            the suffix relaxation, which needs pair tests only and can give a
+            larger bound.
+        max_work (int): Default `1_000_000_000`. Work limit of the pair and
+            triple tests.
+        max_bytes (int): Default 10 GB (decimal, `10_000_000_000` bytes).
+            Byte limit of the tests and their index tables.
+
+    Returns:
+        selection (TrotterStepSelection): `selection.step_count` is the
+            step count, and `selection.bound_value` is the certified total
+            bound at that count (`<= error_budget`).
+            `selection.synthesis_method` names the Qiskit product formula
+            (`"lie_trotter"` or `"suzuki_trotter"`).
+
+    Examples:
+        For `H = X + Z` the second-order coefficient is
+        `||[Z, [Z, X]]||/12 + ||[X, [X, Z]]||/24 = 1/2`, so at `t = 1` and
+        `epsilon = 0.01` the smallest `r` with `(1/2)/r**2 <= 0.01` is 8:
+
+        >>> from qiskit.quantum_info import SparsePauliOp
+        >>> from nwqlib.subroutines.trotterization import (
+        ...     select_trotter_step_count)
+        >>> H = SparsePauliOp(["X", "Z"], [1.0, 1.0])
+        >>> selection = select_trotter_step_count(
+        ...     H, time=1.0, error_budget=0.01, order=2)
+        >>> print(selection.step_count, round(selection.bound_value, 10))
+        8 0.0078125
     """
 
     order = _validate_order(order)
@@ -1931,15 +2023,23 @@ def build_trotter_evolution_circuit(
     hamiltonian: SparsePauliOp,
     selection: TrotterStepSelection,
 ) -> QuantumCircuit:
-    """Build the budgeted evolution circuit by delegating the synthesis.
+    """Build the product-formula circuit `S_order(time / step_count)**step_count` of a step-count selection.
 
     Validates ``hamiltonian`` (the operator ``selection`` was computed for)
-    and delegates to ``build_sparse_pauli_product_circuit`` with the
-    selection's synthesis method and ``reps=step_count``, which reaches
-    Qiskit's product-formula synthesis through ``make_evolution_synthesis``.
-    The returned circuit realizes
-    ``S_order(time / step_count)**step_count`` with the summands applied in
-    term order, matching the ordering the recorded bounds are stated for.
+    and builds the circuit with Qiskit's product-formula synthesis
+    (`LieTrotter` or `SuzukiTrotter`, as `selection.synthesis_method`
+    names) repeated `step_count` times. The summands are applied in term
+    order, matching the ordering the recorded bounds are stated for.
+
+    Args:
+        hamiltonian (SparsePauliOp): The Hamiltonian the selection was
+            computed for.
+        selection (TrotterStepSelection): Output of
+            `select_trotter_step_count`.
+
+    Returns:
+        circuit (QuantumCircuit): The evolution circuit on
+            `hamiltonian.num_qubits` qubits.
     """
     from nwqlib.subroutines.hamiltonian_evolution.sparse_pauli_product import (
         build_sparse_pauli_product_circuit,

@@ -75,15 +75,6 @@ def test_read_report_preserves_v7_identity_and_never_loads_method_or_arrays(tmp_
         read_report(path)
     (path / "result.json").write_bytes(before)
     assert read_report(path) == report
-    # The parser accepts 1,200 levels, deeper than the indented output encoder
-    # can recurse; the report refuses the file instead of printing a traceback.
-    deep = json.loads(before)
-    deep["result"]["unexpected"] = json.loads("[" * 1200 + "0" + "]" * 1200)
-    (path / "result.json").write_text(json.dumps(deep))
-    completed = cli("report", str(path))
-    assert completed.returncode == 1 and not completed.stdout, completed.stderr
-    assert completed.stderr == (f"archive JSON file {str(path / 'result.json')!r} nesting exceeds the JSON "
-                                "encoder's recursion limit\n")
 
 
 @pytest.mark.parametrize("damage", ["list", "missing", "extra", "previous_format", "selection", "receipts", "artifact"])

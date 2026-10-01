@@ -30,7 +30,7 @@ Conversion identities implemented here (each guarded by a unit test):
   product.
 - Qiskit sign: ``RZGate(theta) = exp(-i theta Z / 2)`` exactly, so applying
   ``e^{i phi Z}`` is ``RZGate(-2 phi)`` with no residual global phase. The
-  circuit layer (``subroutines/qsp/evolution.py``) applies projector phases
+  QSVT circuit builders apply projector phases
   ``e^{i phi (2 Pi - 1)}`` as ``RZGate(+2 phi)`` on a signal qubit that is
   flipped onto the projector subspace, which is the same identity.
 
@@ -54,8 +54,8 @@ separate dense verification grid with the Chebyshev norming bound rather
 than on the objective.
 
 The Newton start exists for targets whose sup norm lies near 1. The
-larger parity target of the Hamiltonian evolution in
-``subroutines/qsp/evolution.py`` has a sup norm near ``1/(1 + margin)``
+larger parity target of the Hamiltonian evolution of
+``build_qsp_evolution_encoding`` has a sup norm near ``1/(1 + margin)``
 with a margin of ``1e-3``, and every QLS phase target has the norming
 bound ``1/(1 + QLS_TARGET_MARGIN)``, with the same margin. [DMWL]
 arXiv:2002.11649v2, Sec. IV.1, divides the Jacobi-Anger series by 2, so
@@ -65,11 +65,14 @@ grows as ``max|f|`` approaches 1. [DLNW] arXiv:2307.12468v1, Sec. 2.2,
 states that optimization methods such as L-BFGS lose their
 convergence guarantee near ``max|f| = 1``, and Sec. 4.3 (Fig. 8) reports
 Newton's method from the same start converging for ``1 - max|f|`` down to
-``1e-9``. ``docs/ENGINEERING_CONSTANTS.md`` records the NWQLib sweeps
-behind this order, for the evolution targets in its QSP phase-solver
-section and for the QLS targets in the ``QLS_TARGET_MARGIN`` row. In both
-families L-BFGS missed the tolerance on some sampled targets, and the
-Newton start converged on each of them.
+``1e-9``. The engineering constants record the NWQLib sweeps behind this
+order, for the
+[evolution targets](../../ENGINEERING_CONSTANTS.md#qsp-phase-solver-and-evolution-synthesis)
+and for the
+[QLS targets](../../ENGINEERING_CONSTANTS.md#qls-1x-fit-and-phase-pipeline)
+in the `QLS_TARGET_MARGIN` row. In both families L-BFGS missed the
+tolerance on some sampled targets, and the Newton start converged on each
+of them.
 
 L-BFGS runs in ``scipy.optimize`` and each Newton step is one
 ``numpy.linalg.lstsq`` solve. Phase-factor computation
@@ -268,12 +271,12 @@ def chebyshev_polynomial_sup_bound(chebyshev_coefficients: Any, *, max_degree: i
                                   max_bytes: int = DEFAULT_INPUT_BYTES) -> float:
     """Return an upper bound on ``sup_{x in [-1, 1]} |f(x)|`` for ``f = sum_k c_k T_k``.
 
-    The series is sampled on ``64 (d + 1)`` Chebyshev zeros, and the sampled
-    maximum is divided by ``cos(pi d / (2N))`` as in
-    ``chebyshev_norming_sup_bound``. The QLS rescale, the evolution target
-    scale and the admission check of ``solve_symmetric_qsp_phases`` all use
-    this bound. ``max_degree`` and ``max_bytes`` are checked before the grid
-    is formed.
+    The series is sampled on `N = 64 (d + 1)` Chebyshev zeros, and the
+    sampled maximum is divided by `cos(pi d / (2N))` as in
+    `chebyshev_norming_sup_bound`. The QLS rescale, the evolution target
+    scale and the input check of `solve_symmetric_qsp_phases` all use this
+    bound. `max_degree` (default 256) and `max_bytes` (default 10 GB) are
+    checked before the grid is formed.
     """
 
     return _chebyshev_polynomial_norming_data(chebyshev_coefficients, max_degree=max_degree, max_bytes=max_bytes)[2]
@@ -361,17 +364,22 @@ def wx_phases_to_reflection(phases: Any) -> tuple[np.ndarray, float]:
 
 @dataclass(frozen=True, kw_only=True)
 class SymmetricQSPPhases:
-    """Solved symmetric-QSP phase factors and solver diagnostics.
+    """Solved symmetric QSP phase factors with their residual and its sup-norm bound.
 
-    Args:
-        phases: Full symmetric Wx phase vector ``(phi_0, ..., phi_d)``.
-        degree: Polynomial degree ``d``.
-        parity: Target parity (``0`` even, ``1`` odd).
+    [`solve_symmetric_qsp_phases`][nwqlib.subroutines.qsp.phases.solve_symmetric_qsp_phases]
+    returns it. The answer is `phases`. The fields below are read-only.
+
+    Attributes:
+        phases: Full symmetric Wx phase vector `(phi_0, ..., phi_d)`.
+        degree: Polynomial degree `d`.
+        parity: Target parity (`0` even, `1` odd).
         target_chebyshev_coefficients: The solved-for coefficient vector.
-        max_residual: Max ``|Re P - f|`` on the dense verification grid.
+        max_residual: Largest `|Re P - f|` on the dense verification grid.
         residual_sup_bound: Chebyshev-grid norming bound on
-            ``sup_{x in [-1,1]} |Re P(x) - f(x)|``.
-        evaluations: Actual objective/Jacobian and final verification calls.
+            `sup_{x in [-1,1]} |Re P(x) - f(x)|`.
+        evaluations: Number of objective and Jacobian evaluations and final
+            verification calls made, across both starts, polish steps and
+            line searches.
     """
 
     phases: tuple[float, ...]
@@ -545,7 +553,7 @@ def _damped_newton(residual_and_jacobian, free: np.ndarray) -> tuple[np.ndarray,
     for _ in range(QSP_SOLVER_POLISH_MAX_STEPS):
         # Registered stop below the 1e-12 acceptance tolerance, for the
         # polish and the Newton start alike (docs/ENGINEERING_CONSTANTS.md,
-        # "Numerical choices"). A nonfinite start has no finite step (see
+        # "QSP phase solver and evolution synthesis"). A nonfinite start has no finite step (see
         # the docstring).
         if best < 1.0e-14 or not np.isfinite(best):
             break
@@ -577,39 +585,59 @@ def solve_symmetric_qsp_phases(
     max_bytes: int = DEFAULT_INPUT_BYTES,
     limit_name: str = "max_evaluations",
 ) -> SymmetricQSPPhases:
-    """Solve symmetric Wx phase factors for a real definite-parity target.
+    """Solve symmetric Wx phase factors whose `Re P(x)` matches a real definite-parity Chebyshev target.
 
     Implements the [DMWL] optimization (arXiv:2002.11649v2, Sec. III):
-    symmetric phases, positive
-    Chebyshev node objective, ``(pi/4, 0, ..., 0, pi/4)`` initialization and
-    L-BFGS, followed by a damped Gauss-Newton polish. If the objective-node
-    residual from that start is at or above ``residual_tolerance`` or
-    nonfinite, the damped Newton iteration of [DLNW] arXiv:2307.12468v1 runs
-    from the same
-    initialization, and the better of the two results is verified. The
-    returned phases satisfy ``Re P(x) ~= f(x)`` in the Wx convention.
-    ``residual_sup_bound`` bounds
-    ``sup |Re P - f|`` over ``[-1, 1]`` by the Chebyshev norming inequality.
+    symmetric phases, positive Chebyshev node objective,
+    `(pi/4, 0, ..., 0, pi/4)` initialization and L-BFGS, followed by a
+    damped Gauss-Newton polish. If the objective-node residual from that
+    start is at or above `residual_tolerance` or nonfinite, the damped
+    Newton iteration of [DLNW] arXiv:2307.12468v1 (Sec. 3, Eq. (3.1) and
+    Algorithm 3.1) runs from the same initialization, and the better of the
+    two results is verified. Near `max|f| = 1`, where the evolution and QLS
+    targets lie, L-BFGS from that point has no convergence guarantee
+    ([DLNW] Sec. 2.2). The returned phases satisfy `Re P(x) ~= f(x)` in
+    the Wx convention. `residual_sup_bound` bounds `sup |Re P - f|` over
+    `[-1, 1]` by the Chebyshev norming inequality. The degree and the known
+    simultaneous numerical arrays are checked before optimization.
 
     Args:
-        chebyshev_coefficients: Real Chebyshev coefficients ``(c_0..c_d)`` of
-            the target ``f``; entries of the wrong parity must be zero and
-            ``max |f|`` must not exceed 1.
-        residual_tolerance: Max acceptable ``|Re P - f|`` on the dense
-            verification grid.
-        max_degree: Largest admitted target degree.
-        max_evaluations: Combined objective/Jacobian and final verification
-            calls across both starts, polish steps and line searches.
-        max_bytes: Bound on known simultaneous numerical arrays. This does
-            not measure process RSS, vendor workspaces or elapsed time.
-        limit_name: Name of the caller's option that sets ``max_evaluations``,
-            used in the exhaustion and validation messages.
+        chebyshev_coefficients (array_like): Finite real Chebyshev
+            coefficients `(c_0, ..., c_d)` of the target `f`. Entries of the
+            wrong parity must be zero, and `max |f|` must not exceed 1.
+        residual_tolerance (float): Default `1e-12`. Largest acceptable
+            `|Re P - f|` on the dense verification grid.
+        max_degree (int): Default `256`. Largest accepted target degree.
+        max_evaluations (int): Default `20000`. Limit on the combined
+            objective and Jacobian evaluations and final verification calls
+            across both starts, polish steps and line searches.
+        max_bytes (int): Default 10 GB (decimal, `10_000_000_000` bytes).
+            Bound on known simultaneous numerical arrays. It does not
+            measure process memory, vendor workspaces or elapsed time.
+        limit_name (str): Default `"max_evaluations"`. Name of the caller's
+            option that sets `max_evaluations`, used in the error messages.
+
     Returns:
-        SymmetricQSPPhases with the full phase vector and diagnostics.
+        solution (SymmetricQSPPhases): The full phase vector in
+            `solution.phases`, with the residual and its sup-norm bound.
 
     Raises:
-        ValueError: For empty/mixed-parity/out-of-range targets, or when the
-            solver cannot reach ``residual_tolerance`` (with diagnostics).
+        ValueError: For empty, mixed-parity or out-of-range targets, or when
+            the solver cannot reach `residual_tolerance` (with diagnostics).
+
+    Examples:
+        For `f(x) = x / 2`, a degree-one target, both symmetric phases are
+        `-pi/6 = -0.5235987756...`, and `Re P(0.3) = 0.15`:
+
+        >>> import numpy as np
+        >>> from nwqlib.subroutines.qsp import (
+        ...     evaluate_qsp_polynomial, solve_symmetric_qsp_phases)
+        >>> solution = solve_symmetric_qsp_phases([0.0, 0.5])
+        >>> print([round(phase, 10) for phase in solution.phases])
+        [-0.5235987756, -0.5235987756]
+        >>> values = evaluate_qsp_polynomial(solution.phases, [0.3, -0.8])
+        >>> print(np.round(values.real, 10))
+        [ 0.15 -0.4 ]
     """
 
     coefficients = _real_coefficients(chebyshev_coefficients, max_degree=max_degree, max_bytes=max_bytes)

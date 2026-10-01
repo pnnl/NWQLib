@@ -1,8 +1,11 @@
-"""Scientific questions and output quantities, with one owner for actual inputs.
+"""Problems, outputs and accuracy requests.
 
-Input handles own their immutable numerical data. JSON is a description of those
-handles; it cannot manufacture native access. Algorithm choices and execution
-limits belong to the selected method and run, respectively.
+A Problem states a mathematical question with its inputs and units, an output
+names the quantity to compute, and an `Accuracy` states a requested tolerance.
+A Problem holds no Method setting and no run limit. The Method is given to
+`plan` or `solve`, and the limits to `prepare` or `solve`. A Problem keeps
+the numerical data of its inputs. Its JSON form describes them, and a Problem
+rebuilt from that description alone cannot access the numbers.
 """
 
 from __future__ import annotations
@@ -74,7 +77,45 @@ def _input_record(value):
 
 
 OperatorData = Annotated[Any, BeforeValidator(_operator), PlainSerializer(_input_record)]
+"""Matrix or operator accepted by a Problem or output field, such as `Eigenproblem.A`.
+
+Pass one of these forms:
+
+- a square NumPy array, or a nested list or tuple of numbers
+- a SciPy CSR or CSC matrix or array in canonical form
+- a Qiskit `SparsePauliOp`
+- a `PeriodicStencil`
+- an `OperatorInput` from `nwqlib.operators.operator_input` or an
+  `ingest_*` function of `nwqlib.operators`
+
+The field keeps the representation it receives and does not convert sparse
+or Pauli input to a dense matrix. Accepting the input is limited to 10 GB
+(decimal) of known bytes. Pass `operator_input(value, max_bytes=...)` to set
+another limit. A saved description, a dict with a `manifest` entry, gives a
+handle with metadata only, which refuses numerical access. Loading a saved
+archive restores the data. See [Supply operators and
+states](../inputs.md).
+"""
 StateData = Annotated[Any, BeforeValidator(_state), PlainSerializer(_input_record)]
+"""State or vector accepted by a Problem field, such as `Expectation.state` or `LinearSystem.b`.
+
+Pass one of these forms:
+
+- a NumPy array, or a list or tuple of numbers, with its magnitude and phase
+- a Qiskit `Statevector`
+- a Qiskit `QuantumCircuit` without classical bits or free parameters,
+  which means its unitary applied to the all-zero state
+- a `StateInput` from `nwqlib.problems.state_input` or an `ingest_*`
+  function of `nwqlib.problems`
+
+The field keeps the vector's magnitude and phase. A circuit is copied without
+simulating or synthesizing it. Accepting the input is limited to 10 GB
+(decimal) of known bytes. Pass `state_input(value, max_bytes=...)` to set
+another limit. A saved description, a dict with a `manifest` entry, gives a
+handle with metadata only, which refuses numerical access. Loading a saved
+archive restores the data. See [Supply operators and
+states](../inputs.md).
+"""
 
 
 class SymbolicDescription(Record):
@@ -136,16 +177,40 @@ class _ScientificModel(Record):
 
 
 class ProblemRecord(_ScientificModel):
-    """Original scientific inputs plus optional interpretation, never a method.
+    """The optional fields that every Problem accepts besides its own inputs.
+
+    Build a Problem class, such as
+    [`Eigenproblem`][nwqlib.problems.records.Eigenproblem], with keyword
+    arguments. Every Problem also accepts the optional fields below. A
+    Problem is immutable. `problem.revise(**changes)` returns a validated
+    copy with the changes, and a Problem with changed inputs has its own
+    content hash. A Problem holds no Method setting.
 
     Attributes:
-        unit: Unit of the primary result: eigenvalue, solution amplitude,
-            observable expectation, or objective. None means unspecified.
-        scope: Optional physical/model interpretation; no default physical claim.
-        coordinates: Optional labels in the original input index order. Labels
-            do not transform the basis or allocate missing state amplitudes.
-        assumptions: Explicit scientific premises supplied with the question.
-        facts: Existing input evidence; no automatic reference computation.
+        unit: Default `None`, which leaves the unit unspecified. Unit of the
+            primary answer: the eigenvalue, the solution amplitudes, the
+            observable's expectation or the objective. A string such as
+            `"Hartree"` becomes a `Unit` of dimension `"custom"`. NWQLib
+            converts no units. [Units](../problems.md#units) lists the unit
+            of each output. Without a unit, error evidence about the Problem
+            is stated in an explicitly unspecified unit.
+        scope: Default `None`, which makes no physical claim. A `Scope` that
+            states the physical or model meaning of the Problem. Without it,
+            error evidence about the Problem is scoped to the Problem kind in
+            its original input coordinates.
+        coordinates: Default `None`. One label per input coordinate, in the
+            input's index order. Labels do not change the basis or add
+            missing state amplitudes.
+        assumptions: Default `()`. Assumptions stated with the Problem, as
+            text.
+        facts: Default `()`. Evidence about the inputs (`Fact` records). No
+            reference computation is run to produce it.
+
+    Raises:
+        TypeError: If `unit` is neither a string, a `Unit`, a dict of `Unit`
+            fields nor `None`.
+        ValueError: If `coordinates` does not label every input coordinate
+            exactly once.
     """
 
     unit: OptionalUnit = None
@@ -175,18 +240,66 @@ class ProblemRecord(_ScientificModel):
         return self.model_dump(mode="json", exclude_computed_fields=True)
 
     def default_output(self):
+        """Return the output that `plan` and `compare` use when no `output` is given.
+
+        Each built-in Problem returns its default output, such as
+        `Eigenvalue()` for an `Eigenproblem`. A Problem type of a Method
+        author defines its own, as [Run your own circuit](../own_circuit.md)
+        shows. This base raises, so a Problem without its own default needs
+        an explicit `output`.
+
+        Returns:
+            output (OutputRecord): The default output.
+
+        Raises:
+            TypeError: Always, on this base.
+        """
         raise TypeError("select output explicitly for this scientific problem")
 
 
 class Eigenproblem(ProblemRecord):
-    """Request the smallest eigenvalue of a Hermitian A.
+    """The smallest eigenvalue of a Hermitian matrix or operator `A`.
+
+    Build it with keyword arguments, for example `Eigenproblem(A=matrix)`,
+    and pass it to [`solve`][nwqlib.scientist.solve] or `plan` with a Method
+    such as `Lanczos`. `A` is the only required argument. The other fields
+    below have defaults, and the optional `unit`, `scope`, `coordinates`,
+    `assumptions` and `facts` of
+    [`ProblemRecord`][nwqlib.problems.records.ProblemRecord] are accepted
+    too. Without `output=`, the requested output is
+    [`Eigenvalue`][nwqlib.problems.records.Eigenvalue], in the Problem's
+    `unit`.
 
     Attributes:
-        A: Finite Hermitian matrix or supported structured operator.
-        target: Currently "smallest"; a method returns its actual estimate.
-        subspace: Optional explicitly defined scientific subspace. A method's
-            trial basis or initialization does not change the full-space target.
-        sector: Optional scientific sector requiring a compatible preparation.
+        A: Required. Finite Hermitian matrix or supported structured operator,
+            in a form that [`OperatorData`][nwqlib.problems.records.OperatorData]
+            accepts.
+        target: Default `"smallest"`, the only accepted value. A Method
+            returns its own estimate of this target.
+        subspace: Default `None`. An explicitly defined scientific subspace.
+            A Method's trial basis or initial state does not change the
+            full-space target.
+        sector: Default `None`. A scientific sector, which requires a
+            compatible state preparation.
+
+    Raises:
+        ValueError: If `A` is not exactly Hermitian. If the Hermitian part
+            of a matrix `A` is the intended problem, pass
+            `(A + A.conj().T) / 2`. For a Qiskit `SparsePauliOp` named `op`,
+            pass `SparsePauliOp(op.paulis, coeffs=op.coeffs.real)`, which
+            keeps every Pauli term without tolerance-based simplification.
+
+    Examples:
+        The eigenvalues of `[[2, 1], [1, 2]]` are 1 and 3. Lanczos with a
+        two-dimensional Krylov space recovers the smallest:
+
+        >>> from nwqlib import Eigenproblem, solve
+        >>> from nwqlib.algorithms import Lanczos
+        >>> problem = Eigenproblem(A=[[2.0, 1.0], [1.0, 2.0]], unit="Hartree")
+        >>> method = Lanczos(initial_state=[1, 0], krylov_dimension=2)
+        >>> result = solve(problem, method=method, seed=7)
+        >>> print(round(result.eigenvalue, 10))
+        1.0
     """
 
     kind: Literal["eigenproblem"] = "eigenproblem"
@@ -200,10 +313,12 @@ class Eigenproblem(ProblemRecord):
 
     @property
     def dimension(self):
+        """Number of coordinates of `A`."""
         return self.A.manifest.basis.dimension
 
     @property
     def basis(self):
+        """The coordinate basis of `A` (a `Basis` record with its dimension and ordering)."""
         return self.A.manifest.basis
 
     @model_validator(mode="after")
@@ -216,15 +331,52 @@ class Eigenproblem(ProblemRecord):
 
 
 class LinearDynamics(ProblemRecord):
-    """Time-independent du/dt = -A u + source in the original coordinates.
+    """The solution `u(time)` of the linear equation `du/dt = -A u + source` with constant `A` and `source`.
+
+    Build it with keyword arguments, for example
+    `LinearDynamics(A=matrix, initial_state=u0, time=1.0)`, and pass it to
+    [`solve`][nwqlib.scientist.solve] or [`plan`][nwqlib.scientist.plan]
+    with a Method such as `LCHS`. `A`, `initial_state` and `time` are
+    required. The optional `unit`, `scope`, `coordinates`, `assumptions` and
+    `facts` of [`ProblemRecord`][nwqlib.problems.records.ProblemRecord] are
+    accepted too, and `unit` labels the solution amplitudes. Without
+    `output=`, the requested output is
+    [`Solution`][nwqlib.problems.records.Solution]: `u(time)` in the original
+    coordinates, with its magnitude and phase.
 
     Attributes:
-        A: Finite square matrix or a supported structured generator.
-        initial_state: Physical u(initial_time), including magnitude and phase.
-        time: Requested final time, at least initial_time.
-        source: Optional constant physical source; None means zero.
-        initial_time: Initial time, default 0.
-        time_unit: Optional label; numerical A*time must be dimensionless.
+        A: Required. Finite square matrix or supported structured generator,
+            in a form that [`OperatorData`][nwqlib.problems.records.OperatorData]
+            accepts.
+        initial_state: Required. The vector `u(initial_time)`, with its
+            magnitude and phase, in the coordinates of `A` and in a form that
+            [`StateData`](inputs.md#nwqlib.problems.records.StateData) accepts.
+        time: Required. Final time, at least `initial_time`.
+        source: Default `None`, which means zero. Constant source vector, with
+            its magnitude and phase, in the coordinates of `A`.
+        initial_time: Default `0.0`. Initial time.
+        time_unit: Default `None`. Label of the time unit, of dimension
+            `"time"` or `"custom"`. NWQLib converts no units, so the
+            numerical `A*time` must be dimensionless.
+
+    Raises:
+        ValueError: If `time` is less than `initial_time`, if `initial_state`
+            or `source` has another dimension or coordinate order than `A`,
+            or if `time_unit` has another dimension.
+
+    Examples:
+        For `A = diag(1, 2)` the solution at `time=0.5` from `u = (1, 1)` is
+        `(exp(-0.5), exp(-1)) = (0.6065..., 0.3679...)`. The default LCHS
+        approximation, evaluated classically, gives:
+
+        >>> import numpy as np
+        >>> from nwqlib import LinearDynamics, solve
+        >>> from nwqlib.algorithms import LCHS
+        >>> problem = LinearDynamics(A=[[1.0, 0.0], [0.0, 2.0]],
+        ...                          initial_state=[1.0, 1.0], time=0.5)
+        >>> result = solve(problem, method=LCHS(), execution="classical")
+        >>> print(np.round(result.solution.real, 2))
+        [0.61 0.37]
     """
 
     kind: Literal["linear_dynamics"] = "linear_dynamics"
@@ -240,14 +392,17 @@ class LinearDynamics(ProblemRecord):
 
     @property
     def dimension(self):
+        """Number of coordinates of `A`."""
         return self.A.manifest.basis.dimension
 
     @property
     def basis(self):
+        """The coordinate basis of `A` (a `Basis` record with its dimension and ordering)."""
         return self.A.manifest.basis
 
     @property
     def elapsed_time(self):
+        """The evolution time, `time - initial_time`."""
         return self.time - self.initial_time
 
     @model_validator(mode="after")
@@ -263,11 +418,43 @@ class LinearDynamics(ProblemRecord):
 
 
 class LinearSystem(ProblemRecord):
-    """Request physical x in A x = b; the method owns any encoding or dilation.
+    """The solution `x` of the linear system `A x = b`.
+
+    Build it with keyword arguments, `LinearSystem(A=matrix, b=vector)`, and
+    pass it to [`solve`][nwqlib.scientist.solve] or
+    [`plan`][nwqlib.scientist.plan] with a Method such as `QLS`. `A` and `b`
+    are required. The optional `unit`, `scope`, `coordinates`, `assumptions`
+    and `facts` of [`ProblemRecord`][nwqlib.problems.records.ProblemRecord]
+    are accepted too, and `unit` labels the solution. Without `output=`, the
+    requested output is [`Solution`][nwqlib.problems.records.Solution]: `x`
+    in the original coordinates, with its magnitude and phase. The Method
+    chooses any encoding or dilation of `A`.
 
     Attributes:
-        A: Finite square matrix or supported structured operator.
-        b: Physical right-hand side, with its original magnitude and phase.
+        A: Required. Finite square matrix or supported structured operator,
+            in a form that [`OperatorData`][nwqlib.problems.records.OperatorData]
+            accepts.
+        b: Required. Right-hand side, with its magnitude and phase, in the
+            coordinates of `A` and in a form that
+            [`StateData`](inputs.md#nwqlib.problems.records.StateData) accepts.
+
+    Raises:
+        ValueError: If `b` has another dimension or coordinate order than
+            `A`.
+
+    Examples:
+        The solution of this system is `(25/28, 5/28) = (0.8929..., 0.1786...)`.
+        QLS selects its inverse polynomial for its default
+        `epsilon_inv=0.01`, a construction target that does not bound the
+        total error, and returns an approximation:
+
+        >>> import numpy as np
+        >>> from nwqlib import LinearSystem, solve
+        >>> from nwqlib.algorithms.qls import QLS
+        >>> problem = LinearSystem(A=[[1.1, 0.1], [0.1, 0.9]], b=[1.0, 0.25])
+        >>> result = solve(problem, method=QLS(), seed=7)
+        >>> print(np.round(result.x.real, 3))
+        [0.897 0.181]
     """
 
     kind: Literal["linear_system"] = "linear_system"
@@ -279,10 +466,12 @@ class LinearSystem(ProblemRecord):
 
     @property
     def dimension(self):
+        """Number of coordinates of `A`."""
         return self.A.manifest.basis.dimension
 
     @property
     def basis(self):
+        """The coordinate basis of `A` (a `Basis` record with its dimension and ordering)."""
         return self.A.manifest.basis
 
     @model_validator(mode="after")
@@ -293,14 +482,50 @@ class LinearSystem(ProblemRecord):
 
 
 class Expectation(ProblemRecord):
-    """A physical state and Hermitian observable in the same coordinates.
+    """The expectation of a Hermitian observable `O` in a state `u` given in the same coordinates.
 
-    The default quantity is state† observable state / (state† state).
-    An explicit QuadraticForm requests the unnormalized quadratic form.
+    Build it with keyword arguments, `Expectation(state=u, observable=O)`,
+    and pass it to [`solve`][nwqlib.scientist.solve] or
+    [`plan`][nwqlib.scientist.plan] with `ExpectationMethod`. Both arguments
+    are required. The optional `unit`, `scope`, `coordinates`, `assumptions`
+    and `facts` of [`ProblemRecord`][nwqlib.problems.records.ProblemRecord]
+    are accepted too, and `unit` labels the normalized expectation. Without
+    `output=`, the requested output is
+    [`NormalizedExpectation`][nwqlib.problems.records.NormalizedExpectation]
+    with this observable, the value `u† O u / (u† u)`. Request
+    [`QuadraticForm`][nwqlib.problems.records.QuadraticForm] for the
+    unnormalized `u† O u`.
 
     Attributes:
-        state: Physical state u, including its magnitude and phase.
-        observable: Exactly Hermitian observable O in the same dimension and coordinate order.
+        state: Required. The state `u`, with its magnitude and phase, in a
+            form that [`StateData`](inputs.md#nwqlib.problems.records.StateData)
+            accepts.
+        observable: Required. Exactly Hermitian observable `O`, with the
+            dimension and coordinate order of `state`, in a form that
+            [`OperatorData`][nwqlib.problems.records.OperatorData] accepts.
+
+    Raises:
+        ValueError: If `observable` is not exactly Hermitian, or `state` has
+            another dimension or coordinate order. For a Qiskit
+            `SparsePauliOp` named `op` whose Hermitian part is the intended
+            observable, pass `SparsePauliOp(op.paulis, coeffs=op.coeffs.real)`.
+
+    Examples:
+        For `u = (2, 2)` and `O = diag(2, 0)`, the normalized expectation is
+        `8 / 8 = 1` and the quadratic form is `8`:
+
+        >>> from nwqlib import Expectation, QuadraticForm, solve
+        >>> from nwqlib.algorithms import ExpectationMethod
+        >>> problem = Expectation(state=[2.0, 2.0],
+        ...                       observable=[[2.0, 0.0], [0.0, 0.0]])
+        >>> result = solve(problem, method=ExpectationMethod())
+        >>> print(round(result.value, 10))
+        1.0
+        >>> output = QuadraticForm(observable=problem.observable)
+        >>> physical = solve(problem, method=ExpectationMethod(),
+        ...                  output=output, execution="classical")
+        >>> print(round(physical.value, 10))
+        8.0
     """
 
     kind: Literal["expectation"] = "expectation"
@@ -312,10 +537,12 @@ class Expectation(ProblemRecord):
 
     @property
     def dimension(self):
+        """Number of coordinates of `observable`."""
         return self.observable.manifest.basis.dimension
 
     @property
     def basis(self):
+        """The coordinate basis of `observable` (a `Basis` record with its dimension and ordering)."""
         return self.observable.manifest.basis
 
     @model_validator(mode="after")
@@ -328,21 +555,58 @@ class Expectation(ProblemRecord):
 
 
 class SpectralEstimation(ProblemRecord):
-    """Estimate a component of an explicitly prepared spectral population.
+    """An eigenphase or energy of a Hamiltonian or unitary, estimated from a prepared initial state.
 
-    Supply exactly one of hamiltonian or unitary. The method owns its sampling
-    schedule and branch convention. A unitary alone does not define an energy.
+    Build it with keyword arguments, for example
+    `SpectralEstimation(hamiltonian=H, initial_state=psi)`, and pass it to
+    [`solve`][nwqlib.scientist.solve] or [`plan`][nwqlib.scientist.plan] with
+    a phase-estimation Method: `QCELS`, `SPE`, `RFE` or `RWPE`.
+    `initial_state` is required, and exactly one of `hamiltonian` and
+    `unitary`. The optional `unit`, `scope`, `coordinates`, `assumptions` and
+    `facts` of [`ProblemRecord`][nwqlib.problems.records.ProblemRecord] are
+    accepted too. Without `output=`, the requested output is
+    [`Eigenphase`][nwqlib.problems.records.Eigenphase], a phase in turns. The
+    overlaps of `initial_state` with the eigenvectors define the spectral
+    population that the measurements sample. The Method chooses its sampling
+    schedule and branch convention. A unitary alone does not define an
+    energy.
+
     The component each Method targets follows from its estimator. SPE, for
     example, targets the lowest value in the prepared support, which is the
     lowest energy of a Hamiltonian but the lowest principal eigenphase of a
-    unitary. For ``U = exp(-i tau H)`` with ``tau |E| < pi/2`` for every
+    unitary. For `U = exp(-i tau H)` with `tau |E| < pi/2` for every
     prepared energy E, that eigenphase belongs to the highest energy of the
     support.
 
     Attributes:
-        hamiltonian: Exactly Hermitian H, or None when a unitary is supplied.
-        unitary: Unitary U, or None when a Hamiltonian is supplied. Its unitarity is checked by the selected Method.
-        initial_state: State whose overlaps with the eigenvectors define the sampled spectral population.
+        hamiltonian: Default `None`. Exactly Hermitian `H`, in a form that
+            [`OperatorData`][nwqlib.problems.records.OperatorData] accepts.
+            Give it or `unitary`.
+        unitary: Default `None`. Unitary `U`, in a form that
+            [`OperatorData`][nwqlib.problems.records.OperatorData] accepts.
+            Give it or `hamiltonian`. The Method checks that it is unitary.
+        initial_state: Required. State whose overlaps with the eigenvectors
+            define the sampled spectral population, in the coordinates of the
+            operator and in a form that
+            [`StateData`](inputs.md#nwqlib.problems.records.StateData) accepts.
+
+    Raises:
+        ValueError: If both or neither of `hamiltonian` and `unitary` are
+            given, if `hamiltonian` is not exactly Hermitian, or if
+            `initial_state` has another dimension or coordinate order than the
+            operator.
+
+    Examples:
+        The initial state `(1, 0)` is the eigenvector of energy 0.2 of
+        `H = diag(0.2, 0.7)`:
+
+        >>> from nwqlib import SpectralEstimation, solve
+        >>> from nwqlib.algorithms.qpe import QCELS
+        >>> problem = SpectralEstimation(
+        ...     hamiltonian=[[0.2, 0.0], [0.0, 0.7]], initial_state=[1, 0])
+        >>> result = solve(problem, method=QCELS(), seed=7)
+        >>> print(round(result.eigenvalue, 10))
+        0.2
     """
 
     kind: Literal["spectral_estimation"] = "spectral_estimation"
@@ -355,14 +619,17 @@ class SpectralEstimation(ProblemRecord):
 
     @property
     def dimension(self):
+        """Number of coordinates of the operator."""
         return self.operator.manifest.basis.dimension
 
     @property
     def basis(self):
+        """The coordinate basis of the operator (a `Basis` record with its dimension and ordering)."""
         return self.operator.manifest.basis
 
     @property
     def operator(self):
+        """The Hamiltonian when one is given, otherwise the unitary."""
         return self.hamiltonian if self.hamiltonian is not None else self.unitary
 
     @model_validator(mode="after")
@@ -419,12 +686,49 @@ def _admit_box(variables, bounds, expressions):
 
 
 class Optimization(ProblemRecord):
-    """Minimize a supplied SymPy objective over an ordered finite box.
+    """The minimum of a SymPy objective over a finite box of real variables.
+
+    Build it with keyword arguments, for example
+    `Optimization(objective=(x - 0.2)**2, variables=(x,), bounds=((-1.0, 1.0),))`
+    with `x = sympy.Symbol("x", real=True)`, and pass it to
+    [`solve`][nwqlib.scientist.solve] or [`plan`][nwqlib.scientist.plan] with
+    `QHD`. The three arguments are required. The optional `unit`, `scope`,
+    `coordinates`, `assumptions` and `facts` of
+    [`ProblemRecord`][nwqlib.problems.records.ProblemRecord] are accepted
+    too, and `unit` labels the objective. Without `output=`, the requested
+    output is
+    [`OptimizationCandidate`][nwqlib.problems.records.OptimizationCandidate],
+    a candidate point and its objective value, which is not a proof of
+    optimality.
 
     Attributes:
-        objective: A SymPy scalar expression, not an executable source string.
-        variables: Ordered SymPy symbols defining coordinate order.
-        bounds: One finite (lower, upper) pair per variable.
+        objective: Required. Scalar SymPy expression in the variables, not a
+            string of source code.
+        variables: Required. SymPy symbols with distinct names. Their order
+            is the coordinate order.
+        bounds: Required. One finite `(lower, upper)` pair with
+            `lower < upper` per variable, in the order of `variables`.
+
+    Raises:
+        TypeError: If `objective` or a variable is not a SymPy expression.
+        ValueError: If `bounds` does not give one interval per variable, an
+            interval has `lower >= upper`, two variables share a name, a
+            variable is not a SymPy symbol, or `objective` contains a symbol
+            that is not in `variables`.
+
+    Examples:
+        QHD's default grid has two interior points per variable, `-1/3` and
+        `1/3` on `[-1, 1]`, and the objective is smaller at `1/3`:
+
+        >>> import sympy as sp
+        >>> from nwqlib import Optimization, solve
+        >>> from nwqlib.algorithms.qhd import QHD
+        >>> x = sp.Symbol("x", real=True)
+        >>> problem = Optimization(objective=(x - 0.2)**2, variables=(x,),
+        ...                        bounds=((-1.0, 1.0),))
+        >>> result = solve(problem, method=QHD(), seed=7)
+        >>> print([round(value, 10) for value in result.candidate])
+        [0.3333333333]
     """
 
     kind: Literal["optimization"] = "optimization"
@@ -437,10 +741,12 @@ class Optimization(ProblemRecord):
 
     @property
     def dimension(self):
+        """Number of variables."""
         return len(self.variables)
 
     @property
     def variable_names(self):
+        """Names of the variables, in their order."""
         return _variable_names(self.variables)
 
     @model_validator(mode="after")
@@ -496,34 +802,69 @@ def _residual(value, field, position):
 
 
 class ConstrainedOptimization(ProblemRecord):
-    """Minimize a SymPy objective over an ordered finite box subject to constraints.
+    """The minimum of a SymPy objective over a finite box of real variables, subject to equality and inequality constraints.
+
+    Build it with keyword arguments, for example
+    `ConstrainedOptimization(objective=..., variables=(x,), bounds=((-1.0, 1.0),), inequalities=(sympy.Le(x, 0.5),))`.
+    `objective`, `variables`, `bounds` and at least one constraint are
+    required. The optional `unit`, `scope`, `coordinates`, `assumptions` and
+    `facts` of [`ProblemRecord`][nwqlib.problems.records.ProblemRecord] are
+    accepted too. Without `output=`, the requested output is
+    [`OptimizationCandidate`][nwqlib.problems.records.OptimizationCandidate].
+    The QHD augmented-Lagrangian layer, `solve_augmented_lagrangian`, solves
+    it as a sequence of QHD box problems ([Constrained
+    problems](../algorithms/qhd.md#constrained-problems)). This record is not
+    an `Optimization`, so a Method for box problems alone, such as `QHD`,
+    rejects it at planning with `ApplicabilityError`, and no constraint is
+    silently dropped.
 
     The stored constraints are residual expressions with the conventions
-    ``h_i(x) = 0`` for equalities and ``g_j(x) <= 0`` for inequalities, the
+    `h_i(x) = 0` for equalities and `g_j(x) <= 0` for inequalities, the
     form of problem (4.1) in Birgin and Martinez, *Practical Augmented
     Lagrangian Methods for Constrained Optimization*, SIAM 2014,
     doi:10.1137/1.9781611973365, with the box as its set Omega. The QHD
-    augmented-Lagrangian layer (``algorithms.qhd.constrained``) follows that
-    book, so a residual here enters its multiplier updates and stopping tests
-    with the book's signs.
-    Live input may also give ``Eq(a, b)`` as an equality, stored as ``a - b``,
-    and ``Le(a, b)`` or ``Ge(a, b)`` as an inequality, stored as ``a - b`` or
-    ``b - a``. Strict relations, ``Ne``, relations that SymPy has already
-    evaluated to True or False, other Boolean objects, matrices and
-    constraints with symbols outside ``variables`` are rejected. Both
-    constraint fields take a tuple or list, and at least one constraint is
-    required.
-
-    This record is not an ``Optimization``. A box-only Method such as QHD
-    rejects it at planning with ``ApplicabilityError``, so no constraint is
-    silently dropped.
+    augmented-Lagrangian layer follows that book, so a residual here enters
+    its multiplier updates and stopping tests with the book's signs. A
+    constraint given as a scalar SymPy expression is the residual itself.
+    Live input may also give `Eq(a, b)` as an equality, stored as `a - b`,
+    and `Le(a, b)` or `Ge(a, b)` as an inequality, stored as `a - b` or
+    `b - a`.
 
     Attributes:
-        objective: A SymPy scalar expression, not an executable source string.
-        variables: Ordered SymPy symbols defining coordinate order.
-        bounds: One finite (lower, upper) pair per variable.
-        equalities: Residual expressions h_i with the constraint ``h_i(x) = 0``.
-        inequalities: Residual expressions g_j with the constraint ``g_j(x) <= 0``.
+        objective: Required. Scalar SymPy expression in the variables, not a
+            string of source code.
+        variables: Required. SymPy symbols with distinct names. Their order
+            is the coordinate order.
+        bounds: Required. One finite `(lower, upper)` pair with
+            `lower < upper` per variable, in the order of `variables`.
+        equalities: Default `()`. Residuals `h_i` with the constraint
+            `h_i(x) = 0`, given as a tuple or list.
+        inequalities: Default `()`. Residuals `g_j` with the constraint
+            `g_j(x) <= 0`, given as a tuple or list.
+
+    Raises:
+        TypeError: If a constraint field is not a tuple or list, or a
+            constraint is not a SymPy expression or relation.
+        ValueError: If no constraint is given, if a constraint is a strict
+            relation (`Lt`, `Gt`), an `Ne` relation, a relation that SymPy
+            has already evaluated to True or False, another Boolean object, a
+            matrix or a relation in the wrong field, if a constraint contains
+            a symbol outside `variables`, or if the box is invalid as for
+            `Optimization`. For a strict inequality, give a non-strict form
+            with an explicit margin, for example `Le(x, 1 - margin)` for
+            `x < 1`.
+
+    Examples:
+        The inequality `x >= 0.5` is stored as the residual `0.5 - x <= 0`:
+
+        >>> import sympy as sp
+        >>> from nwqlib import ConstrainedOptimization
+        >>> x = sp.Symbol("x", real=True)
+        >>> problem = ConstrainedOptimization(
+        ...     objective=(x - 0.2)**2, variables=(x,), bounds=((-1.0, 1.0),),
+        ...     inequalities=(sp.Ge(x, 0.5),))
+        >>> print(problem.inequalities)
+        (0.5 - x,)
     """
 
     kind: Literal["constrained_optimization"] = "constrained_optimization"
@@ -538,10 +879,12 @@ class ConstrainedOptimization(ProblemRecord):
 
     @property
     def dimension(self):
+        """Number of variables."""
         return len(self.variables)
 
     @property
     def variable_names(self):
+        """Names of the variables, in their order."""
         return _variable_names(self.variables)
 
     @field_validator("equalities", "inequalities", mode="before")
@@ -566,13 +909,26 @@ class ConstrainedOptimization(ProblemRecord):
 
 
 class OutputRecord(_ScientificModel):
-    """A requested quantity, with no acquired value or duplicated scope.
+    """The optional field that every output accepts.
 
-    unit labels a quantity that neither the Problem nor the output kind
-    labels, for example an observable of a LinearDynamics Problem. It never
-    converts numerical data. A unit whose symbol differs from the one the
-    Problem defines or the kind fixes raises ValueError at planning, as
-    ``frame`` describes.
+    An output names the quantity to compute, for example `Eigenvalue()`,
+    and is passed as `output=` to [`solve`][nwqlib.scientist.solve],
+    [`plan`][nwqlib.scientist.plan] or [`compare`][nwqlib.scientist.compare].
+    It holds no measured value and takes its scope from the Problem. The
+    Method's Result holds the value. Build an output class, not this base.
+    [Units](../problems.md#units) gives the unit of each output.
+
+    Attributes:
+        unit: Default `None`. Label of a quantity whose unit neither the
+            Problem nor the output kind defines, for example an observable of
+            a `LinearDynamics` Problem. A string becomes a `Unit` of
+            dimension `"custom"`. It never converts numerical data.
+
+    Raises:
+        ValueError: At planning, if `unit` has another symbol than the unit
+            that the Problem defines or the output kind fixes. NWQLib
+            converts no units, so omit the output unit or label the Problem
+            instead.
     """
 
     unit: OptionalUnit = None
@@ -641,24 +997,30 @@ class OutputRecord(_ScientificModel):
 
 
 class Eigenvalue(OutputRecord):
-    """An eigenvalue in the Problem's unit, with absolute error."""
+    """An eigenvalue, in the Problem's unit.
+
+    It is the default output of `Eigenproblem`, whose `target` is the
+    smallest eigenvalue. Pass `Eigenvalue()` as `output=` to request it
+    explicitly. Its error metric is the absolute error.
+    """
 
     kind: Literal["eigenvalue"] = "eigenvalue"
 
 
 class Eigenphase(OutputRecord):
-    """A phase phi in turns, with ``U v = exp(2 pi i phi) v`` and phi in [0, 1).
+    """A phase `phi` in turns, with `U v = exp(2 pi i phi) v` and `phi` in [0, 1).
 
-    For a Hamiltonian input, U is ``exp(-i tau H)`` at the time tau that
-    the Method selects, so an energy E has phase ``(-tau E / (2 pi)) mod 1``
-    and the phase order need not follow the energy order. A Method that
-    targets the lowest principal eigenphase of a supplied unitary
-    ``exp(-i tau H)``, as SPE does, therefore reports the phase of the
-    highest prepared energy of H when ``tau |E| < pi/2`` for every prepared
-    E. The error metric of this
-    output is the circular distance ``min(|d|, 1 - |d|)`` of the difference d
-    between two phases in [0, 1), so estimates on either side of phase zero
-    are close.
+    It is the default output of `SpectralEstimation`. Pass `Eigenphase()` as
+    `output=` to request it explicitly. Its unit is the turn, fixed by the
+    output kind. For a Hamiltonian input, U is `exp(-i tau H)` at the time
+    tau that the Method selects, so an energy E has phase
+    `(-tau E / (2 pi)) mod 1` and the phase order need not follow the
+    energy order. A Method that targets the lowest principal eigenphase of a
+    supplied unitary `exp(-i tau H)`, as SPE does, therefore reports the
+    phase of the highest prepared energy of H when `tau |E| < pi/2` for
+    every prepared E. The error metric of this output is the circular
+    distance `min(|d|, 1 - |d|)` of the difference d between two phases in
+    [0, 1), so estimates on either side of phase zero are close.
     """
 
     kind: Literal["eigenphase"] = "eigenphase"
@@ -681,29 +1043,80 @@ class _ObservableOutput(OutputRecord):
 
 
 class NormalizedExpectation(_ObservableOutput):
-    """u† O u / (u† u), undefined when u is zero."""
+    """The normalized expectation `u† O u / (u† u)` of a Hermitian observable `O`.
+
+    u is the state of an `Expectation` Problem, or the solution of a
+    `LinearDynamics` or `LinearSystem` Problem. The value is undefined when u
+    is zero. Build it with keyword arguments, for example
+    `NormalizedExpectation(observable=O)`, and pass it as `output=` to
+    [`solve`][nwqlib.scientist.solve] or `plan`. An `Expectation` Problem
+    requests it by default with its own observable. `observable` is the only
+    required argument. For an `Expectation` Problem with a `unit`, the value
+    is in that unit. Otherwise the optional `unit` of
+    [`OutputRecord`][nwqlib.problems.records.OutputRecord] labels it, and
+    without one the unit stays unspecified.
+
+    Attributes:
+        observable: Required. Exactly Hermitian observable `O`, in a form
+            that [`OperatorData`][nwqlib.problems.records.OperatorData]
+            accepts.
+
+    Raises:
+        ValueError: If `observable` is not exactly Hermitian. For a Qiskit
+            `SparsePauliOp` named `op` whose Hermitian part is the intended
+            observable, pass `SparsePauliOp(op.paulis, coeffs=op.coeffs.real)`.
+    """
 
     kind: Literal["normalized_expectation"] = "normalized_expectation"
 
 
 class QuadraticForm(_ObservableOutput):
-    """u† O u using the physical magnitude of u."""
+    """The quadratic form `u† O u` of a Hermitian observable `O`, using the magnitude of `u`.
+
+    u is the state of an `Expectation` Problem, or the solution of a
+    `LinearDynamics` or `LinearSystem` Problem. Build it with keyword
+    arguments, for example `QuadraticForm(observable=O)`, and pass it as
+    `output=` to [`solve`][nwqlib.scientist.solve] or
+    [`plan`][nwqlib.scientist.plan]. `observable` is the only required
+    argument. The value's unit stays unspecified unless the optional `unit`
+    of [`OutputRecord`][nwqlib.problems.records.OutputRecord] labels it,
+    because NWQLib infers neither the observable's unit nor the unit of the
+    product `u† O u`. This holds even when the Problem's `unit` labels u,
+    as it does for `LinearDynamics` and `LinearSystem`.
+
+    Attributes:
+        observable: Required. Exactly Hermitian observable `O`, in a form
+            that [`OperatorData`][nwqlib.problems.records.OperatorData]
+            accepts.
+
+    Raises:
+        ValueError: If `observable` is not exactly Hermitian. For a Qiskit
+            `SparsePauliOp` named `op` whose Hermitian part is the intended
+            observable, pass `SparsePauliOp(op.paulis, coeffs=op.coeffs.real)`.
+    """
 
     kind: Literal["quadratic_form"] = "quadratic_form"
 
 
 class NormSquared(OutputRecord):
-    """The physical squared norm u† u, in the square of the solution unit."""
+    """The squared norm `u† u` of a solution `u`, using its magnitude.
+
+    Pass `NormSquared()` as `output=` with a `LinearDynamics` or
+    `LinearSystem` Problem. Its unit is the square of the Problem's `unit`
+    when the Problem has one.
+    """
 
     kind: Literal["norm_squared"] = "norm_squared"
 
 
 class Samples(OutputRecord):
-    """Original-coordinate outcomes, conditional on the Method's success event.
+    """Measured outcomes in the original coordinates, counted over the shots in which the Method succeeded.
 
-    The success event is, for example, the post-selection flag of QLS or
-    LCHS. Plan.shots selects the number of shots, and the stored bins count
-    only the shots in which that event occurred.
+    Pass `Samples()` as `output=`, together with a number of shots. The
+    success event is, for example, the post-selection flag of QLS or LCHS.
+    `shots` sets the number of shots, and the stored counts include only the
+    shots in which that event occurred. Its unit is 1, and its error metric
+    is the total variation distance between distributions.
     """
 
     kind: Literal["samples"] = "samples"
@@ -714,7 +1127,12 @@ class Samples(OutputRecord):
 
 
 class Solution(OutputRecord):
-    """Physical solution amplitudes in original coordinates, including phase."""
+    """The solution vector in the original coordinates, with its magnitude and phase.
+
+    It is the default output of `LinearDynamics` and `LinearSystem`. Pass
+    `Solution()` as `output=` to request it explicitly. Its unit is the
+    Problem's `unit`, and its error metric is the l2 norm of the difference.
+    """
 
     kind: Literal["solution"] = "solution"
 
@@ -724,7 +1142,23 @@ class Solution(OutputRecord):
 
 
 class StateVector(OutputRecord):
-    """Explicit simulator amplitudes with a declared normalization/phase meaning."""
+    """The amplitudes of a simulated state, with a declared normalization and phase convention.
+
+    Build it with keyword arguments, for example
+    `StateVector(normalization="physical")`, and pass it as `output=`. Every
+    argument is optional. With `normalization="physical"` the vector keeps
+    the magnitude of the solution, in the Problem's `unit`. With `"unit"` it
+    has length 1 and is dimensionless. Its error metric is the l2 norm of
+    the difference, or with `global_phase="modulo_global_phase"` the l2 norm
+    after the global phases are aligned. Full amplitudes are a simulator
+    readout, not a hardware measurement.
+
+    Attributes:
+        normalization: Default `"unit"`. `"physical"` or `"unit"`.
+        global_phase: Default `"physical"`. `"physical"`, which compares
+            phases as they are, or `"modulo_global_phase"`, which treats
+            vectors that differ by one global phase factor as equal.
+    """
 
     kind: Literal["state_vector"] = "state_vector"
     normalization: Literal["physical", "unit"] = "unit"
@@ -738,7 +1172,9 @@ class StateVector(OutputRecord):
 class OptimizationCandidate(OutputRecord):
     """A candidate point of the box and its objective value, with the objective gap as error.
 
-    The objective gap is the candidate's objective value minus a reference
+    It is the default output of `Optimization` and `ConstrainedOptimization`.
+    Pass `OptimizationCandidate()` as `output=` to request it explicitly. The
+    objective gap is the candidate's objective value minus a reference
     minimum in objective units, for example the grid minimum that an
     explicit QHD check evaluates. A candidate is not an optimality
     certificate.
@@ -752,20 +1188,34 @@ class OptimizationCandidate(OutputRecord):
 
 
 class Accuracy(_ScientificModel):
-    """Requested accuracy of one component, without a second quantity definition.
+    """A requested accuracy: one tolerance, a confidence and the error component it applies to.
 
-    Exactly one positive tolerance is required. At planning, only a Method
-    that defines ``sampling_shots`` consumes an Accuracy, and
-    ``ExpectationMethod`` accepts only an absolute sampling tolerance for
-    finite Pauli raw counts. ``ErrorModel.assess`` also uses an Accuracy as a
-    criterion for the total or sampling component. A total or relative
-    target is not silently interpreted as that narrower request.
+    Build it with keyword arguments, for example
+    `Accuracy(absolute_tolerance=0.01, component="sampling")`. Exactly one of
+    `absolute_tolerance` and `relative_tolerance` is required. The quantity
+    and unit it refers to come from the output. Pass it as `accuracy=` to
+    [`plan`][nwqlib.scientist.plan], [`solve`][nwqlib.scientist.solve] or
+    [`compare`][nwqlib.scientist.compare], where only a Method that defines
+    `sampling_shots` uses it, to choose the shots. `ExpectationMethod`
+    accepts only an absolute tolerance on the sampling component for
+    finite Pauli counts. Pass it to `Result.assess(accuracy=...)` to check a
+    Result against it, for the total or the sampling component. An Accuracy
+    states a request and records no achieved accuracy. A total or relative
+    target is not silently interpreted as the narrower sampling request.
 
     Attributes:
-        absolute_tolerance: Positive bound on the error in the output's error-frame unit, or None.
-        relative_tolerance: Positive bound on the error divided by the target magnitude, or None.
-        confidence: Required probability, strictly between 0 and 1, that the bound holds.
-        component: ``total`` for the whole output error, or ``sampling`` for the sampling contribution only.
+        absolute_tolerance: Default `None`. Positive bound on the error, in
+            the unit of the output.
+        relative_tolerance: Default `None`. Positive bound on the error
+            divided by the magnitude of the target.
+        confidence: Default `0.95`. Probability, strictly between 0 and 1,
+            with which the bound must hold.
+        component: Default `"total"`. `"total"` for the whole error of the
+            output, or `"sampling"` for the sampling error only.
+
+    Raises:
+        ValueError: If both or neither tolerance is given, or a value is out
+            of its range.
     """
 
     absolute_tolerance: Annotated[Real, Field(gt=0)] | None = None

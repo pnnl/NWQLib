@@ -1,8 +1,11 @@
 """Circuit-level MPS state preparation via layered disentangling.
 
 This backend constructs a Qiskit circuit without calling Qiskit's dense
-``StatePreparation`` synthesis. The NumPy TT-SVD compression analysis is in
-:mod:`nwqlib.subroutines.state_preparation.mps`.
+``StatePreparation`` synthesis. The NumPy TT-SVD and its compression
+analysis are
+[`decompose_state_to_mps`][nwqlib.subroutines.state_preparation.mps.decompose_state_to_mps]
+and
+[`analyze_mps_state_compression`][nwqlib.subroutines.state_preparation.mps.analyze_mps_state_compression].
 
 The layered disentangling scheme implemented here (truncate to bond
 dimension 2, extract a layer of local unitaries, repeat on the residual
@@ -39,8 +42,8 @@ def _require_scikit_tt() -> tuple[Any, Any]:
     except ImportError as exc:
         raise ImportError(
             "lcu_state_preparation='mps_circuit' requires the optional tensor "
-            "dependencies. Install them with `pip install -e '.[tensor]'` or "
-            "`pip install 'nwqlib[tensor]'`."
+            "dependency scikit_tt, which is not on PyPI. Install it with "
+            "`python -m pip install 'scikit_tt @ git+https://github.com/PGelss/scikit_tt.git'`."
         ) from exc
     return tt, TT
 
@@ -143,8 +146,8 @@ def mps_to_circuit(mps: Any, *, num_layers: int = 1) -> QuantumCircuit:
     Each new layer is composed at the front, so the finished circuit applies
     the last extracted layer first and the first extracted layer last.
 
-    Each two-qubit unitary becomes ``_dense_synthesis.dense_unitary_circuit``,
-    exact to rounding with at most three CX, so the synthesis adds only
+    Each two-qubit unitary is synthesized exactly to rounding with at most
+    three CX, so the synthesis adds only
     rounding to the error of the layered construction. Qiskit's
     ``TwoQubitBasisDecomposer`` replaces a unitary by a class with fewer CX
     whenever the average gate fidelity between them is at least
@@ -154,8 +157,9 @@ def mps_to_circuit(mps: Any, *, num_layers: int = 1) -> QuantumCircuit:
     those CX.
 
     Args:
-        mps: ``scikit_tt.TT`` object with cores of shape ``(a, 2, 1, b)``.
-        num_layers: Number of disentangling layers.
+        mps (scikit_tt.TT): Right-canonical tensor train with cores of shape
+            `(a, 2, 1, b)`.
+        num_layers (int): Default `1`. Number of disentangling layers.
 
     Returns:
         QuantumCircuit that approximates the MPS state from ``|0...0>``.
@@ -262,21 +266,29 @@ def mps_to_circuit(mps: Any, *, num_layers: int = 1) -> QuantumCircuit:
 
 @dataclass(frozen=True, kw_only=True)
 class MPSCircuitStatePreparation:
-    """Real MPS circuit-level state preparation and metadata.
+    """A layered MPS state-preparation circuit with its compression data and optional evaluated fidelity.
+
+    [`build_mps_circuit_state_preparation`][nwqlib.subroutines.state_preparation.mps_circuit.build_mps_circuit_state_preparation]
+    returns it with the fidelity fields unset, and
+    [`validate_mps_circuit_state_preparation`][nwqlib.subroutines.state_preparation.mps_circuit.validate_mps_circuit_state_preparation]
+    returns a copy with them evaluated. The circuit is `circuit`. It stores
+    the decomposition and the normalized target used by the validator, and
+    no compression-analysis object or other reconstructed vector. The
+    fields below are read-only.
 
     Attributes:
-        circuit: Actual MPS disentangling state-preparation circuit.
+        circuit: The layered MPS disentangling state-preparation circuit.
         decomposition: Compressed target tensor used by circuit construction.
         target_state: Normalized target input in the original flattened basis order.
         prepared_state: Explicitly evaluated circuit output, or None when no circuit simulation was requested.
         input_norm: Original input magnitude removed before normalized preparation.
         fidelity_to_target: Evaluated circuit fidelity to target, or None if not evaluated.
         preparation_l2_error: Evaluated phase-sensitive circuit-to-target distance ``||prepared - target||``, or None if unavailable.
-        num_layers: Number of selected disentangling circuit layers.
+        num_layers: Number of disentangling circuit layers.
         max_bond_dim: Optional requested compression rank cap.
         threshold: Individual singular-value truncation threshold used by compression.
-        circuit_fidelity_status: evaluated or not_evaluated for actual circuit fidelity; compression estimates do not fill it.
-        method: Name of the selected circuit preparation construction.
+        circuit_fidelity_status: `"evaluated"` or `"not_evaluated"` for the circuit fidelity. Compression estimates do not fill it.
+        method: Name of the construction, `"mps_disentangling_circuit"`.
     """
 
     circuit: QuantumCircuit
@@ -326,29 +338,57 @@ def build_mps_circuit_state_preparation(
     max_bytes: int = DEFAULT_MAX_BYTES,
     max_svd_work: int = mps_module.DEFAULT_MAX_SVD_WORK,
 ) -> MPSCircuitStatePreparation:
-    """Build a circuit-level MPS state-preparation circuit.
+    """Build a layered MPS circuit that approximately prepares a state vector from `|0...0>`.
+
+    The vector is compressed by one TT-SVD sweep, as in
+    `decompose_state_to_mps`, and `mps_to_circuit` builds the layered
+    disentangling circuit (Ran, arXiv:1908.07958v2, Sec. III). The circuit
+    is not simulated, so its fidelity is not evaluated.
 
     Args:
-        vector: State amplitudes to prepare.
-        max_bond_dim: Optional TT-SVD maximum bond dimension.
-        threshold: Singular-value pruning threshold for the core decomposition.
-        num_layers: Number of MPS disentangling layers.
-        register_name: Name for the prepared quantum register.
-        max_bytes: Known input and TT-SVD array allowance, not process RSS.
-            The layered construction (``mps.layered_construction_size``) and
-            the exact syntheses of the two-qubit unitaries are checked against
-            it separately, before either starts.
-        max_svd_work: Prospective whole-sweep dense-SVD work limit. The
-            layered construction's scikit_tt sweeps and products
-            (``mps.layered_construction_size``) and the at most
-            ``num_layers * (n - 1)`` exact syntheses of two-qubit unitaries
-            (``_dense_synthesis.dense_synthesis_size``) are checked against it
-            separately, before either starts.
+        vector (array_like): State amplitudes to prepare.
+        max_bond_dim (int | None): Default `None` (no cap). TT-SVD maximum
+            bond dimension.
+        threshold (float): Default `1e-14`. Singular-value pruning threshold
+            for the core decomposition.
+        num_layers (int): Default `2`. Number of MPS disentangling layers.
+        register_name (str): Default `"system"`. Name for the prepared
+            quantum register.
+        max_bytes (int): Default 10 GB (decimal, `10_000_000_000` bytes).
+            Limit on the known input and TT-SVD arrays. It does not measure
+            process memory. The layered construction
+            ([layered construction law](../../ENGINEERING_CONSTANTS.md#layered-mps-construction-law))
+            and the exact syntheses of the two-qubit unitaries are checked
+            against it separately, before either starts.
+        max_svd_work (int): Default `100_000_000`. Limit on the whole-sweep
+            dense-SVD work. The layered construction's scikit_tt sweeps and
+            products and the at most `num_layers * (n - 1)` exact syntheses
+            of two-qubit unitaries are checked against it separately, before
+            either starts.
 
     Returns:
-        MPSCircuitStatePreparation with the MPS circuit, compression metadata,
-        and unevaluated empirical circuit diagnostics. The TT-SVD discarded
-        weight describes core compression, not the finite-layer circuit error.
+        preparation (MPSCircuitStatePreparation): The circuit with its
+            compression data, and unevaluated circuit diagnostics. The
+            TT-SVD discarded weight describes core compression, not the
+            finite-layer circuit error.
+
+    Examples:
+        The 3-qubit GHZ state has bond dimension 2, and the validated
+        circuit prepares it with fidelity 1. The layered construction needs
+        `scikit_tt`, which is installed separately from NWQLib's extras:
+
+        >>> import numpy as np
+        >>> from nwqlib.subroutines.state_preparation import (
+        ...     build_mps_circuit_state_preparation,
+        ...     validate_mps_circuit_state_preparation)
+        >>> ghz = np.zeros(8)
+        >>> ghz[[0, 7]] = 1
+        >>> preparation = build_mps_circuit_state_preparation(ghz)
+        >>> print(preparation.decomposition.bond_dimensions)
+        (1, 2, 2, 1)
+        >>> checked = validate_mps_circuit_state_preparation(preparation)
+        >>> print(round(checked.fidelity_to_target, 10))
+        1.0
     """
 
     if num_layers < 1:
@@ -418,11 +458,22 @@ def build_mps_circuit_state_preparation(
 def validate_mps_circuit_state_preparation(
     preparation: MPSCircuitStatePreparation,
 ) -> MPSCircuitStatePreparation:
-    """Simulate one completed MPS circuit for explicit small-instance validation.
+    """Simulate a built MPS circuit once and return a copy with its fidelity to the target.
 
-    This helper performs one exponentially scaling statevector simulation and
-    returns a copy of ``preparation`` enriched with empirical circuit fidelity
-    and phase-sensitive L2 error.
+    This helper performs one statevector simulation, whose cost grows
+    exponentially with the qubit count, for small-instance validation. It
+    compares the circuit output with the stored normalized target and
+    returns a copy of `preparation` with `prepared_state`,
+    `fidelity_to_target`, the phase-sensitive `preparation_l2_error` and
+    `circuit_fidelity_status="evaluated"`.
+
+    Args:
+        preparation (MPSCircuitStatePreparation): Output of
+            `build_mps_circuit_state_preparation`.
+
+    Returns:
+        checked (MPSCircuitStatePreparation): The copy with the evaluated
+            fields.
     """
 
     prepared_state = np.asarray(

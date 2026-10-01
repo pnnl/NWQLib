@@ -10,8 +10,9 @@ Plan identity, the receipts against the selected construction, the Result's
 own ``validate_plan`` and the ``validate_data`` hook that an extension Result
 may define. Neither repeats the save-time joins
 of observations to their receipts and attempts, because saved folders are
-treated as read-only (docs/run_archives.md). They never acquire, lower,
-decompose, solve or run a reference, so reading a Result decodes what was saved
+treated as read-only (docs/saved_evidence.md, "Saved folders are read-only").
+They never acquire, lower, decompose, solve or run a reference, so reading a
+Result decodes what was saved
 and computes nothing new.
 
 Published arrays load as read-only memory maps. Their headers (shape, dtype,

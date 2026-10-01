@@ -47,7 +47,29 @@ def parse_xacc(text: str, *, num_modes: int, coefficient_cutoff: float = 0.0) ->
     Electron count, spin ordering, and reference occupations are separate
     caller metadata: none can be inferred from this syntax.
 
-    Raises ValueError with a line number for malformed or nonfinite input.
+    Args:
+        text (str): XACC text.
+        num_modes (int): Positive number of modes, which is the output
+            width. Every written mode index must be smaller.
+        coefficient_cutoff (float): Default `0.0`. Nonnegative absolute
+            cutoff on the final Pauli coefficients.
+
+    Returns:
+        hamiltonian (SparsePauliOp): The Jordan-Wigner image on `num_modes`
+            qubits, including its complete identity term.
+
+    Raises:
+        TypeError: If `num_modes` is omitted or `text` is not a string.
+        ValueError: With a line number, for malformed or nonfinite input,
+            an invalid `num_modes` or a mode index outside it.
+
+    Examples:
+        `2 a_0^dagger a_0 - 3 I` maps to `-2 I - Z`, because
+        `a_0^dagger a_0 = (I - Z)/2`:
+
+        >>> from nwqlib.subroutines.xacc import parse_xacc
+        >>> parse_xacc("(2,0)0^ 0 +\\n(-3,0)", num_modes=1).to_list()
+        [('I', (-2+0j)), ('Z', (-1+0j))]
     """
     if not isinstance(text, str):
         raise TypeError("text must be a string")
@@ -55,7 +77,7 @@ def parse_xacc(text: str, *, num_modes: int, coefficient_cutoff: float = 0.0) ->
 
 
 def read_xacc(path: str | PathLike[str], *, num_modes: int, coefficient_cutoff: float = 0.0) -> SparsePauliOp:
-    """Read UTF-8 XACC from a path; see :func:`parse_xacc` for its contract.
+    """Read a UTF-8 XACC file and map it to a qubit Hamiltonian, as [`parse_xacc`][nwqlib.subroutines.xacc.parse_xacc] does for text.
 
     Lines stream into coefficient buckets for stable normal-order summation,
     then the coalesced polynomial is JW mapped with stable Pauli summation.

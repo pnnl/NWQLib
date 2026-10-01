@@ -81,14 +81,26 @@ _ASSESSMENT_SOURCE = Source(
 
 
 class AssessmentDetail(Record):
-    """One scoped conclusion; evidence and values remain separate from its status.
+    """One scoped conclusion of a device forecast, with the value and limit it compares.
 
-    resource_id points to the actual folded ResourceQuantity where applicable.
-    limit is the unmodified matching core.Limit, never a converted approval score.
-    evidence_ids keep the exact input declarations/receipts used by this item.
-    prediction_ids identify the actual time predictions summarized by this item.
-    statement keeps the planner's complete framed predicate; fact keeps a
-    scoped resource scalar. They are distinct quantities, never alternate formats.
+    Read it from `AxisAssessment.details`. The fields below are read-only. A
+    detail holds either a resource value (`fact`) or a method statement
+    (`statement`), never both, because they are different quantities.
+
+    Attributes:
+        quantity: The quantity compared, such as a memory peak.
+        scope: Where the quantity applies, such as one granted location.
+        status: `"feasible"`, `"infeasible"`, `"conditional"` or `"unknown"`.
+        reason: Why the detail has its status.
+        fact: The resource value compared, or `None`.
+        resource_id: Content hash of the resource quantity in the estimate, or
+            `None`.
+        prediction_ids: Content hashes of the time predictions this detail
+            summarizes.
+        limit: The supplied `Limit` it was compared with, unchanged, or `None`.
+        evidence_ids: Content hashes of the declarations and records used.
+        assumptions: Assumptions the conclusion rests on.
+        statement: The method's complete stated assumption or claim, or `None`.
     """
 
     quantity: Text
@@ -112,10 +124,22 @@ class AssessmentDetail(Record):
 
 
 class AxisAssessment(Record):
-    """Independent axis with all scoped facts kept, including partial knowledge.
+    """One axis of a device forecast: its status and every fact behind it.
 
-    A known failure wins only within this axis. Otherwise conditions, unknowns
-    and complete scoped support have that priority, without affecting other axes.
+    Read it from the `applicability`, `capability`, `capacity`, `time` and
+    `accuracy` fields of a
+    [`ProfileAssessment`][nwqlib.backends.assessment.ProfileAssessment]. The fields
+    below are read-only. The status summarizes the details of this axis only. A
+    known failure (`"infeasible"`) decides the axis. Otherwise any
+    `"conditional"` detail makes it conditional, then any `"unknown"` detail
+    makes it unknown, and it is `"feasible"` only when every detail is.
+
+    Attributes:
+        axis: `"scientific_applicability"`, `"execution_capability"`,
+            `"capacity_materialization"`, `"time_cost"` or `"accuracy_evidence"`.
+        status: `"feasible"`, `"infeasible"`, `"conditional"` or `"unknown"`.
+        details: The [`AssessmentDetail`][nwqlib.backends.assessment.AssessmentDetail]
+            records, partial knowledge included.
     """
 
     axis: Axis
@@ -131,13 +155,29 @@ class AxisAssessment(Record):
 
 
 class TimePrediction(Record):
-    """Named model evaluation, with original uncertainty meaning and feature facts.
+    """The prediction of one time model for one point, in seconds, with its interval and the feature counts it used.
 
-    seconds is a prediction of scope, not observed elapsed time or an execution
-    permission. The optional interval keeps its kind/coverage; a mean confidence
-    interval never becomes a future-run bound. Missing inputs leave seconds None.
-    point_id binds the exact AssessmentPoint; unavailable predictions have no
-    uncertainty/coverage, while their evidence still identifies the source model.
+    Read it from `ProfileAssessment.predictions`. The fields below are read-only.
+    The answer is `seconds.value`, a prediction for the model's `scope`, not an
+    observed elapsed time and not permission to run. When an input is missing,
+    `seconds` is `None` and `reasons` says why. An interval keeps the kind and
+    coverage of the model's uncertainty, so a confidence interval for a mean
+    never becomes a bound on a single run.
+
+    Attributes:
+        model_id: Content hash of the time model.
+        point_id: Content hash of the assessed point.
+        form: `"acquisition_linear/1"`.
+        scope: The model's time scope, copied from the model.
+        seconds: Nonnegative predicted seconds, or `None` when unavailable.
+        unit: Seconds.
+        lower_seconds: Lower end of the interval, at least zero, or `None`.
+        upper_seconds: Upper end of the interval, or `None`.
+        uncertainty: The model's `ModelUncertainty`, or `None`.
+        features: The feature counts the prediction used.
+        evidence: Evidence that names the model's source.
+        reasons: Why the prediction is unavailable. Empty when it is available.
+        assumptions: Assumptions the prediction rests on.
     """
 
     model_id: ContentID
@@ -1603,11 +1643,43 @@ def _accuracy_detail_fields(error, frame):
 
 
 class ProfileAssessment(Record):
-    """Five independent axes for one actual selected point and supplied profile.
+    """The forecast of one resolved Plan point on a device profile: five independent axes and the time predictions.
 
-    The resource fold, model predictions and optional accuracy assessment share
-    that point. Missing accuracy criteria do not manufacture a ClaimAssessment.
-    No conclusion grants permission, configures a backend or modifies science.
+    [`assess`][nwqlib.backends.assessment.assess] returns it, and
+    [`PlanEstimate.assessments`][nwqlib.backends.assessment.PlanEstimate] holds
+    one per point. The fields below are read-only. Each axis is an
+    [`AxisAssessment`][nwqlib.backends.assessment.AxisAssessment] whose `status`
+    summarizes its own details only, so a memory failure cannot hide a supported
+    error bound. No conclusion grants permission to run, configures a backend or
+    changes the computation. An excessive sufficient error bound stays
+    `INCONCLUSIVE` in `error` rather than proving that the actual error is too
+    large.
+
+    Attributes:
+        point: Content hashes of the inputs: problem, Plan, point, base and
+            selected construction, resource estimate and context, profile,
+            allocation, expected runtime and compiler sources, known runtime seed,
+            and the assessment time.
+        realization: The resolved point, with its parameter bindings.
+        resources: Resource estimate of this point. Capability, capacity and time
+            read the same counts.
+        applicability: Whether a stated assumption of the method holds for this
+            problem. The built-in Methods record no such statement, so this axis
+            is unknown, or conditional when the Plan lists assumptions or
+            requirements.
+        capability: Whether the target supports the point's circuit form, Program
+            nodes, readout, instructions, host kernel and control or adjoint use.
+        capacity: Whether each granted location holds the point's simultaneous
+            memory and storage peaks and its known lower requirements.
+        time: The time-model predictions and the matching time limits.
+        accuracy: The Plan's error-model assessment of `criterion`.
+        criterion: The [`Accuracy`][nwqlib.problems.records.Accuracy] criterion
+            assessed, or `None`.
+        error: The complete `ClaimAssessment` of `criterion`, or `None` without a
+            criterion or error model. Before execution it names no observation or
+            result.
+        predictions: One [`TimePrediction`][nwqlib.backends.assessment.TimePrediction]
+            per time model of the profile, in the profile's order.
     """
 
     point: AssessmentPoint
@@ -1763,14 +1835,57 @@ def assess(
     reference: TargetReference | None = None,
     max_assessments=4096,
 ) -> ProfileAssessment:
-    """Assess one existing selected point using supplied models and scoped facts.
+    """Forecast one resolved point of a Plan on a device profile and allocation, without running anything.
 
-    A new invocation records UTC now unless assessed_at is explicitly supplied.
-    Runtime seeds are not guessed: absent runtime excludes only seed-specific
-    models. No pilot, profile refresh, native build or scientific replay runs.
-    The accuracy criterion defaults to the Plan's selection accuracy. Assessing
-    another criterion changes only this assessment, never the Plan's shots or
-    selection.
+    `nwqlib.estimate(plan, profile=..., allocation=...)` assesses every point of
+    the Plan whose parameters are fixed. Call `assess` for one point, for
+    example the point that `plan.resolve(experiment_name)` returns. The result
+    reports five independent axes: applicability, capability, capacity, time and
+    accuracy. Each axis has the status `"feasible"`, `"infeasible"`,
+    `"conditional"` or `"unknown"`, and a failure on one axis, such as memory,
+    does not hide what another supports, such as an error bound. Time
+    predictions rest on the supplied coefficients, so none is an execution
+    guarantee. No pilot run, profile refresh, circuit compilation or replay of the
+    computation takes place. The [profiles guide](../profiles.md) defines the axes, and
+    [Forecast cost and feasibility](backends.md#forecast-cost-and-feasibility) assesses a
+    one-qubit Plan.
+
+    Args:
+        plan (Plan): The Plan whose point is assessed.
+        realization (Realization): One resolved point of `plan`, such as
+            `plan.resolve(experiment_name)`.
+        profile (DeviceProfile): The device profile.
+        allocation (Allocation): The resources granted to the workload.
+        context (ResourceContext | None): Resource-counting context, such as the
+            gate basis. `None` uses `ResourceContext()`.
+        runtime (RuntimeOptions | None): Backend seed of an already known
+            preparation. With `None`, only seed-independent models apply. Seeds are
+            never guessed.
+        assessed_at (datetime | None): Time zone-aware assessment time, against
+            which the validity of the profile, allocation and models is checked.
+            `None` records the current UTC time once.
+        accuracy (Accuracy | None): Accuracy criterion to assess. `None` uses the
+            Plan's `selection_accuracy`, and with neither the accuracy axis is
+            unknown. Another criterion changes only this assessment, never the
+            Plan's shots or selection.
+        facts (tuple[FramedFact, ...]): Supplied error facts, passed unchanged to
+            the Plan's error model. A fact for one point cannot cover another.
+        reference (TargetReference | None): Supplied reference value, passed
+            unchanged to the Plan's error model.
+        max_assessments (int): Positive limit on assessment and
+            prediction rows, here one plus the number of time models, checked
+            before any model is evaluated.
+
+    Returns:
+        assessment (ProfileAssessment): The forecast.
+            Its `predictions` hold the time forecasts in seconds, its `capacity` the
+            memory comparison and its `error` the complete accuracy assessment.
+
+    Raises:
+        TypeError: If `profile` is not a `DeviceProfile` or `accuracy` is not an
+            `Accuracy`.
+        ValueError: If the rows exceed `max_assessments`, or the stored records
+            do not match the Plan, profile and allocation.
     """
     return _assess(plan, realization, profile=profile, allocation=allocation, context=context,
                    runtime=runtime, assessed_at=assessed_at, accuracy=accuracy, facts=facts,
@@ -1838,7 +1953,32 @@ def _assess(plan, realization, *, profile, allocation, context, runtime, assesse
 
 
 class PlanEstimate(Record):
-    """Whole selected resource fold and forecasts for its actual resolved points."""
+    """The resource estimate of a whole Plan with the device forecasts of its resolved points.
+
+    `nwqlib.estimate(plan, profile=profile, allocation=allocation)` returns it.
+    Without a profile and allocation, `estimate` returns the
+    [`WorkloadEstimate`](resources.md) alone. The
+    fields below are read-only. All assessments share one assessment time.
+    Points that an adaptive method has not chosen yet, and points along a range
+    axis that is not expanded, are listed in `unpredicted` instead of being
+    guessed. When a Run is prepared with this estimate, each submission looks up
+    the forecast of its own point, and later timings can be compared with it by
+    [`align_telemetry`][nwqlib.backends.telemetry.align_telemetry].
+
+    Attributes:
+        plan_id: Content hash of the Plan.
+        resources: Resource estimate of the whole Plan, independent of any
+            profile.
+        assessments: One
+            [`ProfileAssessment`][nwqlib.backends.assessment.ProfileAssessment]
+            per resolved point.
+        profile: The [`DeviceProfile`][nwqlib.backends.profiles.DeviceProfile],
+            or `None` when only an allocation was supplied.
+        allocation: The [`Allocation`][nwqlib.backends.profiles.Allocation], or
+            `None`.
+        assessed_at: The assessment time, in UTC.
+        unpredicted: Why each point without a forecast has none.
+    """
 
     plan_id: ContentID
     resources: WorkloadEstimate
@@ -1896,12 +2036,22 @@ class PlanEstimate(Record):
         return self
 
     def assessment_for(self, plan, receipt):
-        """Find an existing exact-point forecast without evaluating or rebinding it.
+        """Return the stored forecast of a prepared circuit's point, or None, without evaluating anything.
 
-        The Plan-level checks (``validate_plan``) run once for this estimate,
-        which has one Plan identity, and each Realization's readout is
-        resolved once; each receipt then compares only its own fields
-        (``ProfileAssessment.validate_prepared``).
+        The forecast is checked against the Plan once per estimate, and against the
+        preparation record each time.
+
+        Args:
+            plan (Plan): The Plan this estimate belongs to.
+            receipt (PreparedArtifact): The preparation record of one prepared circuit.
+
+        Returns:
+            assessment (ProfileAssessment | None): The forecast of that circuit's point, or `None`
+                when the estimate has no forecast for it.
+
+        Raises:
+            ValueError: If the estimate belongs to another Plan, or the forecast does
+                not match the preparation record.
         """
         if (
             self.plan_id != plan.content_id

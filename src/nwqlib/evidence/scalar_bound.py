@@ -14,19 +14,29 @@ from .error_model import FramedFact, predicate_frame, scalar
 
 @dataclass(frozen=True)
 class ScalarBoundResult:
-    """A sufficient integer for the supplied model, with its original premises.
+    """What [`resolve_scalar_bound`][nwqlib.evidence.scalar_bound.resolve_scalar_bound] returns: a sufficient integer for the supplied error model, with its conditions and assumptions.
 
-    covered_bound is a rational upper bound, not an exact irrational value or
-    a total-accuracy certificate. declared_work is the supplied linear model.
+    The answer is `integer`. `covered_bound` is a rational upper bound on
+    the modeled error, not its exact value and not a total-accuracy
+    certificate. The fields below are read-only.
 
     Attributes:
-        integer: Chosen sufficient positive integer within the supplied finite domain, or None if unavailable.
-        status: resolved, conditional, unresolved, inapplicable or infeasible bound/premise outcome; not an execution status.
-        reason: Explanation of the choice or why no sufficient choice was established.
-        covered_bound: Rational upper bound in the original supplied error metric; None when unavailable.
-        conditions: Original framed predicates on which the bound depends.
-        assumptions: Explicit retained premises, including unverified ones.
-        declared_work: Supplied linear work model evaluated at the choice; None when no model/choice exists.
+        integer: The smallest sufficient positive integer n in the supplied
+            domain, the checked `fixed` value, or `None` when none is
+            established.
+        status: Outcome of the bound and its conditions, not of an execution:
+            `"resolved"`, `"conditional"` (it rests on assumptions or
+            unspecified conditions), `"unresolved"` (a quantity or condition is
+            unknown), `"inapplicable"` (a condition is false or does not
+            apply) or `"infeasible"` (no permitted n meets the tolerance).
+        reason: Explanation of the choice, or why no sufficient choice was
+            established.
+        covered_bound: Rational upper bound on `e(n)` in the supplied error
+            metric, or `None` without a choice.
+        conditions: The supplied conditions the bound depends on.
+        assumptions: Every stated assumption, including unverified ones.
+        declared_work: The supplied linear work model at the chosen n, or
+            `None` without a model or a choice.
     """
 
     integer: int | None
@@ -38,6 +48,7 @@ class ScalarBoundResult:
     declared_work: Fraction | None = None
 
     def to_dict(self):
+        """Return the fields as a JSON-ready dictionary, with rationals as numerator and denominator."""
         def ratio(value):
             return None if value is None else dict(numerator=value.numerator, denominator=value.denominator)
         return dict(integer=self.integer, status=self.status, reason=self.reason,
@@ -60,35 +71,55 @@ def resolve_scalar_bound(
     work_per_unit: int | float | Fraction | Rational | Float64 | None = None,
     max_integer_bits: int = DEFAULT_MAX_INTEGER_BITS,
 ) -> ScalarBoundResult:
-    """Invert c/n or c/sqrt(n) on an explicit finite positive integer domain.
+    """Find the smallest integer n with `e_0 + c/n <= epsilon` (or `c/sqrt(n)`) in a finite range.
 
-    All supplied error quantities must share an absolute metric, unit and scope;
-    framed facts check that relation, plain numbers explicitly assume it. Unknown
-    quantities do not become zero. False premises prevent a choice; unspecified
-    premises remain conditional. This operation never selects a method parameter.
+    The supplied model is `e(n) = e_0 + c/n` or `e(n) = e_0 + c/sqrt(n)`.
+    For `epsilon > e_0` and `c > 0`, `e(n) <= epsilon` holds exactly when
+    `n >= c/(epsilon - e_0)` for `c/n` and when `n >= (c/(epsilon - e_0))**2`
+    for `c/sqrt(n)`, so the smallest permitted integer is an exact rational
+    ceiling, with no search over n. For example, with `e_0 = 1/8`,
+    `epsilon = 3/8` and `c = 1`, the answer is 4 for `c/n` and 16 for
+    `c/sqrt(n)`.
 
-    The supplied model is ``e(n) = e_0 + c/n`` or ``e(n) = e_0 + c/sqrt(n)``.
-    For ``epsilon > e_0`` and ``c > 0``, ``e(n) <= epsilon`` holds exactly
-    when ``n >= c/(epsilon - e_0)`` for ``c/n`` and when
-    ``n >= (c/(epsilon - e_0))**2`` for ``c/sqrt(n)``, so the smallest
-    admissible integer is an exact rational ceiling, with no search over n.
+    All error quantities must share an absolute metric, unit and scope.
+    `FramedFact` inputs are checked for that, and plain numbers assume it.
+    Unknown quantities do not become zero. A false condition prevents a
+    choice, and an unspecified condition makes the result conditional. The
+    supplied bounds
+    need not cover every error of a method, so the result is not a
+    total-accuracy claim. It also sets no Method parameter. Use the answer
+    in a new Method configuration yourself when the model describes that
+    parameter.
 
     Args:
-        coefficient: c, a nonnegative number or FramedFact.
-        tolerance: epsilon, the allowed error, a nonnegative number or FramedFact.
-        maximum: Largest permitted n.
-        minimum: Smallest permitted n.
-        fixed_error: e_0, the n-independent part of the error, a nonnegative number or FramedFact.
-        decay: ``inverse`` for c/n or ``inverse_sqrt`` for c/sqrt(n).
-        fixed: An n to check instead of choosing the smallest one, or None.
-        conditions: Premises of the model, as framed boolean predicates, booleans or None for unspecified.
-        assumptions: Further premises stated as text.
-        work_per_unit: Optional declared work per unit of n, multiplied by the chosen n.
-        max_integer_bits: Integer bit limit of the exact arithmetic.
+        coefficient (number | FramedFact): c, nonnegative.
+        tolerance (number | FramedFact): epsilon, the allowed error,
+            nonnegative.
+        maximum (int): Largest permitted n, positive.
+        minimum (int): Smallest permitted n, positive. Default 1.
+        fixed_error (number | FramedFact): e_0, the part of the error that
+            does not depend on n, nonnegative. Default 0.
+        decay (str): `"inverse"` for `c/n`, the default, or `"inverse_sqrt"`
+            for `c/sqrt(n)`.
+        fixed (int | None): An n to check instead of choosing the smallest
+            one.
+        conditions (Iterable): Conditions of the model, as framed boolean
+            predicates, booleans, or `None` for an unspecified condition.
+        assumptions (Iterable[str]): Further assumptions stated as text.
+        work_per_unit (number | None): Declared work per unit of n,
+            multiplied by the chosen n.
+        max_integer_bits (int): Bit limit of the exact arithmetic. Default
+            4096.
 
     Returns:
-        A ScalarBoundResult with the chosen n, its status, a rational upper
-            bound on e(n) and the premises it depends on.
+        bound (ScalarBoundResult): The chosen n, its status, a rational upper
+            bound on `e(n)` and the conditions and assumptions it depends on.
+
+    Raises:
+        ValueError: If `minimum`, `maximum` or `fixed` is not a positive
+            integer in order, `decay` is another value, a quantity is
+            negative, the framed quantities disagree in frame or parameter
+            point, or a condition is not a boolean predicate.
     """
     arithmetic = ExactArithmetic(max_integer_bits=max_integer_bits)
     for name, value in (("minimum", minimum), ("maximum", maximum), ("fixed", fixed)):

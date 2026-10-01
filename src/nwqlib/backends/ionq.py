@@ -84,26 +84,52 @@ def ionq_decode_bytes(outcomes, qubits, width):
 
 
 class IonQBackend(Record):
-    """Explicit IonQ device, gate units, mitigation and wrapper I/O limits.
+    """IonQ connection for raw sampled counts on an IonQ QPU, through the v0.4 REST API.
 
-    device names the v0.4 backend. gateset selects QIS radians or native turns.
-    debiasing must be False. A debiased job returns separate variant
-    populations, and the v0.4 job schema does not define the direction of their
-    qubit map, so they cannot be decoded as one count population.
-    token_env is read only on an explicit service operation; no key is stored.
-    max_input_bytes bounds optional QPY and serialized request bytes.
-    max_response_bytes bounds stored HTTP response bytes, not internal network
-    buffers, provider work, billing or process RSS. request_timeout_seconds is
-    the requests connect/read timeout, not a total request deadline.
-    The Run bounds decoded data and stored observations.
-    optimization_level is the Qiskit transpiler level of the QIS lowering;
-    the native gateset is converted without Qiskit lowering and accepts only
-    the default 0. The target has no derived roundoff constant, so
-    state_error() gives no bound at any level. A level other than 0 is recorded
-    as the receipt exclusion "optimization_level", which marks a circuit
-    compiled at a non-default level, and its operation count describes the
-    compiled circuit. Levels 2 and 3 resynthesize two-qubit blocks with Qiskit's own
-    synthesis and receive the logical circuit as given.
+    Build it with keyword arguments, for example
+    `IonQBackend(device="qpu.forte-1", max_input_bytes=1_000_000, max_response_bytes=1_000_000)`,
+    and pass it as `backend=` to [`prepare`][nwqlib.scientist.prepare].
+    `device`, `max_input_bytes` and `max_response_bytes` are required. It needs
+    the `ionq` extra. Construction imports no SDK and contacts no service. The API
+    key is read from the environment variable named by `token_env` only when a job
+    is submitted or retrieved, and it is never stored.
+
+    Each operation is one HTTP request, so no SDK retry can create a second job.
+    IonQ's v0.4 API offers no qualified way to find a job by name, so a lost
+    submission acknowledgement leaves the outcome uncertain, and `Run.wait` raises
+    `RunFailed` without submitting a replacement. Only raw histograms are read, because
+    IonQ's probability results are not counts of shots. The Run bounds decoded
+    data and stored observations. Only offline SDK and API checks qualify this
+    backend, and live QPU behavior is unqualified. The [IonQ guide](../ionq.md)
+    gives the API sources, batch limits and histogram decoding.
+
+    Attributes:
+        device: Required. A v0.4 QPU name starting with `qpu.`. The ideal
+            simulator is rejected because it ignores the requested shots.
+        gateset: Default `"qis"`. `"qis"` translates circuits with Qiskit to Rx, Ry,
+            Rz and CX, with angles in radians. `"native"` passes IonQ native gates
+            unchanged, with angles in turns.
+        debiasing: Default `False`, the only supported value. A debiased job
+            returns separate variant populations whose qubit-map direction the v0.4
+            job schema does not define, so they cannot be read as one set of
+            counts.
+        token_env: Default `"NWQLIB_IONQ_API_KEY"`. Environment variable that holds
+            the API key.
+        max_input_bytes: Required. Positive. Limit in bytes on the serialized
+            request and the optional QPY copy of each prepared circuit.
+        max_response_bytes: Required. Positive. Limit in bytes on each HTTP
+            response body that NWQLib reads. It does not bound network buffers,
+            provider work, billing or process memory.
+        request_timeout_seconds: Default `30.0`. Positive. Connect and read
+            timeout of each request in seconds, not a deadline for the whole
+            request.
+        optimization_level: Default `0`. Qiskit transpiler level, 0 to 3, of the
+            `"qis"` translation. The `"native"` gateset accepts only 0. Levels 2 and 3
+            resynthesize two-qubit blocks with Qiskit's own synthesis. A level
+            other than 0 is recorded as the exclusion `"optimization_level"` in
+            the preparation record, and the operation count describes the compiled
+            circuit. The IonQ target has no derived roundoff constant, so
+            `state_error()` gives no bound at any level.
     """
 
     qualification_notice: ClassVar[str] = (

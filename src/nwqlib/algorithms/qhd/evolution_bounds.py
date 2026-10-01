@@ -86,67 +86,71 @@ _TAU = Fraction(1, 2**1074)
 class QHDEvolutionBound(Record):
     """Operator-norm bounds on the compiled product of one QHD Plan against its finite model.
 
-    The norm inputs and the splitting, time-ordering and midpoint-quadrature
-    values are upper bounds in the spectral norm on ``domain``, evaluated
-    outward (module docstring). The coefficient residual is a bound or a
-    first-order estimate, as ``coefficient_status`` says. A norm input is
-    None when it exceeds the binary64 range, and the bounds it enters are
-    then the cap 2.
+    [`evolution_bound`][nwqlib.algorithms.qhd.evolution_bounds.evolution_bound] returns
+    it, and `circuit_resources` includes it as `evolution`. The fields below are
+    read-only. The answer is `evolution`, a bound on the compiled product with the
+    stored exponents against the exact time-ordered evolution of the finite model, with
+    `evolution_status` saying whether it is a bound or conditional. The finite model is
+    `H(t) = a(t) T + b(t) V` on the `K**d` grid states, with the exact schedule
+    functions, T the Plan's kinetic operator on its grid and V the stored support tables
+    plus the constant. The bounds say nothing about the symbolic objective between or at
+    the grid points, the continuum problem or an optimization gap.
+
+    The norm inputs and the splitting, time-ordering and midpoint-quadrature values are
+    upper bounds in the spectral norm on `domain`, evaluated outward from exact
+    rationals of the binary64 inputs, so they are never below the real-arithmetic
+    formulas. The coefficient residual is a bound or a first-order estimate, as
+    `coefficient_status` says. A norm input is None when it exceeds the binary64 range,
+    and the bounds it enters are then the cap 2.
 
     Attributes:
-        domain: ``"valid_one_hot_subspace"``, the states with one excitation
-            per variable register, or ``"full_binary_register"``, every state
-            of the ``d b`` binary qubits after the permutation between circuit
-            and lexicographic variable order, with the physical identity
-            phase included.
-        reference: The finite model: encoding, kinetic model, boundary, grid
-            points, spacings, step count and time step, schedule, coefficient
-            rule and order.
-        formula: ``"one_hot_first_order"`` for the potential factor followed
-            by every link in emitted order, ``"one_hot_second_order"`` for the
-            symmetric potential, odd-link, even-link product, and
-            ``"binary_first_order"``, ``"binary_second_order"`` for the
-            potential and whole-kinetic factors of the binary encoding with
-            exact QFTs.
-        commutator: C, a bound on ``||[T, V]||``.
-        kinetic_nested: D_T, a bound on ``||[T, [T, V]]||``.
-        potential_nested: D_V, a bound on ``||[V, [V, T]]||``.
-        kinetic_norm: mu_T, a bound on ``||T||``.
-        potential_norm: mu_V, a bound on ``||V||`` including the constant.
-        hopping: Gamma, the sequential link commutator sum of one-hot first
-            order, None for second order and for the binary encoding.
-        even_nested: J_E, a bound on ``||[E, [E, O]]||`` of the even and odd
-            link layers of one-hot second order, None otherwise.
-        odd_nested: J_O, a bound on ``||[O, [O, E]]||``, None as J_E is.
-        norm_methods: ``(input, method)`` pairs naming which bound attained
-            each minimum: ``range`` for the table-range bounds C_0 and
-            D_(T,0), ``neighbor`` for the neighbor-difference bounds C_edge and
-            D_(V,edge), and ``commutator`` for ``2 tau C`` (D_T) and
-            ``2 nu C`` (D_V). mu_T and mu_V come from the kinetic diagonal and
-            the table extremes, Gamma from its closed form and J_E, J_O from
-            the K-point graph.
-        splitting: ``min(2, sum_k s_k)``, the product-formula bound.
-        time_ordering: ``min(2, sum_k w_k)``, the time-ordering bound.
-        midpoint_quadrature: ``min(2, sum_k q_k)`` under the midpoint rule,
-            None under the integrated rule.
-        schedule: ``min(2, sum_k (w_k + q_k))``.
-        coefficient_residual: ``min(2, sum_k e_coeff,k)``, or None when a
-            premise of its estimate is missing.
-        coefficient_status: ``"bound"`` when every step's residual is an
-            exact rational discrepancy, ``"estimate"`` when some step uses the
-            first-order integral estimate, ``"unavailable"`` when the
-            estimate's premise fails.
+        domain: `"valid_one_hot_subspace"`, the states with one excitation per variable
+            register, or `"full_binary_register"`, every state of the `d b` binary
+            qubits after the permutation between circuit and lexicographic variable
+            order, with the physical identity phase included.
+        reference: The finite model: encoding, kinetic model, boundary, grid points,
+            spacings, step count and time step, schedule, coefficient rule and order.
+        formula: `"one_hot_first_order"` for the potential factor followed by every link
+            in emitted order, `"one_hot_second_order"` for the symmetric potential,
+            odd-link, even-link product, and `"binary_first_order"`,
+            `"binary_second_order"` for the potential and whole-kinetic factors of the
+            binary encoding with exact QFTs.
+        commutator: C, a bound on `||[T, V]||`.
+        kinetic_nested: D_T, a bound on `||[T, [T, V]]||`.
+        potential_nested: D_V, a bound on `||[V, [V, T]]||`.
+        kinetic_norm: mu_T, a bound on `||T||`.
+        potential_norm: mu_V, a bound on `||V||` including the constant.
+        hopping: Gamma, the sequential link commutator sum of one-hot first order, None
+            for second order and for the binary encoding.
+        even_nested: J_E, a bound on `||[E, [E, O]]||` of the even and odd link layers
+            of one-hot second order, None otherwise.
+        odd_nested: J_O, a bound on `||[O, [O, E]]||`, None as J_E is.
+        norm_methods: `(input, method)` pairs naming which bound attained each minimum:
+            `range` for the table-range bounds C_0 and D_(T,0), `neighbor` for the
+            neighbor-difference bounds C_edge and D_(V,edge), and `commutator` for
+            `2 tau C` (D_T) and `2 nu C` (D_V). mu_T and mu_V come from the kinetic
+            diagonal and the table extremes, Gamma from its closed form and J_E, J_O
+            from the K-point graph.
+        splitting: `min(2, sum_k s_k)`, the product-formula bound.
+        time_ordering: `min(2, sum_k w_k)`, the time-ordering bound.
+        midpoint_quadrature: `min(2, sum_k q_k)` under the midpoint rule, None under the
+            integrated rule.
+        schedule: `min(2, sum_k (w_k + q_k))`.
+        coefficient_residual: `min(2, sum_k e_coeff,k)`, or None when an assumption of
+            its estimate is missing.
+        coefficient_status: `"bound"` when every step's residual is an exact rational
+            discrepancy, `"estimate"` when some step uses the first-order integral
+            estimate, `"unavailable"` when the estimate's assumption fails.
         coefficient_unavailable: Why the coefficient residual is None, or None.
-        evolution: ``min(2, splitting + schedule + coefficient_residual)``,
-            for the compiled product with the stored exponents against the
-            exact time-ordered evolution of the finite model: a bound when
-            ``evolution_status`` is ``"bound"``, conditional on the
-            coefficient estimate when it is ``"conditional"``, and None
+        evolution: `min(2, splitting + schedule + coefficient_residual)`, for the
+            compiled product with the stored exponents against the exact time-ordered
+            evolution of the finite model: a bound when `evolution_status` is `"bound"`,
+            conditional on the coefficient estimate when it is `"conditional"`, and None
             without the coefficient residual.
-        evolution_status: ``"bound"``, ``"conditional"`` when it rests on the
-            coefficient estimate, or ``"unavailable"``.
-        work: Scalar work: table entries reduced, support-axis comparisons,
-            graph rows and steps.
+        evolution_status: `"bound"`, `"conditional"` when it rests on the coefficient
+            estimate, or `"unavailable"`.
+        work: Scalar work: table entries reduced, support-axis comparisons, graph rows
+            and steps.
     """
 
     domain: Literal["valid_one_hot_subspace", "full_binary_register"]
@@ -379,77 +383,99 @@ def _graph_constants(grid):
 
 
 def evolution_bound(plan):
-    """Return the ``QHDEvolutionBound`` of a Plan whose step blocks were compiled, in either encoding.
+    """Bound the error of a QHD Plan's compiled product against its finite model, in the operator norm.
+
+    `evolution_bound(plan)` returns a
+    [`QHDEvolutionBound`][nwqlib.algorithms.qhd.evolution_bounds.QHDEvolutionBound] for
+    a Plan whose step blocks were compiled, which quantum execution and the `ir_product`
+    flavor do, in either encoding. `circuit_resources` includes the same record. Its
+    `evolution` field bounds the compiled product with the stored exponents against the
+    exact time-ordered evolution, with the physical phase included, conditionally where
+    the coefficient residual is an estimate. It adds four stages: time ordering,
+    midpoint quadrature, the coefficient residual and splitting. The work is one pass
+    over the stored tables and steps, `O(sum_S |S| K**|S| + d K + N)`, with no state or
+    matrix.
 
     Splitting (Childs et al., arXiv:1912.08854v3, Eqs. (145) and (152)). For
     dimensionless Hermitian generators G_j in application order and
     ``R_j = sum_(q > j) G_q``, the first-order product errs by at most
-    ``(1/2) sum_j ||[R_j, G_j]||`` and the symmetric second-order product by
-    at most ``(1/12) sum_j ||[R_j, [R_j, G_j]]|| + (1/24) sum_j ||[G_j, [G_j, R_j]]||``.
+    ``(1/2) sum_j ||[R_j, G_j]||`` and the symmetric second-order product by at most
+    ``(1/12) sum_j ||[R_j, [R_j, G_j]]|| + (1/24) sum_j ||[G_j, [G_j, R_j]]||``.
     Unitarity makes these valid with no exponential growth factor.
 
-    First order applies ``beta_k V`` and then every link generator
-    ``alpha_k L_(j,e)`` in emitted order, with ``L_(j,e) = -w_j (|p><q| + |q><p|)``
-    of norm ``w_j = 1/(2 h_j**2)``, the restriction of
-    ``-(XX + YY)/(4 h_j**2)``. XX and YY on one link commute, so the fused
-    hopping gate adds no split, and all projector blocks commute. The
-    potential factor against all links gives ``|alpha_k beta_k| C/2``, and
+    First order applies ``beta_k V`` and then every link generator ``alpha_k L_(j,e)``
+    in emitted order, with ``L_(j,e) = -w_j (|p><q| + |q><p|)`` of norm
+    ``w_j = 1/(2 h_j**2)``, the restriction of ``-(XX + YY)/(4 h_j**2)``. XX and YY on
+    one link commute, so the fused hopping gate adds no split, and all projector blocks
+    commute. The potential factor against all links gives ``|alpha_k beta_k| C/2``, and
     the links among themselves ``alpha_k**2 Gamma/2`` with
-    ``Gamma = sum_j sum_e ||[sum_(f > e) L_(j,f), L_(j,e)]||``. On a chain
-    each link but the last has one later adjacent link, whose commutator has
-    norm ``w_j**2``. On an even cycle the first link has two later adjacent
-    links, which give two disjoint skew-symmetric 2-by-2 blocks of norm
-    ``w_j**2`` together, and every other nonfinal link has one. Disjoint links
-    and different variables commute, so ``Gamma = (K - 2) sum_j w_j**2`` on
-    the Dirichlet chain and ``(K - 1) sum_j w_j**2`` on the periodic cycle
-    (zero for K = 2), and
+    ``Gamma = sum_j sum_e ||[sum_(f > e) L_(j,f), L_(j,e)]||``. On a chain each link but
+    the last has one later adjacent link, whose commutator has norm ``w_j**2``. On an
+    even cycle the first link has two later adjacent links, which give two disjoint
+    skew-symmetric 2-by-2 blocks of norm ``w_j**2`` together, and every other nonfinal
+    link has one. Disjoint links and different variables commute, so
+    ``Gamma = (K - 2) sum_j w_j**2`` on the Dirichlet chain and ``(K - 1) sum_j w_j**2``
+    on the periodic cycle (zero for K = 2), and
 
     ``s_k = |alpha_k beta_k| C/2 + alpha_k**2 Gamma/2``.
 
-    Second order applies ``exp(-i beta_k V/2) exp(-i alpha_k O/2)
-    exp(-i alpha_k E) exp(-i alpha_k O/2) exp(-i beta_k V/2)`` after regrouping
-    the per-variable layers, which commute across variables, for the odd and
-    even layer sums O and E. The symmetric bound for the three generators
+    Second order applies
+    ``exp(-i beta_k V/2) exp(-i alpha_k O/2) exp(-i alpha_k E) exp(-i alpha_k O/2) exp(-i beta_k V/2)``
+    after regrouping the per-variable layers, which commute across variables, for the
+    odd and even layer sums O and E. The symmetric bound for the three generators
     ``beta_k V``, ``alpha_k O`` and ``alpha_k E`` gives
 
     ``s_k = alpha_k**2 |beta_k| D_T/12 + |alpha_k| beta_k**2 D_V/24 + |alpha_k|**3 (J_E/12 + J_O/24)``,
 
-    where the first two terms hold every kinetic/potential commutator,
-    since ``O + E`` is T up to an identity, and the last the internal link
-    split, which a bound from ``[T, V]`` alone would miss (it is nonzero for a
-    constant V). ``_norm_inputs`` gives C, D_T, D_V and ``_graph_constants``
-    the layer constants.
+    where the first two terms hold every kinetic/potential commutator, since ``O + E``
+    is T up to an identity, and the last the internal link split, which a bound from
+    ``[T, V]`` alone would miss (it is nonzero for a constant V). C, D_T and D_V come
+    from the table ranges and, for the finite-difference stencil, from the largest
+    potential change across each link, and the layer constants J_E and J_O from the
+    K-point graph.
 
-    Binary encoding. An exact Fourier conjugation applies each variable's
-    kinetic factor ``F^dagger exp(-i alpha_k diag(E_j)) F`` whole
-    (``binary.compile_binary_steps``), and the bit-reversal relabeling
-    conjugates the phase table as well, so it leaves ``T_j`` unchanged.
-    Kinetic factors on different variables commute, and so do the potential
-    tables. First order therefore has the two generators ``beta_k V`` and
-    ``alpha_k T``, and second order the symmetric ``beta_k V/2``,
-    ``alpha_k T``, ``beta_k V/2``, which give
+    Binary encoding. An exact Fourier conjugation applies each variable's kinetic factor
+    ``F^dagger exp(-i alpha_k diag(E_j)) F`` whole, and the bit-reversal relabeling
+    conjugates the phase table as well, so it leaves ``T_j`` unchanged. Kinetic factors
+    on different variables commute, and so do the potential tables. First order
+    therefore has the two generators ``beta_k V`` and ``alpha_k T``, and second order
+    the symmetric ``beta_k V/2``, ``alpha_k T``, ``beta_k V/2``, which give
 
     ``s_k = |alpha_k beta_k| C/2`` and
     ``s_k = alpha_k**2 |beta_k| D_T/12 + |alpha_k| beta_k**2 D_V/24``,
 
-    with no link term, K = 2 included. The dense and unpruned Walsh
-    diagonals implement the same factors. An approximate QFT, pruning and
-    the rounding of the computed angles are later ledger entries.
+    with no link term, K = 2 included. The dense and unpruned Walsh diagonals implement
+    the same factors. An approximate QFT, pruning and the rounding of the computed
+    angles are later entries of the circuit's error sources (`circuit_resources`).
 
-    Schedule and coefficients. ``_schedule_terms`` gives ``w_k`` and ``q_k``
-    and ``_coefficient_term`` the residual ``e_coeff,k``. The totals are
+    Schedule and coefficients. For step k of width Delta, w_k is the time-ordering
+    budget, the smaller of the available integral bound `min(2, C A B/2)` and derivative
+    bound `Delta**3 (a* B1 + b* A1) C/12`, q_k the midpoint-quadrature bound
+    `Delta**3 (A2 mu_T + B2 mu_V)/24` under the midpoint rule, and e_coeff,k the
+    residual between the exact coefficients and the stored exponents. The guide's
+    [fault-tolerant resources](../../algorithms/qhd.md#fault-tolerant-resources) section
+    states when each bound is available. The totals are
     ``splitting = min(2, sum_k s_k)``, ``schedule = min(2, sum_k (w_k + q_k))``,
     ``coefficient_residual = min(2, sum_k e_coeff,k)`` and
-    ``evolution = min(2, splitting + schedule + coefficient_residual)``, which
-    is conditional on the coefficient estimate where one is used. For the
-    fixed smooth schedules the schedule bound falls as ``N**-2`` at fixed
-    final time, first-order splitting as ``N**-1`` and second-order splitting
-    as ``N**-2``. A small schedule parameter s or a fine grid can make the
-    bounds large, and the cap 2 is then valid but uninformative.
+    ``evolution = min(2, splitting + schedule + coefficient_residual)``, which is
+    conditional on the coefficient estimate where one is used. For the fixed smooth
+    schedules the schedule bound falls as ``N**-2`` at fixed final time, first-order
+    splitting as ``N**-1`` and second-order splitting as ``N**-2``. A small schedule
+    parameter s or a fine grid can make the bounds large, and the cap 2 is then valid
+    but uninformative.
+
+    Args:
+        plan (Plan): A QHD Plan with compiled step blocks, from
+            `nwqlib.plan(problem, method=QHD(...))` with quantum execution or
+            `theory_flavor="ir_product"`.
+
+    Returns:
+        bound (QHDEvolutionBound): The norm inputs, the per-stage bounds and their total
+            `evolution` with its `evolution_status`.
 
     Raises:
-        ValueError: The Plan has no compiled step blocks, so there is no
-            product to bound.
+        ValueError: If the Plan has no compiled step blocks, so there is no product to
+            bound.
     """
     from .method import _grid
 

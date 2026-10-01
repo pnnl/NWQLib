@@ -84,7 +84,7 @@ Interpretation = Literal["exact", "upper_bound", "estimate", "conditional", "una
 # bases are never converted into or added to each other.
 MetricBasis = Literal["selected_logical", "cx", "clifford_t", "toffoli"]
 # The stored conventional angles that name a one-qubit phase or single-axis
-# rotation (docs/resources.md, "Selected laws and logical bases"). A phase or
+# rotation (docs/development/execution.md, "Resource estimate bookkeeping"). A phase or
 # Z rotation whose angle equals one of CLIFFORD_ANGLES is the identity, S, Z or
 # S-inverse up to global phase, and one whose angle equals one of T_ANGLES is
 # T or T-inverse. A rotation about another Pauli axis is a Clifford conjugate
@@ -102,20 +102,39 @@ T_ANGLES = frozenset((math.pi / 4, -math.pi / 4))
 
 
 class ResourceContext(Record):
-    """One operation's metric basis, synthesis choice and resident payload scope.
+    """Settings that fix how a resource estimate counts: gate basis, rotation precision, synthesis, resident data and schedule.
 
-    resident stays live throughout this workload. capacities are declarations,
-    kept for a later assessment; the fold never allocates or queries devices.
-    batch_schedule selects serial independent acquisitions or leaves their
-    concurrency unspecified; it is a planning condition for the consumer.
+    Build it with keyword arguments, for example `ResourceContext(basis="cx")`,
+    and pass it as `context=` to [`nwqlib.estimate`][nwqlib.scientist.estimate]
+    or [`estimate`][nwqlib.resources.fold.estimate]. Every argument is
+    optional, and `ResourceContext()` counts in the `"selected_logical"`
+    basis.
 
     Attributes:
-        basis: Metric basis in which gate metrics are counted.
-        precision: Rotation synthesis precision, required before arbitrary rotations get a T count.
-        synthesis: Selected synthesis law. A ResourceLaw applies only under the same choice.
-        resident: Payloads live for the whole workload, added to every memory peak.
-        capacities: Device capacity declarations kept for a later assessment.
-        batch_schedule: ``serial`` discharges the schedule condition on batch peaks.
+        basis: Default `"selected_logical"`. Basis in which gate metrics are
+            counted: `"selected_logical"`, `"cx"`, `"clifford_t"` or
+            `"toffoli"`. Counts in different bases answer different
+            questions and are never converted into or added to each other.
+        precision: Default `None`. Positive rotation synthesis precision. An
+            arbitrary rotation gets a T count only when the precision and the
+            synthesis are known.
+        synthesis: Default `None`. Source naming the synthesis method. A
+            block's [`ResourceLaw`][nwqlib.resources.records.ResourceLaw]
+            applies only under the same choice.
+        resident: Default `()`. [`Workspace`][nwqlib.resources.records.Workspace]
+            entries that stay in memory for the whole workload and are added
+            to every memory peak.
+        capacities: Default `()`. Device capacities as `Limit` records, kept
+            for a later device assessment. The estimate itself allocates
+            nothing and queries no device.
+        batch_schedule: Default `"unspecified"`. `"serial"` declares that
+            independent circuit batches run one at a time, so a batch memory
+            peak holds without condition. With `"unspecified"` such a peak is
+            labeled `conditional`. The required schedule stays recorded for
+            the execution to follow.
+
+    Raises:
+        ValueError: If `precision` is not positive.
     """
 
     basis: MetricBasis = "selected_logical"
@@ -133,31 +152,45 @@ class ResourceContext(Record):
 
 
 class ResourceLaw(Record):
-    """A selected per-call scalar law, conditional on an exact bounded context.
+    """The cost of one call of a circuit block in one metric, as the block declares it.
 
-    bindings fix selected cost_parameters and call arguments exactly, except
-    unbound_parameters explicitly declares coverage over those formal parameters'
-    whole admitted domains. Empty coverage keeps exact-point matching. No
-    arbitrary formula parsing or executable callable is admitted. Different
-    bases describe alternatives, not additions.
-
-    A law is a scalar per call rather than a formula so that the fold can
-    check it, compare it with a known recipe and keep its evidence without
-    evaluating caller code.
+    A circuit block of a Plan can declare cost rules for its metrics. The
+    estimate uses a rule only for a call whose control and adjoint flags, cost
+    parameters and call arguments, basis, precision and synthesis all match.
+    The value is a number per call, not a formula, so the estimate can check
+    it against a known gate recipe and keep its source without running
+    caller code. Rules in different bases are alternatives, not additions.
+    Build it with keyword arguments when you write a block (see [Compose
+    blocks](../blocks.md)). `metric`, `basis`, `value`, `interpretation` and
+    `evidence` are required.
 
     Attributes:
-        metric: The count metric this law supplies.
-        basis: Metric basis the value is counted in.
-        value: Per-call value. An exact law requires an integer.
-        interpretation: Exact count, upper bound or estimate.
-        evidence: Where the value comes from. Observed, empirically predicted or numerically estimated evidence makes it an estimate.
-        bindings: Cost parameters and call arguments the law is valid for.
-        unbound_parameters: Formal parameters whose whole admitted domain the law covers.
-        controlled: Whether the law describes the controlled selection.
-        adjoint: Whether the law describes the adjoint selection.
-        precision: Rotation precision the law assumes, or None.
-        synthesis: Synthesis choice the law assumes, or None.
-        assumptions: Conditions carried into every quantity derived from the law.
+        metric: Required. The count metric the rule supplies.
+        basis: Required. Basis the value is counted in.
+        value: Required. Nonnegative per-call value, an integer when
+            `interpretation` is `"exact"`.
+        interpretation: Required. `"exact"`, `"upper_bound"` or
+            `"estimate"`.
+        evidence: Required. Where the value comes from. Observed,
+            empirically predicted or numerically estimated evidence makes
+            every quantity derived from it an estimate.
+        bindings: Default `()`. Cost parameters and call arguments that must
+            match exactly for the rule to apply.
+        unbound_parameters: Default `()`. Formal parameters whose whole
+            accepted range the rule covers instead of one value. Empty means
+            exact matching only.
+        controlled: Default `False`. Whether the rule is for the controlled
+            block.
+        adjoint: Default `False`. Whether the rule is for the adjoint block.
+        precision: Default `None`. Rotation precision the rule assumes.
+        synthesis: Default `None`. Synthesis method the rule assumes.
+        assumptions: Default `()`. Conditions carried into every quantity
+            derived from the rule.
+
+    Raises:
+        ValueError: If the value is negative, an exact value is not an
+            integer, a binding is repeated, or a parameter is both bound and
+            listed in `unbound_parameters`.
     """
 
     metric: Metric
@@ -190,11 +223,22 @@ class ResourceLaw(Record):
 
 
 class Workspace(Record):
-    """Declared simultaneous bytes at a location; None preserves missing workspace.
+    """Bytes needed at the same time at one location, as declared by a block or the caller.
 
-    A selected definition's workspace lasts for each invocation; resident
-    payloads in ResourceContext last for the workload. Sizes are declarations,
-    not observed allocations, and quantum widths are separately counted.
+    A block's workspace lasts for each call. Entries in
+    `ResourceContext.resident` last for the whole workload. Sizes are
+    declarations, not observed allocations, and quantum widths are counted
+    separately. Build it with keyword arguments. All four fields are
+    required.
+
+    Attributes:
+        location: Where the bytes live, for example `"host"`.
+        purpose: `"input"`, `"preparation"`, `"analysis"`, `"io"`,
+            `"materialization"`, `"stored"` or `"workspace"`.
+        bytes: Nonnegative byte count, or `None` when unknown. An unknown
+            size makes the memory peak at that location unavailable, never
+            zero.
+        source: Source of the declaration.
     """
 
     location: Text
@@ -209,22 +253,49 @@ ResourceContext.model_rebuild()
 
 
 class ResourceQuantity(Record):
-    """A scoped metric with per-metric availability and original evidence.
+    """One count or peak of a resource estimate, with its value, label and sources.
 
-    derivation_sources excludes ancillary conformance from the value's basis.
-    required_schedule must be honored before using a batch peak for capacity.
+    [`WorkloadEstimate.quantity`][nwqlib.resources.records.WorkloadEstimate.quantity]
+    returns it. The value is `fact.value`, an exact `Rational` (read
+    `numerator` and `denominator`) or a `Float64`, in the unit `fact.unit`:
+    `count`, or `byte` for byte metrics. A symbolic value is
+    `fact.symbol`, and an unavailable one has `fact.reason` and no value.
+    `interpretation` says how to read the value (see [Read a
+    quantity](resources.md#read-a-quantity)). `print(quantity)` shows the value, label
+    and conditions. The fields below are read-only.
 
     Attributes:
-        metric: Quantity name, such as ``cx``, ``shots`` or ``logical_width``.
-        fact: Value or unavailability reason, with unit, scope, conditions and derived evidence kind.
-        population: What is counted, for example dynamic workload or simultaneous live footprint.
-        lifecycle: Workflow stage of the quantity (planned, prepared, submitted or observed). The fold emits only ``planned``.
-        basis: Metric basis of the producing context.
-        interpretation: Exact, upper bound, estimate, conditional or unavailable.
-        location: Footprint location for located metrics, None for workload totals.
-        sources: Evidence identities attached to the value, including conformance checks.
-        derivation_sources: Evidence identities that determined the value.
-        required_schedule: Schedule the consumer must follow for this peak to hold, or None.
+        metric: Name of the quantity, such as `cx`, `shots` or
+            `logical_width`.
+        fact: The value, or the reason it is unavailable, with its unit,
+            scope, conditions (`fact.assumptions`) and the weakest evidence
+            kind among the sources that determined it.
+        population: What is counted, for example `"dynamic workload"` for a
+            total over the whole run or `"simultaneous live footprint"` for a
+            peak.
+        lifecycle: Workflow stage of the quantity: `"planned"`,
+            `"prepared"`, `"submitted"` or `"observed"`. A planning estimate
+            gives only `"planned"`.
+        basis: Gate basis of the estimate.
+        interpretation: `"exact"`, `"upper_bound"`, `"estimate"`,
+            `"conditional"` or `"unavailable"`.
+        location: Location of a width or byte peak, `None` for a total.
+        sources: Content hashes of all evidence attached to the value,
+            including evidence used only to check a gate recipe against a
+            declared rule.
+        derivation_sources: Content hashes of the evidence that determined the
+            value, a subset of `sources`.
+        required_schedule: `"serial_acquisitions"` when this peak holds only
+            if independent circuit batches run one at a time, otherwise
+            `None`. Follow it before comparing the peak with a device
+            capacity.
+
+    Raises:
+        ValueError: When a record is loaded whose label disagrees with its
+            availability, whose value is negative, not real or, when exact,
+            not an integer (`expected_operations` may be fractional), whose
+            unit does not match the metric, or whose derivation sources are
+            not among its sources.
     """
 
     schema_version: Literal[2] = 2
@@ -306,28 +377,65 @@ class ResourceQuantity(Record):
 
 
 class WorkloadEstimate(Record):
-    """Fold of one selected construction, with bounded shared symbolic definitions.
+    """Resource estimate of a planned computation: one quantity per metric and location.
 
-    sources preserve original evidence declarations; arithmetic does not witness
-    them. defined_selections is the reachable potential inventory, not a native
-    construction receipt. work_units charges kept fold contexts and outputs,
-    not runtime. expressions use local refs and never expand Repeat or sharing.
-    Terminal exact_evaluations counts grouped statistic requests, not returned
-    labels/bins or simulator trajectories. Direct non-batch programs encode no
-    acquisition population: zero shots/settings does not imply a free native run.
+    [`nwqlib.estimate(plan)`][nwqlib.scientist.estimate] returns it when no
+    device profile is given, and so does [`estimate`][nwqlib.resources.fold.estimate].
+    Read one metric with `quantity(metric)`, or a width or byte peak with
+    `quantity(metric, location=...)`, and list everything with `quantities`
+    or `print(workload)`. A metric without a cost rule is present and
+    labeled `unavailable`, never zero. The estimate is of the logical
+    circuit description, before compilation, routing or error correction.
+
+    `exact_evaluations` counts grouped exact-statistic requests, not returned
+    labels, bins or simulator trajectories. A circuit with no terminal
+    measurement batch declares no measurements, so zero `shots` and
+    `settings` there do not mean that running it is free. The fields below
+    are read-only.
 
     Attributes:
-        construction_id: Identity of the folded SelectedConstruction.
-        context: The ResourceContext that fixed basis, precision, synthesis and schedule.
-        quantities: One quantity per (metric, location), including unavailable ones.
-        expressions: Local symbolic cost definitions referenced by symbolic facts.
-        parameters: Program parameters those expressions may reference.
-        sources: Original evidence records referenced by the quantities.
-        defined_selections: Identities of potentially reached selected definitions and host kernels.
-        work_units: Fold bookkeeping work, bounded by the Program's admission limits.
-        evaluated_contexts: Distinct node and call contexts folded.
-        limits: AdmissionLimits of the folded Program.
-        assumptions: Program premises, readiness blockers and the fold's own scope conditions.
+        construction_id: Content hash of the planned circuit description
+            that was estimated.
+        context: The [`ResourceContext`][nwqlib.resources.records.ResourceContext]
+            that fixed basis, precision, synthesis and schedule.
+        quantities: One [`ResourceQuantity`][nwqlib.resources.records.ResourceQuantity]
+            per (metric, location), including unavailable ones.
+        expressions: Symbolic cost expressions that symbolic quantities
+            name. Repeats and shared parts are not expanded.
+        parameters: Circuit parameters those expressions may use.
+        sources: The original evidence records of the cost rules. The
+            arithmetic of the estimate does not make them verified.
+        defined_selections: Content hashes of the circuit blocks and classical
+            kernels the run may reach, not a record of built circuits.
+        work_units: Bookkeeping work of the estimate, not run time, at most
+            `24 * limits.max_steps`.
+        evaluated_contexts: Distinct node and call contexts evaluated.
+        limits: The size limits of the planned circuit description.
+        assumptions: Conditions of the whole estimate, such as
+            `"logical dependency schedule; no physical QEC/routing/factory projection"`.
+
+    Examples:
+        A two-dimensional Lanczos Plan, estimated in the CX basis, has an
+        exact width of two qubits and an upper bound of three CX gates. No
+        rule gives its total operation count:
+
+        >>> import nwqlib
+        >>> from nwqlib import Eigenproblem
+        >>> from nwqlib.algorithms import Lanczos
+        >>> from nwqlib.resources import ResourceContext
+        >>> problem = Eigenproblem(A=[[1.5, -1], [-1, 0.5]])
+        >>> method = Lanczos(initial_state=[1, 0], krylov_dimension=2)
+        >>> selected = nwqlib.plan(problem, method=method, seed=7)
+        >>> context = ResourceContext(basis="cx")
+        >>> workload = nwqlib.estimate(selected, context=context)
+        >>> cx = workload.quantity("cx")
+        >>> cx.interpretation, cx.fact.value.numerator
+        ('upper_bound', 3)
+        >>> width = workload.quantity("logical_width", location="logical_device")
+        >>> width.interpretation, width.fact.value.numerator
+        ('exact', 2)
+        >>> workload.quantity("operations").interpretation
+        'unavailable'
     """
 
     schema_version: Literal[2] = 2
@@ -391,7 +499,21 @@ class WorkloadEstimate(Record):
         return self
 
     def quantity(self, metric: str, *, location: str | None = None) -> ResourceQuantity:
-        """Read one metric without recomputation, synthesis or serialization."""
+        """Return the quantity of one metric at one location, without recomputing anything.
+
+        Args:
+            metric (str): Metric name, such as `"cx"` or `"logical_width"`.
+            location (str | None): Location of a width or byte peak, for
+                example `"logical_device"` or `"host"`. `None`, the default,
+                selects a total.
+
+        Returns:
+            quantity (ResourceQuantity): The stored quantity.
+
+        Raises:
+            ValueError: If no quantity has this metric and location. The
+                message lists up to eight locations of the metric.
+        """
         matches = [
             item for item in self.quantities if item.metric == metric and item.location == location
         ]

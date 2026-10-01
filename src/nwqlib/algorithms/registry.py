@@ -15,16 +15,34 @@ ENTRY_POINT_GROUP = "nwqlib.algorithms"
 
 @dataclass(frozen=True)
 class Registration:
-    """Trusted in-process factory, never loaded from a saved Source string.
+    """An entry that makes a Method findable by name and version: its Source and a trusted factory path.
 
-    method_type names an already known actual configuration class. External
-    inventory may leave it and descriptor unknown until explicit code selection.
+    Build it with keyword arguments, for example
+    `Registration(source=MyMethod.descriptor.source, factory="my_methods:MyMethod")`,
+    in a module that does not import the Method itself, and pass it to
+    [`AlgorithmRegistry`][nwqlib.algorithms.registry.AlgorithmRegistry].
+    `source` and `factory` are required. Building it imports nothing. A saved
+    Source string never loads code. Only a registration in the running
+    process does. [Explicit trusted registration](../algorithm_protocol.md#explicit-trusted-registration)
+    shows the metadata module of the reference Method.
 
-    Attributes:
-        source: Exact trusted Method/version provenance used for resolution.
-        factory: Explicit module:attribute callable selected only by registry resolution.
-        descriptor: Already-known applicability metadata; None avoids importing unknown implementation code.
-        method_type: Already-known Method configuration class; None for an unloaded external registration.
+    Args:
+        source: Source naming the method and version, as
+            `descriptor.source` gives it.
+        factory: `"module:attribute"` path of a callable that returns
+            the Method, called only by `AlgorithmRegistry.resolve`.
+        descriptor: The Method's
+            [`AlgorithmDescriptor`][nwqlib.algorithms.protocol.AlgorithmDescriptor]
+            when already known, with the same method and version as `source`.
+            `None` avoids importing the Method to read it.
+        method_type: The Method class when already known. Its
+            `descriptor` must equal `descriptor`.
+
+    Raises:
+        ValueError: If `factory` is not a `module:attribute` path, or the
+            descriptor's method and version differ from `source` or from
+            `method_type.descriptor`.
+        TypeError: If `method_type` is not a Method subclass.
     """
 
     source: Source
@@ -65,7 +83,24 @@ class Registration:
 def third_party_registrations(
     entries: Iterable[EntryPoint] | None = None,
 ) -> tuple[Registration, ...]:
-    """Read installed method@version entry-point metadata without loading code."""
+    """Return a registration for each installed `nwqlib.algorithms` entry point, without loading its code.
+
+    Each entry point must be named `method@version`, and its value is the
+    factory path. The descriptor and Method class of these registrations stay
+    `None` until code is loaded explicitly. Builtin inventory does not call this
+    function, so installed extensions are found only when it is called.
+
+    Args:
+        entries (Iterable[EntryPoint] | None): Entry points to read. `None` reads the
+            installed entry points of the group `nwqlib.algorithms`. Entries of
+            other groups are ignored.
+
+    Returns:
+        registrations (tuple[Registration, ...]): The registrations, sorted by method, version and factory.
+
+    Raises:
+        ValueError: If an entry-point name is not `method@version`.
+    """
     entries = entry_points(group=ENTRY_POINT_GROUP) if entries is None else entries
     rows = []
     for entry in entries:
@@ -86,10 +121,20 @@ def third_party_registrations(
 
 
 class AlgorithmRegistry:
-    """An explicit inventory of trusted code; discovery does not execute factories.
+    """A list of trusted Method registrations that finds a Method by name and version and builds it on request.
 
-    Default inventory is empty. External code runs only when resolve selects its
-    exact registration. This is not a security sandbox or backend qualification.
+    Build it as `AlgorithmRegistry((registration, ...))`. Without registrations it is
+    empty. `discover` lists the registrations without running any
+    factory, and `resolve` runs only the factory of the requested Source. A
+    registry is not a security sandbox, and a registration does not qualify a
+    backend.
+
+    Args:
+        registrations (Iterable[Registration]): The registrations,
+            at most one per method and version.
+
+    Raises:
+        ValueError: If two registrations share a method and version.
     """
 
     def __init__(self, registrations: Iterable[Registration] = ()):
@@ -103,11 +148,38 @@ class AlgorithmRegistry:
             self._registrations[key] = row
 
     def discover(self) -> tuple[Registration, ...]:
-        """Return the registrations in name/version order without importing any factory."""
+        """Return the registrations in method and version order, without importing any factory.
+
+        Returns:
+            registrations (tuple[Registration, ...]): The registrations.
+        """
         return tuple(self._registrations.values())
 
     def resolve(self, source: Source, *, expected_type: type[T] = Method, **configuration) -> T:
-        """Invoke only the selected factory with its explicit configuration."""
+        """Build the registered Method for a Source by calling its factory with the given configuration.
+
+        Only the factory of that Source runs, with exactly the configuration
+        supplied, and no earlier configuration is reused. The built Method must match
+        the registered method, version, descriptor and class.
+
+        Args:
+            source (Source): Source of the method and version, equal to the
+                registered one.
+            expected_type (type): Class the result must be an
+                instance of, which keeps a caller's concrete type.
+            **configuration (object): Keyword arguments for the factory, such as Method
+                settings.
+
+        Returns:
+            method (Method): The configured Method.
+
+        Raises:
+            LookupError: If no registration has this method and version.
+            ValueError: If `source` differs from the registered Source, or the built
+                Method differs from the registration.
+            TypeError: If the built object is not a complete Method of
+                `expected_type`.
+        """
         row = self._registrations.get((source.name, source.version))
         if row is None:
             raise LookupError(
@@ -129,7 +201,22 @@ class AlgorithmRegistry:
 
 
 def direct_method(method: object, *, expected_type: type[T] = Method) -> T:
-    """Check the actual directly supplied configuration; execute no factory."""
+    """Check that an object is a complete Method and return it, without running a factory.
+
+    A complete Method has a descriptor and implements `plan` and `analyze`.
+
+    Args:
+        method (object): The object to check.
+        expected_type (type): Class the object must be an
+            instance of.
+
+    Returns:
+        method (Method): The same object.
+
+    Raises:
+        TypeError: If it is not an instance of `expected_type`, has no
+            descriptor, or does not implement `plan` and `analyze`.
+    """
     if not isinstance(method, expected_type):
         raise TypeError("Method does not implement the caller's expected type")
     if not isinstance(method, Method) or not isinstance(
@@ -142,11 +229,15 @@ def direct_method(method: object, *, expected_type: type[T] = Method) -> T:
 
 
 def builtin_registrations() -> tuple[Registration, ...]:
-    """Read actual builtin configuration types, without constructing or planning.
+    """Return a registration for each built-in Method, without constructing or planning one.
 
-    Builtin configuration modules are trusted package code. External entry points
-    are neither discovered nor loaded implicitly. Scientific fields and defaults
-    come from the actual Method class schema, including its required fields.
+    It imports the built-in configuration modules, which can load NumPy, SciPy
+    and their dependencies, but no quantum SDK. Installed extensions are not
+    included. Their configuration fields, defaults and required fields come from
+    each Method class's schema.
+
+    Returns:
+        registrations (tuple[Registration, ...]): The registrations, in method and version order.
     """
     from . import _METHOD_OWNERS
 
@@ -179,7 +270,22 @@ def algorithm_card(registration: Registration) -> dict:
 
 
 def options_schema(registration: Registration) -> dict:
-    """Read the actual Method schema; do not guess required scientific inputs."""
+    """Return the JSON schema of a registered Method's configuration, with its required fields and defaults.
+
+    `nwqlib options METHOD` prints it. The schema comes from the Method class
+    (`model_json_schema()`), so no required input is guessed.
+
+    Args:
+        registration (Registration): A registration whose `method_type` is known.
+
+    Returns:
+        schema (dict): The JSON schema.
+
+    Raises:
+        ValueError: If the registration's Method class is not loaded, as for an
+            installed extension found by `third_party_registrations`. Select the
+            extension's code explicitly in Python first.
+    """
     if registration.method_type is None:
         raise ValueError(
             "configuration unavailable: explicitly select trusted external code in Python"

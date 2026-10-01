@@ -1,6 +1,36 @@
-# Direct QASM3 artifacts
+# Export OpenQASM
 
-`nwqlib.io.write_qasm3` writes an admitted SelectedConstruction to a synchronous binary sink. `nwqlib.io.write_qasm3_file` atomically replaces a file after complete writing and receipt validation. Public IO import and direct writing require no vendor SDK. `nwqlib.io.export_qasm` separately converts an already-built Qiskit circuit: without `path` it returns complete text; with `path` it atomically writes the destination and returns a `Path`. Its `max_operations=100000` admits the supplied top-level native instruction count before export, and `max_text_bytes=10_000_000_000` bounds emitted UTF-8 bytes. QASM3 streams the text but still builds a complete dependency AST. QASM2's dependency first constructs a complete string, so its text limit is a publication bound, not a bound on that temporary allocation. Neither control bounds expanded definitions or SDK workspace. Export failure preserves any prior destination file. Explicit compiler text consumers continue to omit `path`.
+<a id="direct-qasm3-artifacts"></a>NWQLib writes OpenQASM text in two ways. `export_qasm` exports a Qiskit circuit that is already built, such as a circuit NWQLib prepared. `write_qasm3_file` writes the construction of a `Plan` directly as OpenQASM 3, without Qiskit or any other vendor SDK. Neither executes the circuit.
+
+## Export a built circuit
+
+```python
+from qiskit import QuantumCircuit
+from nwqlib.io import export_qasm
+
+circuit = QuantumCircuit(2)
+circuit.h(0)
+circuit.cx(0, 1)
+print(export_qasm(circuit))
+```
+
+This prints:
+
+```text
+OPENQASM 3.0;
+include "stdgates.inc";
+qubit[2] q;
+h q[0];
+cx q[0], q[1];
+```
+
+`export_qasm` returns the complete text, or with `path=` writes the file atomically and returns its `Path`. `format="qasm2"` selects OpenQASM 2. The circuits that NWQLib prepared for a backend are available as `prepared.circuit(index)` while their run is open, and `export_qasm` exports them the same way. This is the export for use with NWQ-Sim outside NWQLib or with another simulator, and NWQEC compilation reads its OpenQASM 2 output ([Choose a backend](backends.md#export-circuits)).
+
+`max_operations=100000` checks the number of top-level instructions of the circuit before export, and `max_text_bytes=10_000_000_000` bounds the emitted UTF-8 bytes. OpenQASM 3 export streams the text but still builds a complete syntax tree in the Qiskit exporter. Qiskit's OpenQASM 2 exporter first builds the complete string, so its text limit bounds what is written, not that temporary string. Neither limit bounds expanded gate definitions or SDK workspace. Parent directories must already exist, and a failed export keeps any earlier file at the destination. Omit `path` to receive the text, for example to pass it to a compiler.
+
+## Write a Plan's construction directly
+
+`write_qasm3_file` writes the construction of a `Plan` as an OpenQASM 3 file, and `write_qasm3` writes it to a synchronous binary stream. Importing `nwqlib.io` and writing directly require no vendor SDK. The budget bounds every quantity the writer checks before output:
 
 ```python
 from nwqlib import Expectation, plan
@@ -8,69 +38,84 @@ from nwqlib.algorithms import ExpectationMethod
 from nwqlib.io import QasmWriteBudget, write_qasm3_file
 from nwqlib.operators import ingest_pauli
 
-selected = plan(
-    Expectation(state=[2.0, 2.0], observable=ingest_pauli((("I", 1.0), ("Z", 1.0)), num_qubits=1)),
-    method=ExpectationMethod(), seed=7,
-)
+observable = ingest_pauli((("I", 1.0), ("Z", 1.0)), num_qubits=1)
+expectation_plan = plan(Expectation(state=[2.0, 2.0], observable=observable),
+                        method=ExpectationMethod(), seed=7)
 writer_budget = QasmWriteBudget(
     max_metadata_bytes=1000000, max_walk_steps=100000,
     max_qubits=1, max_clbits=0, max_bytes=4096,
     max_instructions=100, max_chunk_bytes=256,
 )
-receipt = write_qasm3_file(selected.construction, "preparation.qasm", budget=writer_budget)
+record = write_qasm3_file(expectation_plan.construction, "preparation.qasm",
+                          budget=writer_budget)
+print(open("preparation.qasm").read())
 ```
 
-This actual expectation Plan selects H for the normalized vector proportional to (2, 2). The file prepares that state; the physical norm and requested I+Z observation remain in the Plan. Writing does not collect the observation.
+This prints:
 
-## Writer subset
+```text
+OPENQASM 3.0;
+include "stdgates.inc";
+gate g0 a0 {
+h a0;
+}
+qubit[1] q0;
+g0 q0[0];
+```
 
-The version `nwqlib.direct-qasm3.v1` emits OpenQASM 3.0 with `stdgates.inc`. Identifiers are generated ASCII names; receipt layouts keep original names, widths and declaration order. Formal signature order owns call operands, and qubit index zero is the least-significant bit. Stored angles use shortest round-trip binary64 decimal representation, including signed adjoint phases. The phase primitive is written as `gphase`, a global phase in OpenQASM 3. Under `ctrl` it becomes a relative phase on the branch where all controls are one, so a selected phase is always emitted. An adjoint recipe reverses its order, turns `sdg` into `s` and negates phase angles.
+This Plan prepares the normalized vector proportional to (2, 2) with one H gate, and the file contains only that state preparation. The physical norm and the requested I+Z observable stay in the Plan, and writing does not measure anything. The returned write record, a `QasmWriteReceipt`, describes what was written. `write_qasm3_file` replaces the file only after the complete text and the write record have been checked.
 
-| Construction | Writer behavior | Offline materializer |
+### Writer subset {#writer-subset}
+
+The writer version `nwqlib.direct-qasm3.v1` emits OpenQASM 3.0 with `stdgates.inc`. Identifiers are generated ASCII names, and the write record's layouts keep the original names, widths and declaration order. The order of a gate's formal parameters decides the order of its call operands, and qubit index zero is the least significant bit. Stored angles use the shortest binary64 decimal representation that round-trips, including signed adjoint phases. The phase primitive is written as `gphase`, a global phase in OpenQASM 3. Under `ctrl` it becomes a relative phase on the branch where all controls are one, so a phase in the construction is always emitted. An adjoint recipe reverses its order, turns `sdg` into `s` and negates phase angles.
+
+| Construction | Writer behavior | Checked import with Qiskit |
 | --- | --- | --- |
-| Direct native occupation, exact basis-vector/full-uniform PREP; HZH; positive-zero reflection | Emit selected ordered x/h/z/mc_z/phase recipe once per reachable definition | Admitted logical user gates |
-| Pauli parity network (`pauli.parity`) | Emit selected ordered sdg/h/cx recipe once per reachable definition | Admitted logical user gates |
-| Pauli group readout basis (`pauli.group_basis`) | Emit selected ordered sdg/h recipe once per reachable definition | Admitted logical user gates |
-| Selected control and/or adjoint | Prepend control, reverse adjoint recipe, negate phase; keep controlled phase | Supported, except Z with more than two total controls |
-| Bound Repeat | One signed int[64] loop for each positive count through 2**63-1; zero emits no body | Source-derived total visits/operations admitted before import and loop unrolling |
-| Sequence, CoherentRegion | Preserve order | Supported |
-| Allocate/Release | Initial zero-state declaration/no emitted discard; reallocation rejected | Same file semantics |
+| Direct native occupation, exact basis-vector or full-uniform PREP, HZH, positive-zero reflection | Emits its ordered x/h/z/mc_z/phase recipe once per reachable definition | Imported as logical user gates |
+| Pauli parity network (`pauli.parity`) | Emits its ordered sdg/h/cx recipe once per reachable definition | Imported as logical user gates |
+| Pauli group readout basis (`pauli.group_basis`) | Emits its ordered sdg/h recipe once per reachable definition | Imported as logical user gates |
+| Control and/or adjoint | Prepends the control, reverses the adjoint recipe, negates the phase and keeps a controlled phase | Supported, except Z with more than two controls in total |
+| Bound Repeat | One signed int[64] loop for each positive count up to 2**63-1, and no body for a zero count | Total visits and operations, derived from the source, are checked before import and loop unrolling |
+| Sequence, CoherentRegion | Keeps the order | Supported |
+| Allocate/Release | Declaration in the zero state, no emitted discard, and reallocation rejected | Same file meaning |
 | Computational Measure/Reset | Explicit per-bit statements at their original positions | Supported |
-| One root batch setting, no axes | One template; repetitions, setting label and observation kind stay in receipt | No acquisition or shot loop |
+| One root batch setting, no axes | One template, with repetitions, setting label and observation kind kept in the write record | No measurement or shot loop |
 | Zero-width identity | No zero-width register or empty-operand gate call | Supported |
-| Opaque recipes, including generic/prefix PREP, SELECT and label readout | Reject before output | Unavailable |
-| Parallel, nested batches, dynamic/host/timing nodes, non-bit classical values, unbound/parameterized calls | Reject before output | Unavailable |
+| Opaque recipes, including generic or prefix PREP, SELECT and label readout | Rejected before output | Unavailable |
+| Parallel, nested batches, dynamic, host or timing nodes, non-bit classical values, unbound or parameterized calls | Rejected before output | Unavailable |
 
-No outer native lowering, native leaf synthesis, backend call or Qiskit dumps occurs during direct writing. No Lanczos, GCiM, full LCHS/QLS or NWQ-Sim export compatibility is implied by this subset.
+Direct writing performs no outer native translation, native leaf synthesis, backend call or Qiskit `dumps`. The subset of `write_qasm3` implies no compatibility with Lanczos, GCiM, full LCHS or QLS constructions, or with NWQ-Sim.
 
-## Bounds and completion
+### Bounds and completion {#bounds-and-completion}
 
-`max_metadata_bytes` bounds the conservative JSON envelope of the selected graph and final receipt separately. `max_walk_steps` bounds each graph walk and the static accounting/emission traversals. Both checks precede artifact output; the input graph is checked before identity/JSON work and layout allocation. Stored data is bounded by the admitted graph, recipes, layouts and output chunk, independent of Repeat multiplicity and total output bytes. Static repeated references still consume admitted traversal/emission work. Integer products also obey IR limits.
+`max_metadata_bytes` bounds a conservative estimate of the JSON size of the construction graph and of the final write record, each separately. `max_walk_steps` bounds each walk of the graph and the static counting and emission passes. Both checks precede any output, and the input graph is checked before hashing, JSON work and layout allocation. Stored data is bounded by the checked graph, recipes, layouts and output chunk, independent of Repeat multiplicity and of the total output bytes. Static repeated references still use checked traversal and emission work. Integer products also obey the limits of NWQLib's circuit description.
 
-`bytes_written` counts actual accepted ASCII/UTF-8 bytes including punctuation. `emitted_instructions` counts textual gate applications, measurement and reset, including definition bodies once per text occurrence. `expanded_operations` counts direct primitive applications plus per-bit measurement/reset after expanding loops and user calls. `dynamic_visits` separately counts IR visits, including empty calls/loops. Neither expansion counter counts acquisition shots or lower-level controlled-gate synthesis. These are syntactic counts, not hardware estimates. Native bytes and peak RSS remain unknown.
+`bytes_written` counts the accepted ASCII and UTF-8 bytes, punctuation included. `emitted_instructions` counts textual gate applications, measurements and resets, including definition bodies once per text occurrence. `expanded_operations` counts direct primitive applications plus per-bit measurements and resets after loops and user calls are expanded. `dynamic_visits` separately counts visits of the circuit description, including empty calls and loops. Neither expansion counter counts shots or lower-level controlled-gate synthesis. These are syntactic counts, not hardware estimates. Native bytes and peak memory remain unknown.
 
-A blocking binary sink must return a positive integer no larger than the offered buffer. Partial prefixes are completed before producing more text. Cancellation is checked between emission steps and every partial-write retry; an arbitrary blocking write cannot be preempted. `QasmWriteError.prefix` provides accepted bytes, fully accepted instruction statements and their `sha256:` digest, with the original failure chained. Admission errors occur before output. Failed streams may expose their prefix but never return a completed receipt.
+A blocking binary stream must return a positive integer no larger than the offered buffer. Partial prefixes are completed before more text is produced. Cancellation is checked between emission steps and before every retry of a partial write, and a blocking write cannot be interrupted. `QasmWriteError.prefix` gives the accepted bytes, the fully accepted instruction statements and their `sha256:` digest, with the original failure chained. Errors of the checks before output occur before any output. A failed stream may expose its prefix but never returns a completed write record.
 
-Files use a same-directory temporary, flush/close, then atomic replacement only after receipt construction succeeds. Failure or cancellation attempts to remove the owned temporary and preserves an existing destination. The original `QasmWriteError` keeps its prefix and cause if close or removal also fails; `secondary` records these failures in order, and `temporary` names a remaining owned file when removal fails. Control-flow exceptions keep their original type and expose secondary failures and remaining paths through exception notes. No fsync or power-loss durability is promised. Completed receipts bind source ID, selected IDs, subset/angle convention, layouts, batch context, counts and digest.
+Files use a temporary file in the same directory, flush and close it, then replace the destination atomically only after the write record has been built. Failure or cancellation tries to remove the temporary file and keeps an existing destination. The original `QasmWriteError` keeps its prefix and cause if closing or removal also fails. `secondary` records these failures in order, and `temporary` names a remaining temporary file when removal fails. Control-flow exceptions keep their original type and expose the secondary failures and remaining paths through exception notes. No fsync or durability after power loss is promised. A completed write record binds the source ID, the construction IDs, the subset and angle convention, layouts, batch context, counts and digest.
 
-## Explicit offline materialization
+## Check a written file with Qiskit {#explicit-offline-materialization}
 
 ```python
 from nwqlib.io import QasmMaterializationBudget, materialize_qasm3_file
 
 materialized = materialize_qasm3_file(
-    selected.construction, "preparation.qasm", receipt, writer_budget=writer_budget,
+    expectation_plan.construction, "preparation.qasm", record,
+    writer_budget=writer_budget,
     budget=QasmMaterializationBudget(
         max_bytes=4096, max_qubits=1, max_clbits=0,
         max_dynamic_visits=100, max_operations=100,
     ),
 )
+print(materialized.output_nodes)  # 1
 ```
 
-This optional operation rederives capacity from the supplied construction, re-emits bounded text into a digest sink to verify the complete receipt, reads one bounded file snapshot, and verifies its bytes before passing those same bytes to Qiskit's QASM3 importer and UnrollForLoops. A persisted receipt alone cannot authorize unrelated text. Huge dynamic workloads reject before opening the file or importing it. Required hard native-byte or peak-RSS bounds also reject before import because this consumer cannot establish them.
+This optional step derives the capacity again from the construction, writes the bounded text again into a digest stream to verify the complete write record, reads one bounded snapshot of the file, and verifies its bytes before passing those same bytes to Qiskit's OpenQASM 3 importer and `UnrollForLoops`. A saved write record alone cannot vouch for unrelated text. Very large dynamic workloads are rejected before the file is opened or imported. A required hard bound on native bytes or peak memory is also rejected before import, because this step cannot establish one.
 
-Install `nwqlib[qasm]` to enable this explicit consumer, for example with `pip install "nwqlib[qasm]"`. Select `dev,qasm` together for the consumer tests. Public IO import and direct writing remain SDK-free. The `qasm` extra includes Qiskit and both parser/importer requirements; base does not install Qiskit.
+Install `nwqlib[qasm]` to enable it, for example with `pip install "nwqlib[qasm]"`. Select `dev,qasm` together to run its tests. Importing `nwqlib.io` and writing directly remain SDK-free. The `qasm` extra includes Qiskit and both the parser and the importer, and the base install does not include Qiskit.
 
-The checked dependency combination is OpenQASM parser 1.0.1, qiskit-qasm3-import 0.6.0 and Qiskit 2.5.2. Tiny text/AST and actual import/unroll checks cover user gates, ctrl, inv, global phase, controlled phase and nested fixed loops. Parser grammar acceptance is broader than this writer subset. The importer can eagerly synthesize Z with more than two controls, so that consumer construct is rejected before SDK allocation while remaining valid writer output. User definitions remain logical; no explicit gate decomposition, device transpilation, simulation or backend execution is requested. `materialized.output_nodes` is the actual loop-free top-level instruction count, which can differ from the source primitive expansion envelope. Dependency failures propagate; these checks do not prove physical execution equivalence or universal native memory bounds.
+The checked dependency combination is the OpenQASM parser 1.0.1, qiskit-qasm3-import 0.6.0 and Qiskit 2.5.2. Small text, syntax-tree, import and unroll checks cover user gates, `ctrl`, `inv`, global phase, controlled phase and nested fixed loops. The parser accepts a larger grammar than this writer subset. The importer can eagerly synthesize Z with more than two controls, so that construct is rejected before SDK allocation while remaining valid writer output. User definitions stay logical, and no explicit gate decomposition, device transpilation, simulation or backend execution is requested. `materialized.output_nodes` is the number of top-level instructions after loops are removed, which can differ from the source's expanded primitive count. Dependency failures propagate. These checks do not prove that physical execution is equivalent or that native memory is bounded in general.
 
-The fresh-process audit is `docs/scripts/check_qasm_records.py`; it also requires a swallowed forbidden-import negative control to fail. Focused tests live in `tests/test_qasm_streaming.py` and use only bounded text/AST/logical import work.
+A check in a fresh Python process writes OpenQASM directly while imports of Qiskit, Aer, the OpenQASM importer and NWQLib's backends are blocked, and a negative control confirms that a blocked import swallowed inside the writer still fails that check.

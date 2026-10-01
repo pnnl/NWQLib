@@ -144,11 +144,43 @@ def _native_family_census(encoding):
 
 
 def select_block_encoding(name, encoding, *, operator, max_bytes=DEFAULT_INPUT_BYTES):
-    """Bind a supplied native BlockEncoding using one private execution snapshot.
+    """Wrap a block-encoding circuit you built as a block that a Program can call.
 
-    The operator equation/error are caller assertions, not a dense validation.
-    Equal shapes or metadata cannot reattach another native oracle. SDK import
-    occurs only at this explicit native intake.
+    Pass a `BlockEncoding`, for example from
+    [`build_block_encoding`][nwqlib.subroutines.block_encoding.build_block_encoding],
+    and the operator input A it encodes. The block promises the
+    `(alpha, a, epsilon)` block encoding of Gilyén, Su, Low and Wiebe,
+    arXiv:1806.01838v1, Sec. 4.1, Definition 43 (p. 41),
+    `||A - alpha (<0_a| tensor I) U (|0_a> tensor I)|| <= epsilon`, with alpha
+    and epsilon in the units of A. The formula writes the ancillas first, as the
+    paper does. NWQLib's encodings place them on the low-order qubits, so in a
+    Qiskit dense matrix the block is `(I tensor <0_a|) U (I tensor |0_a>)`. The
+    relation and error are the caller's assertion. Selection checks the widths,
+    alpha and the error's domain, and does not extract or verify the dense block.
+    The circuit is copied once, so an encoding with equal shapes or metadata
+    cannot attach another circuit later. When the encoding's family and gate
+    counts are known (dense dilation, banded, Pauli LCU or multiplexed Pauli),
+    the block carries a CX-per-query estimate from them, recorded as the
+    caller's assertion rather than a verified inventory. Qiskit is imported only
+    by this call.
+
+    Args:
+        name (str): Signature name of the block.
+        encoding (BlockEncoding): The encoding circuit and its metadata.
+        operator (OperatorInput): The operator input A.
+        max_bytes (int): Default 10 GB (decimal, `10_000_000_000` bytes). Limit on
+            the stored data of the copied circuit.
+
+    Returns:
+        block (SelectedBlock): The block, with ports `ancillas` (a qubits, omitted when
+            a = 0) and `system`.
+
+    Raises:
+        TypeError: If `encoding` is not a `BlockEncoding`.
+        ValueError: If the circuit width is not ancillas plus system qubits, the
+            system width is not log2 of A's power-of-two dimension, alpha is not
+            finite and positive, or a given error bound is not finite and
+            nonnegative.
     """
     from nwqlib.subroutines.block_encoding.core import BlockEncoding
     from ._qiskit_intake import snapshot_circuit

@@ -1,33 +1,91 @@
-# Command line
+# Use the command line
 
-The workflow CLI is available as `nwqlib` or `python -m nwqlib`. Scientific execution, reanalysis, search, save/load and verification remain Python operations. Independent native backend build commands keep their own entry points.
+<a id="command-line"></a>The `nwqlib` command, also available as `python -m nwqlib`, lists the Methods, shows each Method's scope and parameters, checks a Method you wrote, and prints a saved Result. Solving, reanalysis, search, saving, loading and verification are Python operations. The NWQ-Sim runner has its own [build command](nwqsim.md#building-a-selected-nwq-sim-runner).
 
 ## Discover methods
 
 ```sh
 python -m nwqlib algorithms
+```
+
+```text
+adapt_gcim@4: eigenvalue
+chebyshev_lanczos@5: eigenvalue
+finite_pauli_expectation@2: normalized_expectation, quadratic_form
+fixed_gcim@4: eigenvalue
+lchs@3: solution, state_vector, norm_squared, quadratic_form, normalized_expectation, samples
+qcels@1: eigenphase, eigenvalue
+qhd@2: optimization_candidate
+qls@2: solution, state_vector, norm_squared, quadratic_form, normalized_expectation, samples
+rfe@2: eigenphase, eigenvalue
+rwpe@2: eigenphase, eigenvalue
+spe@2: eigenphase, eigenvalue
+Declared scope only; discovery does not establish scientific or backend qualification.
+```
+
+Each line gives a Method name, its version after `@`, and the outputs it can return ([Choose a problem and output](problems.md#outputs)). `card` prints one Method's declared problems, outputs, input forms, limitations and references as JSON:
+
+```sh
+python -m nwqlib card qls
+```
+
+```text
+{
+  ...
+  "descriptor": {
+    ...
+    "problem_families": [
+      "linear_system"
+    ],
+    ...
+    "access_families": [
+      "dense",
+      "pauli",
+      "periodic_stencil",
+      "bound_block_encoding"
+    ],
+    ...
+    "limitations": [
+      "complete propagated physical error and native rounding remain unknown",
+      "shortcut supplies a unit direction; classical norm models do not supply physical x"
+    ],
+    "references": [
+      {
+        ...
+        "reference": "selected inverse Chebyshev QSVT and Dalzell arXiv:2406.12086v2 kernel-reflection methods",
+        ...
+```
+
+`algorithms --json` prints every card as JSON. `options` prints the JSON schema of a Method's configuration, including required scientific fields and current defaults:
+
+```sh
 python -m nwqlib algorithms --json
-python -m nwqlib card finite_pauli_expectation
 python -m nwqlib options adapt_gcim
 ```
 
-`algorithms` and `card` display actual declared method scope, references and limitations. They do not prove applicability, native support or accuracy. `options` shows the configured Method type's JSON schema, including required scientific fields and current defaults. It does not instantiate a Method with invented inputs or plan a workload.
+These commands show what each Method declares. They do not show that a Method applies to your problem, runs on a given backend or reaches a given accuracy. `options` creates no Method and plans no workload.
 
-`--version VERSION` selects the exact named version for `card` or `options`. Missing or ambiguous registrations reject without fallback. `--third-party` explicitly includes installed entry-point metadata. It executes no external factory; unloaded external descriptors and schemas remain unavailable. Builtin discovery reads the same configuration owners as Python exports.
+`--version VERSION` selects an exact Method version for `card` or `options`, and an unknown or ambiguous name is an error. `--third-party` also lists the Methods that installed packages declare through entry points, without running their code. Their scope, cards and schemas are therefore unavailable from these commands.
 
-## Check an explicitly selected Method
+## Check a Method you wrote {#check-an-explicitly-selected-method}
 
 ```sh
 python -m nwqlib check-method MODULE:case
 ```
 
-`MODULE` is your importable module and `case` is its factory returning a `MethodCase`. This imports and executes the user-selected trusted factory. Its `MethodCase` declares actual bounded evaluation, an independent scientific oracle and a wrong-result falsifier. The reference Hadamard Method in `tests/_hadamard_method.py` supplies a complete `case`. It performs one two-qubit acquisition, checks the Y expectation of `|+i>`, and exercises the existing Result archive. See [method authoring](algorithm_protocol.md) for the contract and three independent scientific witnesses.
+`MODULE` is your importable module, and `case` is a function in it that returns a `MethodCase`. The `MethodCase` holds your Method, a Problem for the check and three functions. `evaluate` runs the Method, `accepts` tests the Result against an independently known answer, and `invalid_result` makes a wrong Result for the same Plan. `check-method` then checks the following, as [Add a method](algorithm_protocol.md#author-cases-and-their-limits) defines:
 
-A selected case or archive hook can execute Python code and declared acquisition; this command is not a sandbox. The checker adds no automatic reference study. A failed or unsupported case exits nonzero. Passing establishes the scoped case, rather than general scientific or backend qualification.
+1. The Result that `evaluate` returns satisfies `accepts`, the Method's error model matches its Plan, and the Method names the Result type it returns.
+2. The wrong Result from `invalid_result` is rejected by the Method's own check of the Plan and Result, both in memory and when written into a saved Result.
+3. The correct Result saves, reloads unchanged and still satisfies `accepts`.
+
+The [reference Hadamard Method](https://github.com/pnnl/NWQLib/blob/main/tests/_hadamard_method.py) supplies a complete `case`. It runs one two-qubit circuit, checks that the Y expectation of `|+i>` is 1, and saves and reloads the Result. On it, `check-method` prints `"status": "CONFORMANT"` with the scope of the check.
+
+`check-method` imports and runs the case you name, including any circuit execution it declares, so it is not a sandbox. It adds no reference study of its own. A failed or unsupported case exits with a nonzero status. A pass establishes this one case only, not general scientific accuracy or backend support.
 
 ## Python discovery
 
-In Python, discovery keeps the actual immutable registration records. A compact display does not replace them with strings:
+In Python, `methods()` returns the registration record of each built-in Method:
 
 ```python
 from nwqlib import methods
@@ -37,11 +95,11 @@ for registration in registrations:
     print(registration.source.name, registration.source.version)
 ```
 
-Use the existing `algorithms`, `card` and `options` commands for formatted declarations and configuration schemas. Discovery does not execute or qualify a Method.
+For formatted declarations and configuration schemas, use the `algorithms`, `card` and `options` commands. Discovery neither runs nor qualifies a Method.
 
 ## Read a saved report
 
-Save an actual Result in Python, then inspect it without loading its Method or binary data:
+Save a Result in Python, then print it without loading its Method or binary data:
 
 ```python
 result.save("my-result")
@@ -51,6 +109,9 @@ result.save("my-result")
 python -m nwqlib report my-result
 ```
 
-`report PATH` reads `result.json` with the archive owner's JSON reader, which refuses nesting deeper than the JSON parser's recursion limit, duplicate keys and nonfinite numbers. The report also refuses a file that parses but is nested too deeply for the indented JSON encoder that writes the report. Its JSON output keeps the saved selection, scientific fields, observations, receipts and trace, plus the `metadata_validation` entry that lists what was checked. Known common schemas and identities, the canonical Plan identity and the associations of the Result with its observations and of the attempts with their forecast are checked. The joins of observations to their receipts and attempts were checked when the Result was saved and are not repeated. Method-specific Result schema/identity and scientific pair checks require the explicitly chosen loader. No array, native circuit or controller cache is hydrated. Binary payload integrity remains unverified, including when data is missing or changed.
+The JSON output holds the saved selection, scientific fields, observations, preparation records and trace, plus a `metadata_validation` entry that states what was checked:
 
-A malformed known record or changed canonical Plan description rejects. Method names in the file remain inert data. Reporting does not replan, analyze, execute, refresh a provider or modify the saved directory. Use the Python Result and Run operations for the corresponding explicitly selected work.
+- Checked: the common record schemas and content hashes, the Plan's content hash, and the links of the Result to its observations and of the attempts to their forecast.
+- Not checked: the Method's own Result schema, content hash and scientific relation, which need the Result loaded in Python with `nwqlib.load_result(path, method=...)`, and the integrity of binary data, because `report` reads no arrays or circuits. Data that is missing or changed is not detected.
+
+A malformed known record or a changed Plan description is rejected. Method names in the file are read as text and never imported. `report` does not plan, analyze, execute, contact a provider or modify the saved folder. The limits of the JSON reader are in [report reader limits](development/execution.md#report-reader-limits).

@@ -21,39 +21,82 @@ from .references import dense_work
 
 
 class LCHSVerification(Record):
-    """One named reference; no reference is part of planning or ordinary analysis.
+    """Reference comparison for the physical solution of an `LCHS` Result.
 
-    Work caps cover this complete call, including both explicitly selected
-    references and every selected node. Dense work is a size proxy, not FLOPs.
-    Reference arrays are temporary; only discrepancies and actual counts remain.
+    Build it with keyword arguments and pass it to
+    `result.verify(checks=...)`, for example
+    `result.verify(checks=LCHSVerification(reference="expm"))`. `reference`
+    is the only required argument. The call returns `(receipt, facts)`.
+    `facts[0].fact.value.value` is the discrepancy between the Result's
+    physical solution u and the reference `u_ref`, and the receipt records
+    every computed value and call count. The check is named `name`, and
+    `"ivp_closed_form"` adds `name + ".reference_consistency"`.
+    `Certificate.with_verification` turns `facts` into PASS when the value
+    is at most `threshold`, FAIL when it is larger, and INCONCLUSIVE when
+    the value or the threshold is missing.
+    Planning, solving and ordinary analysis never compute a reference.
+
+    The Result must hold a physical solution vector with its phase, from a
+    `Solution` output or a physical `StateVector`, and A must be a dense
+    matrix, never converted from a compact input. The work limits cover the
+    whole call, including both references of `"ivp_closed_form"` and every
+    node of `"selected_grid"`. Dense work is a size-based count, not a
+    floating-point operation count. Reference arrays are temporary, and only
+    discrepancies and call counts are kept. A discrepancy is numerical
+    evidence for this input, not a proven error bound. The
+    [LCHS guide](../../algorithms/lchs.md#explicit-checks-and-saved-results)
+    shows a complete check.
 
     Attributes:
-        reference: ``expm`` for homogeneous exp(-A*T)u0, ``ivp`` for an RK45
-            solve of du/dt = -A u + b, ``closed_form`` for the constant-source
-            formula of ACL arXiv:2312.03916v2, Eq. (2), ``ivp_closed_form``
-            for both with their signed consistency, or ``selected_grid`` for
-            the exact saved finite recipe. The last reproduces the saved
-            nodes and product-formula steps, so its discrepancy excludes the
-            kernel-integral, k- and Duhamel-quadrature and product-formula
-            errors.
-        name: Name of the published discrepancy and the prefix of its companions.
-        metric: ``absolute_l2`` is ||target - reference||_2 with no global-phase
-            fit, and ``relative_l2`` divides it by the reference norm.
-        threshold: Optional pass threshold of the discrepancy check.
-        consistency_threshold: Optional threshold of the IVP and closed-form
-            consistency check, only for ``ivp_closed_form``.
-        rtol: RK45 relative tolerance, required for IVP references and
-            rejected otherwise.
-        atol: RK45 absolute tolerance, required for IVP references and
-            rejected otherwise.
-        max_rhs_calls: Cap on RK45 right-hand-side evaluations.
-        max_bytes: Cap on known arrays of this call.
-        max_dense_work: Cap on counted dense work units of this call. For
-            ``selected_grid`` it also covers the stored product-formula
-            node-table reads (``stored_node_read_work``, a diagnostic subset)
-            and the node actions.
-        max_node_evaluations: Cap on selected k-node times application evaluations.
-        max_pf_operations: Cap on product-formula rotations or elementary gates evaluated by ``selected_grid``.
+        reference: Required. `"expm"` compares with `exp(-A T) u0` for
+            dynamics without a source (An, Childs and Lin,
+            arXiv:2312.03916v2, here ACL, Eq. (2) with b = 0). `"ivp"` solves `du/dt = -A u + b` with SciPy's RK45
+            under explicit `rtol`, `atol` and `max_rhs_calls`.
+            `"closed_form"` evaluates ACL Eq. (2) for a constant source with
+            one exponential of `[[-A*T, b*T], [0, 0]]`. `"ivp_closed_form"`
+            runs both and also reports their signed consistency. These three
+            need a source. A matrix with 1-norm above `2**37`, or with an
+            exponential that is not finite in binary64, gives an unknown
+            discrepancy. `"selected_grid"` reproduces the saved finite sum,
+            with its nodes and product-formula steps, so its discrepancy
+            excludes the kernel-integral, k- and Duhamel-quadrature and
+            product-formula errors.
+        name: Default `"reference_error"`. Name of the reported discrepancy
+            and prefix of its companion values.
+        metric: Default `"absolute_l2"`, the norm `||u - u_ref||_2` without a
+            global-phase fit. `"relative_l2"` divides it by `||u_ref||_2`.
+        threshold: Default `None`. Optional nonnegative pass threshold of the
+            discrepancy check.
+        consistency_threshold: Default `None`. Optional nonnegative threshold
+            of the consistency check between the IVP and closed-form
+            references, only for `"ivp_closed_form"`.
+        rtol: Default `None`. Positive RK45 relative tolerance, at least
+            SciPy's floor of 100 times the binary64 machine epsilon. Required
+            for `"ivp"` and `"ivp_closed_form"` and refused otherwise.
+        atol: Default `None`. Positive RK45 absolute tolerance. Required for
+            `"ivp"` and `"ivp_closed_form"` and refused otherwise.
+        max_rhs_calls: Default `None`. Upper limit on RK45 right-hand-side
+            evaluations. Required for `"ivp"` and `"ivp_closed_form"` and
+            refused otherwise.
+        max_bytes: Default 10 GB (decimal, `10_000_000_000` bytes). Upper
+            limit on the known arrays of this call.
+        max_dense_work: Default `1e8` (`100_000_000`). Upper limit on the
+            counted dense work of this call. For `"selected_grid"` it also
+            covers reading the stored product-formula node table and the
+            node actions.
+        max_node_evaluations: Default `4096`. Upper limit on the number of
+            k nodes times operator applications evaluated.
+        max_pf_operations: Default `100_000`. Upper limit on the
+            product-formula rotations or elementary gates that
+            `"selected_grid"` evaluates.
+
+    Raises:
+        ValueError: If an IVP reference lacks `rtol`, `atol` or
+            `max_rhs_calls`, if `rtol` is below SciPy's floor, if these are
+            given for another reference, or if `consistency_threshold` is
+            given without `"ivp_closed_form"`. `result.verify` also raises
+            for `"expm"` with a source, for the source references without
+            one, and for a non-dense A.
     """
 
     reference: Literal["expm", "ivp", "closed_form", "ivp_closed_form", "selected_grid"]

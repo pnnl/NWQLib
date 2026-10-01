@@ -7,7 +7,7 @@
 #
 # NWQLib's quantum linear solver (QLS) solves it in Dalzell's shortcut form (arXiv:2406.12086v2), which returns the unit direction $x/\|x\|$ of the history. The question is whether this direction resolves the small relaxation of the populations better than a history in which nothing evolves.
 #
-# Install with `python -m pip install -e ".[aer,notebook]"` from the repository root · one 10-qubit circuit · about 10 s on a laptop.
+# Install with `python -m pip install "nwqlib[aer,notebook]"`. To work on NWQLib itself, run `python -m pip install -e ".[aer,notebook]"` in a clone of the repository instead. The notebook simulates one 10-qubit circuit and runs in about 7 s on an Apple M3 Max with 36 GiB of memory (Python 3.12.14, Qiskit 2.5.2, Aer 0.17.2).
 #
 # > **How to read this notebook.** The next cells solve the history and show the answer with its cost.
 # >
@@ -108,7 +108,7 @@ def show_table(rows, *, digits=3, details=None, headers=("Quantity", "Value", "M
 
 def show_card(result, predicted, aligned_direction, reference_direction, no_evolution_direction,
               plan_seconds, solve_seconds):
-    """Show the result card: the verdict, the cost of both ledgers, the comparison figure and what NWQLib did."""
+    """Show the result card: the verdict, the quantum and classical cost, the comparison figure and what NWQLib did."""
     rec, trace = result.plan.reconstruction, result.data.trace
     qls_error = np.linalg.norm(aligned_direction - reference_direction)
     baseline_error = np.linalg.norm(no_evolution_direction - reference_direction)
@@ -222,7 +222,7 @@ show_table([
 # %% [markdown]
 # ## 2. What it costs
 #
-# **The gate-count formulas give the qubits before the circuit exists, but no CX count for this construction.** The compiled circuit gives that count, and the run records the classical ledger of work, stored data and time.
+# **The gate-count formulas give the qubits before the circuit exists, but no CX count for this construction.** The compiled circuit gives that count, and the run records the classical cost: work, stored data and time.
 #
 # `estimate` adds up a gate-count formula for each block of the selected construction without building a circuit. Three blocks have no CX formula: the controlled dense-dilation query of $A$, the controlled preparation of $b$ and the multi-controlled RY rotation that loads $1/t$.
 #
@@ -246,7 +246,7 @@ show_table([
     ("Success probability", "Not predicted", result.algorithm_success_mass),
     ("Single-qubit gates", "Not predicted", compiled["operations"].get("u", 0)),
     ("Depth", "Not predicted", compiled["depth"]),
-], headers=("Quantum ledger", "Predicted by estimate", "Compiled circuit or run"))
+], headers=("Quantum cost", "Predicted by estimate", "Compiled circuit or run"))
 
 trace = result.data.trace
 show_table([
@@ -256,11 +256,11 @@ show_table([
     ("Stored run data", "Not predicted", format_bytes(trace.data_bytes)),
     ("Time on this computer", "Not predicted", f"plan {plan_seconds:.2f} s, solve {solve_seconds:.2f} s, "
      f"{sum(event.timing.seconds for event in trace.events):.2f} s of it in the simulator call"),
-], headers=("Classical ledger", "Before the run", "Recorded by the run"))
+], headers=("Classical cost", "Before the run", "Recorded by the run"))
 
 # %% [markdown]
 # - **Block applications** count every call of a building block, such as the preparation of $b$, the steps of each query and the phase rotations, so they exceed the polynomial degree.
-# - **Work.** `estimate` counts the work of the unique selected block definitions. The run records the work it reserved for the native definitions it built, so the two differ.
+# - **Work.** `estimate` counts the work of each distinct block definition once. The run records the work it counted for the Qiskit definitions it built, so the two differ.
 # - **Time.** The solve time includes building the circuit, the simulator call and the analysis of its output.
 # - **Not estimated:** peak memory on this route, physical qubits, error correction, run time on hardware and price.
 #
@@ -290,7 +290,7 @@ show_table([
      "Measured from A and b alone (Appendix C). Zero when A times the direction is parallel to b"),
     ("Singular values outside the selected domain", spectral_facts["spectral_domain_deficit"],
      "Measured from the singular values plan computed. Zero means all are covered"),
-    ("Phase-fit bound", rec.phase_error, "Upper bound for realizing the rescaled polynomial, not for the direction"),
+    ("Phase-fit bound", rec.phase_error, "Upper bound for implementing the rescaled polynomial, not for the direction"),
     ("Roundoff of the simulated state", roundoff,
      "Upper bound" if roundoff is not None else "Unavailable: " + roundoff_reason),
     ("Total error of the direction from all sources", None, "Unavailable: " + selected.error_model.terms[0].formula),
@@ -477,7 +477,7 @@ plt.show()
 show_table([
     ("Original / padded dimension", (rec.original_dimension, rec.padded_dimension), f"{rec.original_dimension} physical history entries, padded to {rec.padded_dimension}"),
     ("Encoded coordinate dimension", rec.system_dimension, "A / alpha coordinates before the Dalzell augmentation"),
-    ("Encoding family / ancillas", (rec.encoding_family, rec.encoding_ancillas), "Actual encoding selected for A"),
+    ("Encoding family / ancillas", (rec.encoding_family, rec.encoding_ancillas), "Encoding chosen for A"),
     ("Method embedding / total qubits", (rec.embedding, rec.width), "Shortcut layout and complete selected width"),
     ("Original singular interval", (rec.sigma_min, rec.sigma_max), "Numerical endpoints computed by plan"),
     ("Condition number", rec.condition_number, "Original sigma_max / sigma_min"),
@@ -497,7 +497,7 @@ show_table([
 # %% [markdown]
 # ### Inspect the kernel-reflection polynomial and phases
 #
-# The shortcut constructs an augmented operator $G_t$ whose kernel encodes the inverse direction (Dalzell, arXiv:2406.12086v2, Eqs. (8)–(11)). An ideal reflection multiplies vectors in the kernel by $+1$ and other admitted singular-vector directions by $-1$.
+# The shortcut constructs an augmented operator $G_t$ whose kernel encodes the inverse direction (Dalzell, arXiv:2406.12086v2, Eqs. (8)–(11)). An ideal reflection multiplies vectors in the kernel by $+1$ and the other singular-vector directions, whose singular values lie in the selected positive domain, by $-1$.
 #
 # A finite even polynomial approximates that reflection (Dalzell, App. B.3, Eq. (62)). Its behavior in the gap between zero and the selected positive singular domain is not an accuracy claim.
 #
@@ -509,9 +509,9 @@ show_table([
     ("Reflection degree / half-degree", (rec.degree, rec.polynomial.ell), "Even polynomial degree is twice ell"),
     ("Kernel parameter eta", rec.polynomial.eta, "Construction parameter derived from epsilon_inv"),
     ("Polynomial rescale", rec.polynomial.rescale, "Maps the polynomial into the QSP amplitude domain"),
-    ("Phase count / evaluations", (len(rec.phase_solution), rec.phase_evaluations), "Selected angles and actual phase-solver work"),
-    ("Phase-fit bound", rec.phase_error, "Available bound for realizing the rescaled polynomial"),
-    ("Encoding error", rec.encoding_error, "Bound in the selected encoding's declared operator frame"),
+    ("Phase count / evaluations", (len(rec.phase_solution), rec.phase_evaluations), "Selected angles and phase-solver work"),
+    ("Phase-fit bound", rec.phase_error, "Available bound for implementing the rescaled polynomial"),
+    ("Encoding error", rec.encoding_error, "Bound in the quantity and metric that the selected encoding declares"),
 ], digits=6, details="Polynomial and phase parameters")
 singular_grid = np.linspace(0.0, 1.0, 201)
 reflection_values = np.polynomial.chebyshev.chebval(singular_grid, rec.polynomial.coefficients)
@@ -605,7 +605,7 @@ event, target = result.data.trace.events[0], result.data.receipts[0].target
 show_table([
     ("Method / execution", (selected.method.descriptor.method, selected.execution), "Selected algorithm and execution path"),
     ("Backend / version", (target.name, target.version), "Recorded when the circuit was prepared"),
-    ("Native instructions", result.data.receipts[0].native_operations, "Prepared instruction count, not a CX count"),
+    ("Instructions", result.data.receipts[0].native_operations, "Prepared instruction count, not a CX count"),
     ("Simulator call [s]", event.timing.seconds, f"Recorded scope {event.timing.scope}, part of the solve time"),
     ("Plan identifier", selected.content_id, "Identifies the selected Plan"),
     ("Result identifier", result.content_id, "This direction and the observations it used"),

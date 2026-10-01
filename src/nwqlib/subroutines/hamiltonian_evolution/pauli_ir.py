@@ -1,4 +1,4 @@
-"""Typed Pauli-evolution intermediate representation."""
+"""Records of Pauli terms and Hamiltonian-evolution blocks for circuit construction."""
 
 from __future__ import annotations
 
@@ -8,11 +8,19 @@ from typing import Any, Mapping
 
 @dataclass(frozen=True, kw_only=True)
 class PauliEvolutionTerm:
-    """One compact Pauli term in an evolution block.
+    """One Pauli term `c P` of an evolution block, with `P` given by a compact label.
 
-    Attributes:
-        pauli: Compact indexed Pauli label accepted by the evolution label parser.
-        coefficient: Coefficient in the block generator; Hermitian execution imposes its real-coefficient premise.
+    Build it with keyword arguments, for example
+    `PauliEvolutionTerm(pauli="x0z2", coefficient=0.5)` for `0.5 X_0 Z_2`.
+    Both arguments are required.
+
+    Args:
+        pauli: Compact indexed Pauli label such as `"x0z2"`, with
+            strictly increasing zero-based qubit indices, as
+            [`parse_pauli_label`][nwqlib.subroutines.hamiltonian_evolution.pauli_labels.parse_pauli_label]
+            accepts.
+        coefficient: Coefficient in the block generator. A
+            Hermitian generator needs it real.
     """
 
     pauli: str
@@ -21,20 +29,34 @@ class PauliEvolutionTerm:
 
 @dataclass(frozen=True, kw_only=True)
 class PauliEvolutionBlock:
-    """One Hamiltonian-evolution instruction.
+    """One Hamiltonian-evolution step `exp(-i * time_step * sum_j c_j P_j)` or one of its exact special forms.
 
-    For the default kind the block means exp(-i * time_step * sum_j c_j P_j),
-    synthesized as one product-formula application in term order. Special
-    kinds are described in pauli_evolution.
+    Build it with keyword arguments, for example
+    `PauliEvolutionBlock(terms=(term,), time_step=0.1)`, and pass a sequence
+    of blocks to
+    [`build_pauli_evolution_circuit`][nwqlib.subroutines.hamiltonian_evolution.pauli_evolution.build_pauli_evolution_circuit].
+    `terms` and `time_step` are required. For the default kind the block is
+    synthesized as one product-formula application in term order, which is
+    exact when the terms commute. The `"number_projector"` and `"kinetic"`
+    kinds have the exact forms that the
+    [Pauli-evolution builders][nwqlib.subroutines.hamiltonian_evolution.pauli_evolution]
+    describe.
 
-    Attributes:
-        terms: Ordered compact Pauli terms of the selected generator.
-        time_step: Duration multiplying the generator for this evolution block.
-        time: Optional schedule-time metadata; distinct from the step duration.
-        kind: Instruction meaning, normally hamiltonian_evolution.
-        support: Optional explicit wire positions for a specialized compact instruction.
-        angle: Optional rotation-angle metadata for a specialized compact instruction.
-        metadata: Additional selected construction information; not a second executed circuit.
+    Args:
+        terms: Ordered Pauli terms of the
+            generator.
+        time_step: Duration multiplying the generator for this
+            block.
+        time: Default `None`. Optional schedule time, distinct
+            from the step duration.
+        kind: Default `"hamiltonian_evolution"`. Block meaning:
+            `"hamiltonian_evolution"`, `"number_projector"` or `"kinetic"`.
+        support: Default `None`. Qubits of a
+            `"number_projector"` block.
+        angle: Default `None`. Angle of a `"number_projector"`
+            block.
+        metadata: Default empty. Additional construction
+            information. It does not describe a second circuit.
     """
 
     terms: tuple[PauliEvolutionTerm, ...]
@@ -75,7 +97,7 @@ def coerce_pauli_evolution_block(
 
 
 def pauli_terms_to_dicts(terms: tuple[PauliEvolutionTerm, ...]) -> list[dict[str, Any]]:
-    """Return compact dictionary records accepted by Qiskit conversion helpers."""
+    """Return the terms as `{"pauli": label, "coefficient": c}` records, the input of `sparse_pauli_op_from_terms`."""
 
     return [{"pauli": term.pauli, "coefficient": term.coefficient} for term in terms]
 

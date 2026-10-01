@@ -26,45 +26,55 @@ def validate_preparation_binding(record, state, constructor):
 
 
 def write_blocks(blocks, files):
-    """Serialize the shared selected-block graph once, placing transformed bases before their
-    users.
+    """Return the saved form of a Method's selected blocks, for its `save_archive` hook.
 
-    Selection admits the read-only coefficient array, padded amplitudes and
-    their construction temporaries. The archive stores the shared operator
-    and amplitude array once and derives coefficients from the restored
-    operator. A signed Pauli SELECT or readout block therefore saves its
-    operator and amplitude array only, for m terms on q qubits and
-    P = 2**a >= m padded amplitudes.
+    Call it in `save_archive(plan, files)` with the archive object `files` that
+    the hook receives, and store the returned dict with the saved Plan. Each
+    block is written once, base blocks before the blocks that transform them.
+    Only the built-in preparation, Pauli SELECT and readout, reflection and
+    transformed blocks can be saved. A signed Pauli SELECT or readout saves its
+    operator and amplitude array only, because loading derives the coefficients
+    from the operator, and blocks that share an operator or amplitude array
+    write it once.
 
-    The selection law alone does not bound the whole archive or the live
-    packed operator. With w=ceil(q/64), that operator has numerical data
-    B_op=16mw+16m. A single shared amplitude file adds 8P. No coefficient
-    file is needed when load derives coefficients from the operator:
+    The selection limit of
+    [`select_signed_pauli`][nwqlib.blocks.selection.select_signed_pauli] does not
+    bound the whole archive or the live packed operator. For m terms on q qubits,
+    `P = 2**a >= m` padded amplitudes and `w = ceil(q/64)`, the packed operator
+    holds `B_op = 16mw + 16m` bytes of numerical data and the one shared
+    amplitude file adds `8P`, so
 
-        B_archive,data = 16mw + 16m + 8P.
+    ```text
+    B_archive,data = 16mw + 16m + 8P,
+    ```
 
-    Add four NPY headers and the actual graph/manifest JSON. For these
-    fixed-dtype rank-one/rank-two arrays with intp-sized shapes, 256 bytes
-    per NPY header suffices. Shared SELECT/readout payloads and an
-    already-written operator are counted once by object identity.
+    plus four NPY headers, at most 256 bytes each for these fixed-dtype
+    rank-one and rank-two arrays, and the graph and manifest JSON. The NumPy NPY
+    writer
+    ([v2.5.2](https://github.com/numpy/numpy/blob/v2.5.2/numpy/lib/_format_impl.py))
+    writes a contiguous array with at most one data chunk of
+    `min(array.nbytes, 2**24)` bytes, and an array that must be copied because
+    it is not contiguous needs a second such buffer. With contiguous packed and
+    amplitude arrays, the numerical peak while writing is
 
-    For contiguous arrays, the inspected NumPy NPY writer
-    (https://github.com/numpy/numpy/blob/v2.5.2/numpy/lib/_format_impl.py)
-    uses at most one data bytes chunk of min(array.nbytes,2^24). If an
-    iterator must copy noncontiguous data as well, charge a second such
-    buffer. With contiguous packed and amplitude arrays, a numerical
-    write-phase peak is
+    ```text
+    B_held,other + B_op + 8m + 8P + min(max(8mw, 16m, 8P), 2**24) + H_archive,
+    ```
 
-        B_held,other + B_op + 8m + 8P
-         + min(max(8mw,16m,8P),2^24) + H_archive.
+    where `H_archive`, the graph serialization and writer bookkeeping, is not
+    fixed for an arbitrary block graph. The peak of a save is the larger of this
+    and the selection peak, counting shared operator bytes once. A transport that
+    buffers a whole archive needs its own allowance. This function takes no byte
+    limit, and the archive's byte limits apply to each file it writes.
 
-    H_archive includes actual graph serialization and writer bookkeeping and
-    is not fixed for an arbitrary block graph. Take the maximum of this
-    phase and selection, counting shared operator bytes once. A transport
-    that buffers a whole archive needs its own additional charge. Keep the
-    existing law (``_signed_pauli_requirements``) as the selection owner
-    without relabeling it as an archive bound. This function takes no byte
-    limit.
+    Args:
+        blocks (Iterable[SelectedBlock]): The blocks to save, usually the Plan's
+            bound blocks.
+        files (ArchiveFiles): The archive object of the hook.
+
+    Returns:
+        saved (dict): The saved block graph, with its format, nodes and roots, for
+            [`read_blocks`][nwqlib.blocks._archive.read_blocks].
     """
     from nwqlib.problems.inputs import StateInput
     roots = {id(block): index for index, block in enumerate(blocks)}
@@ -114,18 +124,30 @@ def write_blocks(blocks, files):
 
 
 def read_blocks(data, records, files):
-    """Restore saved blocks, binding only the known builtin constructors.
+    """Restore the blocks saved by `write_blocks`, for a Method's `load_archive` hook.
 
-    A saved kind selects one constructor from this module's fixed table, so
-    loading never imports or calls code named in the archive. A preparation
-    is joined to its reloaded input before binding, and a transformed block
-    is rebound to its already restored base. Selection admits the read-only
-    coefficient array, padded amplitudes and their construction temporaries.
-    The archive stores the shared operator and amplitude array once and
-    derives coefficients from the restored operator. A signed Pauli SELECT
-    or readout derives them with ``signed_pauli_coefficients``, the
-    expression selection uses, and a SELECT and its readout share one
-    restored payload.
+    A saved kind selects one constructor from a fixed table of built-in block
+    kinds, so loading never imports or calls code named in the archive. A
+    preparation is checked against its reloaded state input before it is bound,
+    and a transformed block is bound again to its restored base. A signed Pauli
+    SELECT or readout derives its coefficients from the restored operator with
+    the expression selection uses, so alpha, the coefficients and the PREP
+    amplitudes equal those before saving, and a SELECT and its readout share one
+    restored operator.
+
+    Args:
+        data (dict): The saved block graph that `write_blocks` returned.
+        records (Sequence[SelectedDefinition]): The selected definitions that the
+            saved root blocks refer to by position. The reference Method passes
+            `plan.construction.selections`.
+        files (ArchiveFiles): The archive object of the hook.
+
+    Returns:
+        blocks (tuple[SelectedBlock, ...]): The restored blocks, in the saved order.
+
+    Raises:
+        ValueError: If the saved format is not the current block format, or a
+            saved preparation does not match its input.
     """
     import json
 

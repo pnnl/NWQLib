@@ -13,9 +13,17 @@ from nwqlib.ir.expressions import Binding
 
 
 class EstimatorContribution(Record):
-    """coefficient multiplies the random variable data_id; variance has squared units.
+    """One term `a_i X_i` of a linear estimator, for [`linear_variance`][nwqlib.evidence.statistics.linear_variance].
 
-    Repeated data_id is the same variable, never another independent sample.
+    Build it with keyword arguments. All three fields are required. Terms
+    with the same `data_id` are the same random variable, never independent
+    samples.
+
+    Attributes:
+        data_id: Required. Content hash of the data that defines `X_i`.
+        coefficient: Required. The real coefficient `a_i`.
+        variance: Required. `Var(X_i)` as a [`FramedFact`][nwqlib.evidence.error_model.FramedFact],
+            in the squared unit of `X_i`.
     """
 
     data_id: ContentID
@@ -24,7 +32,22 @@ class EstimatorContribution(Record):
 
 
 class CrossCovariance(Record):
-    """One supplied unordered pair; absence never means zero covariance."""
+    """The covariance of two distinct random variables, for [`linear_variance`][nwqlib.evidence.statistics.linear_variance].
+
+    A pair without a supplied covariance is unknown, never zero. Build it
+    with keyword arguments. All three fields are required.
+
+    Attributes:
+        left: Required. Content hash of the data of one variable.
+        right: Required. Content hash of the other variable, distinct from
+            `left`.
+        fact: Required. The covariance as a
+            [`FramedFact`][nwqlib.evidence.error_model.FramedFact].
+
+    Raises:
+        ValueError: If `left` equals `right`. A variance belongs to its
+            `EstimatorContribution`.
+    """
 
     left: ContentID
     right: ContentID
@@ -38,7 +61,25 @@ class CrossCovariance(Record):
 
 
 class IndependenceLaw(Record):
-    """Joint relation with its own frame, restrictions, predicates and receipt."""
+    """A declared independence of the variables of one joint data set, in place of covariances.
+
+    Pass it as `independence=` to [`linear_variance`][nwqlib.evidence.statistics.linear_variance].
+    It keeps its own frame, parameter restrictions, predicates and evidence.
+    Build it with keyword arguments. `joint_id`, `frame`, `bindings` and
+    `evidence` are required.
+
+    Attributes:
+        joint_id: Required. Content hash of the joint data.
+        frame: Required. The variance frame the independence applies in.
+        bindings: Required. Parameter values the independence is restricted to.
+        evidence: Required. The basis of the independence claim.
+        conditions: Default `()`. Boolean predicates that must hold, in the
+            predicate frame of `frame`.
+
+    Raises:
+        ValueError: If a parameter is restricted twice, or a condition is not
+            a predicate in that frame.
+    """
 
     joint_id: ContentID
     frame: ErrorFrame
@@ -56,9 +97,20 @@ class IndependenceLaw(Record):
 
 
 class VarianceAssessment(Record):
-    """Variance and stored joint-data inputs; value owns the complete output frame.
+    """What [`linear_variance`][nwqlib.evidence.statistics.linear_variance] returns: the variance and the inputs it was computed from.
 
-    This is not a standard deviation, confidence bound or PSD validation.
+    The answer is `value`, a variance in squared units with its frame. It is
+    not a standard deviation or a confidence bound, and it does not check
+    that a covariance matrix is positive semidefinite. The fields below are
+    read-only.
+
+    Attributes:
+        joint_id: Content hash of the joint data.
+        value: The variance as a [`FramedFact`][nwqlib.evidence.error_model.FramedFact],
+            unknown when a needed variance or covariance is missing.
+        contributions: The supplied terms.
+        covariance: The supplied covariances.
+        independence: The supplied `IndependenceLaw`, or `None`.
     """
 
     joint_id: ContentID
@@ -72,34 +124,53 @@ def linear_variance(*, joint_id: str, frame: ErrorFrame,
                     contributions: tuple[EstimatorContribution, ...],
                     covariance: tuple[CrossCovariance, ...] = (),
                     independence: IndependenceLaw | None = None, max_integer_bits=DEFAULT_MAX_INTEGER_BITS) -> VarianceAssessment:
-    """Evaluate Var(sum a_i X_i) in O(contributions + supplied pairs) record space.
+    """Compute `Var(sum_i a_i X_i)` exactly from supplied variances and covariances.
 
-    Var(sum a_i X_i)=sum a_i^2 Var(X_i)+2 sum_{i<j} a_i a_j Cov(X_i,X_j), after
-    contributions with one data_id are merged into one variable by adding
-    their coefficients. This merge accounts for the correlation between two
-    estimators that share calibration data. Their derivatives with respect to
-    the shared population add before squaring. Every pair of active
-    variables needs a supplied covariance or the IndependenceLaw, and a
-    missing one leaves the result unknown. A supplied covariance c must
-    satisfy the Cauchy-Schwarz inequality c^2<=Var(X)Var(Y).
-    Group repeated variables before missing-pair decisions. Exact cancellation
-    needs no unused variance. Never invent independence, a dense matrix or PSD
-    repair. Exact scalar operations use their finite integer representation guard.
-    Its evidence is a proved relation only when every used input is witnessed
-    proof. An asserted or externally specified input makes it a user
-    assertion, and any other mix makes it a numerical estimate.
+    `Var(sum a_i X_i) = sum a_i^2 Var(X_i) + 2 sum_{i<j} a_i a_j Cov(X_i, X_j)`,
+    after terms with one `data_id` are merged into one variable by adding
+    their coefficients. The merge accounts for the correlation between two
+    estimators that share calibration data, whose derivatives with respect
+    to the shared data add before squaring. So `Var(2X) = 4 Var(X)`, and
+    `X - X = 0` needs no variance at all. Every pair of variables with
+    nonzero merged coefficients needs a supplied covariance or a declared
+    [`IndependenceLaw`][nwqlib.evidence.statistics.IndependenceLaw], and a
+    missing one leaves the result unknown. Independence is never assumed. A
+    supplied covariance c must satisfy the Cauchy-Schwarz inequality
+    `c**2 <= Var(X) Var(Y)`. That pairwise test does not show that the whole
+    covariance matrix is positive semidefinite, and no impossible value is
+    repaired. The record space is O(number of terms + supplied pairs), and
+    no dense matrix is formed.
+
+    The evidence of the result is `proved_relation` only when every input
+    used is witnessed proof. An asserted or externally specified input makes
+    it `user_assertion`, and any other mix `numerical_estimate`.
 
     Args:
-        joint_id: Identity of the joint data the variables belong to.
-        frame: ErrorFrame with the variance metric and the squared output unit.
-        contributions: EstimatorContribution per (variable, coefficient) term.
-        covariance: Explicit cross-covariances of distinct variables.
-        independence: Declared IndependenceLaw in place of explicit covariances.
-        max_integer_bits: Integer width limit of the exact rational arithmetic.
+        joint_id (str): Content hash of the joint data the variables belong
+            to.
+        frame (ErrorFrame): Frame with metric `"variance"` and the squared
+            output unit.
+        contributions (tuple[EstimatorContribution, ...]): One term per
+            (variable, coefficient).
+        covariance (tuple[CrossCovariance, ...]): Covariances of distinct
+            variables. Default `()`.
+        independence (IndependenceLaw | None): Declared independence in
+            place of covariances. Default `None`.
+        max_integer_bits (int): Bit limit of the exact arithmetic. Default
+            4096.
 
     Returns:
-        VarianceAssessment whose value is concrete with its evidence kind, or
-        unknown when a needed variance or covariance is missing.
+        assessment (VarianceAssessment): The variance, concrete with its
+            evidence kind, or unknown when a needed variance or covariance
+            is missing.
+
+    Raises:
+        ValueError: If the frame's metric is not `"variance"`, both
+            covariances and an `IndependenceLaw` are given, a variance is
+            negative, a covariance pair repeats or names an unknown
+            variable, a covariance violates Cauchy-Schwarz, or the complete
+            sum is negative.
+        TypeError: If `independence` is not an `IndependenceLaw`.
     """
     arithmetic = ExactArithmetic(max_integer_bits=max_integer_bits)
     if frame.metric != "variance":

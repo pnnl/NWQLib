@@ -18,7 +18,18 @@ from pydantic import (
 from pydantic_core import core_schema
 
 Text = Annotated[str, StringConstraints(strict=True, strip_whitespace=True, min_length=1)]
+"""A nonempty string.
+
+Surrounding whitespace is removed, and a string that is then empty is
+rejected. Only a `str` is accepted, not a number or bytes.
+"""
 ContentID = Annotated[str, StringConstraints(strict=True, pattern=r"^sha256:[0-9a-f]{64}$")]
+"""A content hash: `"sha256:"` followed by 64 lowercase hexadecimal digits.
+
+Every record has one in its `content_id`, computed from its type and fields,
+and a record refers to another, such as a Result to its Plan, by this hash.
+See [`Record`][nwqlib.core.records.Record].
+"""
 
 
 def _finite_zero(value: float) -> float:
@@ -33,8 +44,19 @@ def _finite_zero(value: float) -> float:
 
 
 Real = Annotated[StrictFloat, AfterValidator(_finite_zero)]
+"""A finite real number, stored as a binary64 `float`.
+
+A Python `float` or `int` is accepted, and an `int` becomes a `float`.
+Infinity, NaN, `bool` and strings are rejected. `-0.0` becomes `0.0`, so equal
+values give one content hash.
+"""
 Nonnegative = Annotated[Real, Field(ge=0)]
+"""A finite real number at least 0, accepted as for [`Real`][nwqlib.core.records.Real]."""
 PositiveInt = Annotated[StrictInt, Field(gt=0)]
+"""A positive Python `int`.
+
+A `float`, a `bool` or a NumPy integer is rejected. Convert it with `int(...)`.
+"""
 
 
 class FrozenArray:
@@ -226,58 +248,69 @@ class FrozenArray:
 
 
 class Record(BaseModel):
-    """Validated fields determine identity; JSON exports are detached snapshots.
+    """The base of every NWQLib record: immutable, built with keyword arguments and validated when built.
 
-    ``revise`` and ``model_copy(update=...)`` validate changes and link the old
-    identity. Pydantic's unsafe ``model_construct`` and legacy ``copy`` are
-    deliberately unavailable.
-    Identity encoding v1 is UTF-8, sorted-key compact JSON with the fully
-    qualified record type and all declared fields (including schema/parent).
-    Tuples keep their order. Numbers use Python's round-trippable binary64 JSON.
+    Problems, outputs, Methods, Plans, Results and the other records derive
+    from it. Build a record with keyword arguments. Unknown fields are
+    rejected, and a record cannot be changed after it is built.
+    `record.revise(**changes)` returns a validated new record with the
+    changes and leaves the old one unchanged. Every construction, including
+    `model_validate` and `model_validate_json` from saved JSON, runs the
+    full validation, and `model_dump(mode="json")` returns a detached JSON
+    description. Unchecked `model_construct` and Pydantic's legacy `copy`
+    are disabled.
 
-    Content identity is how NWQLib associates data with the selection that
-    produced it. A Result names its Plan, an observation its realization, a
-    resource quantity its evidence. It therefore covers everything that
-    changes meaning. The concrete type is included, so two record classes
-    with equal fields stay distinct. The schema version is included, so a
-    format change cannot collide with old data. The parent revision is
-    included, so a revision stays distinguishable from an independently
-    built record with the same fields. A supplied ``content_id`` is checked
-    on load, so edited JSON cannot keep a stale identity. Records are frozen,
-    and every construction or load from field values or JSON runs the full
-    validation.
+    Each record has a content hash, `content_id`. A Result names its Plan,
+    an observation its circuit and a resource quantity its evidence by this
+    hash, so data stays attached to the record it came from. The hash covers
+    the record's concrete type, so two record classes with equal fields stay
+    distinct, its schema version, so a format change cannot collide with
+    old data, and its `parent_id`, so a revision stays distinguishable from
+    a separately built record with the same fields. A `content_id` given in
+    saved JSON is checked when the record is loaded, so edited JSON cannot
+    keep a stale hash.
 
-    An admitted record is reused, not validated again. When a field,
-    ``model_validate`` or a revision receives an instance of exactly the
-    declared record type, validation returns that instance unchanged: its
-    validators, including heavy admission such as Program admission, do not
-    run again, and it keeps its stored identity and any other stored
-    admission result. Records are frozen and every construction path runs
-    the full validation, so an instance of the exact type is an admitted one,
-    and the wrap validator ``_check_identity`` returns it before any other
-    validator runs. ``revise`` and ``model_copy`` still validate a new record
-    from field values, and so does a field or ``model_validate`` that
-    receives an instance of a subclass of the declared type. An instance of
-    any other record type is rejected, even when its fields fit.
-
-    The first ``content_id`` read of a record stores the identity in the
-    slot ``_identity_cache``, and later reads return it. An after-validator
-    may read ``content_id`` before a later validator normalizes a declared
-    field, so each validation that builds a new record clears the stored
-    identity after all its validators have run and before a supplied
-    ``content_id`` is checked; an admitted instance returned unchanged keeps
-    it. The slot is neither a field nor a Pydantic private attribute, so
-    equality and hashing never see it, and reading ``content_id`` on one of
-    two equal records keeps them equal. Copies and pickles start without it.
-
-    Computing ``content_id`` holds the JSON text of the identity encoding and
-    its UTF-8 bytes beside the record's own data, since ``model_dump`` shares
-    the scalar objects. A record does not know its caller's byte limit, so
-    no check applies here. For each record whose JSON grows with the problem
-    size, ENGINEERING_CONSTANTS.md, "Record identity JSON", names the
-    admission that bounds its data and whether that bound also covers these
-    two JSON copies.
+    Attributes:
+        schema_version: Version of the record's format, fixed by its type.
+        parent_id: Content hash of the record that this one revises, or
+            `None`. `revise` sets it.
+        content_id: The record's content hash, read-only: the SHA-256 digest
+            of compact, sorted-key UTF-8 JSON of the record's fully qualified
+            type and all its declared fields. Tuples keep their order, and
+            numbers use Python's round-trip binary64 JSON form.
     """
+
+    # Reuse of admitted records. When a field, ``model_validate`` or a revision
+    # receives an instance of exactly the declared record type, validation
+    # returns that instance unchanged: its validators, including heavy
+    # admission such as Program admission, do not run again, and it keeps its
+    # stored identity and any other stored admission result. Records are frozen
+    # and every construction path runs the full validation, so an instance of
+    # the exact type is an admitted one, and the wrap validator
+    # ``_check_identity`` returns it before any other validator runs.
+    # ``revise`` and ``model_copy`` still validate a new record from field
+    # values, and so does a field or ``model_validate`` that receives an
+    # instance of a subclass of the declared type. An instance of any other
+    # record type is rejected, even when its fields fit.
+    #
+    # Identity cache. The first ``content_id`` read of a record stores the
+    # identity in the slot ``_identity_cache``, and later reads return it. An
+    # after-validator may read ``content_id`` before a later validator
+    # normalizes a declared field, so each validation that builds a new record
+    # clears the stored identity after all its validators have run and before a
+    # supplied ``content_id`` is checked; an admitted instance returned
+    # unchanged keeps it. The slot is neither a field nor a Pydantic private
+    # attribute, so equality and hashing never see it, and reading
+    # ``content_id`` on one of two equal records keeps them equal. Copies and
+    # pickles start without it.
+    #
+    # Identity JSON memory. Computing ``content_id`` holds the JSON text of the
+    # identity encoding and its UTF-8 bytes beside the record's own data, since
+    # ``model_dump`` shares the scalar objects. A record does not know its
+    # caller's byte limit, so no check applies here. For each record whose JSON
+    # grows with the problem size, ENGINEERING_CONSTANTS.md, "Record identity
+    # JSON", names the admission that bounds its data and whether that bound
+    # also covers these two JSON copies.
 
     model_config = ConfigDict(
         frozen=True, extra="forbid", validate_default=True, revalidate_instances="never",
@@ -378,7 +411,31 @@ class Record(BaseModel):
         return identity
 
     def revise(self, **changes) -> Self:
-        """Validate a new revision while keeping the original record."""
+        """Return a validated copy with `changes`, recording this record as its parent.
+
+        The new record's `parent_id` is this record's content hash, and this
+        record is unchanged. Problems, outputs and `Accuracy` return a copy
+        without a parent link, because a changed input is a new input with
+        its own content hash.
+
+        Args:
+            **changes (object): New field values, by field name. `content_id` and
+                `parent_id` cannot be given.
+
+        Returns:
+            record (Record): The new record, of the same type.
+
+        Raises:
+            ValueError: If `content_id` or `parent_id` is given, or the new
+                values fail validation.
+
+        Examples:
+            >>> from nwqlib.core import Unit
+            >>> hartree = Unit(symbol="Ha", dimension="energy")
+            >>> revised = hartree.revise(symbol="Hartree")
+            >>> print(revised.symbol, revised.parent_id == hartree.content_id)
+            Hartree True
+        """
         if "content_id" in changes or "parent_id" in changes:
             raise ValueError("revision identity and parent are derived, not caller updates")
         values = {name: getattr(self, name) for name in type(self).model_fields}
@@ -402,25 +459,65 @@ class Record(BaseModel):
 
 
 class Unit(Record):
-    """A declared unit label, without conversion or unit algebra."""
+    """A unit label with its dimension. NWQLib converts no units and does no unit algebra.
+
+    Build it with keyword arguments, for example
+    `Unit(symbol="Hartree", dimension="energy")`. Both arguments are
+    required. A Problem's `unit` also accepts a string, which becomes a
+    `Unit` of dimension `"custom"`.
+
+    Attributes:
+        symbol: Required. The unit's symbol, a nonempty string.
+        dimension: Required. `"dimensionless"`, `"energy"`, `"time"`,
+            `"inverse_time"`, `"angle"`, `"bytes"`, `"count"`, `"currency"`
+            or `"custom"`.
+    """
 
     symbol: Text
     dimension: Literal["dimensionless", "energy", "time", "inverse_time", "angle", "bytes", "count", "currency", "custom"]
 
     def same_unit(self, other: Unit) -> bool:
-        """Compare declared unit meaning independently of record ancestry."""
+        """Return whether `other` has the same symbol and dimension, whatever the revision history of either.
+
+        Args:
+            other (Unit): The unit to compare with.
+
+        Returns:
+            same (bool): `True` when symbol and dimension are equal.
+        """
         return (self.symbol, self.dimension) == (other.symbol, other.dimension)
 
 
 class Scope(Record):
-    """The algebraic object or explicitly declared physical/model domain."""
+    """The algebraic object, or the declared physical or model domain, that a value refers to.
+
+    Build it with keyword arguments, for example
+    `Scope(kind="model", domain="1D heat equation on 64 grid points")`.
+    `domain` is required.
+
+    Attributes:
+        kind: Default `"algebraic"`. `"algebraic"`, `"physical"` or `"model"`.
+        domain: Required. Description of the object or domain.
+    """
 
     kind: Literal["algebraic", "physical", "model"] = "algebraic"
     domain: Text
 
 
 class Source(Record):
-    """A source/version/domain declaration, not a verification receipt."""
+    """The name, version, domain and reference of a piece of code, data or method.
+
+    It declares where something came from. It is not evidence that the
+    source was verified. Build it with keyword arguments. All four arguments
+    are required.
+
+    Attributes:
+        name: Required. Name of the source.
+        version: Required. Its version.
+        domain: Required. What it applies to.
+        reference: Required. Where to find it, such as a paper identifier, a
+            URL or a function name.
+    """
 
     name: Text
     version: Text
@@ -429,14 +526,31 @@ class Source(Record):
 
 
 class Float64(Record):
-    """Finite binary64 value; decimal spelling is not an exact-number claim."""
+    """A finite binary64 number, as a record.
+
+    Build it with keyword arguments, `Float64(value=0.5)`. Its decimal form
+    is the float's value and does not claim that the number is exact.
+
+    Attributes:
+        kind: Fixed `"float64"`.
+        value: Required. The number, accepted as for
+            [`Real`][nwqlib.core.records.Real].
+    """
 
     kind: Literal["float64"] = "float64"
     value: Real
 
 
 class Complex128(Record):
-    """Two finite binary64 components, with canonical positive zeros."""
+    """A complex number with finite binary64 parts, as a record.
+
+    A part given as `-0.0` is stored as `0.0`.
+
+    Attributes:
+        kind: Fixed `"complex128"`.
+        real: Required. Real part.
+        imag: Required. Imaginary part.
+    """
 
     kind: Literal["complex128"] = "complex128"
     real: Real
@@ -444,10 +558,22 @@ class Complex128(Record):
 
 
 class Rational(Record):
-    """Exact integer ratio in lowest terms with a positive denominator.
+    """An exact rational number `numerator / denominator`.
 
-    Reduction gives each rational number one representation, and hence one
-    content identity.
+    Build it with keyword arguments, for example
+    `Rational(numerator=2, denominator=6)`. Construction reduces it to
+    lowest terms with a positive denominator, here `1/3`, so each rational
+    number has one representation and one content hash.
+
+    Attributes:
+        kind: Fixed `"rational"`.
+        numerator: Required. Integer numerator. After reduction it carries
+            the sign of the number.
+        denominator: Required. Nonzero integer denominator, positive after
+            reduction.
+
+    Raises:
+        ValueError: If `denominator` is zero.
     """
 
     kind: Literal["rational"] = "rational"
@@ -471,14 +597,34 @@ Scalar = Annotated[Float64 | Complex128 | Rational, Field(discriminator="kind")]
 
 
 class Symbol(Record):
-    """An inert named mathematical symbol; no expression evaluation."""
+    """A named mathematical symbol and the source that defines it.
+
+    It is a name only and is never evaluated as an expression.
+
+    Attributes:
+        name: Required. A letter followed by letters, digits or underscores.
+        reference: Required. The [`Source`][nwqlib.core.records.Source] that
+            defines the symbol.
+    """
 
     name: Annotated[str, StringConstraints(strict=True, pattern=r"^[A-Za-z][A-Za-z0-9_]*$")]
     reference: Source
 
 
 class InputRef(Record):
-    """An immutable input/access declaration; it does not prepare an oracle."""
+    """A declaration of an input and of how it is accessed, without its data.
+
+    It names the input and its representation. It does not build an oracle
+    or a circuit for the input. `Eigenproblem.subspace` takes one to name an
+    explicitly defined subspace.
+
+    Attributes:
+        identity: Required. Name of the input.
+        representation: Required. How the input is represented, for example
+            `"circuit"`.
+        source: Required. The [`Source`][nwqlib.core.records.Source] of the
+            input.
+    """
 
     schema_version: Literal[2] = 2
     identity: Text
@@ -487,7 +633,17 @@ class InputRef(Record):
 
 
 class Basis(Record):
-    """Declared coordinate basis and entry/bit ordering."""
+    """The coordinate basis of an input: its name, its dimension and the order of its entries and bits.
+
+    A Problem reports the basis of its inputs in `basis`, and all inputs of
+    one Problem must have the same basis.
+
+    Attributes:
+        identity: Required. Name of the basis, such as `"computational"`.
+        dimension: Required. Number of coordinates, a positive integer.
+        ordering: Required. Order of the entries and bits, for example
+            `"coordinate index increasing; qubit 0 is rightmost tensor/bit position"`.
+    """
 
     identity: Text
     dimension: PositiveInt
@@ -498,22 +654,43 @@ Stage = Literal["planning", "preparation", "execution", "analysis", "verificatio
 
 
 class Limit(Record):
-    """A stage-specific limit declaration. Admission neither approves nor runs work.
+    """A declared limit on one quantity at one stage of the workflow.
 
-    ``kind`` separates a consumable budget (CPU seconds, shots, currency), a
-    capacity that is reused (memory, stored bytes) and a deadline, because
-    they combine differently. Consumption adds across work, capacity is
-    compared with a peak, and a deadline bounds elapsed time. The validator
-    fixes one unit and kind per metric so a limit cannot be read in the
-    wrong sense.
+    Declaring a limit neither approves nor runs any work. `kind` separates a
+    budget that is used up (`"consumption"`, such as CPU seconds, shots or
+    currency), a capacity that is reused (`"capacity_stock"`, such as memory
+    or stored bytes) and a `"deadline"`, because they combine differently.
+    Use adds up across work, a capacity is compared with a peak, and a
+    deadline bounds the elapsed time. Each metric accepts one unit and one
+    kind, so a limit cannot be read in the wrong sense:
+
+    - `cpu_time` is a budget and `wall_time` a deadline, both in
+      `Unit(symbol="s", dimension="time")`.
+    - `memory` and `stored` are capacities, in
+      `Unit(symbol="byte", dimension="bytes")`.
+    - `materialization` and `transfer` are budgets, in the same byte unit.
+    - `evaluations`, `shots`, `jobs`, `host_invocations` and `host_work`
+      are budgets, in `Unit(symbol="count", dimension="count")`.
+    - `currency` is a budget, in any unit of dimension `"currency"`.
 
     Attributes:
-        stage: Workflow phase the limit governs.
-        metric: Limited quantity.
-        unit: Declared unit, which must match the metric.
-        kind: ``consumption``, ``capacity_stock`` or ``deadline``, which must match the metric.
-        value: Limit value. Byte and count metrics require an exact integer.
-        scope: What the limit applies to.
+        stage: Required. Workflow stage the limit applies to:
+            `"planning"`, `"preparation"`, `"execution"`, `"analysis"` or
+            `"verification"`.
+        metric: Required. Limited quantity: `"cpu_time"`, `"wall_time"`,
+            `"memory"`, `"materialization"`, `"stored"`, `"transfer"`,
+            `"evaluations"`, `"shots"`, `"jobs"`, `"currency"`,
+            `"host_invocations"` or `"host_work"`.
+        unit: Required. Unit, which must match the metric.
+        kind: Required. `"consumption"`, `"capacity_stock"` or `"deadline"`,
+            which must match the metric.
+        value: Required. Nonnegative limit value. Byte and count metrics
+            require an exact integer.
+        scope: Required. What the limit applies to.
+
+    Raises:
+        ValueError: If the unit or kind does not match the metric, or a byte
+            or count limit is not an integer.
     """
 
     stage: Stage

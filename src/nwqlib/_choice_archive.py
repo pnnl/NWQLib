@@ -21,7 +21,7 @@ adds to the journal of a Run copy are charged right after that commit
 its stored-data total. The Result and Run loaders open a folder without an
 allowance (``max_bytes=None``) and charge nothing for reading, because each file
 was charged when it was written and saved folders are treated as read-only
-(docs/run_archives.md).
+(docs/saved_evidence.md, "Saved folders are read-only").
 
 Executable code is never chosen by saved text. ``method_class`` resolves only
 built-in Methods or an explicitly supplied class.
@@ -107,36 +107,51 @@ class _LimitedWriter:
 
 
 class ArchiveFiles:
-    """One explicit save or load of an archive folder, with an optional file-byte cap.
+    """The folder of a saved Result or Run, as passed to a Method's `save_archive` and `load_archive` hooks.
 
-    SDK memory and CPU are unknown. Files have caller-readable names. Native
-    input array headers are checked against their representation, dimensions
-    and declared encoding. Arrays load as read-only NumPy mappings and are
-    neither normalized nor content-hashed.
-    Header checks do not validate every value or restore an ingestion digest.
-    Keep the archive available while using the restored Plan. Native circuits use
-    public QPY APIs.
-
-    Written objects are remembered by identity and read files by name, so an array
-    or circuit shared by several owners is written once per save and read once per
-    load. Files are created in exclusive mode and never overwritten.
+    A Method author writes and reads the Method's data through the `files`
+    argument of those hooks, as [Add a Method](../algorithm_protocol.md) and
+    [Run your own circuit](../own_circuit.md) show, rather than through a
+    serializer of its own. Its operations keep each input in its own
+    representation and count the written bytes against the folder's limit.
+    Files have readable names, are created new and are never overwritten.
+    An array or circuit used by several parts is written once per save and
+    read once per load. Arrays load as read-only NumPy memory maps and are
+    neither normalized nor content-hashed. The headers of input arrays are
+    checked against their representation, dimensions and declared encoding.
+    These checks do not validate every value or restore the digest that the
+    input had when it was first accepted. Keep the folder available while
+    using the restored Plan. Circuits use Qiskit's public QPY format. The
+    memory and CPU use of the SDKs is unknown.
     """
 
     def __init__(self, path, max_bytes):
-        """Open an archive folder with a file-byte allowance of ``max_bytes``.
+        """Open the folder `path`, with a limit of `max_bytes` on the bytes written.
 
-        ``remaining`` is the allowance still available. With ``max_bytes=None``
-        the folder has no allowance of its own and ``remaining`` stays None.
-        The Result and Run loaders open a folder this way, and so does a
-        durable Run for its own folder, because the Run charges each write to
-        its stored-data total through ``_on_reserve``. The ``_written_*`` maps
-        (by object identity) and ``_read_*`` maps (by file name) let a shared
-        object be written or read once. ``_written_files`` lists files this
-        session wrote or registered, which orphan cleanup keeps.
-        ``_dependencies`` records the NPY files that a JSON file points to.
-        ``_pending_files`` is not None while a cache delta is being written, so
-        a failed commit can delete exactly those files and refund their bytes.
+        NWQLib opens the folder and passes it to the hooks, so Method code
+        does not build one.
+
+        Args:
+            path (str | os.PathLike): The folder.
+            max_bytes (int | None): Positive limit on the bytes written, or
+                `None` for a folder without a limit of its own.
+
+        Raises:
+            ValueError: If `max_bytes` is neither a positive integer nor
+                `None`.
         """
+        # ``remaining`` is the allowance still available. With
+        # ``max_bytes=None`` the folder has no allowance of its own and
+        # ``remaining`` stays None. The Result and Run loaders open a folder
+        # this way, and so does a durable Run for its own folder, because the
+        # Run charges each write to its stored-data total through
+        # ``_on_reserve``. The ``_written_*`` maps (by object identity) and
+        # ``_read_*`` maps (by file name) let a shared object be written or
+        # read once. ``_written_files`` lists files this session wrote or
+        # registered, which orphan cleanup keeps. ``_dependencies`` records the
+        # NPY files that a JSON file points to. ``_pending_files`` is not None
+        # while a cache delta is being written, so a failed commit can delete
+        # exactly those files and refund their bytes.
         if max_bytes is not None and (type(max_bytes) is not int or max_bytes < 1):
             raise ValueError("archive max_bytes must be a positive integer or None")
         self.path, self.remaining = Path(path), max_bytes
@@ -230,14 +245,21 @@ class ArchiveFiles:
         return tuple(names), size
 
     def read_path(self, name):
-        """Register a file dependency before eager or lazy payload access.
+        """Register a file that the Method's saved data depends on, and return its path.
 
-        Cache loaders must call this for every referenced file during restore,
-        including files whose contents they will read later. Registration uses
-        file metadata only, so a missing file raises ``FileNotFoundError`` here,
-        and it protects the dependency from orphan cleanup. A folder opened with
-        an allowance charges the file size to it, and a folder opened without
-        one (``max_bytes=None``) charges nothing.
+        A `load_archive` hook that restores cached data must call it for
+        every file it refers to, including files whose contents it reads only
+        later. Registration reads the file's metadata only, so a missing file
+        raises `FileNotFoundError` here, and it keeps the file from being
+        removed as unused when the Run is reopened. A folder opened with a
+        limit counts the file's size against it, and a folder opened without
+        one (`max_bytes=None`) counts nothing.
+
+        Args:
+            name (str): The file name, without a directory part.
+
+        Returns:
+            path (pathlib.Path): The file's path.
         """
         path = self.file(name)
         size = path.stat().st_size
@@ -456,13 +478,20 @@ class ArchiveFiles:
         return self._read_instructions[name]
 
     def write_state(self, name, state):
-        """Save a state input's manifest, preparation spec and its one native payload.
+        """Save a state input, its preparation and its circuit, and return its description.
 
-        The physical vector and its normalized direction are stored as given,
-        without renormalization, so scale and phase survive exactly. When the
+        The vector and its normalized direction are stored as given, without
+        normalizing them again, so scale and phase survive exactly. When the
         two arrays have the same dtype, shape and bytes (a unit-norm vector is
-        its own direction), one payload is written and the direction names the
-        physical file. The comparison is one pass over the entries.
+        its own direction), one array is written and the direction names its
+        file. The comparison is one pass over the entries.
+
+        Args:
+            name (str): Prefix of the file names.
+            state (StateInput): The state input.
+
+        Returns:
+            description (dict): JSON description that `read_state` reads.
         """
         import numpy as np
         physical, direction = state._physical, state._direction
@@ -528,11 +557,18 @@ class ArchiveFiles:
         return StateInput._from_admitted(manifest, spec, physical, direction, native)
 
     def write_operator(self, name, operator):
-        """Save an operator in its own admitted representation, never a converted one.
+        """Save an operator in its own representation, never a converted one, and return its description.
 
-        Dense, CSR/CSC, Pauli and periodic-stencil inputs keep their native arrays
-        or parameters, so a sparse or Pauli operator is never densified by saving.
-        A declaration without data is saved as a declaration.
+        Dense, CSR, CSC, Pauli and periodic-stencil inputs keep their arrays or
+        parameters, so saving never turns a sparse or Pauli operator into a
+        dense matrix. A declaration without data is saved as a declaration.
+
+        Args:
+            name (str): Prefix of the file names.
+            operator (OperatorInput): The operator.
+
+        Returns:
+            description (dict): JSON description that `read_operator` reads.
         """
         representation = operator.manifest.reference.representation
         data = dict(manifest=operator.manifest.model_dump(mode="json", exclude_computed_fields=True),
@@ -656,7 +692,16 @@ class ArchiveFiles:
         return OperatorInput._from_admitted(manifest, data["structure"], native)
 
     def write_problem(self, problem):
-        """Save known input handles once; symbolic descriptions stay inert."""
+        """Save a Problem, writing each of its numerical inputs once, and return its description.
+
+        Symbolic expressions are saved as descriptions and never evaluated.
+
+        Args:
+            problem (ProblemRecord): The Problem.
+
+        Returns:
+            description (dict): JSON description that `read_problem` reads.
+        """
         from nwqlib.operators.inputs import OperatorInput
         from nwqlib.problems.inputs import StateInput
         fields = problem.to_record()
@@ -670,10 +715,16 @@ class ArchiveFiles:
         return dict(fields=fields, inputs=inputs)
 
     def read_problem(self, data):
-        """Rebuild a Problem from its saved fields and restored input handles.
+        """Rebuild a built-in Problem from its saved description, with its inputs restored.
 
-        The Problem class is chosen from a fixed table of the built-in kinds, so
-        saved text never selects an arbitrary class.
+        The Problem class is chosen from a fixed table of the built-in kinds,
+        so saved text never selects an arbitrary class.
+
+        Args:
+            data (dict): The description that `write_problem` returned.
+
+        Returns:
+            problem (ProblemRecord): The Problem.
         """
         from nwqlib.problems import records
         classes = {cls.model_fields["kind"].default: cls for cls in (
@@ -685,14 +736,31 @@ class ArchiveFiles:
         return classes[fields["kind"]].model_validate(fields)
 
     def write_output(self, output):
-        """Save an Output's fields, and its observable operator in native form when it has one."""
+        """Save an output's fields, and its observable in its own representation when it has one.
+
+        Args:
+            output (OutputRecord): The output.
+
+        Returns:
+            description (dict): JSON description that `read_output` reads.
+        """
         data = dict(fields=output.model_dump(mode="json", exclude_computed_fields=True))
         if hasattr(output, "observable"):
             data["observable"] = self.write_operator("output-observable", output.observable)
         return data
 
     def read_output(self, data):
-        """Rebuild an Output from a fixed table of the built-in output kinds (see ``read_problem``)."""
+        """Rebuild a built-in output from its saved description.
+
+        The output class is chosen from a fixed table of the built-in kinds,
+        as in `read_problem`.
+
+        Args:
+            data (dict): The description that `write_output` returned.
+
+        Returns:
+            output (OutputRecord): The output.
+        """
         from nwqlib.problems import records
         classes = {cls.model_fields["kind"].default: cls for cls in (
             records.Eigenvalue, records.Eigenphase, records.NormalizedExpectation, records.QuadraticForm,
@@ -704,16 +772,37 @@ class ArchiveFiles:
 
     @staticmethod
     def write_plan(plan):
-        """The Plan's portable record.
+        """Return the Plan's JSON description.
 
-        Its Problem, Method and Output entries are inert descriptions.
-        ``read_plan`` replaces them with the owners that their own readers restored.
+        Its Problem, Method and output entries are descriptions only.
+        `read_plan` replaces them with the objects that their own readers
+        restored.
+
+        Args:
+            plan (Plan): The Plan.
+
+        Returns:
+            description (dict): The Plan's JSON description.
         """
         return plan.to_record()
 
     @staticmethod
     def read_plan(data, *, problem, method, output, reconstruction=None):
-        """Restore selected metadata with already restored scientific owners."""
+        """Rebuild a Plan from its JSON description and the Problem, Method and output already restored.
+
+        Args:
+            data (dict): The description that `write_plan` returned.
+            problem (ProblemRecord): The restored Problem.
+            method (Method): The restored Method.
+            output (OutputRecord): The restored output.
+            reconstruction (object | None): The Method's restored
+                interpretation data, which replaces the saved one when given.
+
+        Returns:
+            plan (Plan): The Plan. A Method that binds circuit blocks binds
+                them with `plan._bind(...)` before returning the Plan from
+                `load_archive`.
+        """
         from nwqlib.core.planning import Plan
         fields = dict(data)
         fields.update(problem=problem, method=method, output=output)
@@ -754,7 +843,7 @@ def load_plan(data, files, *, method=None):
     The restored Plan must have the saved content identity. Some hooks, such
     as the LCHS one, also compare their saved construction data with the
     selected records. Other saved construction files are trusted not to have
-    been edited (docs/run_archives.md, "Saved folders are read-only").
+    been edited (docs/saved_evidence.md, "Saved folders are read-only").
     """
     from nwqlib.core.planning import Plan
     cls = method_class(data["method"], method)

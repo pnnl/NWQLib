@@ -135,19 +135,30 @@ class ChebyshevSubspace(Record):
 
 
 class SensitivitySampling(Record):
-    """Explicit two-stage empirical sensitivity allocation, not a certified law.
+    """Two-stage shot allocation for `Lanczos`, weighted by each moment's effect on the energy.
 
-    A pilot stage spends about pilot_fraction of the budget uniformly. One
-    allocation decision then weights the main stage by each moment's pilot
-    energy sensitivity, following the measured-pilot suggestion of Oumarou et
-    al., arXiv 2603.15552v1, Section 3.3.2. Only main-stage moments enter the
-    final estimate. The weights, pilot floor and fallback rules are NWQLib's
-    choices, documented in numerical._sensitivity_weights and
-    numerical._apply_pilot_floor.
+    Build it with keyword arguments, for example
+    `SensitivitySampling(total_shots=1400, pilot_fraction=0.2)`, and pass it
+    as `Lanczos(sampling=...)`. Both arguments are required. It replaces
+    `shots=`, which must then be omitted, and it conflicts with classical
+    execution. A pilot stage spends about `pilot_fraction` of the shots
+    uniformly. One allocation decision then weights the main stage by each
+    moment's pilot energy sensitivity, following the measured-pilot
+    suggestion of Oumarou et al., arXiv:2603.15552v1, Section 3.3.2. Only
+    main-stage moments enter the final estimate. The weights
+    `abs(g_k)*sqrt(v_k)`, the pilot floor and the fallback rules are NWQLib's
+    choices, described in the [Lanczos guide](../../algorithms/lanczos.md).
+    The allocation is an empirical rule, not a proven optimum. Because the
+    main stage allocates its shots from the pilot,
+    `prepare(plan, settings="all")` is refused, and `prepare(plan)` prepares
+    the next setting.
 
     Attributes:
-        total_shots: Shots across both stages and all settings, at least four per setting.
-        pilot_fraction: Requested pilot share of total_shots, adjusted so that each stage keeps two shots per setting.
+        total_shots: Required. Positive number of shots across both stages
+            and all settings, at least four per setting.
+        pilot_fraction: Required, strictly between 0 and 1. Requested pilot
+            share of `total_shots`, adjusted so that each stage keeps two
+            shots per setting.
     """
 
     total_shots: PositiveInt
@@ -654,29 +665,81 @@ def _trajectory_program(reference, select_operator, *, n, a, degrees, max_bytes)
 
 
 class Lanczos(Method):
-    """Chebyshev trial subspace for the original Eigenproblem target.
+    """Chebyshev Lanczos method for the smallest eigenvalue of an `Eigenproblem`.
 
-    The result is the lowest Ritz value of the target in span{T_k(K)|psi>,
-    k<m} (Kirby, Motta and Mezzacapo, arXiv 2208.00567v4, Section 3.1).
-    Quantum execution acquires the moments through the qubitized walk, and
-    classical execution evaluates the same moments with the three-term
-    recurrence. Both feed one projected solve, numerical.reconstruct. A
-    projected Ritz value does not identify the ground state.
+    Build it with keyword arguments and pass it as `method=`, for example
+    `solve(Eigenproblem(A=matrix), method=Lanczos(krylov_dimension=4))`.
+    Every argument is optional. The result is a
+    [`LanczosResult`][nwqlib.algorithms.lanczos.records.LanczosResult] whose
+    `eigenvalue` is the lowest Ritz value of the target in the trial space
+    `span{T_k(K)|psi>, k<m}` (Kirby, Motta and Mezzacapo, arXiv:2208.00567v4,
+    Section 3.1). Here `|psi>` is the initial state, and
+    `K = (A - center*I) / alpha` is `A` shifted and scaled so that its
+    spectrum lies in [-1, 1] (Oumarou et al., arXiv:2603.15552v1, Section 2,
+    Eqs. (1) and (4)). A projected Ritz value does not identify the ground
+    state. Quantum execution obtains the moments through the
+    qubitized walk, and classical execution evaluates the same moments with
+    the three-term recurrence. Both feed one projected solve. The four
+    `overlap_*` settings can be changed after the run with
+    `result.analyze(...)`, which reuses the same moments. The
+    [Lanczos guide](../../algorithms/lanczos.md) describes the construction,
+    the cutoff analysis and sensitivity sampling.
 
     Attributes:
-        initial_state: Reference preparation; None selects the Method's default reference from the selected RNG; explicit sectors require a supplied state.
-        krylov_dimension: Trial dimension m; None selects min(8, problem dimension).
-        degrees: Distinct requested positive moment degrees below 2m; None requests all 1..2m-1.
-        overlap_cutoff: Optional positive Gram-eigenvalue cutoff. None uses the selected policy, or the numerical floor for exact moments.
-        overlap_cutoff_policy: Empirical noise filtering by default, or explicit confidence regularization. Neither certifies Ritz energy accuracy.
-        overlap_noise_multiplier: Positive scale of the empirical Gram RMS, a tunable exploratory threshold.
-        overlap_failure_probability: Tail probability for the reported Gram sampling bound under independent bounded shots.
-        sampling: Optional two-stage SensitivitySampling allocation; incompatible with scalar shots or classical execution.
-        max_bytes: Bound on known input, moment and projected numerical workspace bytes.
-        max_analysis_work: Cap on selected projected analysis work, including matrix assembly and solve.
-        max_classical_products: Cap on counted classical Chebyshev operator applications.
-        input_conversion: ``auto`` keeps admitted access; ``dense_pauli`` permits explicit dense-to-Pauli conversion.
-        max_conversion_work: Work cap for selected operator conversion.
+        initial_state: Default `None`. Reference state `|psi>`. `None` draws
+            the Method's default reference from the planning random
+            generator. A Problem with an explicit `sector` requires a
+            supplied state.
+        krylov_dimension: Default `None`, which selects `min(8, d)` for
+            problem dimension d. Trial dimension m, a positive integer that
+            must not exceed d.
+        degrees: Default `None`, which requests every degree 1 to 2m-1.
+            Distinct positive moment degrees below 2m.
+        overlap_cutoff: Default `None`. Positive cutoff on the Gram (overlap)
+            eigenvalues. `None` uses `overlap_cutoff_policy`, or the
+            numerical floor `1e-12` for exact moments.
+        overlap_cutoff_policy: Default `"empirical"`, empirical noise
+            filtering. `"confidence"` selects explicit confidence
+            regularization. Neither establishes the accuracy of the Ritz
+            energy.
+        overlap_noise_multiplier: Default `1.0`. Positive scale of the
+            empirical Gram RMS noise, a tunable exploratory threshold.
+        overlap_failure_probability: Default `0.05`, strictly between 0 and
+            1. Tail probability of the reported Gram sampling bound under
+            independent bounded shots.
+        sampling: Default `None`. A two-stage
+            [`SensitivitySampling`][nwqlib.algorithms.lanczos.method.SensitivitySampling]
+            shot allocation. It conflicts with `shots=` and with classical
+            execution.
+        max_bytes: Default 10 GB (decimal, `10_000_000_000` bytes). Limit on
+            the known bytes of input, moments and projected numerical
+            workspace.
+        max_analysis_work: Default `1e8`. Limit on the work of the projected
+            analysis, including matrix assembly and solve. Planning checks it
+            before any moment is obtained.
+        max_classical_products: Default `1e8`. Limit on the counted
+            classical Chebyshev operator applications.
+        input_conversion: Default `"auto"`, which keeps the accepted input
+            access. `"dense_pauli"` permits explicit dense-to-Pauli
+            conversion, which quantum execution needs for sparse input and
+            for dense input of dimension above 16.
+        max_conversion_work: Default `1e8`. Limit on the work of operator
+            conversion, counted as `q*D²` transform work, where D includes
+            the quantum embedding. It is not a time estimate.
+
+    Examples:
+        `H = ZZ + 0.5*(XI + IX)` on two qubits has lowest eigenvalue
+        `-sqrt(2) = -1.4142135623...`, which a three-dimensional trial
+        space built from `|00>` recovers on Aer with exact readout:
+
+        >>> from qiskit.quantum_info import SparsePauliOp
+        >>> from nwqlib import Eigenproblem, solve
+        >>> from nwqlib.algorithms import Lanczos
+        >>> H = SparsePauliOp.from_list([("ZZ", 1), ("XI", 0.5), ("IX", 0.5)])
+        >>> method = Lanczos(initial_state=[1, 0, 0, 0], krylov_dimension=3)
+        >>> result = solve(Eigenproblem(A=H), method=method, seed=7)
+        >>> print(round(result.eigenvalue, 10))
+        -1.4142135624
     """
 
     schema_version: Literal[3] = 3
@@ -698,55 +761,59 @@ class Lanczos(Method):
     descriptor: ClassVar[AlgorithmDescriptor] = DESCRIPTOR
 
     def plan(self, problem, *, output, execution, shots, rng):
-        """Select the Chebyshev frame, the moments to acquire and the Program that reads them.
+        """Choose the Chebyshev frame, the moments to obtain and the circuits that read them.
 
-        The Plan fixes the affine frame (center, alpha) once, with its
-        enclosure source. Pauli input uses the centered coefficient L1 norm
-        (``pauli_l1``), which gives K the unit L1 norm of Kirby's Section 2.1
-        encoding (arXiv:2208.00567v4) after the identity term is removed.
-        For Pauli input, Lanczos uses the admitted packed Pauli table to
-        define its centered operator and SELECT address order. The
-        reconstruction stores the scalar frame and table identity. Readout
-        signs, support masks and normalized coefficients are derived from
-        that same table, so the classical action and quantum decoder use a
-        common term order. Dense, CSR and CSC input on the classical path
-        uses scaled Gershgorin row intervals, or the equal column intervals
-        of Hermitian CSC storage (``scaled_gershgorin``). The frame
-        determines every moment, so later analysis never reselects it.
-        Moments known algebraically are recorded instead of acquired.
+        The Plan fixes the frame `H = center*I + alpha*K` once, with the
+        source of its spectral enclosure. Pauli input uses the L1 norm of the
+        non-identity coefficients (`"pauli_l1"`), which gives K the unit L1
+        norm of the encoding of Kirby et al., arXiv:2208.00567v4,
+        Section 2.1, after the identity term is removed. For Pauli input,
+        Lanczos uses the accepted packed Pauli table to define its centered
+        operator and SELECT address order. The stored reconstruction keeps
+        the scalar frame and the table's content hash. Readout signs, support
+        masks and normalized coefficients come from that same table, so the
+        classical action and the quantum decoder use one term order. Dense,
+        CSR and CSC input on the classical path uses scaled Gershgorin row
+        intervals, or the equal column intervals of Hermitian CSC storage
+        (`"scaled_gershgorin"`). The frame determines every moment, so later
+        analysis never changes it. Moments known algebraically are recorded
+        instead of measured.
 
-        Record requested even and odd moments along the exact selected walk.
-        After j applications of RU, the positive reflection gives mu_(2j)
-        and the signed SELECT readout gives mu_(2j+1), by Kirby et al.,
-        arXiv:2208.00567v4, Eq. (26). Readout snapshots leave the
-        continuation state unchanged. The signed decoder assigns zero to
+        The requested even and odd moments are read along one walk. After j
+        applications of `RU`, the positive reflection gives `mu_(2j)` and
+        the signed SELECT readout gives `mu_(2j+1)` (Kirby et al.,
+        arXiv:2208.00567v4, Eq. (26)). Readout snapshots leave the state that
+        the walk continues from unchanged. The signed decoder assigns zero to
         unused SELECT addresses and does not renormalize probability mass.
         Sampled settings use independent preparations.
 
-        With exact probabilities the Plan declares one trajectory
-        experiment, whose points read each requested degree through its
-        reversible view (_trajectory_program). A backend without exact
-        trajectory views rejects it before work, with no fallback to
-        independent per-degree simulations. With counts, one measurement
-        batch per degree parity holds one setting per degree. A setting
-        prepares the reference and the coefficient state, applies
-        floor(k/2) walk steps, then applies PREP^dagger and reads the index
-        register (even k) or applies the coherent SELECT readout and reads
-        the index and system registers (odd k). Classical execution binds one
-        host recurrence kernel instead.
+        With exact probabilities the Plan declares one trajectory, whose
+        points read each requested degree through a reversible view. A
+        backend without exact trajectory views rejects it before any work,
+        with no fallback to independent per-degree simulations. With counts,
+        one measurement batch per degree parity holds one setting per degree.
+        A setting prepares the reference and the coefficient state, applies
+        `floor(k/2)` walk steps, then applies `PREP^dagger` and reads the
+        index register (even k), or applies the coherent SELECT readout and
+        reads the index and system registers (odd k). Classical execution
+        uses one recurrence kernel instead.
 
-        shots is the count per setting, or None for exact probabilities, and
-        must be None with SensitivitySampling or classical execution. rng
-        draws the default reference when initial_state is None. The returned
-        Plan is bound and carries the LanczosReconstruction and the eigenvalue
-        ErrorModel. ValueError reports a krylov_dimension above the problem
-        dimension, degrees outside distinct members of 1..2m-1 or conflicting
-        shots. It also reports a projected analysis, or a sensitivity pilot
-        with its solve and derivative, whose envelope
-        (numerical.admit_projected_analysis) exceeds max_bytes or
-        max_analysis_work. These analyses run after acquisition, so planning
-        rejects them before any moment is acquired. ApplicabilityError reports a
-        Problem that requests a different trial subspace.
+        `shots` is the count per setting, or None for exact probabilities,
+        and must be None with `SensitivitySampling` or classical execution.
+        `rng` draws the default reference when `initial_state` is None. The
+        returned Plan carries the reconstruction and the eigenvalue error
+        model.
+
+        Raises:
+            ValueError: If `krylov_dimension` exceeds the problem dimension,
+                if `degrees` are not distinct members of 1 to `2m - 1`, or if
+                `shots` conflicts. Also if the projected analysis, or a
+                sensitivity pilot with its solve and derivative, would exceed
+                `max_bytes` or `max_analysis_work`. These analyses run after
+                the moments are measured, so planning rejects them before any
+                moment is measured.
+            ApplicabilityError: If the Problem requests a different trial
+                subspace.
         """
         m = self.krylov_dimension or min(8, problem.dimension)
         if m > problem.dimension:

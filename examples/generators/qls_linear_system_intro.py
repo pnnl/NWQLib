@@ -3,7 +3,7 @@
 #
 # A metal plate with cold edges is warmed by two small heaters, and on a 4 × 4 grid its steady temperature solves a 16-unknown linear system $Ax=b$. This notebook solves it with NWQLib's quantum linear-system solver (QLS) and checks the answer against `numpy.linalg.solve`.
 #
-# Install with `python -m pip install -e ".[aer,notebook]"` from the repository root · at most 12 simulated qubits · about 20 s on a laptop.
+# Install with `python -m pip install "nwqlib[aer,notebook]"`. To work on NWQLib itself, run `python -m pip install -e ".[aer,notebook]"` in a clone of the repository instead. The notebook simulates at most 12 qubits and runs in about 23 s on an Apple M3 Max with 36 GiB of memory (Python 3.12.14, Qiskit 2.5.2, Aer 0.17.2).
 #
 # > **How to read this notebook.** The next cells solve the plate and show the answer with its cost.
 # >
@@ -100,7 +100,7 @@ def checked_values(check):
 
 
 def show_card(result, reference, check, predicted, seconds, peak_bytes):
-    """Show the result card: the answer against the reference, the cost of both ledgers, the maps and the steps."""
+    """Show the result card: the answer against the reference, the quantum and classical cost, the maps and the steps."""
     rec, x = result.plan.reconstruction, np.asarray(result.x).real
     grid = round(len(x) ** 0.5)
     error = np.linalg.norm(x - reference) / np.linalg.norm(reference)
@@ -148,7 +148,7 @@ from nwqlib.resources import ResourceContext
 reference = np.linalg.solve(A, b)                                    # the classical answer, used only for comparison
 check, _ = result.verify(checks=QLSVerification(                     # error against the polynomial's allowance
     comparisons=("spectral_domain", "inverse_relative_error", "inverse_success")))
-predicted = estimate(selected, context=ResourceContext(basis="cx"))  # counts from the resource laws, no circuit built
+predicted = estimate(selected, context=ResourceContext(basis="cx"))  # counts from the resource formulas, no circuit built
 peak_bytes = traced_peak(lambda: solve(plan(problem, method=QLS(epsilon_inv=EPSILON), seed=7), progress=False))
 show_card(result, reference, check, predicted, seconds, peak_bytes)
 
@@ -164,7 +164,7 @@ show_card(result, reference, check, predicted, seconds, peak_bytes)
 # - **Size.** A dimension that is not a power of two is padded and uses a dense block encoding, which costs many more CX gates. `plan` reports the qubits before anything runs.
 # - **Conditioning.** The polynomial degree grows with the encoded condition number κ. At ε = 0.01 the default cap `max_degree=256` stops planning above κ ≈ 44.
 #
-# The cell plans a 10-unknown 1D Poisson matrix, whose κ lies above that ceiling. Planning refuses it with a `ValueError` that names `max_degree`. Raising the cap is the remedy, and the second half of the cell plans and solves it, one solve in about 3 s.
+# The cell plans a 10-unknown 1D Poisson matrix, whose κ lies above that limit. Planning refuses it with a `ValueError` that names `max_degree`. Raising the cap is the remedy, and the second half of the cell plans and solves it, one solve in about 4 s.
 
 # %%
 n = 10
@@ -180,7 +180,7 @@ raised = plan(steep, method=QLS(epsilon_inv=EPSILON, max_degree=512), seed=7)  #
 steep_x = np.asarray(solve(raised, progress=False).x).real
 steep_reference = np.linalg.solve(poisson, np.ones(n))
 show_table([
-    ("Encoded condition number κ", raised.reconstruction.kappa_be, "Above the ceiling of the default cap"),
+    ("Encoded condition number κ", raised.reconstruction.kappa_be, "Above the limit of the default cap"),
     ("Polynomial degree", raised.reconstruction.degree, f"Allowed by max_degree = {raised.method.max_degree}"),
     ("Qubits", raised.reconstruction.width,
      f"{n} unknowns padded to {raised.reconstruction.padded_dimension} amplitudes"),
@@ -193,7 +193,7 @@ show_table([
 # %% [markdown]
 # ## 2. What it costs
 #
-# **`estimate` predicts the quantum ledger before the circuit exists, and the run records the classical ledger.** The quantum ledger counts qubits, gates and shots. The classical ledger counts memory, work and time on this computer.
+# **`estimate` predicts the quantum cost before the circuit exists, and the run records the classical cost.** Quantum cost means qubits, gates and shots, and classical cost means memory, work and time on this computer.
 #
 # `estimate` adds up a gate-count formula for each block of the selected construction without building a circuit. `prepare` builds the circuit without running it, and `inspect_resources` compiles a copy with Qiskit. The formulas of this construction give no depth or T count.
 
@@ -214,7 +214,7 @@ show_table([
     ("Single-qubit gates", "not predicted", compiled["operations"].get("u", 0)),
     ("Depth", "not predicted", compiled["depth"]),
     ("T gates", "not predicted", "Not in the cx and u basis"),
-], headers=("Quantum ledger", "Predicted by estimate", "Compiled circuit"))
+], headers=("Quantum cost", "Predicted by estimate", "Compiled circuit"))
 print(f"Compiled CX / predicted CX = {compiled['operations'].get('cx', 0) / predicted_cx:.2f} "
       f"(Qiskit optimization level 1).")
 
@@ -227,11 +227,11 @@ show_table([
     ("Stored run data", "Not predicted", format_bytes(trace.data_bytes)),
     ("Time on this computer", "Not predicted", f"{seconds:.2f} s for plan and solve, "
      f"{sum(event.timing.seconds for event in trace.events):.3f} s of it in the simulator call"),
-], headers=("Classical ledger", "Before the run", "Measured or recorded by the run"))
+], headers=("Classical cost", "Before the run", "Measured or recorded by the run"))
 
 # %% [markdown]
 # - **Peak memory** is the largest total of Python allocations, traced with `tracemalloc` while the card cell repeats plan and solve. Memory that Aer allocates in C++ is not traced.
-# - **Work.** `estimate` counts the work of the unique selected block definitions. The run records the work it reserved for the native definitions it built, so the two differ.
+# - **Work.** `estimate` counts the work of each distinct block definition once. The run records the work it counted for the Qiskit definitions it built, so the two differ.
 # - **Not estimated:** physical qubits, error correction, run time on hardware and price.
 #
 # ## 3. How accurate?
@@ -272,9 +272,9 @@ show_table([(run.plan.method.epsilon_inv, run.plan.reconstruction.degree,
 # %% [markdown]
 # ## 4. How large can I go?
 #
-# **On a laptop the simulator sets the limit. Beyond it, `plan` and `estimate` still give the cost.** The table lists the limits this run had and the plate's use of them.
+# **The local simulator sets the limit. Beyond it, `plan` and `estimate` still give the cost.** The table lists the limits this run had and the plate's use of them.
 #
-# `solve(..., execution="classical")` evaluates the same selected polynomial on the host, for systems too large to simulate. Its plan states the peak memory and work before anything runs. [Planning at scale](resource_estimation_at_scale.ipynb) plans circuits far beyond any simulator.
+# `solve(..., execution="classical")` evaluates the same polynomial classically, for systems too large to simulate. Its plan states the peak memory and work before anything runs. [Planning at scale](resource_estimation_at_scale.ipynb) plans circuits far beyond any simulator.
 
 # %%
 limits = result.data.trace.limits
@@ -283,9 +283,9 @@ show_table([
     ("Qubits the local simulator accepts", limits.max_simulation_qubits, f"Default. This plate uses {rec.width}"),
     ("Simulator memory cap", f"{limits.simulator_memory_mb:,} MB", "Default simulator_memory_mb"),
     ("Polynomial degree cap", selected.method.max_degree, f"Default max_degree. This plate needs {rec.degree}"),
-    ("Host evaluation: peak memory", format_bytes(host_plan.reconstruction.work.workspace_bytes),
+    ("Classical evaluation: peak memory", format_bytes(host_plan.reconstruction.work.workspace_bytes),
      "Stated by plan before it runs"),
-    ("Host evaluation: work", host_plan.reconstruction.work.size_units, "Units, a planning quantity, not seconds"),
+    ("Classical evaluation: work", host_plan.reconstruction.work.size_units, "Units, a planning quantity, not seconds"),
 ], headers=("Limit or cost", "Value", "Meaning"))
 
 # %% [markdown]
@@ -299,7 +299,7 @@ show_table([
 #
 # - **Input.** `my_A` is a square invertible NumPy array, real or complex, and `my_b` a vector of the same length. A non-Hermitian matrix is embedded in a Hermitian matrix of twice the size.
 # - **SciPy sparse matrices.** Convert a small one with `.toarray()`, as the cell does. This is not a route for large sparse matrices.
-# - **Size limits.** The encoded κ must stay below about 44 at ε = 0.01 with the default `max_degree`, and the circuit within 20 qubits. The 8-unknown example sits just below the κ ceiling.
+# - **Size limits.** The encoded κ must stay below about 44 at ε = 0.01 with the default `max_degree`, and the circuit within 20 qubits. The 8-unknown example sits just below the κ limit.
 # - **A Qiskit `SparsePauliOp`** works as A when you also pass `QLS(kappa=K)` with $K\ge\alpha/\sigma_{\min}(A)$. Here α is the sum of the absolute Pauli coefficients.
 # - **Output.** `my_result.x` is the physical solution, read out exactly by the simulator, and `my_result.algorithm_success_mass` the success probability.
 
@@ -327,7 +327,7 @@ print(f"success probability {my_result.algorithm_success_mass:.2f}, "
 # ## 7. What NWQLib adds
 #
 # - **Planning beyond simulation.** `plan` and `estimate` work at sizes no simulator holds ([Planning at scale](resource_estimation_at_scale.ipynb)).
-# - **The law behind every number.** Each predicted count comes from a gate-count formula per block ([Mathematics](../docs/mathematics.md)). Section 2 sets it beside the compiled circuit, and the resource notebook compares the formulas with compiled circuits at small sizes.
+# - **The formula behind every number.** Each predicted count comes from a gate-count formula per block ([Mathematics](../docs/mathematics.md)). Section 2 sets it beside the compiled circuit, and the resource notebook compares the formulas with compiled circuits at small sizes.
 # - **One argument switches the method.** `QLS(solver="shortcut_native_svp", ...)` returns the unit direction with Dalzell's shortcut instead of the inverse polynomial (Go deeper C).
 # - **Saved and reloaded.** A saved result reloads with its plan, and its numbers can be recomputed from it (Appendix B).
 #
@@ -395,7 +395,7 @@ show_table([
 # | `NormalizedExpectation(observable=O)` | $x^\dagger Ox/x^\dagger x$ | no |
 # | `Samples()` | grid points drawn with probability $\lvert x_i\rvert^2/\lVert x\rVert^2$ | no |
 #
-# The cell requests the quadratic form $x^\top Ax$ and divides it by the total heater power, which gives the power-weighted mean heater temperature. It uses 10,000 shots per measured group and five seeds, five solves in about 7 s.
+# The cell requests the quadratic form $x^\top Ax$ and divides it by the total heater power, which gives the power-weighted mean heater temperature. It uses 10,000 shots per measured group and five seeds, five solves in about 2 s.
 #
 # <details><summary>Why the quadratic form x<sup>T</sup>Ax gives a heater temperature</summary>
 #
@@ -440,7 +440,7 @@ display(HTML(
 # %% [markdown]
 # ### C. Physical solution or unit direction
 #
-# **What if you need only the direction $x/\|x\|$?** One argument switches QLS to Dalzell's kernel-reflection shortcut ([arXiv:2406.12086v2](https://arxiv.org/abs/2406.12086v2), Algorithm 1), which returns the unit direction. The cell compares four norm guesses, four solves in about 4 s.
+# **What if you need only the direction $x/\|x\|$?** One argument switches QLS to Dalzell's kernel-reflection shortcut ([arXiv:2406.12086v2](https://arxiv.org/abs/2406.12086v2), Algorithm 1), which returns the unit direction. The cell compares four norm guesses, four solves in about 3 s.
 #
 # The shortcut needs a guess $t$ for the encoded solution norm $\nu=\alpha\|x\|/\|b\|$. The guess changes the direction only slightly, but it sets the success probability, which is highest when $t$ is close to $\nu$.
 #
@@ -497,7 +497,7 @@ plt.show()
 # %% [markdown]
 # ### E. Accuracy against circuit size
 #
-# **How does the requested accuracy ε set the polynomial degree, the CX count and the error?** The cell plans and solves the plate for six values of ε, six solves in about 3 s, each read out exactly.
+# **How does the requested accuracy ε set the polynomial degree, the CX count and the error?** The cell plans and solves the plate for six values of ε, six solves in about 2 s, each read out exactly.
 #
 # A smaller ε raises the degree, and with it the queries and CX gates that `plan` and `estimate` give before any circuit runs. The measured error follows ε closely. The success probability falls slowly, because a more accurate polynomial must be rescaled more strongly to stay bounded.
 
@@ -546,7 +546,7 @@ UNMODELED_LABELS = {
 
 
 def show_estimate(workload):
-    """Show the resource quantities an estimate determines, and name the ones its laws do not cover."""
+    """Show the resource quantities an estimate determines, and name the ones its formulas do not cover."""
     rows = [(RESOURCE_LABELS[q.metric], q.fact.value.numerator if q.fact.value.kind == "rational" else q.fact.value.value,
              q.interpretation.replace("_", " "))
             for q in workload.quantities if q.metric in RESOURCE_LABELS and q.fact.availability == "concrete"]
@@ -554,7 +554,7 @@ def show_estimate(workload):
     missing = sorted({UNMODELED_LABELS[q.metric] for q in workload.quantities
                       if q.metric in UNMODELED_LABELS and q.fact.availability == "unknown"})
     if missing:
-        display(HTML("<p>Not covered by the resource laws of this construction: " + escape(", ".join(missing)) + ".</p>"))
+        display(HTML("<p>Not covered by the resource formulas of this construction: " + escape(", ".join(missing)) + ".</p>"))
 
 # %%
 show_estimate(predicted)

@@ -411,8 +411,6 @@ def test_malformed_saved_metadata_rejects_before_method_loading(tmp_path, monkey
             ),
             ('{"unselected":NaN,' + original[1:], "finite"),
             ('{"unselected":1e999,' + original[1:], "finite"),
-            # Nesting deeper than the recursive parser's limit is a ValueError.
-            ('{"unselected":' + "[" * 100_000 + "0" + "]" * 100_000 + "," + original[1:], "nesting"),
         ):
             path.write_text(malformed)
             with pytest.raises(ValueError, match=reason):

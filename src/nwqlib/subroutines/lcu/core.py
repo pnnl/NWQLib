@@ -113,7 +113,12 @@ def _as_unitary_array(unitary: Any, *, dimension: int) -> np.ndarray:
 
 @dataclass(frozen=True, kw_only=True)
 class LCUData:
-    """Validated and phase-adjusted data for an LCU circuit.
+    """Checked LCU coefficients, PREP amplitudes and phase-adjusted unitaries.
+
+    [`prepare_lcu_data`][nwqlib.subroutines.lcu.core.prepare_lcu_data] and
+    [`prepare_lcu_gate_data`][nwqlib.subroutines.lcu.core.prepare_lcu_gate_data]
+    return it. `alpha` is `coefficient_l1_norm`. The fields below are
+    read-only.
 
     Attributes:
         original_coefficients: The N supplied complex coefficients ``c_j``,
@@ -121,10 +126,11 @@ class LCUData:
         positive_coefficients: The magnitudes ``|c_j|`` that PREP encodes,
             zero-padded to P entries.
         phase_adjusted_unitaries: The N D-square complex128 matrices
-            ``(c_j / |c_j|) U_j`` that SELECT applies, with ``U_j`` unchanged
-            for ``c_j = 0``. Empty for gate-level SELECT data
-            (``prepare_lcu_gate_data``), whose branch gates carry their own
-            coefficient phases.
+            `(c_j / |c_j|) U_j` that SELECT applies, with `U_j` unchanged
+            for `c_j = 0`. Only the N supplied matrices are stored, and the
+            `P - N` padding addresses act as the identity. Empty for
+            gate-level SELECT data (`prepare_lcu_gate_data`), whose branch
+            gates carry their own coefficient phases.
         coefficient_l1_norm: ``alpha = sum_j |c_j|``, the subnormalization
             of the encoded block, in the units of the coefficients.
         prep_amplitudes: The P complex amplitudes ``sqrt(|c_j| / alpha)``
@@ -168,7 +174,11 @@ class LCUData:
 
 @dataclass(frozen=True, kw_only=True)
 class LCUCircuit:
-    """PREP-SELECT-PREP^dagger LCU circuit and metadata.
+    """A PREP-SELECT-PREP^dagger circuit with its coefficient data and PREP error.
+
+    [`build_lcu_circuit`][nwqlib.subroutines.lcu.core.build_lcu_circuit]
+    returns it. The circuit is `circuit`, and `alpha` is
+    `data.coefficient_l1_norm`. The fields below are read-only.
 
     Attributes:
         circuit: The built circuit PREP, SELECT, PREP^dagger on
@@ -184,10 +194,12 @@ class LCUCircuit:
             ``"mps_circuit"``, the TT-SVD summary.
         preparation_l2_error: 2-norm distance between the state PREP
             prepares and the target coefficient state, phases included, in
-            the ideal-gate model. 0 for direct PREP, which makes no
-            algorithmic approximation, and for a single term, which needs no
-            PREP circuit. None for MPS PREP of two or more terms, whose
-            circuit error this construction does not evaluate.
+            the ideal-gate model, as reported by the PREP construction. 0
+            for direct PREP, which makes no algorithmic approximation, and
+            for a single term, which needs no PREP circuit. None for MPS
+            PREP of two or more terms, whose circuit error this construction
+            does not evaluate. It has the same phase convention as coherent
+            PREP, inverse PREP and controlled use.
     """
 
     circuit: QuantumCircuit
@@ -227,13 +239,29 @@ def prepare_lcu_gate_data(
     max_bytes: int = DEFAULT_MAX_BYTES,
     max_work: int = DEFAULT_MAX_LCU_WORK,
 ) -> LCUData:
-    """Validate coefficients for a gate-level SELECT without dense matrices.
+    """Check LCU coefficients and compute the PREP data for a SELECT built from your own gates.
 
-    Same coefficient bookkeeping as :func:`prepare_lcu_data`, for callers
-    whose SELECT branches are inserted as controlled gates rather than dense
-    ``UnitaryGate`` matrices: ``phase_adjusted_unitaries`` is empty, and each
-    branch gate must carry its own coefficient phase (the PREP register
-    still encodes only nonnegative coefficient magnitudes).
+    The coefficient handling is that of
+    [`prepare_lcu_data`][nwqlib.subroutines.lcu.core.prepare_lcu_data],
+    for callers whose SELECT branches are inserted as controlled gates
+    rather than dense `UnitaryGate` matrices. `phase_adjusted_unitaries` is
+    empty, and each branch gate must carry its own coefficient phase. The
+    PREP register still encodes only nonnegative coefficient magnitudes.
+    The returned data cannot be passed to `build_lcu_select`.
+
+    Args:
+        coefficients (array_like): One-dimensional complex coefficients.
+        system_dimension (int): Dimension D of the system register that the
+            branch gates act on, a power of two.
+        coefficient_atol (float): Default `0.0`. Threshold on the total
+            coefficient 1-norm, as for `prepare_lcu_data`.
+        max_bytes (int): Default 10 GB (decimal, `10_000_000_000` bytes).
+            Limit on the coefficient and PREP arrays.
+        max_work (int): Default `1_000_000_000`. Limit on the PREP work.
+
+    Returns:
+        data (LCUData): Coefficients, PREP amplitudes and register sizes,
+            with an empty `phase_adjusted_unitaries`.
     """
 
     coefficient_array, dimension, (
@@ -275,29 +303,59 @@ def prepare_lcu_data(
     max_bytes: int = DEFAULT_MAX_BYTES,
     max_work: int = DEFAULT_MAX_LCU_WORK,
 ) -> LCUData:
-    """Validate coefficients/unitaries and absorb complex coefficient phases.
+    """Check LCU coefficients and unitaries, and move each coefficient's phase into its unitary.
+
+    The result holds the PREP amplitudes `sqrt(|c_j| / alpha)` with
+    `alpha = sum_j |c_j|` and the phase-adjusted unitaries
+    `(c_j / |c_j|) U_j` that SELECT applies, ready for
+    [`build_lcu_prepare`][nwqlib.subroutines.lcu.core.build_lcu_prepare]
+    and [`build_lcu_select`][nwqlib.subroutines.lcu.core.build_lcu_select].
+    Coefficient count, finite values and nonzero total weight are checked
+    before unitary conversion.
 
     Args:
-        coefficients: One-dimensional complex coefficient array.
-        unitaries: Sequence of square unitary matrices with one matrix per
-            coefficient.
-        coefficient_atol: Admission threshold for the total coefficient 1-norm.
-            The default rejects only a zero norm, so a representable global
-            rescaling preserves admission. This threshold does not prune
-            individual terms. Every nonzero coefficient contributes its phase.
-        max_bytes: Byte limit for the coefficient and PREP arrays, the
-            supplied matrices and the prospective dense SELECT, including the
-            synthesized branch circuits it keeps (``_admit_lcu``).
-        max_work: Work limit for intake and the prospective dense SELECT,
-            including the synthesis of each controlled branch
-            (``_admit_lcu``).
+        coefficients (array_like): One-dimensional complex coefficients
+            `c_j`.
+        unitaries (Sequence[array_like]): One square unitary matrix `U_j`
+            per coefficient, of power-of-two dimension D.
+        coefficient_atol (float): Default `0.0`. Threshold on the total
+            coefficient 1-norm. The default rejects only a zero norm, so a
+            representable global rescaling is still accepted. This
+            threshold does not prune individual terms. Every nonzero
+            coefficient contributes its phase.
+        max_bytes (int): Default 10 GB (decimal, `10_000_000_000` bytes).
+            Byte limit for the coefficient and PREP arrays, the supplied
+            matrices and the later dense SELECT, including the synthesized
+            branch circuits it keeps.
+        max_work (int): Default `1_000_000_000`. Work limit for these
+            checks and the later dense SELECT, including the synthesis of
+            each controlled branch.
 
     Returns:
-        LCUData ready for PREP and SELECT construction.
+        data (LCUData): Coefficients, PREP amplitudes, phase-adjusted
+            unitaries and register sizes. `data.coefficient_l1_norm` is
+            `alpha`.
 
     Raises:
         ValueError: If inputs have inconsistent shapes or all coefficients are
-            zero.
+            zero, or if the PREP or later dense SELECT would exceed
+            `max_bytes` or `max_work`.
+
+    Examples:
+        For `0.5 X - 0.5i Z`, `alpha = 1`, both PREP amplitudes are
+        `sqrt(0.5) = 0.7071...`, and SELECT applies `X` and `-i Z`:
+
+        >>> import numpy as np
+        >>> from nwqlib.subroutines.lcu import prepare_lcu_data
+        >>> X = np.array([[0, 1], [1, 0]])
+        >>> Z = np.diag([1, -1])
+        >>> data = prepare_lcu_data([0.5, -0.5j], [X, Z])
+        >>> print(data.coefficient_l1_norm, data.num_control_qubits)
+        1.0 1
+        >>> print(np.round(np.real(data.prep_amplitudes), 4))
+        [0.7071 0.7071]
+        >>> print(np.allclose(data.phase_adjusted_unitaries[1], -1j * Z))
+        True
     """
 
     # Coefficient validity precedes reading or converting any unitary.
@@ -437,27 +495,37 @@ def build_lcu_prepare(
     max_bytes: int = DEFAULT_MAX_BYTES,
     max_work: int = DEFAULT_MAX_LCU_WORK,
 ) -> QuantumCircuit:
-    """Build the PREP circuit for an LCU coefficient register.
+    """Build the PREP circuit that loads the LCU coefficient state on the control register.
 
     Args:
-        data: Prepared LCU metadata.
-        preparation_backend: ``"direct"`` uses Qiskit's direct state
-            synthesis. ``"mps_circuit"`` uses the MPS disentangling circuit
-            backend.
-        mps_max_bond_dim: Optional rank cap for MPS-backed PREP.
-        mps_threshold: Singular-value pruning threshold for MPS-backed PREP.
-            Each singular value at or below it is dropped from the TT-SVD of
-            the unit-norm coefficient state, keeping at least one per bond.
-            The default 1e-14 is registered in docs/ENGINEERING_CONSTANTS.md.
-        mps_num_layers: Number of MPS disentangling layers.
-        max_bytes: Known coefficient/PREP array allowance, not SDK RSS.
-        max_work: Local PREP work and prospective TT-SVD allowance.
+        data (LCUData): Output of `prepare_lcu_data` or
+            `prepare_lcu_gate_data`.
+        preparation_backend (str): Default `"direct"`, the exact magnitude
+            tree of
+            [`build_qiskit_state_preparation`][nwqlib.subroutines.state_preparation.direct.build_qiskit_state_preparation].
+            `"mps_circuit"` uses the MPS disentangling circuit of
+            [`build_mps_circuit_state_preparation`][nwqlib.subroutines.state_preparation.mps_circuit.build_mps_circuit_state_preparation].
+        mps_max_bond_dim (int | None): Default `None` (no cap). Rank cap for
+            MPS PREP.
+        mps_threshold (float): Default `1e-14`. Singular-value threshold for
+            MPS PREP. Each singular value at or below it is dropped from the
+            TT-SVD of the unit-norm coefficient state, keeping at least one
+            per bond. The [constants registry](../../ENGINEERING_CONSTANTS.md)
+            gives its reason.
+        mps_num_layers (int): Default `2`. Number of MPS disentangling
+            layers.
+        max_bytes (int): Default 10 GB (decimal, `10_000_000_000` bytes).
+            Limit on the known coefficient and PREP arrays. It does not
+            bound SDK memory.
+        max_work (int): Default `1_000_000_000`. Limit on the PREP work and
+            the TT-SVD of MPS PREP.
 
     Returns:
-        Circuit targeting ``sum_j sqrt(|c_j| / alpha) |j>`` from ``|0...0>``.
-        Direct synthesis realizes this ideal relation; finite-layer MPS
-        preparation approximates it with unevaluated circuit error. TT-SVD
-        discarded weight alone does not bound that circuit error.
+        circuit (QuantumCircuit): Circuit targeting
+            `sum_j sqrt(|c_j| / alpha) |j>` from `|0...0>`. Direct PREP
+            realizes this ideal relation. Finite-layer MPS PREP approximates
+            it with unevaluated circuit error. TT-SVD discarded weight alone
+            does not bound that circuit error.
     """
 
     return _build_lcu_preparation_artifact(
@@ -472,38 +540,42 @@ def build_lcu_prepare(
 
 def build_lcu_select(data: LCUData, *, max_bytes: int = DEFAULT_MAX_BYTES,
                      max_work: int = DEFAULT_MAX_LCU_WORK) -> QuantumCircuit:
-    """Build the small-dense-validation SELECT for full unitary tables.
+    """Build SELECT, which applies the dense unitary of branch `j` when the control register holds `j`.
 
-    This supported entry owns unrelated dense multi-qubit LCU tables. Pauli
-    and product-formula callers use their gate-level multiplexor compilers;
-    they do not route through this dense branch-control construction.
+    This entry serves small dense validation tables of unrelated
+    multi-qubit unitaries. Pauli and product-formula callers use their
+    gate-level multiplexor compilers and do not go through this dense
+    construction.
 
-    ``qiskit_compat.controlled`` synthesizes the whole controlled matrix of
-    each branch, with its address as the control state, by the exact
-    synthesis of ``_dense_synthesis.controlled_unitary_circuit``. SELECT
-    therefore equals the ideal relation to binary64 rounding when every
-    branch is unitary to rounding. A branch that passes Qiskit's
-    constructor check (``numpy.allclose`` of U^dagger U with the identity,
+    The whole controlled matrix of each branch, with its address as the
+    control state, is synthesized exactly (see
+    [Controlled dense unitaries](../../development/dense_synthesis.md#controlled-dense-unitaries)).
+    SELECT therefore equals the ideal relation to binary64 rounding when
+    every branch is unitary to rounding. A branch that passes Qiskit's
+    constructor check (`numpy.allclose` of `U^dagger U` with the identity,
     atol 1e-8 and rtol 1e-5) with a larger defect is realized as its unitary
     polar factor, which differs from it by the order of that defect. For
-    ``U = expm(-i t G)`` with random Hermitian G, t from 1e-10 to 10, one to
+    `U = expm(-i t G)` with random Hermitian G, t from 1e-10 to 10, one to
     three system qubits and one to three controls, the largest entry error
     was 4e-14, also after lowering to U and CX. A branch on
-    ``m = log2(P D)`` qubits takes at most ``(25/96) 4**m - 2**m + 4/3`` CX
+    `m = log2(P D)` qubits takes at most `(25/96) 4**m - 2**m + 4/3` CX
     for m >= 3, the largest count that Qiskit's own synthesis of the same
     controlled matrices reached in tests.
 
     Args:
-        data: Prepared LCU metadata.
-        max_bytes: Byte limit for the supplied matrices, the arrays of one
-            branch synthesis and the synthesized circuits the branches keep
-            (``_admit_lcu``), checked before the first synthesis.
-        max_work: Work limit for the unitarity checks and the synthesis of
-            each branch (``_admit_lcu``), checked before the first
-            synthesis.
+        data (LCUData): Output of `prepare_lcu_data`, which holds the dense
+            unitaries.
+        max_bytes (int): Default 10 GB (decimal, `10_000_000_000` bytes).
+            Byte limit for the supplied matrices, the arrays of one branch
+            synthesis and the synthesized circuits the branches keep,
+            checked before the first synthesis.
+        max_work (int): Default `1_000_000_000`. Work limit for the
+            unitarity checks and the synthesis of each branch, checked
+            before the first synthesis.
 
     Returns:
-        Circuit applying branch ``j`` when the control register stores ``j``.
+        circuit (QuantumCircuit): Circuit applying branch `j` when the
+            control register stores `j`.
 
     Raises:
         ValueError: If the dense unitary tuple is empty or does not cover the
@@ -609,34 +681,58 @@ def build_lcu_circuit(
     max_bytes: int = DEFAULT_MAX_BYTES,
     max_work: int = DEFAULT_MAX_LCU_WORK,
 ) -> LCUCircuit:
-    """Build a PREP-SELECT-PREP^dagger LCU circuit.
+    """Build the PREP-SELECT-PREP^dagger circuit whose all-zero control block is `sum_j c_j U_j / alpha`.
+
+    The function runs `prepare_lcu_data`, `build_lcu_prepare` and
+    `build_lcu_select` and composes PREP, SELECT and the inverse of PREP,
+    with `alpha = sum_j |c_j|`.
 
     Args:
-        coefficients: Complex LCU coefficients.
-        unitaries: One D-square unitary matrix ``U_j`` per coefficient, with
-            D a power of two.
-        preparation_backend: LCU PREP backend. ``"direct"`` is exact Qiskit
-            state synthesis; ``"mps_circuit"`` uses MPS disentangling.
-        mps_max_bond_dim: Optional rank cap for MPS-backed PREP.
-        mps_threshold: Singular-value pruning threshold for MPS-backed PREP.
-            Each singular value at or below it is dropped from the TT-SVD of
-            the unit-norm coefficient state, keeping at least one per bond.
-            The default 1e-14 is registered in docs/ENGINEERING_CONSTANTS.md.
-        mps_num_layers: Number of MPS disentangling layers.
-        max_bytes: Byte limit for the supplied matrices, PREP and the dense
-            SELECT with its kept synthesized branch circuits (``_admit_lcu``).
-        max_work: Work limit for intake, SELECT synthesis (``_admit_lcu``)
-            and the TT-SVD of MPS PREP.
+        coefficients (array_like): Complex LCU coefficients `c_j`.
+        unitaries (Sequence[array_like]): One D-square unitary matrix `U_j`
+            per coefficient, with D a power of two.
+        preparation_backend (str): Default `"direct"`, exact PREP.
+            `"mps_circuit"` uses MPS disentangling, as for
+            `build_lcu_prepare`.
+        mps_max_bond_dim (int | None): Default `None` (no cap). Rank cap for
+            MPS PREP.
+        mps_threshold (float): Default `1e-14`. Singular-value threshold for
+            MPS PREP. Each singular value at or below it is dropped from the
+            TT-SVD of the unit-norm coefficient state, keeping at least one
+            per bond.
+        mps_num_layers (int): Default `2`. Number of MPS disentangling
+            layers.
+        max_bytes (int): Default 10 GB (decimal, `10_000_000_000` bytes).
+            Byte limit for the supplied matrices, PREP and the dense SELECT
+            with its kept synthesized branch circuits.
+        max_work (int): Default `1_000_000_000`. Work limit for the input
+            checks, the SELECT synthesis and the TT-SVD of MPS PREP.
 
     Returns:
-        LCUCircuit targeting the normalized all-zero block
-        ``sum_j c_j U_j / sum_j |c_j|``. The direct backend realizes the
-        coefficient amplitudes exactly, and SELECT realizes each controlled
-        branch to binary64 rounding when the branch is unitary to rounding
-        (``build_lcu_select``).
-        MPS PREP approximates the coefficient amplitudes, so the
-        realized block can differ; its error remains unevaluated in the
-        matching preparation metadata and ``preparation_l2_error=None``.
+        lcu (LCUCircuit): The circuit in `lcu.circuit`, targeting the
+            normalized all-zero block `sum_j c_j U_j / sum_j |c_j|`, and
+            `alpha` in `lcu.data.coefficient_l1_norm`. Direct PREP realizes
+            the coefficient amplitudes exactly, and SELECT realizes each
+            controlled branch to binary64 rounding when the branch is
+            unitary to rounding. MPS PREP approximates the coefficient
+            amplitudes, so the realized block can differ. Its error remains
+            unevaluated in the preparation metadata, and
+            `preparation_l2_error` is `None`.
+
+    Examples:
+        The control register is the low-order bits, so the block is read at
+        stride 2. `alpha` times the block equals `0.5 X - 0.5i Z`:
+
+        >>> import numpy as np
+        >>> from qiskit.quantum_info import Operator
+        >>> from nwqlib.subroutines.lcu import build_lcu_circuit
+        >>> X = np.array([[0, 1], [1, 0]])
+        >>> Z = np.diag([1, -1])
+        >>> lcu = build_lcu_circuit([0.5, -0.5j], [X, Z])
+        >>> block = Operator(lcu.circuit).data[::2, ::2]
+        >>> alpha = lcu.data.coefficient_l1_norm
+        >>> print(np.allclose(alpha * block, 0.5 * X - 0.5j * Z))
+        True
     """
 
     data = prepare_lcu_data(coefficients, unitaries, max_bytes=max_bytes, max_work=max_work)

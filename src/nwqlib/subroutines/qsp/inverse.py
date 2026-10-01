@@ -1,6 +1,6 @@
 """Certified ``1/x`` polynomial construction for QSVT matrix inversion.
 
-QLS polynomial selection calls ``_fit_inverse_chebyshev``, which builds an
+QLS polynomial selection builds an
 odd polynomial ``P`` approximating ``1/(kappa x)`` on the domain
 ``D(a) = {x : a <= |x| <= 1}`` with ``a = 1/kappa``: odd-Chebyshev least
 squares on domain-restricted Chebyshev nodes, degree found by
@@ -15,7 +15,7 @@ still gives a domain with ``a < 1``. ``kappa_be`` is
 ``max(1, alpha / sigma_min(A))`` for ``kappa="auto"`` and otherwise the
 supplied ``kappa``, which must cover that value. With ``kappa="auto"``, the
 analytic periodic encoding passes ``alpha / min(sigma_min, encoded gap)``,
-rounded outward (``algorithms/qls/periodic.py``). Every ``kappa`` below is
+rounded outward (QLS periodic encoding). Every ``kappa`` below is
 that domain parameter.
 
 Two choices make the polynomial usable by QSVT and by physical recovery.
@@ -105,9 +105,12 @@ class _FitCost(NamedTuple):
 
 @dataclass(frozen=True, kw_only=True)
 class InverseChebyshevFit:
-    """Certified odd-Chebyshev fit of ``1/(kappa * x)`` on ``D(1/kappa)``.
+    """Certified odd-Chebyshev fit of `1/(kappa * x)` on `D(1/kappa)`.
 
-    Args:
+    QLS polynomial selection produces it, and its `coefficients` define the
+    polynomial `P`. The fields below are read-only.
+
+    Attributes:
         coefficients: Full Chebyshev coefficient vector ``(c_0..c_d)`` of the
             fitted ``P``; even entries are exactly zero.
         degree: Selected odd degree ``d`` from the bounded search.
@@ -131,7 +134,10 @@ class InverseChebyshevFit:
 
 
 def inverse_degree_law_bound(kappa: float, epsilon_inv: float) -> int:
-    """Return the tripwire ``ceil(C_law * kappa * log(kappa/eps))`` in the form of [CKS] arXiv:1511.02306v2."""
+    """Return the quick upper check `ceil(C_law * kappa * log(kappa/eps))` on the inverse-fit degree, in the form of [CKS] arXiv:1511.02306v2.
+
+    `C_law` is 1.25.
+    """
 
     return int(ceil(QLS_INVERSE_DEGREE_LAW_FACTOR * kappa * log(kappa / epsilon_inv)))
 
@@ -184,7 +190,7 @@ def _fit_candidate(
 
 
 def inverse_candidate_cost(degree) -> _FitCost:
-    """Return the admission cost of ``_fit_candidate`` at one odd degree ``d``.
+    """Return the bytes and work counted for one inverse-fit candidate of odd degree `d` before it is computed.
 
     With ``u = (d + 1)/2`` odd unknowns, ``n = 4u`` least-squares nodes and
     ``q = 25 d`` certificate nodes, ``peak_bytes`` counts 8-byte slots:
@@ -203,7 +209,8 @@ def inverse_candidate_cost(degree) -> _FitCost:
 
     The terms are summed although the Vandermonde matrix is released before
     ``lstsq`` runs, so ``peak_bytes`` is an allowance above the peak of these
-    arrays. ``work`` is ``_linalg_laws.least_squares_work(n, u)`` for the
+    arrays. ``work`` is NWQLib's work formula for ``numpy.linalg.lstsq`` for an
+    ``n x u`` matrix for the
     dense least squares, ``4 n (d + 1)`` for the Vandermonde recurrence and
     design scaling, and ``8 q (d + 1)`` for the Clenshaw evaluation and
     residual on the certificate grid. The caller checks ``peak_bytes`` per

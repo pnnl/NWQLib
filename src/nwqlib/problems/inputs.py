@@ -16,21 +16,30 @@ from nwqlib.operators.inputs import _array_input, _basis, _digest, _freeze_array
 
 
 class PhysicalScale(Record):
-    """Numerical nonnegative scale = mantissa * 2**exponent; never squared.
+    """A nonnegative norm stored as `mantissa * 2**exponent`, so that it can lie outside the float64 range.
 
-    Evidence distinguishes an observed norm, composed method recovery, and a
-    supplied unitary premise (not a norm measurement). Numerical evidence is
-    not certified exact arithmetic. Binary
-    scaling keeps product norms outside the representable float64 range.
-
-    Each scale has one representation. A nonzero scale has ``0.5 <= mantissa < 1``
-    as returned by ``math.frexp``, and zero is ``(0, 0)``. The unit norm is
-    ``(0.5, 1)``.
+    It holds the norm itself, not its square. Input states keep their norm
+    in `StateInput.preparation.physical_scale`, and Method records keep
+    scale factors in it. A product of factors stays representable even when
+    its float64 value would overflow or underflow.
+    Each scale has one representation. A nonzero scale has
+    `0.5 <= mantissa < 1`, as `math.frexp` returns, zero is `(0, 0)`, and the
+    unit norm is `(0.5, 1)`. The values are floating-point results, not
+    certified exact arithmetic. The fields below are read-only.
 
     Attributes:
-        mantissa: Binary mantissa, 0 or in [0.5, 1).
+        mantissa: Binary mantissa, 0 or in `[0.5, 1)`.
         exponent: Power of two, 0 for a zero scale.
-        evidence: ``floating_point_norm`` for a computed norm, ``composed_floating_point_recovery`` for a product of method factors, or ``supplied_unitary_contract`` for the unit norm a supplied preparation circuit promises.
+        evidence: Default `"floating_point_norm"`, a computed norm.
+            `"composed_floating_point_recovery"` is a product of a Method's
+            factors, and `"supplied_unitary_contract"` is the unit norm that
+            a supplied preparation circuit promises, which is an assumption,
+            not a measured norm.
+
+    Raises:
+        ValueError: If the mantissa and exponent are not in the form above,
+            or `"supplied_unitary_contract"` has a scale other than
+            `(0.5, 1)`.
     """
 
     mantissa: Annotated[Real, Field(ge=0, lt=1)]
@@ -49,7 +58,7 @@ class PhysicalScale(Record):
         return self
 
     def as_float(self) -> float | None:
-        """Return a representable norm, or None for overflow/underflow."""
+        """Return the norm as a float, or `None` when it overflows or a nonzero norm underflows to zero."""
         try:
             value = ldexp(self.mantissa, self.exponent)
         except OverflowError:
@@ -57,7 +66,7 @@ class PhysicalScale(Record):
         return None if value == 0 and self.mantissa != 0 else value
 
     def squared_as_float(self) -> float | None:
-        """Return representable physical norm squared; underflow is unavailable."""
+        """Return the squared norm as a float, or `None` when it overflows or a nonzero value underflows to zero."""
         try:
             value = ldexp(self.mantissa * self.mantissa, 2 * self.exponent)
         except OverflowError:
@@ -130,28 +139,54 @@ def compose_recovery(*factors):
 
 
 class StatePreparationSpec(Record):
-    """Executable construction availability, without constructing a circuit.
+    """How a state can be prepared on qubits, recorded without building a circuit.
 
-    Phase is physical: dividing by a positive norm keeps global phase.
-    Ancilla and approximation facts default to unknown. A selected native
-    construction supplies its actual facts; explicit declarations remain legal.
-    Inverse/control availability refers to the selected unitary construction.
+    `StateInput.preparation` holds it, and
+    [`prepare_qiskit`][nwqlib.problems.inputs.prepare_qiskit] builds the
+    circuit it describes. The circuit prepares the input divided by its
+    positive norm, so a negative or complex global phase is kept. Inverse and
+    control availability refer to that unitary construction. The fields
+    below are read-only.
 
     Attributes:
-        input: Identity of the admitted state input.
+        input: Reference of the state input.
         basis: Its computational basis and coordinate order.
-        physical_scale: Norm of the physical input, or None when unknown.
-        normalization: The fixed convention that the circuit prepares the input divided by its positive norm.
-        required_ancillas: Extra qubits the construction needs, 0 for every selected construction, None when unknown.
-        inverse_available: Whether the selected unitary may be inverted.
-        control_available: Whether the selected unitary may be controlled.
-        implementation: Selected constructor, or None when no quantum preparation exists.
-        approximation: Algorithmic approximation statement, or None when unknown.
-        work_law: Text form of the construction's cost law.
-        items: Stored numerical items the construction reads, such as amplitudes, qubit factors, occupation bits or circuit instructions.
-        payload_bytes: Known logical bytes of the construction, the item bytes of a StateInput (checked by ``prepare_qiskit``) or the layered construction envelope for ``qiskit.mps_circuit``.
-        work: Construction size units, such as q*2**q for a direct vector, q for product or occupation input, the instruction count for a supplied circuit, or the layered construction envelope for ``qiskit.mps_circuit``.
-        blocker: Why no preparation exists, or None.
+        physical_scale: Norm of the input as a
+            [`PhysicalScale`][nwqlib.problems.inputs.PhysicalScale], or `None`
+            when unknown.
+        normalization: The fixed convention that the circuit prepares the
+            input divided by its positive norm.
+        required_ancillas: Extra qubits the construction needs, 0 for every
+            built-in construction, `None` (the default) when unknown.
+        inverse_available: Whether the circuit may be inverted.
+        control_available: Whether the circuit may be controlled.
+        implementation: The construction, or `None` when no quantum
+            preparation exists: `"qiskit.direct"` (magnitude and phase
+            synthesis of a vector), `"qiskit.product"` (one single-qubit
+            preparation per qubit), `"qiskit.occupation"` (X gates),
+            `"qiskit.supplied"` (a supplied circuit) or `"qiskit.mps_circuit"`
+            (a layered matrix-product-state circuit).
+        approximation: Statement of the algorithmic approximation, or `None`
+            (the default) when unknown. The preparations of vector, product
+            and occupation inputs make none and do not bound their
+            floating-point synthesis error. A `"qiskit.mps_circuit"` preparation is an approximation
+            whose circuit fidelity is not evaluated.
+        work_law: Text form of the construction's cost.
+        items: Stored items the construction reads: amplitudes, qubit
+            factors, occupation bits or circuit instructions.
+        payload_bytes: Logical bytes of the construction: the item bytes of
+            the input, which `prepare_qiskit` checks, or the layered
+            construction bound for `"qiskit.mps_circuit"`.
+        work: Construction size: `q*2**q` for a direct vector, q for product
+            or occupation input, the instruction count of a supplied circuit,
+            or the layered construction bound for `"qiskit.mps_circuit"`.
+        blocker: Why no preparation exists, or `None`.
+
+    Raises:
+        ValueError: If a specification without `implementation` lacks a
+            `blocker` or claims inverse or control, or a specification with
+            one has a `blocker`, a zero or missing norm, ancillas other than
+            0, or unknown size fields.
     """
 
     input: InputRef
@@ -183,17 +218,25 @@ class StatePreparationSpec(Record):
 
 @dataclass(frozen=True, eq=False, init=False, slots=True)
 class StateInput:
-    """Factory-owned physical data and its correlated preparation specification.
+    """A state ready to use in a Problem: its physical data, norm and preparation.
 
-    Fields cannot be independently replaced. Exported record revisions remain
-    standalone declarations and do not change this native owner.
+    [`state_input`][nwqlib.problems.inputs.state_input] and the `ingest_*`
+    functions of `nwqlib.problems` return it. Constructing it directly
+    raises `TypeError`, and its fields cannot be replaced. It keeps the
+    physical amplitudes, unnormalized, or a compact form (product factors,
+    occupation bits or a supplied circuit), together with the normalized
+    direction that a preparation uses. Pass it wherever a state is accepted,
+    for example `LinearSystem(b=state)`.
+
+    The data methods raise `ValueError` for a handle rebuilt by
+    `from_record`, which holds metadata only. The fields below are
+    read-only.
 
     Attributes:
-        manifest: Input identity, dimensions and checked metadata.
-        preparation: Scale and selected construction specification.
-        _physical: Private physical amplitudes or occupation bits.
-        _direction: Private normalized vector/factors, or None for zero/opaque input.
-        _native: Private supplied circuit snapshot, or None for other input forms.
+        manifest: The [`InputManifest`][nwqlib.operators.access.InputManifest]:
+            content hash, representation, dimension and checks.
+        preparation: The [`StatePreparationSpec`][nwqlib.problems.inputs.StatePreparationSpec]:
+            norm and how the state can be prepared on qubits.
     """
 
     manifest: InputManifest
@@ -217,21 +260,43 @@ class StateInput:
 
     @property
     def basis(self):
+        """The computational [`Basis`][nwqlib.core.records.Basis]: dimension and coordinate order, qubit 0 rightmost."""
         return self.manifest.basis
 
     @property
     def reference(self):
+        """The input's reference: content hash or declared identifier, representation and source."""
         return self.manifest.reference
 
     def to_record(self):
-        """Describe this handle without copying or normalizing numerical data."""
+        """Return a JSON-ready description of this handle without its numerical data.
+
+        Returns:
+            record (dict): The keys `format`, `manifest` and `preparation`.
+                Building it copies and normalizes no numerical data.
+        """
         return dict(format="nwqlib.state_input/2",
                     manifest=self.manifest.model_dump(mode="json", exclude_computed_fields=True),
                     preparation=self.preparation.model_dump(mode="json", exclude_computed_fields=True))
 
     @classmethod
     def from_record(cls, record):
-        """Read inert metadata; numerical or circuit access is not recreated."""
+        """Rebuild a metadata-only handle from a `to_record()` description.
+
+        Its data methods raise `ValueError`, and no circuit can be prepared
+        from it. Saved Results and Runs restore their numerical inputs
+        separately.
+
+        Args:
+            record (dict): A description returned by `to_record()`.
+
+        Returns:
+            handle (StateInput): A handle without numerical data.
+
+        Raises:
+            ValueError: If `record` is not such a description, or its
+                preparation names another input or basis.
+        """
         if (type(record) is not dict or set(record) != {"format", "manifest", "preparation"}
                 or record["format"] != "nwqlib.state_input/2"):
             raise ValueError("unsupported state input record")
@@ -246,7 +311,19 @@ class StateInput:
             raise ValueError("state native data is unavailable; a descriptive record does not restore data access")
 
     def entry(self, index: int):
-        """Read one explicit physical vector entry; compact inputs stay compact."""
+        """Return one physical amplitude of a vector input.
+
+        Args:
+            index (int): Coordinate index, `0 <= index < D`.
+
+        Returns:
+            amplitude (complex): The stored, unnormalized amplitude.
+
+        Raises:
+            ValueError: If the input is not a vector, for example a product
+                or occupation state, which is never expanded, or the index is
+                outside the dimension.
+        """
         self._require_data()
         if self.manifest.reference.representation != "vector" or "entries" not in self.manifest.access:
             raise ValueError("physical vector entries require an ingested vector")
@@ -255,7 +332,15 @@ class StateInput:
         return complex(self._physical[index])
 
     def physical_vector(self):
-        """Access immutable physical amplitudes; compact inputs stay compact."""
+        """Return the stored physical amplitudes of a vector input, unnormalized and read-only.
+
+        Returns:
+            vector (numpy.ndarray): The float64 or complex128 amplitudes.
+
+        Raises:
+            ValueError: If the input is not a vector. A product or
+                occupation state is never expanded.
+        """
         self._require_data()
         if self.manifest.reference.representation != "vector" or "entries" not in self.manifest.access:
             raise ValueError("physical vector access requires an ingested vector")
@@ -278,11 +363,32 @@ def _spec(manifest, scale, implementation, *, items, payload_bytes, work, law, b
 
 
 def ingest_vector(vector, *, max_bytes=DEFAULT_INPUT_BYTES) -> StateInput:
-    """Admit a small physical float64/complex128 vector, including zero data.
+    """Return a StateInput for a physical state vector, kept unnormalized.
 
-    Nonzero data normalizes once through the shared stable BLAS kernel. Both
-    physical bytes and normalized direction are kept (O(D)); metadata
-    exports and preparation do not normalize or hash again.
+    Integer and real data become float64 and complex data complex128. A
+    nonzero vector is normalized once, by a numerically stable BLAS norm, and
+    both the physical amplitudes and the normalized direction are kept
+    (O(D) storage). The norm is `preparation.physical_scale`. A zero vector
+    is accepted but has no quantum preparation. A quantum preparation needs
+    a power-of-two dimension of at least 2. A vector of another length keeps
+    its length, and a Method that supports it handles any padding. Saving
+    the metadata and preparing a circuit normalize nothing again.
+
+    Args:
+        vector (numpy.ndarray | list | tuple): One-dimensional real or
+            complex numbers, finite and nonempty.
+        max_bytes (int): Limit on the bytes of the stored amplitudes and
+            direction. Default 10 GB (decimal, `10_000_000_000`).
+
+    Returns:
+        state (StateInput): Its preparation is `"qiskit.direct"`, or none
+            with a `blocker` for a zero vector or an unsupported dimension.
+
+    Raises:
+        TypeError: If `vector` is another type or holds booleans, objects
+            or strings.
+        ValueError: If `vector` is empty, not one-dimensional or not finite,
+            or exceeds `max_bytes`.
     """
     vector = _array_input(vector, ndim=1, max_bytes=max_bytes, extra_bytes_per_item=16)
     dimension = vector.size
@@ -312,10 +418,29 @@ def ingest_vector(vector, *, max_bytes=DEFAULT_INPUT_BYTES) -> StateInput:
 
 
 def ingest_product(amplitudes, *, max_bytes=DEFAULT_INPUT_BYTES) -> StateInput:
-    """Admit shape (q,2) amplitudes with row j belonging to qubit j.
+    """Return a StateInput for a product state given as one pair of amplitudes per qubit.
 
-    Physical tensor order is row q-1 tensor ... tensor row 0. Non-unit factors
-    and complex/global phase survive. No 2**q vector is allocated.
+    Row j of the `(q, 2)` array belongs to qubit j, so the state is
+    `row_{q-1} ⊗ ... ⊗ row_0`. Factors need not have unit norm, and their
+    complex and global phases are kept. Each row is normalized separately,
+    and the norm is the product of the row norms. No `2**q` vector is
+    formed. A row of zeros gives a zero state, which has no quantum
+    preparation.
+
+    Args:
+        amplitudes (numpy.ndarray | list | tuple): Real or complex array of
+            shape `(q, 2)` with `q >= 1`.
+        max_bytes (int): Byte limit. Default 10 GB (decimal,
+            `10_000_000_000`).
+
+    Returns:
+        state (StateInput): Its preparation is `"qiskit.product"`, one
+            single-qubit preparation per qubit.
+
+    Raises:
+        TypeError: If `amplitudes` is another type or holds non-numbers.
+        ValueError: If the shape is not `(q, 2)`, a value is not finite, or
+            the data exceed `max_bytes`.
     """
     amplitudes = _array_input(amplitudes, ndim=2, max_bytes=max_bytes, extra_bytes_per_item=16)
     if amplitudes.shape[0] < 1 or amplitudes.shape[1] != 2:
@@ -346,10 +471,26 @@ def ingest_product(amplitudes, *, max_bytes=DEFAULT_INPUT_BYTES) -> StateInput:
 
 
 def ingest_occupation(occupations, *, num_qubits: int, max_bytes=DEFAULT_INPUT_BYTES) -> StateInput:
-    """Admit q0-first bits: string '10' means qubits (1,0), printed ket |01>.
+    """Return a StateInput for a computational basis state given as one bit per qubit, qubit 0 first.
 
-    Input is a sized string/list/tuple; width and exact 0/1 values are checked
-    before circuit allocation. No electron, spin or sector inference is made.
+    The string `"10"` means qubit 0 is 1 and qubit 1 is 0: computational
+    index 1, printed as the ket `|01>`. The width and the exact 0 or 1 values
+    are checked before any circuit is built. No electron number, spin or
+    symmetry sector is inferred from the bits.
+
+    Args:
+        occupations (str | list | tuple): Exactly `num_qubits` bits, 0 or 1.
+        num_qubits (int): Positive number of qubits q.
+        max_bytes (int): Byte limit. Default 10 GB (decimal,
+            `10_000_000_000`).
+
+    Returns:
+        state (StateInput): Its preparation is `"qiskit.occupation"`, at
+            most q X gates.
+
+    Raises:
+        ValueError: If `num_qubits` is not a positive integer, the length
+            differs, a value is not 0 or 1, or the bits exceed `max_bytes`.
     """
     if type(num_qubits) is not int or num_qubits < 1:
         raise ValueError("num_qubits must be a positive integer")
@@ -372,12 +513,33 @@ def ingest_occupation(occupations, *, num_qubits: int, max_bytes=DEFAULT_INPUT_B
 
 def bind_preparation_circuit(circuit, *, reference: InputRef, basis: Basis,
                              max_bytes=DEFAULT_INPUT_BYTES) -> StateInput:
-    """Bind supplied U|0> through one bounded stored-data snapshot.
+    """Return a StateInput for the state `U|0...0>` of a Qiskit circuit, under an identifier you choose.
 
-    The circuit reference is declared, never a native content digest. Admission
-    preserves physical phase and checks supported unitary execution structure;
-    it does not measure a norm, synthesize, simulate, or expose classical entries.
-    Snapshot census excludes SDK synthesis and native allocator overhead.
+    NWQLib computes no content hash of circuit data, so `reference` is a
+    declared identifier. Pass one reference for circuits you know prepare the
+    same input. The call copies the circuit's stored data, keeps its global
+    phase and checks that it has a supported unitary structure. It does not
+    simulate or synthesize the circuit, measure a norm or expose amplitudes.
+    The unit norm is the circuit's unitarity, an assumption rather than a
+    measurement. The byte check counts the copied data with fixed per-object
+    allowances, not the Qiskit synthesis or allocator overhead.
+
+    Args:
+        circuit (qiskit.QuantumCircuit): Unitary circuit without classical
+            bits or free parameters.
+        reference (InputRef): An `InputRef` with `representation="circuit"`.
+        basis (Basis): Basis of dimension `2**circuit.num_qubits`.
+        max_bytes (int): Byte limit of the copy. Default 10 GB (decimal,
+            `10_000_000_000`).
+
+    Returns:
+        state (StateInput): Its preparation is `"qiskit.supplied"`.
+
+    Raises:
+        TypeError: If `circuit` is not a `QuantumCircuit`.
+        ValueError: If `reference` or `basis` does not fit the circuit, the
+            circuit has classical bits, free parameters or an unsupported
+            operation, or the copy exceeds `max_bytes`.
     """
     from nwqlib._optional import optional_import
     optional_import("qiskit", extra="qiskit")
@@ -411,11 +573,15 @@ def bind_preparation_circuit(circuit, *, reference: InputRef, basis: Basis,
 
 @dataclass(frozen=True, eq=False)
 class QiskitPreparation:
-    """Actual selected circuit and its input-bound specification; no execution.
+    """What [`prepare_qiskit`][nwqlib.problems.inputs.prepare_qiskit] returns: the preparation circuit and its specification.
 
-    Args:
-        spec: Specification consumed to construct this circuit.
-        circuit: Native unitary preparation circuit, supporting inverse/control.
+    The circuit has not been run. The fields below are read-only.
+
+    Attributes:
+        spec: The [`StatePreparationSpec`][nwqlib.problems.inputs.StatePreparationSpec]
+            the circuit was built from.
+        circuit: The Qiskit `QuantumCircuit`, a unitary that may be inverted
+            or controlled. It is a new copy, which the caller may extend.
     """
 
     spec: StatePreparationSpec
@@ -424,20 +590,36 @@ class QiskitPreparation:
 
 def prepare_qiskit(state: StateInput, *, max_bytes=DEFAULT_INPUT_BYTES,
                    max_direct_amplitudes=DEFAULT_MAX_DIRECT_AMPLITUDES) -> QiskitPreparation:
-    """Explicit synthesis only, after nonzero/access/size admission.
+    """Build the Qiskit circuit that prepares a StateInput, without running it.
 
-    Uses the already normalized direction, preserving its global phase. The
-    returned native circuit may be composed, inverted, or made into a controlled
-    gate. This does not submit, transpile, or simulate it.
+    The circuit prepares the normalized direction stored with the input, so
+    its global phase is kept. It may be composed, inverted or made into a
+    controlled gate. Nothing is submitted, transpiled or simulated. Direct
+    synthesis of a vector takes `O(q*2**q)` arithmetic even when the data fit
+    in memory, so its amplitude count is limited by `max_direct_amplitudes`.
+    That limit does not apply to product, occupation or supplied-circuit
+    preparations. For a supplied circuit the call returns a new copy of the
+    stored circuit on every call, so extending the returned circuit in place
+    leaves the stored one unchanged. Inside a Run, preparation uses
+    [`ExecutionLimits.max_direct_amplitudes`][nwqlib.execution.ExecutionLimits]
+    instead, checked for the whole Plan before the first preparation.
 
-    A supplied circuit is snapshotted again on every call. The stored
-    snapshot is shared by every later preparation of this input, and the
-    caller owns the returned circuit and may extend it in place, so the
-    stored circuit is never returned itself.
+    Args:
+        state (StateInput): A state with an available preparation.
+        max_bytes (int): Limit on the bytes of the preparation data. Default
+            10 GB (decimal, `10_000_000_000`).
+        max_direct_amplitudes (int): Largest vector dimension for direct
+            synthesis. Default `65_536 = 2**16`, that is 16 qubits
+            ([engineering
+            constants](../ENGINEERING_CONSTANTS.md#explicit-input-operation-defaults)).
 
-    Inside a Run, the native constructor of a selected preparation receives
-    ``ExecutionLimits.max_direct_amplitudes`` through lowering, and the Run
-    checks it for the whole Plan before its first preparation.
+    Returns:
+        preparation (QiskitPreparation): The circuit and its specification.
+
+    Raises:
+        ValueError: If the state has no preparation (the error gives the
+            `blocker`, for example a zero vector), holds metadata only, or
+            exceeds `max_direct_amplitudes` or `max_bytes`.
     """
     state._require_data()
     spec = state.preparation
@@ -484,17 +666,47 @@ def prepare_qiskit(state: StateInput, *, max_bytes=DEFAULT_INPUT_BYTES,
 
 
 def state_input(value, *, max_bytes=DEFAULT_INPUT_BYTES) -> StateInput:
-    """Admit known physical amplitudes or a supplied preparation circuit.
+    """Return a StateInput for a state vector, a Qiskit `Statevector` or a preparation circuit.
 
-    QuantumCircuit means its unitary action on the all-zero state. Its native
-    data is copied without simulation or synthesis and receives a fresh source
-    identity; reusing an existing StateInput preserves that identity.
+    The call dispatches on the type of `value`:
 
-    NWQLib computes no content digest of circuit data, so it has no basis to
-    assert that two circuits prepare the same input. A fresh identity per
-    admission never makes that assertion. A caller who knows that two
-    circuits are the same input passes one identity to
-    ``bind_preparation_circuit``.
+    - a NumPy array, or a list or tuple of numbers, and a Qiskit
+      `Statevector`: [`ingest_vector`][nwqlib.problems.inputs.ingest_vector]
+    - a Qiskit `QuantumCircuit`: its unitary action on the all-zero state,
+      as in [`bind_preparation_circuit`][nwqlib.problems.inputs.bind_preparation_circuit]
+    - a `StateInput`: returned unchanged, with its identifier
+
+    A circuit's data is copied without simulation or synthesis and gets a
+    new random identifier on every call. NWQLib computes no content hash of
+    circuit data, so it never asserts that two circuits prepare the same
+    input. If you know they do, pass one `reference` to
+    `bind_preparation_circuit`, or reuse one `StateInput`.
+
+    Args:
+        value (object): The state or circuit.
+        max_bytes (int): Byte limit of the dispatched function. Default
+            10 GB (decimal, `10_000_000_000`).
+
+    Returns:
+        state (StateInput): The accepted state.
+
+    Raises:
+        TypeError: If `value` has none of the types above, or a dispatched
+            function rejects its contents.
+        ValueError: If the dispatched function rejects `value`.
+
+    Examples:
+        The vector `[3, 4j]` has norm 5 and is prepared from the direction
+        `[0.6, 0.8j]`. The stored amplitudes stay unnormalized:
+
+        >>> from nwqlib.problems import state_input
+        >>> b = state_input([3, 4j])
+        >>> b.preparation.physical_scale.as_float()
+        5.0
+        >>> b.physical_vector()
+        array([3.+0.j, 0.+4.j])
+        >>> b.preparation.implementation
+        'qiskit.direct'
     """
     _check_bytes(0, max_bytes)
     if isinstance(value, StateInput):

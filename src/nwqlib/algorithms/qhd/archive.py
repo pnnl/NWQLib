@@ -20,8 +20,8 @@ from .records import QHDReconstruction, validate_selection
 # the error ledger rest on both (circuit_errors), and loading does not
 # replan, so a qhd/4 Plan could carry out-of-range arithmetic that those
 # entries would not charge. Earlier formats are rejected rather than
-# converted, because this unreleased package keeps no development-schema
-# compatibility (docs/FRAMEWORK.md, "Package Import Surface").
+# converted, because NWQLib owes no compatibility with the development
+# schemas that preceded release 1.0 (docs/FRAMEWORK.md, "API stability").
 FORMAT = "qhd/7"
 
 

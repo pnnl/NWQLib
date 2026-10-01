@@ -3,7 +3,8 @@
 Every Program is admitted here before any consumer does work with it: Program
 construction, Plan points, experiment selection, logical lowering, the
 resource fold and acquisition resolution. The public contract is
-docs/ir.md, "Declared quantum and classical lifecycle".
+docs/development/program_checks.md, which states the declared quantum and
+classical lifecycle.
 """
 
 import math
@@ -597,7 +598,8 @@ class _Admission:
     def visit(self, name, q, available, binding, protected=frozenset()):
         """Apply one node's declared effect and return the resulting context.
 
-        The per-node rules are the admission table of docs/ir.md. The rules
+        The per-node rules are the admission table of
+        docs/development/program_checks.md. The rules
         that shape this traversal are:
 
         - A BlockCall connects its registers' correlation groups unless its

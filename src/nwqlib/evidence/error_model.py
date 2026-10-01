@@ -29,20 +29,30 @@ def _same_scope(left, right):
 
 
 class ErrorFrame(Record):
-    """Target quantity, metric, units, scope, conditioning and mathematical domain.
+    """What an error value refers to: quantity, metric, unit, scope, conditions and domain.
 
-    domain separates target, full-operator, projected and zero-input obligations.
-    No missing external context is interpreted as unconditional information.
-    Two frames are compatible only when all six fields agree in meaning, so
-    a projected or zero-input value cannot answer a target claim.
+    Every error bound and check carries one, and the frame of a Result's
+    output is `result.plan.error_model.frame`. A value answers a claim only
+    when the two frames are compatible, which requires all six fields to
+    agree in meaning, with units compared by symbol and dimension and scopes
+    by kind and domain. A value for the projected problem or for a zero input therefore
+    cannot answer a claim about the target quantity, and missing context is
+    never read as an absence of conditions. Build one with keyword arguments
+    to state a value you supply. Every field except `domain` is required.
 
     Attributes:
-        quantity: Name of the scientific quantity the error describes.
-        metric: Error metric, for example an absolute difference or a variance.
-        unit: Unit of the metric's value.
-        scope: Evidence scope of the Problem that owns the quantity.
-        conditioning: Conditions under which the value is meaningful.
-        domain: ``target``, ``full_operator``, ``projected`` or ``zero_input``.
+        quantity: Required. Name of the quantity the error describes.
+        metric: Required. Error metric, for example an absolute difference
+            or `variance`.
+        unit: Required. Unit of the metric's value.
+        scope: Required. Scope of the Problem the quantity belongs to.
+        conditioning: Required. Conditions under which the value is
+            meaningful.
+        domain: Default `"target"`, the requested quantity.
+            `"full_operator"` is a property of the whole operator,
+            `"projected"` one of the projected problem of a subspace method,
+            and `"zero_input"` the error of a preparation applied to the
+            all-zero input.
     """
 
     quantity: Text
@@ -68,13 +78,30 @@ class ErrorFrame(Record):
 
 
 class FramedFact(Record):
-    """One statement with mandatory complete scientific frame and restrictions.
+    """A [`Fact`][nwqlib.evidence.records.Fact] tied to its [`ErrorFrame`][nwqlib.evidence.error_model.ErrorFrame] and parameter point.
 
-    bindings=() explicitly declares no parameter restriction. The inner Fact's
-    name belongs to its consumer: sampling can contribute to expectation.
-    assumptions keep unresolved premises, including on derived-value export.
-    failure_probability belongs to this bound. A replacement without it has
-    unknown confidence; it cannot inherit the displaced bound's probability.
+    `Result.facts`, `ClaimAssessment.facts` and the `facts` that
+    `Result.verify` returns hold them. A value is used only in its own frame
+    and at its own parameter point, and the open assumptions of its fact
+    stay attached when an assessed value is reused. Build one with keyword
+    arguments to supply a bound to `Result.assess(facts=...)`. `frame`,
+    `bindings` and `fact` are required.
+
+    Attributes:
+        frame: Required. The frame of the value.
+        bindings: Required. Parameter values the statement is restricted
+            to. `()` declares no restriction.
+        fact: Required. The value. Its `quantity` names the role the value
+            plays for the code that reads it, for example the `sampling`
+            source of an expectation value.
+        failure_probability: Default `None`, which means unknown. Probability
+            in `[0, 1)` that this bound fails. A bound supplied in place of
+            another does not inherit the other's probability, so a
+            replacement without one has unknown confidence.
+
+    Raises:
+        ValueError: If the fact's unit or scope differs from the frame's, or
+            a parameter is restricted twice.
     """
 
     frame: ErrorFrame
@@ -250,10 +277,32 @@ def _rational(value):
 
 
 class TargetReference(Record):
-    """Framed exact target or magnitude enclosure with explicit failure coverage.
+    """A reference value of the target that sets the scale of a relative criterion.
 
-    An upper enclosure cannot supply a sufficient relative denominator.
-    The FramedFact is the complete owner of the reference's scientific frame.
+    Pass it as `reference=` to `Result.assess(relative_tolerance=...)`. For
+    the criterion `|error| <= r*|target|`, a proved lower bound
+    `L <= |target|` gives the sufficient threshold `r*L`, and an exact
+    nonzero target gives `r*|target|`. An upper bound on the magnitude or an
+    observed
+    estimate gives none, and neither does a reference whose failure
+    probability is unknown or whose evidence is not witnessed proved or
+    certified support. The reference's failure probability joins the union
+    bound of the assessment. Build it with keyword arguments. All three
+    fields are required.
+
+    Attributes:
+        relation: Required. `"exact_target"`, `"magnitude_lower_bound"` or
+            `"magnitude_upper_bound"`.
+        fact: Required. A [`FramedFact`][nwqlib.evidence.error_model.FramedFact]
+            whose quantity is the frame's target quantity. It holds the
+            reference's whole frame.
+        failure_probability: Required. Probability in `[0, 1)` that the
+            reference fails, or `None` when unknown.
+
+    Raises:
+        ValueError: If the fact names another quantity or is not a real
+            scalar, or a magnitude upper bound, or an exact target of a
+            `norm_squared` quantity, is negative.
     """
 
     relation: Literal["exact_target", "magnitude_lower_bound", "magnitude_upper_bound"]
@@ -276,12 +325,32 @@ class TargetReference(Record):
 
 
 class ErrorTerm(Record):
-    """One named source, already propagated in its FramedFact's target frame.
+    """One error source of an [`ErrorModel`][nwqlib.evidence.error_model.ErrorModel], already propagated into the output's frame.
 
-    role is independent of availability and evidence. conditions and inputs
-    keep premises; failure_probability is this bound's failure, not variance.
-    coverage cannot erase another required source. The containing ErrorModel
-    keeps its separate consumer-target obligation.
+    Methods build these. `role` is independent of the value's availability
+    and evidence, and `coverage` cannot remove another required source of
+    the model. The fields below are read-only.
+
+    Attributes:
+        name: Name of the source, equal to `fact.fact.quantity`.
+        stage: Workflow stage where the error arises.
+        source: Where the bound comes from.
+        formula: Text form of the bound.
+        fact: The bound as a [`FramedFact`][nwqlib.evidence.error_model.FramedFact].
+        coverage: Text saying what the bound covers.
+        role: Default `"additive_bound"`, a nonnegative bound added in the
+            triangle inequality. The other roles, `"amplification"`,
+            `"covariance_contribution"`, `"conditional_term"` and
+            `"listed_only"`, are listed but not added.
+        conditions: Boolean predicates that must hold, in the dimensionless
+            predicate frame of this term.
+        inputs: Values the bound depends on.
+        failure_probability: Probability in `[0, 1)` that this bound fails,
+            not a variance. `None` when unknown.
+
+    Raises:
+        ValueError: If `name` differs from the fact's quantity, the value is
+            not a real scalar, or an additive bound is negative.
     """
 
     name: Text
@@ -310,29 +379,63 @@ class ErrorTerm(Record):
 
 
 class ClaimAssessment(Record):
-    """A post-run sufficient criterion bound to the original experiment and data.
+    """The outcome of checking a Result against an accuracy criterion.
 
-    An excessive upper bound is INCONCLUSIVE, not evidence of infeasibility.
-    The criterion belongs to this assessment; changing it does not change Plan.
+    [`Result.assess`][nwqlib.core.analysis.Result.assess] returns it (see
+    [Check a result against a
+    tolerance](evidence.md#check-a-result-against-a-tolerance)).
+    The answer is `status`:
+
+    - `PASS`: every error source the Method lists has a bound that applies
+      at the assessed point and, with its conditions and inputs, has
+      witnessed proved or certified support and no open assumption. The
+      sum of the bounds is at most `threshold`, and their combined failure
+      probability meets the requested confidence.
+    - `INCONCLUSIVE`: otherwise. `remaining` lists the sources without a
+      bound, `unverified` the bounded sources without that support, and
+      `prerequisites` the reasons. A sum of bounds above the threshold is
+      INCONCLUSIVE, not evidence that the error exceeds the tolerance.
+    - `NOT_APPLICABLE`: a `component="sampling"` criterion on an error model
+      that lists no sampling source.
+
+    The bounds are added by the triangle inequality and their failure
+    probabilities by the union bound, with the assumptions stated under
+    [`ErrorModel.assess`][nwqlib.evidence.error_model.ErrorModel.assess]. A
+    `component="sampling"` criterion assesses the sampling contribution
+    only and never covers total error. The assessment is a separate record, so
+    assessing with another criterion changes neither the Result nor its
+    Plan. The fields below are read-only.
 
     Attributes:
-        model_id: ErrorModel the criterion was assessed against.
-        accuracy: Requested tolerance, confidence and component.
-        absolute_fallback: Explicit absolute tolerance used only when a relative scale cannot be established.
-        output_id: Scientific output whose error is assessed.
-        context: Problem, construction, Plan, observation and Result identities of the assessed data.
-        frame: Error frame of the output.
-        method: How the contributions were combined.
-        reference: Target relation that supplies a relative scale, if any.
-        status: ErrorModel.assess returns ``PASS`` only when every needed source has a supported bound, the subtotal meets the threshold and the failure probability meets the confidence. It returns ``NOT_APPLICABLE`` for a ``sampling`` criterion on an ErrorModel that declares no sampling source, and ``INCONCLUSIVE`` otherwise.
-        threshold: Sufficient absolute threshold in the output unit, or None without an established scale.
-        covered_subtotal: Triangle-inequality sum of the covered bounds.
-        covered: Sources whose bounds entered the subtotal.
-        remaining: Needed sources without an applicable additive bound.
-        unverified: Covered sources whose bound, prerequisites or inputs lack supported proof.
+        model_id: Content hash of the error model assessed against.
+        accuracy: The criterion as an [`Accuracy`][nwqlib.problems.records.Accuracy]:
+            tolerance, confidence and component.
+        absolute_fallback: Absolute tolerance used only when the relative
+            scale cannot be established, or `None`.
+        output_id: Content hash of the output whose error is assessed.
+        context: Identities of the Problem, circuit description, Plan,
+            observations and Result of the assessed data, with the parameter
+            point.
+        frame: The [`ErrorFrame`][nwqlib.evidence.error_model.ErrorFrame] of
+            the output.
+        method: How the bounds were combined.
+        reference: The [`TargetReference`][nwqlib.evidence.error_model.TargetReference]
+            of a relative criterion, or `None`.
+        status: `"PASS"`, `"INCONCLUSIVE"` or `"NOT_APPLICABLE"`, as above.
+        threshold: Absolute threshold in the output unit, or `None` when a
+            relative scale was not established.
+        covered_subtotal: Sum of the bounds that entered the triangle
+            inequality, an exact rational.
+        covered: Sources whose bounds entered the sum.
+        remaining: Required sources without an applicable additive bound.
+        unverified: Covered sources whose bound, conditions or inputs lack
+            witnessed proved or certified support.
         prerequisites: Reasons that prevent PASS.
-        failure_probability: Union-bound failure probability of the covered bounds and reference, capped at one, or None when any probability is unknown.
-        facts: Framed facts actually used, with their premises and confidence.
+        failure_probability: Union-bound failure probability of the covered
+            bounds and the reference, capped at one, or `None` when any
+            probability is unknown.
+        facts: The [`FramedFact`][nwqlib.evidence.error_model.FramedFact]
+            records used, with their assumptions and failure probabilities.
     """
 
     model_id: ContentID
@@ -378,11 +481,28 @@ class ClaimAssessment(Record):
 
 
 class ErrorModel(Record):
-    """Already-propagated error sources in one actual scientific output frame.
+    """The error sources a Method lists for its output, each already propagated into the output's frame.
 
-    The Method lists the error sources its output needs, including any
-    subspace or ground-identification obligations. The library does not check
-    that list for completeness. This record never selects an experiment.
+    `result.plan.error_model` holds it, and `Result.assess` calls `assess`
+    with `result.facts`. The Method lists every error source its output
+    needs, including any subspace or ground-state identification. The
+    library does not check that list for completeness. The fields below are
+    read-only.
+
+    Attributes:
+        output_id: Content hash of the output the model describes.
+        subject_id: Content hash of the Problem.
+        construction_id: Content hash of the planned circuit description.
+        frame: The [`ErrorFrame`][nwqlib.evidence.error_model.ErrorFrame]
+            of the output, shared by every additive term.
+        required_sources: Names of the sources a total-error claim needs.
+        terms: The [`ErrorTerm`][nwqlib.evidence.error_model.ErrorTerm]
+            records.
+        source: Where the model comes from.
+
+    Raises:
+        ValueError: If source names repeat, no source is required, or an
+            additive term has another frame.
     """
 
     output_id: ContentID
@@ -405,39 +525,64 @@ class ErrorModel(Record):
         return self
 
     def assess(self, accuracy, *, context, facts=(), reference=None, absolute_fallback=None, max_integer_bits=DEFAULT_MAX_INTEGER_BITS):
-        """Compare supplied bounds at an existing point; perform no acquisition.
+        """Assess an accuracy criterion against the model's bounds at an existing parameter point, measuring nothing.
 
-        component='sampling' assesses that named contribution only. Missing
-        hardware, preparation or model terms cannot thereby acquire total-error
-        coverage. A model that declares no sampling source, as QLS and QHD do
-        with exact readout, has no sampling contribution to bound, so that
-        criterion is NOT_APPLICABLE rather than missing. The caller supplies
-        the actual admitted experiment context.
+        Most callers use `Result.assess`, which supplies the context and the
+        error bounds in `result.facts`. Two rules combine the bounds, each
+        with its assumption:
 
-        Two combination rules produce the result, each with its premise:
-
-        - Triangle inequality. Its premise, which this code does not check, is
-          that the Method has propagated every source into this output frame,
-          so the output error is the sum ``e = sum_k e_k`` of the propagated
-          source errors. The validator checks only that the frames agree. Then, where each
-          bound ``|e_k| <= b_k`` holds, ``|e| <= sum_k b_k``. The sum covers
-          the error only when every required source has a bound, so a
-          missing source keeps the result INCONCLUSIVE.
-        - Union bound. If bound k fails with probability at most
-          ``delta_k``, all bounds (and a relative reference) hold together
-          with probability at least ``1 - sum_k delta_k``, whatever their
+        - Triangle inequality. Its assumption, which the code does not check,
+          is that the Method has propagated every source into this output's
+          frame, so the output error is the sum `e = sum_k e_k` of the
+          propagated source errors. The code checks only that the frames
+          agree. Where each bound `|e_k| <= b_k` holds, `|e| <= sum_k b_k`.
+          The sum covers the error only when every required source has a
+          bound, so a missing source keeps the result INCONCLUSIVE.
+        - Union bound. If bound k fails with probability at most `delta_k`,
+          all bounds, and a relative reference, hold together with
+          probability at least `1 - sum_k delta_k`, whatever their
           dependence, so no independence is assumed. Confidence c needs
-          ``sum_k delta_k <= 1 - c``, and an unknown ``delta_k`` makes the
-          total unknown.
+          `sum_k delta_k <= 1 - c`, and an unknown `delta_k` makes the total
+          unknown.
 
-        PASS also requires the covered subtotal to meet the threshold and
-        witnessed proved or certified support for every covered term, as
-        ``supported`` defines.
+        PASS also requires the sum to be at most the threshold and every
+        covered bound to apply at the assessed point, carry no open
+        assumption and have witnessed `proved_relation` or `certified_bound`
+        evidence for a subject of the context. Numerical estimates,
+        observations and assertions never qualify, however small their
+        value. `component="sampling"` assesses that contribution only, so
+        missing hardware, preparation or model terms cannot give it
+        total-error coverage. A model that lists no sampling source, as QLS
+        and QHD do with exact readout, has no sampling contribution to bound,
+        so that criterion is NOT_APPLICABLE rather than missing.
+
+        Args:
+            accuracy (Accuracy): The criterion.
+            context (AssessmentContext): Identities and parameter point of
+                the assessed data. `Result.assess` builds it from the Result.
+            facts (tuple[FramedFact, ...]): Bounds that replace the model's
+                terms of the same name.
+            reference (TargetReference | None): Scale of a relative
+                criterion.
+            absolute_fallback (float | None): Positive absolute tolerance
+                used only when the relative scale cannot be established.
+                Requires a relative criterion.
+            max_integer_bits (int): Bit limit of the exact arithmetic.
+                Default 4096.
 
         Returns:
-            The ClaimAssessment with its threshold, covered subtotal, covered,
-            remaining and unverified sources, reasons and capped failure
-            probability.
+            assessment (ClaimAssessment): The status with its threshold,
+                covered sum, covered, remaining and unverified sources,
+                reasons and capped failure probability.
+
+        Raises:
+            TypeError: If `accuracy`, `context` or `reference` has another
+                type.
+            ValueError: If the context belongs to another Problem or circuit
+                description, a supplied fact names no source or repeats one,
+                a bound does not apply in its frame or is a negative
+                additive bound, or `absolute_fallback` is not positive or
+                lacks a relative criterion.
         """
         if type(accuracy) is not Accuracy or type(context) is not AssessmentContext:
             raise TypeError("assessment requires Accuracy and its actual AssessmentContext")
@@ -674,15 +819,27 @@ def assess_result(result, *, accuracy=None, absolute_tolerance=None, relative_to
 
 
 class CheckDomain(Record):
-    """Mathematical scalar range in the check's reported unit.
+    """Mathematical range of a check value, in the check's unit.
 
-    lower/upper are inclusive, or absent for an unbounded side. integer
-    restricts the value to whole numbers (for example a zero/one flag).
-    roundoff_tolerance is an explicitly selected absolute endpoint window in
-    that unit; zero makes admission exact. Producers own its numerical scale
-    and justification; selecting a number alone does not establish a rounding
-    error bound. A raw value within the window remains in the fact. Built-in
-    supplied nonnegative error checks use exact admission.
+    `CheckSpec.domain` holds it. A value outside the range is rejected before
+    any status is decided. The fields below are read-only.
+
+    Attributes:
+        lower: Inclusive lower end, or `None` for no lower end.
+        upper: Inclusive upper end, or `None` for no upper end.
+        integer: Whether the value must be a whole number, for example a
+            zero-one flag.
+        roundoff_tolerance: Absolute window at each end, in the check's
+            unit. A value outside the range by at most this amount is
+            compared at the end, and its raw value stays in the fact. Zero
+            means exact comparison. The code that sets a nonzero window must
+            justify its scale, because a number alone does not bound
+            rounding error. The built-in checks of nonnegative errors use
+            zero.
+
+    Raises:
+        ValueError: If `lower` exceeds `upper`, or a nonzero window is set on
+            an integer domain or a domain without ends.
     """
 
     lower: Real | None = None
@@ -700,16 +857,34 @@ class CheckDomain(Record):
 
 
 class CheckSpec(Record):
-    """Selected scalar criterion, mathematical domain and explicitly scoped work.
+    """One scalar check: the quantity, its threshold and domain, and what running it costs.
 
-    options_id identifies an actual selected verification options record, or
-    is absent for a supplied-evidence check with no executable selection.
-    domain is independent of the metric's display spelling. A threshold
-    compares an admitted value; it does not define that value's domain.
-    A verification fact records this record's content identity, so any
-    revision, including a new threshold, needs a new verification. access,
-    experiments, classical_work and reference_work state what that
-    verification costs.
+    A verification options record produces one per selected criterion, and
+    `Result.verify` returns one fact per check. Each verification fact
+    records the content hash of its check, so any revision of the check,
+    including only a new threshold, needs a new verification. The fields
+    below are read-only.
+
+    Attributes:
+        name: Check name, which the answering fact's quantity repeats.
+        claim_id: Content hash of the output the check concerns.
+        frame: The [`ErrorFrame`][nwqlib.evidence.error_model.ErrorFrame] of
+            the checked value.
+        domain: The [`CheckDomain`][nwqlib.evidence.error_model.CheckDomain]
+            of valid values. The threshold compares a valid value and does
+            not define the domain, and the domain does not depend on how the
+            metric is named.
+        source: Implementation that computes the value.
+        options_id: Content hash of the options record that selected the
+            check, or `None` for a check of a supplied value.
+        threshold: Nonnegative threshold. PASS means value `<=` threshold.
+            `None` keeps the check INCONCLUSIVE.
+        prerequisites: Open assumptions, which keep the check INCONCLUSIVE.
+        access: Data the check reads.
+        experiments: Number of new experiments the check runs.
+        classical_work: Text form of its classical computation.
+        reference_work: Text form of its reference computation.
+        data_description: What the check stores.
     """
 
     schema_version: Literal[2] = 2
@@ -729,14 +904,25 @@ class CheckSpec(Record):
 
 
 class CheckAssessment(Record):
-    """PASS/FAIL concern only this scalar criterion, preserving the evidence kind.
+    """Outcome of one scalar check: its status and the fact it was decided on.
+
+    `Certificate.checks` holds them, and
+    [`assemble_check`][nwqlib.evidence.error_model.assemble_check] returns
+    one. PASS or FAIL concerns only this check's threshold, and the evidence
+    kind of the fact is unchanged. The fields below are read-only.
 
     Attributes:
-        check_id: Content identity of the CheckSpec that was evaluated.
-        artifact_id: Result the check concerns.
-        status: ``PASS`` or ``FAIL`` compare the admitted value with the threshold. ``NOT_RUN`` means no fact was supplied, ``INCONCLUSIVE`` that the value, threshold, admitted point or artifact-bound support is missing or a premise is open, and ``NOT_APPLICABLE`` that the fact states inapplicability.
-        fact: Supplied fact, with its raw value and evidence kind unchanged.
-        reason: Explanation of the status, including any disclosed roundoff adjustment.
+        check_id: Content hash of the [`CheckSpec`][nwqlib.evidence.error_model.CheckSpec].
+        artifact_id: Content hash of the Result the check concerns.
+        status: `"PASS"` or `"FAIL"` compares the value with the threshold.
+            `"NOT_RUN"` means no fact was supplied. `"INCONCLUSIVE"` means
+            the value, the threshold, the assessed point or support bound to
+            this Result is missing, or an assumption is open. `"NOT_APPLICABLE"`
+            means the fact states that the check does not apply.
+        fact: The supplied fact, with its raw value and evidence kind, or
+            `None`.
+        reason: Explanation of the status, including any roundoff-window
+            adjustment.
     """
 
     check_id: ContentID
@@ -747,13 +933,32 @@ class CheckAssessment(Record):
 
 
 def assemble_check(check: CheckSpec, *, artifact_id: str, fact: FramedFact | None = None, max_integer_bits=DEFAULT_MAX_INTEGER_BITS) -> CheckAssessment:
-    """Direct restricted checks lack admitted context and stay INCONCLUSIVE.
+    """Decide one check from a supplied fact, outside a Certificate.
 
-    A receipt-witnessed fact answers only the unmodified CheckSpec that
-    options.verification_checks(result) returned when it was produced. Its
-    evidence records that CheckSpec's identity, so a CheckSpec revised
-    afterwards, for example with another threshold, is rejected here as it is
-    by Certificate.with_verification. Run verify again with new options instead.
+    The status is decided as in
+    [`Certificate.with_verification`][nwqlib.evidence.error_model.Certificate.with_verification],
+    without a Result context. A fact restricted to a parameter point
+    therefore stays INCONCLUSIVE here. A fact from a verification answers
+    only the unmodified check that it records, so a check revised
+    afterwards, for example with another threshold, is rejected. Run
+    `Result.verify` again with new options instead. A value outside the
+    check's domain raises before any status is decided.
+
+    Args:
+        check (CheckSpec): The check.
+        artifact_id (str): Content hash of the Result the check concerns.
+        fact (FramedFact | None): The value, or `None`, which gives
+            `NOT_RUN`.
+        max_integer_bits (int): Bit limit of the exact arithmetic. Default
+            4096.
+
+    Returns:
+        outcome (CheckAssessment): The status and reason.
+
+    Raises:
+        ValueError: If the fact names another quantity or frame, was
+            produced by other options or for another check, or lies outside
+            the check's domain.
     """
     return _assemble_check(check, artifact_id=artifact_id, fact=fact, context=None, max_integer_bits=max_integer_bits)
 
@@ -834,21 +1039,29 @@ def _assemble_check(check, *, artifact_id, fact, context=None, max_integer_bits=
 
 
 class Certificate(Record):
-    """Exact Plan/result association with a common assessment and supplied checks.
+    """An accuracy assessment of one Result together with its completed verification checks.
 
-    Checks and the accuracy assessment stay separate, so a check PASS on its
-    own scalar threshold does not change an INCONCLUSIVE assessment. A
-    verification fact attaches only with the options record and CheckSpec
-    that produced it. Rebinding it to revised options, for example another
-    threshold, would answer a criterion with evidence that was never produced
-    for it, so with_verification raises ValueError and a new verification is
-    required.
+    Build it with keyword arguments from an assessment, for example
+    `Certificate(plan_id=result.plan_id, result_id=result.content_id,
+    assessment=result.assess(absolute_tolerance=1e-6), checks=())`, then
+    attach the `facts` that `Result.verify` returned with `with_verification`
+    (see [Keep an assessment and its checks
+    together](evidence.md#keep-an-assessment-and-its-checks-together)). All four fields
+    are required. Checks and the assessment stay separate, so a check that
+    passes its own threshold does not change an INCONCLUSIVE assessment.
 
     Attributes:
-        plan_id: Plan of the certified Result.
-        result_id: Certified Result.
-        assessment: Accuracy assessment of that Result.
-        checks: Completed explicit checks of that Result.
+        plan_id: Required. Content hash of the Result's Plan.
+        result_id: Required. Content hash of the Result.
+        assessment: Required. The [`ClaimAssessment`][nwqlib.evidence.error_model.ClaimAssessment]
+            of that Result.
+        checks: Required. Completed checks as
+            [`CheckAssessment`][nwqlib.evidence.error_model.CheckAssessment]
+            records, `()` to start.
+
+    Raises:
+        ValueError: If the assessment belongs to another Plan or Result, or a
+            check to another Result.
     """
 
     plan_id: ContentID
@@ -857,11 +1070,32 @@ class Certificate(Record):
     checks: tuple[CheckAssessment, ...]
 
     def with_verification(self, result, *, options, evidence, max_integer_bits=DEFAULT_MAX_INTEGER_BITS):
-        """Attach already-completed checks without another verification or assessment.
+        """Return a new Certificate with the `facts` of a completed verification attached as checks.
 
-        Each receipt-witnessed fact must come from these same options, compared
-        by their complete content identity. Changing any option, including a
-        threshold, requires calling verify again with the new options.
+        Nothing is verified or assessed again. Each fact from a verification
+        must come from these same `options`, compared by their complete
+        content hash, and answer the check it records. The hash covers every
+        field and the revision history (`parent_id`), so keep the options
+        object you passed to `Result.verify`, or its saved JSON. Changing any
+        option, even only a threshold, needs a new `Result.verify` call with
+        the new options, because the old `facts` were never produced for it.
+        An attached check replaces an earlier check of the same `CheckSpec`.
+
+        Args:
+            result (Result): The certified Result, with its Plan attached.
+            options (object): The options record passed to `Result.verify`.
+            evidence (tuple[FramedFact, ...]): The `facts` that
+                `Result.verify` returned.
+            max_integer_bits (int): Bit limit of the exact arithmetic.
+                Default 4096.
+
+        Returns:
+            certificate (Certificate): A revision with the checks attached.
+
+        Raises:
+            ValueError: If `result` is not the certified Result, a fact names
+                no check of `options` or repeats one, or a fact was produced
+                by other options or for another check.
         """
         plan = result.plan
         if self.plan_id != plan.content_id or self.result_id != result.content_id:

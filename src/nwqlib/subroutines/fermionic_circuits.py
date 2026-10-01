@@ -173,7 +173,7 @@ def build_generator_circuit(
     _plan: _GeneratorCircuitPlan | None = None,
     max_bytes: int = DEFAULT_INPUT_BYTES,
 ) -> QuantumCircuit:
-    """Build the circuit of ``exp(theta*A)`` for one admitted generator.
+    """Build an exact circuit of `exp(theta*A)` for one pool generator `A`, optionally controlled or inverted.
 
     Inversion evaluates the complete parameter map at ``-theta``, including
     the even angle functions such as ``alpha_5`` of Magoulas and
@@ -194,21 +194,23 @@ def build_generator_circuit(
     gate on the control qubit under control, where the phase is physical.
 
     Args:
-        generator: Admitted anti-Hermitian ``FermionicGenerator``.
-        theta: Finite rotation angle in radians. On the ``shared_index``
-            route, ``theta`` times each occupation block must have a 1-norm
-            of at most ``_linalg_laws.MAX_EXPONENTIAL_NORM``, the limit of
-            the matrix exponential.
-        controlled: Add one control qubit. The control is qubit 0 and system
-            qubit ``j`` becomes qubit ``j + 1``.
-        inverse: Build ``exp(-theta*A)``.
-        _plan: Precomputed ``_GeneratorCircuitPlan`` of this exact generator
-            object, reused across angles.
-        max_bytes: Byte cap for planning when ``_plan`` is omitted.
+        generator (FermionicGenerator): Anti-Hermitian pool generator of a
+            supported family, or a custom commuting Pauli sum.
+        theta (float): Finite rotation angle in radians. On the
+            ``shared_index`` route, ``theta`` times each occupation block
+            must have a 1-norm of at most `2**37`, the limit of the matrix
+            exponential.
+        controlled (bool): Default `False`. Add one control qubit. The
+            control is qubit 0 and system qubit ``j`` becomes qubit ``j + 1``.
+        inverse (bool): Default `False`. Build ``exp(-theta*A)``.
+        _plan: Internal reuse of a precomputed plan across angles. Leave it
+            unset.
+        max_bytes (int): Default 10 GB (decimal, `10_000_000_000` bytes).
+            Byte limit for choosing the construction.
 
     Returns:
-        A ``QuantumCircuit`` on ``generator.num_qubits + int(controlled)``
-        qubits.
+        circuit (QuantumCircuit): Circuit on
+            ``generator.num_qubits + int(controlled)`` qubits.
     """
 
     theta = float(theta)

@@ -13,12 +13,15 @@ EvidenceKind = Literal[
 
 
 class WorkProvenance(Record):
-    """Work actually used to acquire evidence. This record launches no work.
+    """Work done to obtain a value: when it ran, what it computed and where its output is.
+
+    `Evidence.work` holds these records. The fields below are read-only.
 
     Attributes:
         stage: Workflow stage in which the work ran.
-        description: What was computed and its derived size, for example entries scanned and scalar operations.
-        artifact: Identity of the receipt or record that holds the work's output.
+        description: What was computed and its size, for example entries
+            scanned and scalar operations.
+        artifact: Identifier of the record that holds the output of the work.
     """
 
     stage: Stage
@@ -27,30 +30,57 @@ class WorkProvenance(Record):
 
 
 class Evidence(Record):
-    """Declared basis, never promoted by validation into scientific certification.
+    """The basis of a value (proof, bound, estimate, assertion or observation) and the record that produced it.
 
-    A witnessed claim requires a specific artifact and scope receipt. Without
-    that receipt, even a declared proved_relation remains an unverified source
-    declaration. A user assertion can be recorded as witnessed (the assertion
-    was received) without becoming proof of the asserted quantity. A
-    verification receipt witness also names the complete options record that
-    produced the value, and the value answers only that selection. When the
-    value answers a selected check, check_id names that exact CheckSpec, so a
-    criterion revised afterwards, for example with another threshold, is not
-    answered by it. A receipt value that answers no check, such as an
-    output-error component, has no check_id.
+    `Fact.evidence` holds it. `kind` is a declaration, and validating the
+    record never turns it into a verified result. A value is witnessed only
+    when `status` is `"witnessed"` and the evidence names the record of the
+    computation that produced the value (`artifact`), its scope and its
+    subject. Without that, even a declared `proved_relation` stays an
+    unverified declaration. A user assertion can be witnessed, meaning it
+    was received, without becoming proof of the asserted value. Evidence
+    from a verification also names the options record that produced the
+    value, and the value answers only those options. When it answers a
+    check, `check_id` names that exact `CheckSpec`, so a check revised
+    afterwards, for example with another threshold, is not answered by it.
+    A verification value that answers no check, such as an output-error
+    component, has no `check_id`.
+
+    Build it with keyword arguments to state the basis of a value you
+    supply, for example `Evidence(kind="user_assertion", source=source)`.
+    `kind` and `source` are required. The other fields describe a witnessed
+    value and default to `None` or empty.
 
     Attributes:
-        kind: Declared basis of the value, from ``proved_relation`` and ``certified_bound`` (the only kinds that can support an accuracy PASS) to ``numerical_estimate``, ``empirical_prediction``, ``user_assertion``, ``external_specification`` and ``observed``.
-        source: Versioned Source that declares the basis.
-        work: Work actually used to acquire the value.
-        status: ``declared`` for a source declaration alone, ``witnessed`` when a receipt artifact records it.
-        artifact: Identity of the witnessing artifact, required exactly when witnessed.
-        artifact_kind: ``verification_receipt`` when the artifact is a VerificationReceipt, otherwise None.
-        witnessed_scope: Scope that the artifact witnesses, required exactly when witnessed.
-        subject_id: Identity of the witnessed subject, such as a Result or an operator input, required exactly when witnessed.
-        options_id: Identity of the verification options that produced the value, required exactly for a verification receipt.
-        check_id: Identity of the CheckSpec the value answers, or None.
+        kind: Required. Declared basis of the value: `"proved_relation"` or
+            `"certified_bound"` (the only kinds that can support an
+            accuracy PASS), `"numerical_estimate"`,
+            `"empirical_prediction"`, `"user_assertion"`,
+            `"external_specification"` or `"observed"`.
+        source: Required. Versioned `Source` that declares the basis.
+        work: Default `()`. [`WorkProvenance`][nwqlib.evidence.records.WorkProvenance]
+            records of the work done to obtain the value.
+        status: Default `"declared"`, a declaration alone. `"witnessed"`
+            means the evidence names the record of the computation that
+            produced the value.
+        artifact: Default `None`. Identifier of that record, set exactly
+            when witnessed.
+        artifact_kind: Default `None`. `"verification_receipt"` when that
+            record is a verification record.
+        witnessed_scope: Default `None`. Scope that the record covers, set
+            exactly when witnessed.
+        subject_id: Default `None`. Content hash of the witnessed subject,
+            such as a Result or an operator input, set exactly when
+            witnessed.
+        options_id: Default `None`. Content hash of the verification options
+            that produced the value, set exactly for a verification record.
+        check_id: Default `None`. Content hash of the `CheckSpec` the value
+            answers.
+
+    Raises:
+        ValueError: If the witnessed fields are not all set exactly when
+            `status` is `"witnessed"`, or `options_id` or `check_id` is set
+            without a verification record.
     """
 
     schema_version: Literal[4] = 4
@@ -82,22 +112,33 @@ class Evidence(Record):
 
 
 class Fact(Record):
-    """One quantity with explicit availability, units, scope and evidence basis.
+    """One value with its availability, unit, scope and evidence.
 
-    A concrete fact carries a value and its declared evidence. A symbolic
-    fact carries only an inert symbol. An unknown or not_applicable fact
-    carries its reason and no value, so missing evidence never reads as zero.
+    A concrete fact has a value and its [`Evidence`][nwqlib.evidence.records.Evidence].
+    A symbolic fact has only a symbol that names an expression. An unknown
+    or not-applicable fact has a reason and no value, so missing information
+    never reads as zero. Build one with keyword arguments to supply a value.
+    `quantity`, `unit`, `scope` and `availability` are required.
 
     Attributes:
-        quantity: Name of the quantity the fact states.
-        unit: Unit of the value.
-        scope: Evidence scope in which the value holds.
-        availability: ``concrete``, ``symbolic``, ``unknown`` or ``not_applicable``.
-        value: Exact or binary64 scalar, or a boolean for a predicate, present exactly when concrete.
-        symbol: Inert symbol naming an expression, present exactly when symbolic.
-        reason: Why the value is unknown or not applicable, present exactly then.
-        evidence: Declared evidence basis, required for a concrete value and absent when unavailable.
-        assumptions: Open premises on which the value depends.
+        quantity: Required. Name of the quantity.
+        unit: Required. Unit of the value.
+        scope: Required. Scope in which the value holds.
+        availability: Required. `"concrete"`, `"symbolic"`, `"unknown"` or
+            `"not_applicable"`.
+        value: Default `None`. An exact `Rational`, a `Float64`, a
+            `Complex128` or, for a predicate, a boolean. Set exactly when
+            concrete.
+        symbol: Default `None`. Symbol naming an expression, set exactly
+            when symbolic.
+        reason: Default `None`. Why the value is unknown or not applicable,
+            set exactly then.
+        evidence: Default `None`. Required for a concrete value, absent when
+            the value is unknown or not applicable.
+        assumptions: Default `()`. Open assumptions the value depends on.
+
+    Raises:
+        ValueError: If the fields set do not match `availability` as above.
     """
 
     quantity: Text

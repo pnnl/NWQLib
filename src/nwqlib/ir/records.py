@@ -11,13 +11,19 @@ from .expressions import (
 
 
 class Register(Record):
-    """A whole quantum register in declaration order. Allocation is explicit.
+    """A quantum register of a Program, allocated explicitly by an `Allocate` node.
+
+    Build it as `Register(name="q", width=2)` and pass it in `registers=` of a
+    [`Program`][nwqlib.ir.records.Program]. `name` and `width` are required.
 
     Attributes:
-        name: Register name used by ports, allocation and measurement.
-        width: Number of qubits, exact or a local expression reference.
-        location: Logical device on which the resource fold places this width.
-        role: ``system``, ``clean_ancilla`` or ``dirty_ancilla``, reported separately in footprints.
+        name: Required. Register name, used by ports, allocation and measurement.
+        width: Required. Number of qubits, an integer or an
+            [`ExprRef`][nwqlib.ir.expressions.ExprRef].
+        location: Default `"logical_device"`. Device location on which the
+            resource estimate places the register.
+        role: Default `"system"`. `"system"`, `"clean_ancilla"` or
+            `"dirty_ancilla"`, reported separately in memory and qubit counts.
     """
 
     name: Text
@@ -27,7 +33,23 @@ class Register(Record):
 
 
 class ClassicalValue(Record):
-    """A named classical value; bits have a positive width, scalars have none."""
+    """A named classical value of a Program, such as measured bits or a computed scalar.
+
+    Build it as `ClassicalValue(name="bits", dtype="bits", width=2)` and pass it
+    in `classical=` of a [`Program`][nwqlib.ir.records.Program]. `name` and
+    `dtype` are required. Bits have a positive width, and the other types have
+    none.
+
+    Attributes:
+        name: Required. Value name.
+        dtype: Required. `"bits"`, `"bool"`, `"integer"` or `"real"`.
+        width: Default `None`. Number of bits, positive and required for
+            `"bits"`, `None` otherwise.
+
+    Raises:
+        ValueError: If `width` is missing or not positive for bits, or given for
+            another type.
+    """
 
     name: Text
     dtype: Literal["bits", "bool", "integer", "real"]
@@ -43,18 +65,26 @@ class ClassicalValue(Record):
 
 
 class QuantumPort(Record):
-    """Ordered exclusive whole-register port and promised input/output state effect.
+    """A port of a block signature: a whole register the block acts on, with the state it needs and the effect it promises.
 
-    Zero is a coherent state. Unitary keeps the epoch but clears known zero;
-    preserve promises exact state restoration. Coherent/zero outputs assert new
-    preparation obligations for the semantic owner to check.
-    Unknown effects block readiness and cannot satisfy later state promises.
+    Build it as `QuantumPort(name="system", width=2)` and pass it in `quantum=`
+    of a [`BlockSignature`][nwqlib.ir.records.BlockSignature]. `name` and `width`
+    are required. A call maps each port, in signature order, to a register that
+    no other port of the call uses. The zero state counts as coherent. A `"unitary"` effect keeps the register's coherence
+    epoch but clears a known zero state, and `"preserve"` promises that the
+    state is restored exactly. A `"zero"` or `"coherent"` output asserts a newly
+    prepared state, which the block's implementation must guarantee. An
+    `"unknown"` effect makes the Program not ready and cannot satisfy a later
+    state requirement.
 
     Attributes:
-        name: Formal port name, mapped once per call in signature order.
-        width: Port width, exact or a local expression reference.
-        requires: Input state the port needs: any ``live`` state, ``zero`` or ``coherent``.
-        ensures: Declared effect on the register's state and coherence epoch.
+        name: Required. Port name.
+        width: Required. Number of qubits, an integer or an
+            [`ExprRef`][nwqlib.ir.expressions.ExprRef].
+        requires: Default `"live"`. Input state the port needs: any allocated
+            (`"live"`) state, `"zero"` or `"coherent"`.
+        ensures: Default `"unitary"`. Effect on the register: `"unitary"`,
+            `"preserve"`, `"zero"`, `"coherent"` or `"unknown"`.
     """
 
     name: Text
@@ -64,16 +94,32 @@ class QuantumPort(Record):
 
 
 class BlockSignature(Record):
-    """Versioned semantic target and declared interface, not an action proof.
+    """The declared interface of a block that a Program calls: its target action, ports and parameters.
+
+    Build it with keyword arguments, for example
+    `BlockSignature(name="h", target=source, quantum=(QuantumPort(name="system", width=1),))`,
+    and pass it in `signatures=` of a [`Program`][nwqlib.ir.records.Program].
+    `name` and `target` are required. A
+    [`BlockCall`][nwqlib.ir.records.BlockCall] names the signature, and the
+    selected definition bound to it supplies the action, its cost rules and the
+    circuit constructor. The signature declares an interface. It does not prove
+    that an implementation performs the action.
 
     Attributes:
-        name: Signature name referenced by BlockCall and by its selected definition.
-        target: Versioned Source of the semantic action a selection must implement.
-        quantum: Ordered exclusive quantum ports.
-        parameters: Formal scalar parameters with their domains.
-        interface: ``declared``, or ``unknown`` to keep an undeclared block representable with blockers.
-        coupling: ``joint`` when the call may correlate its ports, ``independent`` when it promises not to.
-        obligations: Semantic promises for the selected implementation's owner to check.
+        name: Required. Signature name, used by block calls and by the selected
+            definition.
+        target: Required. Versioned Source of the action a selection must
+            implement.
+        quantum: Default `()`. Ordered [`QuantumPort`][nwqlib.ir.records.QuantumPort]
+            records.
+        parameters: Default `()`. Scalar [`Parameter`][nwqlib.ir.expressions.Parameter]
+            records with their domains.
+        interface: Default `"declared"`. `"unknown"` keeps an undeclared block in
+            the Program, which is then not ready.
+        coupling: Default `"joint"`, when the call may correlate its ports, or
+            `"independent"` when it promises not to.
+        obligations: Default `()`. Promises that the selected implementation must
+            meet.
     """
 
     name: Text
@@ -86,31 +132,59 @@ class BlockSignature(Record):
 
 
 class PortMap(Record):
-    """Map one named formal port to an exclusive whole register."""
+    """Maps one port of a block signature to a whole register in a block call.
+
+    Build it as `PortMap(port="system", wire="q")`. Both arguments are required.
+
+    Attributes:
+        port: Required. Port name of the signature.
+        wire: Required. Register name.
+    """
 
     port: Text
     wire: Text
 
 
 class Argument(Record):
-    """Map a formal parameter to a local expression definition."""
+    """Gives a scalar parameter of a block signature the value of an expression in a block call.
+
+    Build it as `Argument(parameter="angle", value=ExprRef(expression="theta"))`.
+    Both arguments are required.
+
+    Attributes:
+        parameter: Required. Parameter name of the signature.
+        value: Required. The [`ExprRef`][nwqlib.ir.expressions.ExprRef] of the
+            value.
+    """
 
     parameter: Text
     value: ExprRef
 
 
 class Sequence(Record):
-    """Ordered serial children, even on disjoint registers."""
+    """Runs its child nodes in order, even when they act on disjoint registers.
+
+    Build it as `Sequence(children=("allocate", "measure"))`, with the IDs of
+    other definitions.
+
+    Attributes:
+        children: Default `()`. Definition IDs, in order.
+    """
 
     kind: Literal["sequence"] = "sequence"
     children: tuple[Text, ...] = ()
 
 
 class Parallel(Record):
-    """Concurrent disjoint declared unitary/preserve BlockCalls, with a join.
+    """Runs block calls concurrently on disjoint registers and joins them.
 
-    Children must be direct calls; shared wires, classical work and lifetime
-    changes are rejected. Sequence remains serial even on disjoint registers.
+    Build it as `Parallel(children=("call_a", "call_b"))`. Every child must be a
+    direct block call whose ports declare `"unitary"` or `"preserve"`. Children that
+    share registers, and classical work or lifetime changes, are rejected. Use
+    [`Sequence`][nwqlib.ir.records.Sequence] for serial order.
+
+    Attributes:
+        children: Default `()`. Definition IDs of the block calls.
     """
 
     kind: Literal["parallel"] = "parallel"
@@ -118,7 +192,17 @@ class Parallel(Record):
 
 
 class Repeat(Record):
-    """Nonnegative repetitions; admission checks an iteration contract, never unrolls."""
+    """Repeats a body a fixed number of times, without unrolling it.
+
+    Build it as `Repeat(body="step", count=4)`. Both arguments are required. The
+    check verifies that the body can be repeated and never expands it, so a
+    large count costs no more checking work than a small one.
+
+    Attributes:
+        body: Required. Definition ID of the body.
+        count: Required. Nonnegative repetition count, an integer or an
+            [`ExprRef`][nwqlib.ir.expressions.ExprRef].
+    """
 
     kind: Literal["repeat"] = "repeat"
     body: Text
@@ -126,11 +210,19 @@ class Repeat(Record):
 
 
 class BlockCall(Record):
-    """Invoke a declared signature on exclusive whole registers, ports in signature order.
+    """Calls a declared block signature on whole registers, with ports in signature order.
 
-    The call names its signature, not an implementation. The selected
-    definition bound to that signature supplies the action, cost laws and
-    native constructor.
+    Build it as `BlockCall(signature="h", ports=(PortMap(port="system", wire="q"),))`.
+    `signature` is required. Each register is used by one port only. The call
+    names the signature, not an implementation. The selected definition bound to
+    that signature supplies the action, cost rules and circuit constructor.
+
+    Attributes:
+        signature: Required. Signature name.
+        ports: Default `()`. One [`PortMap`][nwqlib.ir.records.PortMap] per port,
+            in signature order.
+        arguments: Default `()`. [`Argument`][nwqlib.ir.records.Argument] values
+            of the signature's parameters.
     """
 
     kind: Literal["block_call"] = "block_call"
@@ -140,20 +232,20 @@ class BlockCall(Record):
 
 
 class StateClaim(Record):
-    """Claim a current coherent register epoch. Measurement and reset advance it.
+    """Claims that a register is still in a given coherent epoch. Measurement and reset start a new epoch.
 
+    Use it in `claims=` of a [`CoherentRegion`][nwqlib.ir.records.CoherentRegion].
     An epoch numbers the coherence generations of one register. The first
-    allocation starts it at 0. Every measurement, reset, release,
-    reallocation and block port that promises a newly prepared zero or
-    coherent output adds one, to the register it acts on and to every
-    register correlated with it. A claim therefore names one specific coherent
-    state, and a claim written before a measurement no longer matches after
-    it. docs/ir.md, "Declared quantum and classical lifecycle", gives the
-    full rules.
+    allocation starts it at 0. Every measurement, reset, release, reallocation
+    and block port that promises a newly prepared zero or coherent output adds
+    one, to the register it acts on and to every register correlated with it. A
+    claim therefore names one specific coherent state, and a claim written
+    before a measurement no longer matches after it.
+    [Program checks](../development/program_checks.md) gives the full rules.
 
     Attributes:
-        wire: Register whose coherence is claimed.
-        epoch: Epoch the register must currently have.
+        wire: Required. Register whose coherence is claimed.
+        epoch: Required. Epoch the register must currently have.
     """
 
     wire: Text
@@ -161,7 +253,17 @@ class StateClaim(Record):
 
 
 class CoherentRegion(Record):
-    """The named coherent epochs must remain unbroken throughout the body."""
+    """Requires the claimed registers to stay in their coherent epochs throughout the body.
+
+    Build it as `CoherentRegion(body="kernel", claims=(StateClaim(wire="q", epoch=0),))`.
+    Both arguments are required. A measurement, reset or other new preparation
+    of a claimed register inside the body is rejected.
+
+    Attributes:
+        body: Required. Definition ID of the body.
+        claims: Required. The [`StateClaim`][nwqlib.ir.records.StateClaim]
+            records.
+    """
 
     kind: Literal["coherent_region"] = "coherent_region"
     body: Text
@@ -169,21 +271,43 @@ class CoherentRegion(Record):
 
 
 class Allocate(Record):
-    """Begin a fresh zero-state register lifetime in the current experiment."""
+    """Allocates a register in the zero state, starting its lifetime in the current experiment.
+
+    Build it as `Allocate(wire="q")`.
+
+    Attributes:
+        wire: Required. Register name.
+    """
 
     kind: Literal["allocate"] = "allocate"
     wire: Text
 
 
 class Release(Record):
-    """Discard a wire explicitly; its quantum state cannot cross later boundaries."""
+    """Discards a register. Its quantum state cannot be used after this point.
+
+    Build it as `Release(wire="q")`.
+
+    Attributes:
+        wire: Required. Register name.
+    """
 
     kind: Literal["release"] = "release"
     wire: Text
 
 
 class Measure(Record):
-    """Measure a whole register into typed bits; wire stays live in a new epoch."""
+    """Measures a whole register into a classical bits value. The register stays allocated in a new epoch.
+
+    Build it as `Measure(wire="q", result="bits")`. `wire` and `result` are
+    required.
+
+    Attributes:
+        wire: Required. Register name.
+        result: Required. Name of a classical bits value of the same width.
+        basis: Default `"computational"`, the only basis that `lower_qiskit` and
+            OpenQASM export support.
+    """
 
     kind: Literal["measure"] = "measure"
     wire: Text
@@ -192,14 +316,30 @@ class Measure(Record):
 
 
 class Reset(Record):
-    """Prepare zero on a live wire, beginning a new coherent epoch."""
+    """Resets an allocated register to zero, starting a new coherent epoch.
+
+    Build it as `Reset(wire="q")`.
+
+    Attributes:
+        wire: Required. Register name.
+    """
 
     kind: Literal["reset"] = "reset"
     wire: Text
 
 
 class Branch(Record):
-    """Both paths are checked; later availability is their typed intersection."""
+    """Chooses between two bodies on a classical value. Both paths are checked.
+
+    Build it as `Branch(condition="flag", when_true="a", when_false="b")`. Every
+    argument is required. After the branch, a register state or classical value
+    is available only as far as both paths make it available.
+
+    Attributes:
+        condition: Required. Name of an available classical value.
+        when_true: Required. Definition ID of the body for true.
+        when_false: Required. Definition ID of the body for false.
+    """
 
     kind: Literal["branch"] = "branch"
     condition: Text
@@ -208,16 +348,23 @@ class Branch(Record):
 
 
 class ClassicalStage(Record):
-    """In-job processing or explicit host boundary. Admission executes no callable.
+    """A classical computation inside the quantum job or on the host. The check runs no code.
+
+    Build it with keyword arguments, for example
+    `ClassicalStage(implementation=source, inputs=("bits",), outputs=("value",))`.
+    `implementation` is required. A host stage requires every register to be
+    released first and can name the selected kernel that runs it.
 
     Attributes:
-        kind: Node discriminator.
-        implementation: Versioned Source of the classical computation.
-        inputs: Classical values read, which must be available on every path.
-        outputs: Classical values defined.
-        arguments: Scalar arguments bound to local expressions.
-        boundary: ``in_job`` for processing inside the quantum job, or ``host``, which requires every register released first.
-        kernel: Name of the SelectedKernel that executes a host stage, or None.
+        implementation: Required. Versioned Source of the computation.
+        inputs: Default `()`. Classical values read, which must be available on
+            every path.
+        outputs: Default `()`. Classical values defined.
+        arguments: Default `()`. Scalar [`Argument`][nwqlib.ir.records.Argument]
+            values.
+        boundary: Default `"in_job"`, processing inside the quantum job, or
+            `"host"`.
+        kernel: Default `None`. Name of the selected kernel that runs a host stage.
     """
 
     kind: Literal["classical_stage"] = "classical_stage"
@@ -230,15 +377,22 @@ class ClassicalStage(Record):
 
 
 class AdaptiveLoop(Record):
-    """Zero to max_rounds iterations, with a declared policy and termination rule.
+    """Repeats a body zero to `max_rounds` times, with a classical policy after each round and a declared stopping rule.
+
+    Build it with keyword arguments. `body`, `max_rounds`, `policy` and
+    `termination` are required. The stopping rule is kept as text and never
+    executed.
 
     Attributes:
-        kind: Node discriminator.
-        body: Definition ID of one round.
-        max_rounds: Upper bound on the number of rounds.
-        policy: Versioned classical stage admitted after each round, which may read that round's results.
-        termination: Declared termination rule, kept as text and never executed.
-        resource_envelope: Asserted uniform per-round cost bound over the history, or None, which leaves the loop's costs unknown in the resource fold.
+        body: Required. Definition ID of one round.
+        max_rounds: Required. Upper bound on the rounds, an integer or an
+            [`ExprRef`][nwqlib.ir.expressions.ExprRef].
+        policy: Required. Versioned [`ClassicalStage`][nwqlib.ir.records.ClassicalStage]
+            run after each round, which may read that round's results.
+        termination: Required. Declared stopping rule.
+        resource_envelope: Default `None`. Stated bound on the cost of every
+            round. With `None`, the resource estimate leaves the loop's cost
+            unknown.
     """
 
     kind: Literal["adaptive_loop"] = "adaptive_loop"
@@ -250,14 +404,33 @@ class AdaptiveLoop(Record):
 
 
 class MetadataRef(Record):
-    """Algorithm-owned metadata schema and immutable input reference; never decoded."""
+    """A reference to method metadata attached to a setting, in a format the method defines. It is never decoded by the check.
+
+    Build it as `MetadataRef(format=source, data=input_ref)`. Both arguments are
+    required.
+
+    Attributes:
+        format: Required. Source of the metadata format.
+        data: Required. `InputRef` of the stored metadata.
+    """
 
     format: Source
     data: InputRef
 
 
 class Setting(Record):
-    """One experiment point: label plus bindings and metadata determine identity."""
+    """One experiment of a measurement batch: a label, parameter values and method metadata.
+
+    Build it as `Setting(label="z_basis", bindings=(...), metadata=MetadataRef(...))`.
+    `label` and `metadata` are required. The label, bindings and metadata
+    together determine the experiment's content hash.
+
+    Attributes:
+        label: Required. Experiment label.
+        bindings: Default `()`. [`Binding`][nwqlib.ir.expressions.Binding] values
+            of this experiment.
+        metadata: Required. The [`MetadataRef`][nwqlib.ir.records.MetadataRef].
+    """
 
     label: Text
     bindings: tuple[Binding, ...] = ()
@@ -265,7 +438,22 @@ class Setting(Record):
 
 
 class RangeAxis(Record):
-    """Compact integer range [start, stop) with positive step; never expanded."""
+    """An integer parameter range `[start, stop)` with a positive step, kept compact and never expanded.
+
+    Build it as `RangeAxis(parameter="k", start=0, stop=8)` and pass it in
+    `axes=` of a [`MeasurementBatch`][nwqlib.ir.records.MeasurementBatch], which
+    combines every setting with every value. `parameter`, `start` and `stop` are
+    required.
+
+    Attributes:
+        parameter: Required. Parameter name.
+        start: Required. Nonnegative first value.
+        stop: Required. Nonnegative end, excluded and greater than `start`.
+        step: Default `1`. Positive step.
+
+    Raises:
+        ValueError: If the range is empty.
+    """
 
     parameter: Text
     start: NonnegativeInt
@@ -283,18 +471,32 @@ ObservationKind = Literal["counts", "pauli_expectation", "probabilities", "estim
 
 
 class MeasurementBatch(Record):
-    """Independent experiments sharing a body; no quantum/classical state escapes.
+    """Independent experiments that share one body. No quantum or classical state passes between them.
 
-    Settings combine with compact axes. Axis-dependent unresolved leaf/count
-    requirements remain readiness blockers until one point is selected/bound.
-    repetitions counts independent body invocations. Terminal observation_kind
-    distinguishes sampled counts from exact-statistic evaluations; outer batches
-    have no observation kind. None keeps an unknown planning requirement.
-    A terminal ``trajectory`` kind is one exact evaluation of the selected body;
-    its observation points belong to the selected Experiment's readout details,
-    never to settings. As for the other exact kinds, preparation requires
-    ``repetitions`` to be one.
-    Logical lowering materializes one selected body, not these repetitions.
+    Build it with keyword arguments, for example
+    `MeasurementBatch(body="experiment", settings=(setting,), repetitions=1, observation_kind="counts")`.
+    `body` and `settings` are required. The settings are combined with the range
+    axes. A requirement that depends on an axis value keeps the Program not ready
+    until one experiment is selected and bound
+    ([`Program.select_experiment`][nwqlib.ir.records.Program.select_experiment]).
+    [`lower_qiskit`][nwqlib.blocks.lowering.lower_qiskit] builds one circuit of the body, not its repetitions. Every
+    register the body allocates must be released at its end.
+
+    Attributes:
+        body: Required. Definition ID of the shared body.
+        settings: Required. At least one [`Setting`][nwqlib.ir.records.Setting].
+        axes: Default `()`. [`RangeAxis`][nwqlib.ir.records.RangeAxis] ranges.
+        scope: Default `"independent_experiments"`, the only accepted value.
+        repetitions: Default `None`. Independent runs of the body, an integer or
+            an [`ExprRef`][nwqlib.ir.expressions.ExprRef]. `None` leaves the
+            planning requirement unknown. Preparing an exact readout kind requires 1.
+        observation_kind: Default `None`. For the innermost batch, `"counts"` for
+            sampled counts, `"pauli_expectation"` or `"probabilities"` for exact
+            statistics, `"estimated_observable"` for a provider estimate, or
+            `"trajectory"`.
+            A `"trajectory"` is one exact evaluation of the body whose
+            observation points belong to the selected experiment's readout, not
+            to the settings. An outer batch has `None`.
     """
 
     schema_version: Literal[2] = 2
@@ -315,19 +517,37 @@ Node = Annotated[
 
 
 class Definition(Record):
-    """One local node definition. References preserve sharing in persisted JSON."""
+    """One node of a Program with its ID. Nodes refer to each other by ID, so a shared body is stored once.
+
+    Build it as `Definition(id="main", node=Sequence(children=(...)))` and pass it
+    in `definitions=` of a [`Program`][nwqlib.ir.records.Program]. Both arguments
+    are required.
+
+    Attributes:
+        id: Required. Unique ID within the Program.
+        node: Required. One node: `Sequence`, `Repeat`, `BlockCall`,
+            `CoherentRegion`, `Allocate`, `Release`, `Measure`, `Reset`,
+            `Branch`, `ClassicalStage`, `AdaptiveLoop`, `MeasurementBatch` or
+            `Parallel`.
+    """
 
     id: Text
     node: Node
 
 
 class Readiness(Record):
-    """Structural admission result, not semantic conformance or execution approval.
+    """The result of a Program's structural check: what is still unresolved, and the checking work it took.
+
+    [`Program.check_readiness`][nwqlib.ir.records.Program.check_readiness] returns
+    it. The fields below are read-only. A ready Program is structurally valid. It
+    is not a check of the blocks' promised actions or an approval to run.
 
     Attributes:
-        blockers: Sorted unresolved requirements, such as an unbound width or an unknown block effect.
-        expression_evaluations: Expression evaluations performed by this check.
-        lifecycle_steps: Other admission work units of this check, not quantum events or algorithm costs.
+        blockers: Sorted unresolved requirements, such as an unbound width or an
+            unknown block effect. Empty when the Program is ready.
+        expression_evaluations: Expression evaluations of this check.
+        lifecycle_steps: Other checking work units of this check, not quantum
+            events or algorithm costs.
     """
 
     blockers: tuple[Text, ...]
@@ -336,40 +556,90 @@ class Readiness(Record):
 
     @property
     def ready(self) -> bool:
+        """Whether no requirement is unresolved, that is, `blockers` is empty."""
         return not self.blockers
 
     def require_ready(self):
-        """Refuse executable structural admission while obligations are unresolved."""
+        """Return this result, or raise when a requirement is still unresolved.
+
+        Returns:
+            readiness (Readiness): This result.
+
+        Raises:
+            ValueError: If `blockers` is not empty. The message lists them.
+        """
         if self.blockers:
             raise ValueError("Program is not ready: " + "; ".join(self.blockers))
         return self
 
 
 class Program(Record):
-    """Finite shared structure with exact bindings and explicit experiment lifetimes.
+    """A circuit described as named steps: registers, block calls, measurements and their order, checked when it is built.
 
-    The root starts with no allocated wires or available classical values. Root
-    wires may remain live for a quantum-output consumer; independent batch bodies
-    must release theirs. This layer checks declared effects only.
+    Build it with keyword arguments and use it in a
+    [`SelectedConstruction`][nwqlib.blocks.records.SelectedConstruction].
+    `root` and `definitions` are required. Every node is a
+    [`Definition`][nwqlib.ir.records.Definition] with an ID, and nodes refer to
+    each other by ID, so a shared body is stored once however often it runs, and
+    the checking work grows with its distinct contexts rather than its run
+    count. The root starts with no allocated registers or classical values.
+    Registers still allocated at the end of the root stay available to
+    code that uses the quantum output, while the body of a measurement batch must
+    release its registers. Construction runs the full structural check of the
+    declared effects, so an illegal lifecycle or a graph over its limits is
+    rejected before anything uses the Program. Unresolved requirements, such as
+    an unbound width, do not reject it but make it not ready.
 
-    One Program is the single description of a selected construction that
-    every consumer reads: structural admission, resource folding, logical
-    lowering and acquisition resolution. Keeping one graph means a cost, a
-    circuit and a readout cannot describe different constructions. Bodies
-    are referenced by local ID and Repeat keeps a count, so a shared body is
-    stored once however often it runs, and admission work grows with its
-    distinct contexts rather than its run count. Construction runs the
-    full admission check, so an illegal lifecycle or an over-limit graph
-    rejects before any consumer receives the Program. Content identity
-    covers every table, binding and limit.
+    One Program is the single description of a construction that the structural
+    check, resource estimate, circuit building and readout all read, so a cost, a
+    circuit and a readout cannot describe different constructions. Its content
+    hash covers every table, binding and limit. [Run your own circuit](../own_circuit.md)
+    builds a Program around a supplied circuit, and
+    [Describe a circuit as a Program](../ir.md) explains the nodes.
 
-    The Readiness that construction computes is stored in the slot
-    ``_readiness``, which is neither a field nor a private attribute, so
-    equality, hashing and identity never see it. An admitted Program
-    embedded in another record is reused unchanged (see ``Record``), so
-    ``check_readiness`` returns the stored result and every consumer reads
-    one admission per Program object. Copies and pickles start without it
-    and compute it again on first use.
+    Attributes:
+        root: Required. Definition ID of the root node.
+        definitions: Required. The [`Definition`][nwqlib.ir.records.Definition]
+            records.
+        expressions: Default `()`. [`Expression`][nwqlib.ir.expressions.Expression]
+            records that widths, counts and arguments refer to.
+        parameters: Default `()`. Declared [`Parameter`][nwqlib.ir.expressions.Parameter]
+            records.
+        constraints: Default `()`. Bool expressions that every bound point must
+            satisfy.
+        registers: Default `()`. Quantum [`Register`][nwqlib.ir.records.Register]
+            records.
+        classical: Default `()`. [`ClassicalValue`][nwqlib.ir.records.ClassicalValue]
+            records.
+        signatures: Default `()`. [`BlockSignature`][nwqlib.ir.records.BlockSignature]
+            records of the blocks called.
+        bindings: Default `()`. Parameter values bound so far.
+        limits: Default `AdmissionLimits()`, the default
+            [`AdmissionLimits`][nwqlib.ir.expressions.AdmissionLimits].
+        premises: Default `()`. Stated assumptions of the construction.
+
+    Raises:
+        ValueError: If the structure breaks a lifecycle rule, refers to an
+            unknown ID, or exceeds `limits`.
+
+    Examples:
+        Allocate a two-qubit register and measure it.
+
+        >>> from nwqlib.ir import (Allocate, ClassicalValue, Definition, Measure,
+        ...                        Program, Register, Sequence)
+        >>> program = Program(
+        ...     root="main",
+        ...     definitions=(
+        ...         Definition(id="allocate", node=Allocate(wire="q")),
+        ...         Definition(id="measure", node=Measure(wire="q", result="bits")),
+        ...         Definition(id="main",
+        ...                    node=Sequence(children=("allocate", "measure"))),
+        ...     ),
+        ...     registers=(Register(name="q", width=2),),
+        ...     classical=(ClassicalValue(name="bits", dtype="bits", width=2),),
+        ... )
+        >>> program.check_readiness().ready
+        True
     """
 
     __slots__ = ("_readiness",)
@@ -392,12 +662,16 @@ class Program(Record):
         return self
 
     def check_readiness(self) -> Readiness:
-        """Return the Readiness of this Program's full admission check.
+        """Return the result of this Program's structural check.
 
-        The check runs once per Program object, at construction, and its
-        result is stored; it covers concrete legality and returns blockers for
-        unresolved requirements. ``Readiness.expression_evaluations +
-        Readiness.lifecycle_steps`` is the admission work it measured.
+        The check runs once per Program object, when it is built, and its result is
+        kept for later calls. Copies and unpickled Programs check again on first
+        use. It covers every concrete rule and lists unresolved requirements as
+        blockers. `expression_evaluations + lifecycle_steps` of the result is the
+        checking work it measured.
+
+        Returns:
+            readiness (Readiness): The result of the check.
         """
         try:
             readiness = object.__getattribute__(self, "_readiness")
@@ -410,18 +684,44 @@ class Program(Record):
         return readiness
 
     def bind(self, **values):
-        """Return a validated revision with concrete assignments; keep shared bodies."""
+        """Return a copy of the Program with parameter values bound, keeping shared bodies.
+
+        The copy runs the structural check again.
+
+        Args:
+            **values (int | Float64): Parameter values by name, an exact integer or a `Float64`.
+
+        Returns:
+            program (Program): The bound Program.
+
+        Raises:
+            ValueError: If the bound Program fails the structural check.
+        """
         bound = {item.parameter: item for item in self.bindings}
         bound.update({key: Binding(parameter=key, value=value) for key, value in values.items()})
         return self.revise(bindings=tuple(bound[key] for key in sorted(bound)))
 
     def select_experiment(self, batch_id: str, setting_index: int, **axis_values):
-        """Select one independent experiment without expanding any range/product.
+        """Return a Program for one experiment of a measurement batch, without expanding any range or product.
 
-        The returned root is the selected batch with one setting and no axes.
-        Keep its dependency closure and every global constraint and register
-        layout. Selected values also bind global constraints. This creates no
-        observation/execution ID; the parent identifies the entire source graph.
+        The returned Program's root is the batch with the one selected setting and
+        no axes. It keeps the dependency closure of that batch, every global
+        constraint and the register layout, and the selected values also bind the
+        global constraints. It creates no observation or execution ID, because the
+        original Program identifies the whole source graph. Use it before
+        [`lower_qiskit`][nwqlib.blocks.lowering.lower_qiskit], which builds the
+        circuit of one static experiment.
+
+        Args:
+            batch_id (str): Definition ID of the measurement batch.
+            setting_index (int): Index of the setting.
+            **axis_values (int): One value for each range axis of the batch.
+
+        Returns:
+            program (Program): The Program of the selected experiment.
+
+        Raises:
+            ValueError: If the batch, setting or axis values are invalid.
         """
         from .selection import select_experiment
         from .validation import _Admission
@@ -430,5 +730,9 @@ class Program(Record):
         return select_experiment(admission, batch_id, setting_index, axis_values)
 
     def iter_definitions(self):
-        """Visit kept definitions once in declaration order, with no dynamic expansion."""
+        """Return an iterator over the stored definitions, each once in declaration order, without expanding anything.
+
+        Returns:
+            definitions (Iterator[Definition]): The definitions.
+        """
         return iter(self.definitions)

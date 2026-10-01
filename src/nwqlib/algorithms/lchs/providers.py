@@ -291,34 +291,55 @@ class LCHSPairCompatibility:
 
 @dataclass(frozen=True, kw_only=True)
 class LCHSCoefficientPlan:
-    """Final immutable coefficient plan shared by every LCHS backend.
+    """Nodes, weights and coefficients of the finite LCHS sum, shared by every backend.
+
+    [`resolve_lchs_coefficient_plan`][nwqlib.algorithms.lchs.providers.resolve_lchs_coefficient_plan]
+    returns it. The finite sum is `sum_j c_j exp(-i T (k_j L + H)) u0`
+    over the `nodes` k_j and `coefficients` c_j. The fields below are
+    read-only.
 
     Attributes:
-        requested_lchs_kernel: Original kernel request, retaining which parameters
-            the caller explicitly supplied.
-        resolved_lchs_kernel: Kernel actually selected, including its resolved defaults.
-        requested_k_quadrature: Original quadrature request before resolution.
-        resolved_k_quadrature: Actual resolved quadrature or algebraic reduction.
-        lchs_kernel_formula_id: Versioned coefficient-kernel formula identifier.
-        k_quadrature_formula_id: Versioned node/weight formula identifier.
-        lchs_kernel_fixed_parameters: Formula constants excluded from user configuration.
-        kernel_parameter_selection: Parameter provenance, normally user or
-            provider_default, with a selected profile identifier where applicable.
-        derived_parameters: Pair-derived quantities such as Low-Somma gamma/R/h/J;
-            homogeneous physical plans also record their PSD-shift compensation here.
-        nodes: Ordered real k values shared with the selected quadrature record.
-        base_weights: Corresponding integration weights before kernel multiplication.
-        coefficients: Complex LCU coefficients in node order. Homogeneous physical
-            selections include exp(shift*T) compensation; their phases remain in SELECT.
-            When that factor exceeds binary64 they include it divided by 2**e, and
-            the recovery carries 2**e (_homogeneous_coefficient_plan).
-        coefficient_l1_norm: Sum of coefficient magnitudes used as LCU normalization;
-            it is not the physical output norm or an error estimate.
-        quadrature: Actual node/address selection and provider-scope component bounds.
-        compatibility: Domain and certificate-scope policy of the selected pair.
-        mps_decomposition: Optional precomputed TT-SVD data for the normalized, padded
-            magnitude PREP target. None means none is attached; explicit reuse checks
-            tensor ordering and truncation settings before accepting stored cores.
+        requested_lchs_kernel: Kernel choice as given, showing which
+            parameters the caller supplied.
+        resolved_lchs_kernel: Kernel used, with its defaults filled in.
+        requested_k_quadrature: Quadrature choice as given.
+        resolved_k_quadrature: Quadrature used, or the algebraic reduction
+            for an exactly zero L.
+        lchs_kernel_formula_id: Versioned identifier of the kernel formula.
+        k_quadrature_formula_id: Versioned identifier of the node and weight
+            formula.
+        lchs_kernel_fixed_parameters: Constants of the kernel formula that
+            are not user parameters, such as Low–Somma `j=2` and `y=1`.
+        kernel_parameter_selection: Where each parameter value came from,
+            normally `"user"` or `"provider_default"`, with a profile
+            identifier where one applies.
+        derived_parameters: Quantities derived for the pair, such as the
+            Low–Somma `gamma`, `R`, `h` and `J`. A problem without a source
+            also records its PSD-shift compensation here.
+        nodes: Ordered real k values, as in `quadrature`.
+        base_weights: Integration weights before multiplication by the
+            kernel.
+        coefficients: Complex coefficients c_j in node order. For a problem
+            without a source they include the PSD growth factor
+            `exp(shift*T)`, divided by `2**e` when the factor exceeds
+            binary64, and the physical recovery carries `2**e`. Their phases
+            are applied in the SELECT circuit.
+        coefficient_l1_norm: `sum_j |c_j|`, the normalization of the
+            coefficient state. It is neither the physical output norm nor an
+            error estimate.
+        quadrature: Node and address data of the rule, with its component
+            bounds `approximate_lchs_error_bound` (kernel integral, the
+            cutoff tail for the default kernel) and `quadrature_error_bound`,
+            each for a unit input before PSD growth. `None` means
+            unavailable, not zero.
+        compatibility: Pair status, `certificate_status` `"certified"`,
+            `"uncertified"`, `"incomplete"` or `"exact_algebraic"` for the
+            zero-L reduction, with its `reason` and `unbudgeted_error_stages`.
+            None of these alone certifies a complete physical solution.
+        mps_decomposition: Attached TT-SVD (MPS) decomposition of the
+            normalized, padded coefficient-state amplitudes, or `None`.
+            `decompose_mps` reuses it only for the same tensor ordering and
+            truncation settings.
     """
 
     requested_lchs_kernel: ProviderConfig
@@ -339,13 +360,22 @@ class LCHSCoefficientPlan:
     mps_decomposition: object | None = None
 
     def prep_amplitudes(self, *, max_bytes=DEFAULT_INPUT_BYTES):
-        """Return the coefficient PREP amplitudes sqrt(|c_j|/alpha), zero-padded.
+        """Return the coefficient-state amplitudes `sqrt(|c_j|/alpha)`, zero-padded.
 
-        alpha is coefficient_l1_norm and the array length is the next power of
-        two at or above len(coefficients). Complex phases of c_j are not in
-        this state. SELECT applies them (ACL arXiv:2312.03916v2, Lemma 24,
-        Eq. (178), with the phases moved from the two PREP oracles into
-        SELECT).
+        alpha is `coefficient_l1_norm`, and the array length is the next
+        power of two at or above `len(coefficients)`. The complex phases of
+        c_j are not in this state. The SELECT circuit applies them (An,
+        Childs and Lin, arXiv:2312.03916v2, Lemma 24, Eq. (178), with the
+        phases moved from the two preparation oracles into SELECT).
+
+        Args:
+            max_bytes (int): Default 10 GB (decimal, `10_000_000_000`
+                bytes). Upper limit on the arrays, 96 bytes per padded
+                address, checked first.
+
+        Returns:
+            amplitudes (numpy.ndarray): Read-only amplitudes, one per padded
+                address.
         """
         from nwqlib.subroutines.lcu.data import _coefficient_bookkeeping
         from nwqlib.operators.inputs import _freeze_array
@@ -360,13 +390,32 @@ class LCHSCoefficientPlan:
 
     def decompose_mps(self, max_bond_dim=None, threshold=1e-14, *, reuse=None,
                       max_bytes=DEFAULT_INPUT_BYTES, max_svd_work=100_000_000):
-        """Return the TT-SVD (MPS) decomposition of the prep_amplitudes tensor.
+        """Return the TT-SVD (MPS) decomposition of the `prep_amplitudes` tensor.
 
-        A stored or supplied decomposition is reused only when its input digest
-        matches this exact normalized tensor and its max_bond_dim and threshold
-        equal the requested ones. Otherwise a new TT-SVD runs under max_bytes
-        and max_svd_work. A supplied ``reuse`` that does not match raises
-        instead of being replaced silently. No LCHS solve or circuit is run.
+        A stored or supplied decomposition is reused only when it was made
+        from this exact normalized tensor with the same `max_bond_dim` and
+        `threshold`. Otherwise a new TT-SVD runs under `max_bytes` and
+        `max_svd_work`. No LCHS solve or circuit is run.
+
+        Args:
+            max_bond_dim (int | None): Upper limit on the kept bond
+                dimension. `None` means no limit.
+            threshold (float): Singular-value truncation threshold.
+            reuse (MPSDecomposition | None): Decomposition to reuse instead
+                of the attached `mps_decomposition`.
+            max_bytes (int): Default 10 GB (decimal, `10_000_000_000`
+                bytes). Upper limit on the known arrays.
+            max_svd_work (int): Upper limit on the counted TT-SVD work.
+
+        Returns:
+            decomposition (MPSDecomposition): The TT cores, bond dimensions
+                and discarded weight, the sum of the squared singular values
+                discarded.
+
+        Raises:
+            TypeError: If `reuse` is not an `MPSDecomposition`.
+            ValueError: If `reuse` does not match the tensor or the settings,
+                instead of being replaced silently.
         """
         from nwqlib.operators.inputs import _digest
         from nwqlib.subroutines.state_preparation.mps import MPSDecomposition, _decompose_normalized_state
@@ -385,7 +434,14 @@ class LCHSCoefficientPlan:
                                            max_bytes=max_bytes, max_svd_work=max_svd_work)
 
     def record(self) -> dict[str, Any]:
-        """Return the stable kernel/quadrature/pair record fields."""
+        """Return the kernel, quadrature and pair choices with their bounds as a plain dict.
+
+        The keys name the requested and resolved kernel and quadrature,
+        their parameters and formula identifiers, the node order, panel
+        width and address structure, the pair's certificate status, the
+        component bounds `approximate_lchs_error_bound` and
+        `quadrature_error_bound`, and the `unbudgeted_error_stages`.
+        """
 
         record = {
             "requested_lchs_kernel": self.requested_lchs_kernel.to_dict(),
@@ -1578,22 +1634,51 @@ def _homogeneous_coefficient_plan(quadrature, elapsed):
 
 def resolve_lchs_coefficient_plan(problem_or_plan, *, lchs_kernel=None, k_quadrature=None,
                                   approximation_tolerance=None, max_bytes=DEFAULT_INPUT_BYTES):
-    """Inspect a selected coefficient plan or resolve homogeneous coefficients before solve.
+    """Return the LCHS coefficient table of a problem without a source, or of an LCHS Plan.
 
-    This performs only the required scalar/decomposition/quadrature selection.
-    It creates no SELECT circuit, QSP phases, output vector or backend execution.
-    Existing Plans reject overrides and expose their actual saved selection, so
-    an analysis of the coefficient tensor always describes the coefficients
-    that the Plan executes.
+    For a `LinearDynamics` without a source, it computes the k nodes, the
+    weights and the coefficients `c_j` of the finite sum
+    `sum_j c_j exp(-i T (k_j L + H)) u0`, with L after any PSD shift, from
+    the given kernel, quadrature and tolerance. It builds no SELECT circuit
+    or QSP phases, computes no output vector and runs nothing on a backend.
+    For a Plan made by `plan(problem, method=LCHS(...))`, it returns the
+    table that the Plan executes, so an analysis of the coefficient tensor
+    always describes those coefficients. Call `decompose_mps` on the result
+    to study the MPS compression of the coefficient state, as in the
+    [coefficient MPS analysis](../../algorithms/lchs.md#coefficient-mps-analysis)
+    of the LCHS guide.
 
-    For a homogeneous LinearDynamics, ``lchs_kernel``, ``k_quadrature`` and
-    ``approximation_tolerance`` default to ``near_optimal_eq7``,
-    ``composite_gauss`` and 0.01, as in the LCHS Method, and ``max_bytes`` is
-    checked before the Cartesian and PSD arrays are formed. For a Plan all
-    three overrides must be None. The returned LCHSCoefficientPlan of a dense
-    homogeneous selection includes the exp(shift*T) PSD compensation in its
-    coefficients, divided by 2**e when the factor itself exceeds binary64
-    (derived_parameters, "homogeneous_coefficient_compensation").
+    Args:
+        problem_or_plan (LinearDynamics | Plan): A `LinearDynamics` without
+            a source and with positive elapsed time, or an LCHS Plan with a
+            coefficient table for an input without a source.
+        lchs_kernel (ProviderConfig | None): Kernel choice. `None` selects
+            `"near_optimal_eq7"`, as in `LCHS`. Must be `None` for a Plan.
+        k_quadrature (ProviderConfig | None): Quadrature choice. `None`
+            selects `"composite_gauss"`, as in `LCHS`. Must be `None` for a
+            Plan.
+        approximation_tolerance (float | None): Construction tolerance,
+            strictly between 0 and 1. `None` selects `0.01`, as in `LCHS`.
+            Must be `None` for a Plan.
+        max_bytes (int): Default 10 GB (decimal, `10_000_000_000` bytes).
+            Upper limit on the arrays of the Cartesian parts and the PSD
+            check, tested before they are formed. A `PeriodicStencil` A
+            forms no matrix and uses the bound `||L|| <= mass + 4*diffusion`.
+
+    Returns:
+        coefficients (LCHSCoefficientPlan): The nodes, weights, coefficients
+            and component bounds. For a dense A the coefficients include the
+            PSD growth factor `exp(shift*T)`, divided by `2**e` when the
+            factor exceeds binary64, as recorded in
+            `derived_parameters["homogeneous_coefficient_compensation"]`.
+
+    Raises:
+        ValueError: If the problem has a source or zero elapsed time, if
+            `approximation_tolerance` is outside (0, 1), or if a Plan is
+            given with any of the three choices or holds no coefficient
+            table for an input without a source.
+        TypeError: If `problem_or_plan` is neither a `LinearDynamics` nor a
+            Plan.
     """
     from nwqlib.core.planning import Plan
     from nwqlib.problems.records import LinearDynamics

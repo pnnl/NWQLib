@@ -1,66 +1,137 @@
 # Choose a backend
 
-A backend connection owns preparation, submission and result retrieval for a selected method/readout. Pass it to `nwqlib.prepare(plan, backend=backend)`. The [execution guide](prepared_execution.md) explains the common workflow and [run archives](run_archives.md) explain continuation after process exit.
+A backend is where NWQLib runs the circuits of a `Plan` (the method and construction that `nwqlib.plan` fixes before any circuit exists): a local simulator, an HPC simulator or a cloud quantum computer. Pick one by task from the table below, build its connection object and pass it to `nwqlib.prepare` or `nwqlib.solve`.
 
-| Backend | Connection | Current evidence and limits |
+## Choose by task
+
+| Task | Backend and connection | What has been checked |
 | --- | --- | --- |
-| [Aer](aer.md) | `AerBackend` | Local execution, with explicit optional noise for counts. Exact simulation remains bounded by its state storage. Its noiseless exact target also executes a multi-point trajectory schedule, with readout views of Pauli and probability points and reductions whose registered reducers supply both work and execution functions, in one simulation. |
-| [NWQ-Sim](nwqsim.md) | `NWQSimBackend` | Qualified CPU paths and local process-exit continuation. Each native backend/method pair has its own build and readout limits. CPU/SV also executes a multi-point trajectory schedule, with readout views of Pauli and probability points and reductions whose registered reducers supply both work and execution functions, in one evolution. Its trajectory path has native checks on macOS arm64 only. |
-| [IBM Runtime](ibm.md) | `IBMRuntimeBackend` | Offline SDK, transport and result checks. Live credentials, queues and QPUs remain unqualified. |
-| [IonQ](ionq.md) | `IonQBackend` | Offline conversion and v0.4 histogram checks. No live QPU qualification. |
-| [Nexus H2](nexus.md) | `NexusBackend` | Offline conversion, remote-job protocol and result checks. See its dependency exception and timeout limitation. |
-| [Slurm](slurm.md) | `NWQSimSlurmBackend` | Offline scheduler/site-profile checks. Site allocation, MPI and GPU execution require the selected build and live qualification. |
+| Small exact simulation on your machine | [Aer](aer.md), `AerBackend()`, the default | Runs locally. Exact simulation stores the full state, so memory limits its width. The noiseless exact simulator can also read several points of one evolution in one simulation ([trajectory readout](#trajectory-readout)): Pauli values, probabilities, and reductions whose registered functions supply both their work count and their execution. |
+| Noisy counts | [Aer](aer.md) with a noise model, `AerBackend.from_noise_model(noise)` | A noise model applies to sampled counts only. |
+| Larger simulation, on one machine or with MPI or a GPU | [NWQ-Sim](nwqsim.md), `NWQSimBackend` | CPU/SV builds are qualified, and a local run can be continued after the Python process exits. Each backend/method pair has its own build and readouts. CPU/SV also supports [trajectory readout](#trajectory-readout) of Pauli values, probabilities and registered reductions in one evolution. Its trajectory route has native checks on macOS arm64 only. |
+| NWQ-Sim on an HPC cluster | [Slurm](slurm.md), `NWQSimSlurmBackend` | Checked offline against scheduler and site-profile responses. Site allocation, MPI and GPU execution need a qualified build and a live check at the site. |
+| IBM quantum hardware | [IBM Runtime](ibm.md), `IBMRuntimeBackend` | Checked offline: SDK, transport and result decoding. Live credentials, queues and QPUs are not qualified. |
+| IonQ quantum hardware | [IonQ](ionq.md), `IonQBackend` | Checked offline: circuit conversion and v0.4 histograms. No live QPU is qualified. |
+| Quantinuum H2 hardware | [Quantinuum Nexus](nexus.md), `NexusBackend` | Checked offline: conversion, remote-job protocol and results. Its page describes a dependency exception and an HTTP wait without a timeout. |
+| An OpenQASM file for another tool | [Export OpenQASM](qasm-streaming.md), `export_qasm` or `write_qasm3_file` | Writes text only. Nothing is executed. |
 
-## Match the method's readout
+Two operations are not backends: [resource estimation](resources.md), which submits no job, and [fault-tolerant compilation and physical projection](fault-tolerant-resources.md) with NWQEC and QDK.
 
-Methods declare the exact readout they require, such as counts, Pauli statistics, probability marginals, a provider estimate, amplitudes or a host output. A backend label alone does not establish support for every instruction, control, width or readout. The selected target's capability checks reject unsupported combinations before the affected work.
+## Run on any backend
 
-Host execution invokes the selected numerical method. Statevector execution simulates the selected circuit and returns its requested readout. Counts describe finite-shot execution. Resource estimation is a separate operation that does not submit a job. See the method's guide for its actual option names and supported modes.
+Every backend uses the same four steps: prepare the Plan for the backend, submit it, wait for the result, and reopen the saved run folder later if needed. This example runs on Aer and prints `1.0` twice, because the state $\lvert 0\rangle$ is an eigenstate of $Z$ with eigenvalue 1:
+
+```python
+import nwqlib
+from nwqlib.algorithms import ExpectationMethod
+from nwqlib.backends import AerBackend
+
+problem = nwqlib.Expectation(state=[1., 0.],
+                             observable=[[1., 0.], [0., -1.]])
+plan = nwqlib.plan(problem, method=ExpectationMethod(), shots=128, seed=7)
+backend = AerBackend()
+
+prepared = nwqlib.prepare(plan, backend=backend, directory="my-run")
+with prepared.run as run:
+    nwqlib.submit(prepared)
+    print(run.wait().value)
+
+with nwqlib.load_run("my-run", backend=backend) as run:
+    print(run.wait().value)
+```
+
+`prepare` builds the circuits for the backend and saves them, with the Plan, in the new folder `directory`. `submit` sends them. `run.wait()` returns the Result. `load_run` reopens the folder. Here the run has finished, so `wait()` returns the saved Result without measuring again.
+
+For a provider, replace the connection and expect the job to stay pending. The template below is not run here. It needs the provider's credentials:
+
+```python
+backend = ...  # IBMRuntimeBackend, IonQBackend, NexusBackend or
+               # NWQSimSlurmBackend, configured as on its page
+prepared = nwqlib.prepare(plan, backend=backend, directory="provider-run")
+with prepared.run as run:
+    nwqlib.submit(prepared)
+    print(run.exposure)  # circuits and shots submitted so far
+
+# Later, in this or another process, with the same backend configuration:
+with nwqlib.load_run("provider-run", backend=backend) as run:
+    result = run.wait(timeout=3600)
+    print(result.value)
+```
+
+For a provider, `submit` returns the run when the method next has to wait for a job, and `run.result` is `None` while the job is pending. `run.wait(timeout=...)` checks the provider until the Result is ready and raises `TimeoutError` when the timeout passes, leaving the run available for a later `wait()` or `resume()`. `run.resume()` refreshes each pending job once and returns. [Run on a backend](prepared_execution.md) covers the limits of a run, and [Continue an interrupted run](run_archives.md) covers saved folders.
+
+## What every backend does
+
+<a id="match-the-methods-readout"></a>
+
+### Readouts
+
+Each method declares the readout it needs: counts, Pauli statistics, probability marginals, a provider estimate, amplitudes or a host output. A backend name alone does not establish support for every instruction, control, width or readout. Each backend checks the request against its capabilities and rejects an unsupported combination before the affected work starts.
+
+Host execution calls the method's numerical routine. Statevector execution simulates the circuit and returns the requested readout. Counts come from finite-shot execution. The method's guide gives its option names and supported modes.
+
+### Exact synthesis of dense matrices
+
+In the cases that the table under [Optimization level](#optimization-level) lists, a backend replaces each dense `UnitaryGate` by its exact synthesis before it translates the circuit to its gates, because Qiskit's own synthesis of such a gate is not exact to rounding ([dense unitaries](development/dense_synthesis.md#controlled-dense-unitaries)). A run synthesizes each distinct matrix once and reuses the circuit in its later preparations. Before each new synthesis it counts the work against `ExecutionLimits.max_synthesis_work`, a total over all preparations of the run. A reopened run synthesizes a matrix, and counts its work, again.
+
+### Optimization level
+
+`optimization_level` is the Qiskit transpiler level (on Nexus, the level of the Nexus compile job). On NWQ-Sim, IBM Runtime and IonQ, levels 2 and 3 resynthesize two-qubit blocks with Qiskit's own synthesis, so these levels receive the circuit as given, without exact synthesis. The preparation record is what NWQLib saves for each prepared circuit: how it was built, for which backend, and the error assessment of its readout. A level other than the backend's default is recorded as the exclusion `optimization_level` in the preparation record's `probability_window_exclusions`, which marks a circuit compiled at a non-default level, and the record's operation count describes the compiled circuit.
+
+| Backend | Default level | Exact synthesis of dense matrices | Roundoff constant and `state_error()` |
+| --- | --- | --- | --- |
+| Aer | No transpiler level | Only with a noise model whose gate basis omits `UnitaryGate`, outside control-flow blocks. Otherwise Aer applies the matrix directly | Derived for qiskit-aer 0.17.2, see [Aer](aer.md#readout-and-population) |
+| NWQ-Sim and Slurm | 0 | At levels 0 and 1 | Derived for CPU/SV. At a level other than 0, `state_error()` gives no bound, see [NWQ-Sim](nwqsim.md#optimization-level) |
+| IBM Runtime | 1 | At levels 0 and 1, outside control-flow blocks | None, so `state_error()` gives no bound at any level |
+| IonQ, QIS gates | 0 | At levels 0 and 1 | None, so `state_error()` gives no bound at any level |
+| IonQ, native gates | 0, the only accepted level | No Qiskit translation | None, so `state_error()` gives no bound |
+| Nexus | 1, of the Nexus compile job | Always, before the local translation to `u`/`cx` at level 0 | None, so `state_error()` gives no bound at any level |
+
+### Trajectory readout
+
+A trajectory reads several points of one circuit's evolution in one simulation, on Aer and on NWQ-Sim CPU/SV. A point is a position in the circuit at which NWQLib reads a Pauli expectation, a probability marginal or a reduction of the state, and on Aer also amplitudes. A point's readout can first apply a short circuit, its tail, such as a basis change, which is undone before the evolution continues.
+
+Trajectory readout evaluates the declared points of one deterministic, noiseless coherent evolution. Probabilities and Pauli expectations are functions of the pure state at each point. The circuit up to the last point and the readout tails must not introduce measurement-conditioned evolution, resets, postselection or non-unitary channels. Both backends refuse, before building their circuit, a tail or the part of the circuit up to the last point that contains a measurement, a reset, control flow or an opaque instruction without a definition, also inside the definition of a composite instruction such as `Initialize`. Operations after the last point are neither run nor checked. A reduction uses a registered reducer, which must support the state representation and the backend.
+
+<a id="continue-and-cancel"></a>
+
+### Continue, cancel and recover {#provider-rules}
+
+A saved run continues with its original `Run.resume()` and `Run.wait()`, which read the original job. A failed retrieval keeps the job's locator and does not cause a replacement submission. `run.cancel()` stops new work in the run, and the next refresh requests cancellation of the remote job. Cloud and Slurm runs issue their qualification warning once per run, also after reopening. A local detached NWQ-Sim run names its host and result directory before launch, and that computer or VM must keep running after Python exits.
+
+Interrupted submissions follow these rules on every provider:
+
+- NWQLib sends each job request once and never resubmits it, also after an error or a lost acknowledgement. The IBM SDK's own safe retries of single HTTP requests are described on the [IBM Runtime](ibm.md#retries-and-cancellation) page.
+- If the provider's acknowledgement (the job ID) is lost, the submission stays uncertain and its circuits and shots stay counted against the run's limits. The next refresh looks for the job by the label written at submission, listed below. No match or several matches leave the submission uncertain.
+- A refresh reads the original job, saves each completed item once and keeps earlier items when a later item fails.
+- Cancellation is one request to the original job. Only later provider status confirms it, and the submitted work stays counted.
+
+| Backend | Label that identifies a submission |
+| --- | --- |
+| IBM Runtime | Job tag `nwqlib:<submission>` |
+| Quantinuum Nexus | Job name `nwqlib:execute:<submission>`, with its program and shot description |
+| Slurm | Job name `nwqlib-<submission>` |
+| NWQ-Sim, local | Result directory `<spool>/<submission>` |
+| IonQ | None. No exact job lookup is qualified for the IonQ v0.4 API, so a lost IonQ acknowledgement stays uncertain |
+
+The rules that each backend connection implements are listed in [Backend adapter contract](development/execution.md#backend-adapter-contract).
 
 ## Estimate and inspect resources
 
-`nwqlib.estimate(plan, context=...)` folds the selected construction. `handle.inspect_resources(max_operations=100000, max_bytes=10_000_000_000)` inventories an already prepared artifact. Nonempty transpilation options request an additional compilation for that inspection. Formula laws, representative samples and prepared inventories describe different objects and cannot be treated as interchangeable hardware costs. See [resource estimates](resources.md).
+`nwqlib.estimate(plan, context=...)` adds up the resource formulas of the planned construction without building a circuit. `prepared.inspect_resources(max_operations=100000, max_bytes=10_000_000_000)` counts the operations of a circuit that is already prepared. Nonempty `transpile_options` request an additional compilation for that inspection. Formulas, representative samples and counts of prepared circuits describe different objects and are not interchangeable hardware costs. See [Resource estimates](resources.md).
 
-## Continue and cancel
+## Export circuits
 
-Durable backends use the original `Run.resume()` and `Run.wait()`. Refresh uses the original job locator. A failed retrieval does not authorize a replacement submission. Run cancellation stops new work, and an explicit refresh requests remote cancellation before later status confirms the outcome.
-
-Cloud and Slurm paths report their qualification caveat once per run, including across journal reopen. Local detached execution identifies its host and spool before launch. That computer or VM must remain running after Python exits. Provider pages document their actual limits.
-
-QASM export remains separately available for NWQ-Sim and NWQEC. [QASM streaming](qasm-streaming.md) describes bounded export without execution.
-
-[Fault-tolerant resources](fault-tolerant-resources.md) describes explicit NWQEC compilation and QDK physical projection. They are auxiliary operations, not execution backend connections.
-
-## Provider rules
-
-Every connection implements one adapter contract, stated in the module docstring of `nwqlib.backends.connection`. The common execution owner in `nwqlib._prepared_execution` saves the intent, locator and observations around each adapter call and relies on these rules.
-
-| Rule | Failure it prevents | Owner |
-| --- | --- | --- |
-| Readout, shots and batch shape are checked before preparation, upload or submission | Provider work spent on a request that cannot produce the selected observation | each adapter's `target_for` and `admit_batch` |
-| Intent and the submissions set aside are saved before one create request, and NWQLib never retries a create request. The IBM SDK's own safe retries are described in [IBM Runtime execution](ibm.md) | A duplicate job after a lost acknowledgement | `submit_detached` and each adapter's `launch` |
-| A lost acknowledgement is matched only by the label written at launch. No match or several matches leave the intent uncertain and charged | Binding another job, resubmitting, or refunding work whose outcome is unknown | `refresh_submissions` and each `reconcile` |
-| Refresh reads the original job, publishes each completed item once and keeps earlier items when a later item fails | Duplicate or lost observations | `refresh_submissions` and each `refresh` |
-| Cancellation is one request to the original job, confirmed only by later status, and the submissions stay charged | Treating a request as a confirmed cancellation or a refund | `Run.cancel` and each `cancel` |
-| Measurement maps and bit order are translated in one decoder per adapter | Reordered bits or mixed registers | `_decode` for IBM, IonQ and Nexus, `_submit_aer_execution` for Aer, and `NWQSimBackend._result` with the runner for NWQ-Sim and Slurm |
-| Gate-angle units are fixed at preparation | IonQ native gates read in the wrong unit | `IonQBackend.prepare` keeps native turns and lowers QIS gates in radians |
-| Bytes that NWQLib reads or parses are checked against the byte limit before the read or parse | Unbounded provider responses or saved payloads | `run.check_data` calls in each adapter |
-| The qualification notice states offline versus live evidence once per Run | Reading an offline transport check as live device or site qualification | each adapter's `qualification_notice` |
-
-The labels used for reconciliation are the IBM job tag `nwqlib:<submission>`, the Nexus job name `nwqlib:execute:<submission>` with its program and shot description, the Slurm job name `nwqlib-<submission>` and the NWQ-Sim spool directory `<spool>/<submission>`. No exact job lookup is qualified for the IonQ v0.4 API, so a lost IonQ acknowledgement stays uncertain.
+`export_qasm` writes a built Qiskit circuit as OpenQASM 2 or 3 text, for use with NWQ-Sim outside NWQLib or with another simulator, and NWQEC compilation reads its OpenQASM 2 output. This is separate from the direct writer `write_qasm3_file`, whose subset makes no NWQ-Sim compatibility claim. See [Export OpenQASM](qasm-streaming.md).
 
 ## Source map
 
-| Step | Source | Location | Code owner |
+| Step | Source | Location | Code |
 | --- | --- | --- | --- |
 | Dense-unitary CX count `(23/48) 4**n - (3/2) 2**n + 4/3` | Shende, Bullock and Markov, [arXiv:quant-ph/0406176v5](https://arxiv.org/abs/quant-ph/0406176v5) | Eq. (19) in Appendix A (printed page 16), and Table 1 (printed page 14), row "QSD (l = 2, optimized)", which lists 0, 3, 20 and 100 CX for n = 1 to 4. The integer formula reproduces the entries for n >= 2, and the code returns the n = 1 entry 0 as an explicit base case | `backends.resources.dense_unitary_cx_qsd_upper_bound` |
-| Banded block-encoding CX per query | NWQLib census of one QFT/inverse-QFT pair plus the recorded multiplexor, diagonal and PREP counts | comment in the code owner | `backends.resources.block_encoding_per_query_cx` |
-| Surface-code patch size `2*d*d - 1`, with d*d data and d*d - 1 syndrome qubits | QDK 1.32.3 `SurfaceCode.provided_isa` (`qdk/qre/models/qec/_surface_code.py`), whose comment cites Horsman et al., arXiv:1111.4022, without a version (checked here against [v3](https://arxiv.org/abs/1111.4022v3)) | Sec. 7.1, pp. 18–20 (same section in v1 and v2). The rotated lattice has d*d data qubits, and its d = 5 and d = 3 examples have d*d - 1 independent stabilizers. One syndrome qubit per stabilizer gives `2*d*d - 1`. The paper also notes that at d = 3 reusing the four central syndrome qubits reduces the patch to 13 qubits, which QDK does not model | `backends.qre._estimate_qdk` |
-| Syndrome cycle of one one-qubit gate time, four two-qubit gate times and one measurement time, repeated d times per logical cycle | QDK 1.32.3 `SurfaceCode.provided_isa`, whose comment cites Wang, Fowler and Hollenberg, arXiv:1009.3686, Fig. 2, without a version (checked here against [v1](https://arxiv.org/abs/1009.3686v1), the only version) | Figs. 1(b) and 2, p. 1. Fig. 1(b) orders the four CNOT layers, and Fig. 2 measures one stabilizer with four CNOTs between two syndrome measurements, without initialization gates. The one-qubit gate time, which QDK calls ancilla preparation, is QDK's addition. The d cycles per logical step match arXiv:1111.4022v3, Sec. 6, which requires d rounds of error correction after each operation | `backends.qre._estimate_qdk` |
-| Logical error rate `0.03 * (p/0.01)**((d+1)//2)` per patch and lattice-surgery step, p the largest of the H, CNOT and measurement error rates | QDK 1.32.3 `SurfaceCode.provided_isa`, whose comments cite Fowler et al., arXiv:1208.0928, Eqs. (10) and (11), and arXiv:1009.3686 for the threshold, without versions (checked here against [v2](https://arxiv.org/abs/1208.0928v2)) | arXiv:1208.0928v2, Sec. VII, Eqs. (10) and (11), p. 11 (same numbers in v1), give the empirical approximation P_L ~ 0.03 (p/p_th)**d_e with d_e = (d+1)/2 for odd d and d/2 for even d. There P_L is the rate of logical X errors per surface-code cycle, fitted with p_th = 0.57% for that paper's circuits. The paper's footnote 14 says logical Z errors occur at about the same rate. QDK keeps 0.03, uses p_th = 0.01 and charges the rate per lattice-surgery step of d cycles. arXiv:1009.3686v1 reports thresholds of 1.1% to 1.4% (abstract, pp. 3–4), so 0.01 lies below them and is QDK's choice | `backends.qre._estimate_qdk` |
-| Magic-state factory table | QDK 1.32.3, `qdk/qre/models/factories/_litinski.py` | `Litinski19Factory` | `backends.qre._estimate_qdk` |
-| Exact Pauli expectation read directly from native CPU/SV amplitudes, without a dense Pauli matrix | NWQLib derivation from the action of a Pauli string on a basis state, with `Y = iXZ` | comment in the code owner | `pauli_value` in `backends/_native/nwqsim_runner.cpp` |
-| NWQ-Sim known-array bytes per process | Inspected NWQ-Sim constructor and sampler allocations | [NWQ-Sim execution](nwqsim.md) | `backends.nwqsim._buffer_bytes` and the runner |
-| State-body memory lower requirement `b * 2**q` (statevector) or `b * 4**q` (density matrix) | NWQLib, from the stored representation and precision | [Device and physical-model domains](profiles.md#device-and-physical-model-domains) | `backends.assessment._state_body_detail` |
-| Linear time model `acquisition_linear/1` | NWQLib | [Finite time models](profiles.md#finite-time-models) | `backends.assessment._predict_time` |
+| Banded block-encoding CX per query | NWQLib count of one QFT/inverse-QFT pair plus the recorded multiplexor, diagonal and PREP counts | comment in the code | `backends.resources.block_encoding_per_query_cx` |
+| Exact Pauli expectation read directly from native CPU/SV amplitudes, without a dense Pauli matrix | NWQLib derivation from the action of a Pauli string on a basis state, with `Y = iXZ` | comment in the code | `pauli_value` in `backends/_native/nwqsim_runner.cpp` |
+| NWQ-Sim known-array bytes per process | Inspected NWQ-Sim constructor and sampler allocations | [NWQ-Sim](nwqsim.md#memory-per-process) | `backends.nwqsim._buffer_bytes` and the runner |
 | Estimator `stds` meaning with and without ZNE | IBM Estimator input and output guide, qiskit-ibm-runtime 0.49 | URL recorded in the uncertainty Source | `backends.ibm_runtime.IBMRuntimeBackend._estimate_result` |
+
+The surface-code patch, syndrome-cycle, logical-error-rate and magic-state factory models are listed under [Models and sources](fault-tolerant-resources.md#models-and-sources). The state-memory and linear time models are listed under [Finite time models](profiles.md#finite-time-models).

@@ -15,35 +15,70 @@ from .constants import QLS_SPECTRAL_COVERAGE_TOLERANCE
 
 
 class QLSVerification(Record):
-    """Explicit independent comparisons with bounded numerical reference work.
+    """Reference comparisons for a `QLS` Result, with bounded reference work.
 
-    Automatic mass windows and default 5*epsilon direction windows are
-    heuristics. A missing phase certificate leaves its dependent metric unknown.
-    Original spectral facts already selected by this Plan are reused.
-    New spectral or solution references require original dense input access;
-    compact inputs are never implicitly expanded by this verification.
+    Build it with keyword arguments and pass it to
+    `result.verify(checks=...)`, for example
+    `result.verify(checks=QLSVerification(comparisons=("spectral_domain",)))`.
+    `comparisons` is the only required argument. The call returns
+    `(receipt, facts)`, with one nonnegative dimensionless fact per
+    comparison, in the given order, ready for
+    `Certificate.with_verification` with the same options. The receipt also
+    keeps the companion values, such as raw discrepancies and error
+    budgets. The [QLS guide](../../algorithms/qls.md#explicit-verification-and-evidence)
+    shows a complete check.
+
+    All comparisons share one solve of the original `A/alpha` with the
+    normalized b, and a spectral-only request solves nothing. Singular
+    endpoints that the Plan already computed are reused. A comparison that
+    needs only the norm of the solution, such as `"eq17"`, reuses the
+    encoded reference norm that a grid or noisy-search norm model recorded
+    from its own solve, which is that model's intermediate value, not
+    independent evidence. A new spectral or solution reference needs a
+    dense A, and compact Pauli or sparse input is never converted to a
+    dense matrix. Without `relative_tolerance`, `"inverse_relative_error"`
+    reports the raw relative error divided by the error budget
+    `epsilon_inv + polynomial_kappa s delta / ||y_ref||`, with delta the
+    phase-fit residual bound (zero for classical execution), s the
+    polynomial rescale and `y_ref = (A/alpha)^-1 b/||b||`. A value of 0.386
+    then means 0.386 of that budget, not 38.6% physical inverse error. A
+    missing phase bound leaves that budget unknown. The automatic mass
+    windows and the default `5*epsilon_inv` direction window are heuristics.
+    These checks do not prove a bound on the total physical error or
+    establish confidence coverage.
 
     Attributes:
-        name: Label prefixed to every reported fact.
-        comparisons: Distinct comparisons to run. ``spectral_domain`` checks
-            that ``alpha`` and ``kappa_be`` cover the original singular
-            endpoints. ``inverse_relative_error`` and ``inverse_success``
-            compare the inverse output and its success mass using one shared
-            reference solve. ``shortcut_direction`` compares the unit
-            direction modulo global phase. ``eq17`` compares the shortcut
-            success mass with Dalzell's Eq. (17) window
-            (arXiv:2406.12086v2).
-        relative_tolerance: Explicit threshold on the relative L2 inverse
-            error. ``None`` reports the error divided by the method allowance.
-        direction_tolerance: Explicit threshold on the phase-aligned L2
-            direction error. ``None`` uses ``5 * epsilon_inv``.
-        probability_tolerance: Explicit absolute threshold on mass
-            comparisons. ``None`` reports the heuristic window ratio.
-        spectral_tolerance: Window on the dimensionless spectral-domain
-            deficit.
-        max_work: Cap on the known reference work, checked before any solve.
-        max_bytes: Cap on the known reference arrays, checked before any
-            solve.
+        name: Default `"reference"`. Prefix of every reported fact. Each
+            check is named `name + "." + comparison`.
+        comparisons: Required. Distinct comparisons, at least one.
+            `"spectral_domain"` checks that `alpha` and `kappa_be` cover the
+            original singular endpoints. `"inverse_relative_error"` and
+            `"inverse_success"` compare the `"qsvt_inverse"` output and its
+            success mass with the shared reference solve.
+            `"shortcut_direction"` compares a shortcut's unit direction
+            modulo global phase. `"eq17"` compares a shortcut's success mass
+            with Dalzell's Eq. (17) window (arXiv:2406.12086v2). The inverse
+            comparisons need an inverse Plan, and the shortcut comparisons a
+            shortcut Plan.
+        relative_tolerance: Default `None`. Nonnegative threshold on the
+            relative L2 inverse error. `None` reports the error divided by
+            the method's error budget, checked against 1.
+        direction_tolerance: Default `None`. Nonnegative threshold on the
+            phase-aligned L2 direction error. `None` uses `5*epsilon_inv`.
+        probability_tolerance: Default `None`. Nonnegative absolute
+            threshold on the mass comparisons. `None` reports the
+            discrepancy divided by a heuristic window, checked against 1.
+        spectral_tolerance: Default `1e-9`, nonnegative. Window on the
+            dimensionless spectral-domain deficit, wide enough for ordinary
+            rounding of an automatic `kappa`. It is a numerical window, not a
+            spectral theorem.
+        max_work: Default `1e9` (`1_000_000_000`). Upper limit on the known
+            reference work, checked before any solve.
+        max_bytes: Default 10 GB (decimal, `10_000_000_000` bytes). Upper
+            limit on the known reference arrays, checked before any solve.
+
+    Raises:
+        ValueError: If `comparisons` is empty or repeats a name.
     """
 
     name: Text = "reference"

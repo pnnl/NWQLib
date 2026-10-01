@@ -13,14 +13,23 @@ from nwqlib.evidence.error_model import FramedFact
 
 
 class AnalysisOrigin(Record):
-    """One producing invocation; loading never creates a new invocation.
+    """The analysis call that computed a Result, and its software versions.
+
+    A Result records it in `origin`. Loading a saved Result keeps the
+    original record and does not create a new one. The fields below are
+    read-only.
 
     Attributes:
-        invocation_id: Identity of this analysis invocation, not an acquisition ID.
-        analyzer: Source of the actual reduction implementation.
-        method_id: Configured Method identity, or None when no Method is associated.
-        environment: Actual available package/interpreter versions at analysis time.
-        unavailable_versions: Requested dependency names without available metadata; absence is not version zero.
+        invocation_id: Unique identifier of this analysis call. It does not
+            identify a measurement.
+        analyzer: Name, version and reference of the code that computed the
+            Result (`Source`).
+        method_id: Content hash of the configured Method, or `None` when no
+            Method is involved.
+        environment: The Python and package versions (`Source` records)
+            found when the analysis ran.
+        unavailable_versions: Names of requested packages whose version
+            could not be read. A missing version is not version zero.
     """
 
     invocation_id: Text
@@ -73,22 +82,33 @@ def capture_analysis_origin(*, analyzer, method_id=None, dependencies=(), max_de
 
 @dataclass(frozen=True)
 class RunData:
-    """One run snapshot; immutable observations, receipts and arrays are shared.
+    """The measured data of a Run, as attached to its Result.
 
-    artifacts is an immutable tuple of existing handles. Taking the snapshot
-    never copies an array or expands a native circuit.
-    forecast and allocation are the supplied immutable resource provenance;
-    snapshotting never reevaluates models or changes the selected workload.
+    `result.data` and `run.data` return it. It shares the Run's immutable
+    observations, preparation records and arrays, so taking it copies no
+    array and builds no circuit, and it reevaluates no model. The fields
+    below are read-only.
 
     Attributes:
-        observations: Actual immutable observation population from this Run.
-        trace: Recorded attempts, status and exposure associated with those observations.
-        receipts: Actual prepared artifacts; they are not newly synthesized during snapshotting.
-        artifacts: Shared immutable array handles; accessing a handle does not copy its payload.
-        controller: Optional saved adaptive frontier and decision history.
-        method_context: Method-owned analysis context excluding private mutable computational caches.
-        forecast: Optional original PlanEstimate used for this Run.
-        allocation: Optional original resource allocation used for this Run.
+        observations: Every observation the Run collected, as an
+            `ObservationView`. Its `chunks` hold the statistics of each
+            measurement.
+        trace: The [`ExecutionTrace`][nwqlib.execution.ExecutionTrace]: every
+            attempt, its status and the work counted against the limits,
+            failed and uncertain attempts included.
+        receipts: The preparation records (`PreparedArtifact`) of the
+            circuits and of the host computations (classical computations
+            that the Method runs on this machine) that ran. Taking the snapshot
+            builds none of them again.
+        artifacts: Handles of the saved arrays
+            ([`ArtifactHandle`][nwqlib.artifacts.ArtifactHandle]). Reading a
+            handle copies no data.
+        controller: The saved iteration state and decision history of an
+            adaptive Method, as JSON text, or `None`.
+        method_context: Analysis data that the Method keeps with the Result,
+            without its private working caches, or `None`.
+        forecast: The `PlanEstimate` given to the Run, or `None`.
+        allocation: The `Allocation` given to the Run, or `None`.
     """
 
     observations: object
@@ -101,7 +121,19 @@ class RunData:
     allocation: object = None
 
     def artifact(self, manifest):
-        """Return the stored array handle for a manifest or its identity, without copying data."""
+        """Return the handle of one saved array, without copying its data.
+
+        Args:
+            manifest (ArtifactManifest | str): The array's manifest, or its
+                content hash.
+
+        Returns:
+            handle (ArtifactHandle): The handle. Read the values with
+                `handle.array`.
+
+        Raises:
+            ValueError: If this Run's data holds no such array.
+        """
         identity = manifest if isinstance(manifest, str) else manifest.content_id
         for handle in self.artifacts:
             if handle.manifest.content_id == identity:
@@ -110,18 +142,49 @@ class RunData:
 
 
 class Result(Record):
-    """Method scientific fields and exact acquisition lineage.
+    """The answer of a Method, with the Plan and measured data it came from.
 
-    The attached Plan and RunData are shared live inputs, excluded from this
-    scalar record. save writes their actual selected data through method hooks.
+    [`solve`][nwqlib.scientist.solve] and `Run.wait` return a Result, and
+    [`load_result`][nwqlib.scientist.load_result] reopens a saved one. Each
+    Method returns its own Result type, and its fields hold the answer:
+
+    | Method | Result type | Answer | Unit |
+    | --- | --- | --- | --- |
+    | [`ExpectationMethod`][nwqlib.algorithms.expectation.ExpectationMethod] | [`ExpectationAnalysis`][nwqlib.algorithms.expectation.ExpectationAnalysis] | `value` | The Problem's `unit` for the default `NormalizedExpectation` |
+    | [`Lanczos`][nwqlib.algorithms.lanczos.method.Lanczos] | [`LanczosResult`][nwqlib.algorithms.lanczos.records.LanczosResult] | `eigenvalue` | The Problem's `unit` |
+    | [`QCELS`][nwqlib.algorithms.qpe.method.QCELS], [`SPE`][nwqlib.algorithms.qpe.method.SPE], [`RFE`][nwqlib.algorithms.qpe.method.RFE], [`RWPE`][nwqlib.algorithms.qpe.method.RWPE] | [`QPEAnalysis`][nwqlib.algorithms.qpe.records.QPEAnalysis] | `eigenvalue` for a Hamiltonian input, `phase` | The Problem's `unit` for `eigenvalue`, turns in [0, 1) for `phase` |
+    | [`FixedGCIM`][nwqlib.algorithms.gcim.fixed_basis.FixedGCIM] | [`FixedGCIMResult`][nwqlib.algorithms.gcim.fixed_basis.FixedGCIMResult] | `eigenvalue` | The Problem's `unit` |
+    | [`ADAPT`][nwqlib.algorithms.gcim.adapt.ADAPT] | [`ADAPTResult`][nwqlib.algorithms.gcim.adapt_records.ADAPTResult] | `eigenvalue` | The Problem's `unit` |
+    | [`LCHS`][nwqlib.algorithms.lchs.method.LCHS] | [`LCHSAnalysis`][nwqlib.algorithms.lchs.primary_records.LCHSAnalysis] | `solution` for the default `Solution`, `value` for a scalar output | The Problem's `unit` for `solution` |
+    | [`QLS`][nwqlib.algorithms.qls.method.QLS] | [`QLSAnalysis`][nwqlib.algorithms.qls.primary_records.QLSAnalysis] | `x` for the default `Solution`, `value` for any output | The Problem's `unit` for `x` |
+    | [`QHD`][nwqlib.algorithms.qhd.method.QHD] | [`QHDAnalysis`][nwqlib.algorithms.qhd.records.QHDAnalysis] | `candidate`, the observed grid point with the smallest objective, and `value`, the objective there | Coordinates of the variables for `candidate`, the Problem's `unit` for `value` |
+
+    For another requested output, the Result type names the field that holds
+    it, and [Choose a problem and output](../problems.md) gives its unit.
+    Each Result type states when its answer is unavailable. `print(result)` shows
+    the answer with its main conditions. `analyze` recomputes the Result
+    from the same data with other settings, `assess` compares it with an
+    accuracy criterion, `verify` runs a named check, `report` returns its
+    stored values as a dictionary and `save` writes it to a folder. The
+    Plan (`result.plan`) and run data (`result.data`) are attached to the
+    Result rather than stored in its fields, and `save` writes them with it.
+
+    The fields below identify where the answer came from, and they are
+    read-only. A Method author's Result type sets them, as the [Run your own
+    circuit](../own_circuit.md) guide shows.
 
     Attributes:
-        plan_id: Exact selected Plan identity.
-        construction_id: Selected construction interpreted by this Result.
-        observation_id: Identity of the attached observation population.
-        contribution_ids: Actual observation chunks used in this reduction.
-        facts: Existing method-produced error or scientific facts with explicit frames.
-        origin: Actual analysis provenance, or None when it was not recorded.
+        plan_id: Content hash of the Plan the Result was computed from.
+        construction_id: Content hash of the construction of that Plan.
+        observation_id: Content hash of the observations attached to the
+            Result.
+        contribution_ids: Content hashes of the parts of the observations
+            that this Result uses.
+        facts: Error evidence that the Method attached (`FramedFact`
+            records), each stated for its quantity, unit and scope. `assess`
+            reads it.
+        origin: The [`AnalysisOrigin`][nwqlib.core.analysis.AnalysisOrigin]
+            of the analysis, or `None` when it was not recorded.
     """
 
     schema_version: Literal[2] = 2
@@ -142,21 +205,51 @@ class Result(Record):
 
     @property
     def plan(self):
+        """The [`Plan`][nwqlib.core.planning.Plan] this Result was computed from.
+
+        Raises:
+            ValueError: If no Plan is attached, as for a Result built from
+                its fields alone. `load_result` attaches the saved Plan.
+        """
         if self._plan is None:
             raise ValueError("result has no live Plan; load_result restores the saved selection")
         return self._plan
 
     @property
     def data(self):
+        """The [`RunData`][nwqlib.core.analysis.RunData] this Result was computed from.
+
+        It holds the observations, preparation records, attempt history and
+        saved arrays of the Run.
+
+        Raises:
+            ValueError: If no run data is attached.
+        """
         if self._data is None:
             raise ValueError("result has no acquisition data attached")
         return self._data
 
     def _attach(self, plan, data):
-        """Supported Result hook: bind the original Plan and RunData exactly once.
+        """Attach the Plan and run data to a Result once, and return the Result.
 
-        Validate acquisition membership and call validate_plan before attaching.
-        This does not perform an acquisition or synthesize missing observations.
+        A supported hook for Method authors ([Add a
+        Method](../algorithm_protocol.md#supported-protected-extension-hooks)).
+        It checks that the Result names this Plan and these observations,
+        that every part of the observations it uses is in the data, and calls
+        `validate_plan` before attaching. It measures nothing and creates no
+        missing observation.
+
+        Args:
+            plan (Plan): The Plan the Result was computed from.
+            data (RunData): The run data the Result was computed from.
+
+        Returns:
+            result (Result): This Result, with `plan` and `data` attached.
+
+        Raises:
+            ValueError: If the Result names another Plan or other
+                observations, uses an observation absent from the data, or
+                is already attached to another Plan or data.
         """
         if not isinstance(data, RunData) or self.plan_id != plan.content_id:
             raise ValueError("result requires its original Plan and RunData")
@@ -172,13 +265,38 @@ class Result(Record):
         return self
 
     def validate_plan(self, plan):
+        """Check that this Result belongs to `plan`, before the Plan is attached.
+
+        The base check compares `plan_id` with the Plan's content hash. A
+        Method's Result type overrides it to call `_validate_common_plan`
+        and then check its own relation between the Plan and its fields
+        ([Add a Method](../algorithm_protocol.md#supported-protected-extension-hooks)).
+
+        Args:
+            plan (Plan): The Plan to check against.
+
+        Raises:
+            ValueError: If the Result names another Plan.
+        """
         if self.plan_id != plan.content_id:
             raise ValueError("result differs from its exact selected Plan")
 
     def _validate_common_plan(self, plan, plan_type):
-        """Supported Result hook for exact Plan type, identity and Method lineage.
+        """Check the Plan type, the Plan's content hash and the Method that analyzed the Result.
 
-        Call from validate_plan before checking the Method's own scientific pair.
+        A supported hook for Method authors. Call it from `validate_plan`
+        before checking the Method's own relation between the Plan and the
+        Result ([Add a
+        Method](../algorithm_protocol.md#supported-protected-extension-hooks)).
+
+        Args:
+            plan (Plan): The Plan to check against.
+            plan_type (type): The exact Plan class that the Method produces.
+
+        Raises:
+            TypeError: If `plan` is not exactly of type `plan_type`.
+            ValueError: If the Result names another Plan, or its `origin`
+                names another Method than the Plan's.
         """
         if type(plan) is not plan_type:
             raise TypeError(f"{type(self).__name__} requires {plan_type.__name__}")
@@ -188,11 +306,24 @@ class Result(Record):
             raise ValueError("analysis origin differs from its configured Method")
 
     def analyze(self, **settings):
-        """Reinterpret the attached RunData with new analysis settings, acquiring nothing.
+        """Recompute the Result from the same measured data with other analysis settings.
 
-        The Method's analyze builds a new Result, which is attached to the same
-        Plan and RunData after the usual identity and membership checks. The
-        original Result is unchanged.
+        The Method analyzes the attached run data again and returns a new
+        Result, attached to the same Plan and data. Nothing is measured, and
+        this Result is unchanged. A loaded Result can be analyzed too. The
+        settings a Method accepts are listed in its guide, for example the
+        `overlap_*` settings of Lanczos.
+
+        Args:
+            **settings (object): Analysis settings of the Method. Omitted, the
+                analysis uses the original settings.
+
+        Returns:
+            result (Result): The new Result.
+
+        Raises:
+            ValueError: If no Plan or run data is attached. The Method raises
+                its own error for a setting it does not accept.
         """
         result = self.plan.method.analyze(self.plan, self.data, settings=settings)
         if not isinstance(result, Result):
@@ -200,29 +331,119 @@ class Result(Record):
         return result._attach(self.plan, self.data)
 
     def assess(self, **criterion):
-        """Assess an explicit accuracy criterion against existing error facts, acquiring nothing.
+        """Check whether the Result's error evidence meets an accuracy criterion.
 
-        A known component bound is not promoted to a total-error certificate.
+        `assess` combines the error bounds that the Method attached in
+        `facts`, and any bounds supplied here, and compares them with the
+        criterion. It measures nothing, reruns nothing and leaves the Result
+        unchanged, so a stricter criterion later is a new assessment of the
+        same data. A known bound on one error component is never counted as a
+        bound on the total error. The [Check accuracy and verify a
+        result](../verification.md) guide explains the criteria.
+
+        Args:
+            **criterion (object): The criterion, given either as
+                `accuracy=Accuracy(...)` or by the fields of
+                [`Accuracy`][nwqlib.problems.records.Accuracy]: exactly one
+                of `absolute_tolerance` and `relative_tolerance`,
+                `confidence` (default `0.95`) and `component` (`"total"`,
+                the default, or `"sampling"`). The optional keyword `facts`
+                gives error evidence (`FramedFact` records) that replaces the
+                Result's evidence of the same name, `reference` gives a
+                `TargetReference` that supplies the target's scale for a
+                relative tolerance, `absolute_fallback` gives a positive
+                absolute tolerance used when that scale is unavailable or
+                zero, and `max_integer_bits`, default `4096`, limits the
+                integers of the exact arithmetic.
+
+        Returns:
+            assessment (ClaimAssessment): The
+                [`ClaimAssessment`][nwqlib.evidence.ClaimAssessment]. Its
+                `status` is `"PASS"` when every required error source has a
+                supported bound and together they meet the tolerance at the
+                requested confidence, `"INCONCLUSIVE"` when they do not show
+                it, for example because a bound exceeds the tolerance or a
+                source is unknown, and `"NOT_APPLICABLE"` for
+                `component="sampling"` when the Method's error model has no
+                sampling source.
+
+        Raises:
+            ValueError: If `accuracy` is given together with the individual
+                fields, or the Method has no error model.
+
+        Examples:
+            An exact classical solve has no sampling error, while its total
+            error stays unproven:
+
+            >>> from nwqlib import Eigenproblem, solve
+            >>> from nwqlib.algorithms import FixedGCIM
+            >>> problem = Eigenproblem(A=[[1.0, 0.0], [0.0, -1.0]])
+            >>> method = FixedGCIM(basis=([1.0, 0.0], [0.0, 1.0]))
+            >>> result = solve(problem, method=method, execution="classical")
+            >>> print(result.eigenvalue)
+            -1.0
+            >>> print(result.assess(absolute_tolerance=0.01,
+            ...                     component="sampling").status)
+            PASS
+            >>> print(result.assess(absolute_tolerance=0.01).status)
+            INCONCLUSIVE
         """
         from nwqlib.evidence import assess_result
         return assess_result(self, **criterion)
 
     def verify(self, *, checks):
-        """Run the Method's explicitly selected checks, at their own stated cost.
+        """Run a named check of the Result, such as a residual or a comparison with a reference.
 
-        ``checks`` is one options record, and every built-in options type
-        returns ``(receipt, facts)``. ``receipt`` is the VerificationReceipt
-        with the raw facts and the numerical calls, and ``facts`` is a tuple
-        of FramedFacts that cite that receipt. The types are
-        LCHSVerification and LCHSRefinement for LCHS,
-        ProjectedVerificationOptions for Lanczos, FixedGCIM and ADAPT,
-        EnergyShiftOptions for Lanczos and FixedGCIM,
-        AdaptVerificationOptions for ADAPT, NumberSectorOptions and
-        QHDVerification for QHD, QLSVerification for QLS and QPEVerification
-        for QPE. Except for LCHSRefinement, ``facts`` answers the options'
-        ``verification_checks``, and ``Certificate.with_verification``
-        attaches it with the same options. LCHSRefinement returns
-        output-error components for ``assess`` instead.
+        The check is described by one options record of a type that the
+        Method supports. It computes what the record names, at the cost the
+        record states, and only when called. Every built-in options type
+        returns `(receipt, facts)`. `receipt` records the check, its raw
+        values and the numerical calls it made, and `facts` is a tuple of
+        `FramedFact` records that cite `receipt`. The [Check accuracy and
+        verify a result](../verification.md) guide describes each check.
+
+        | Method | Options types |
+        | --- | --- |
+        | LCHS | [`LCHSVerification`][nwqlib.algorithms.lchs.verification.LCHSVerification], [`LCHSRefinement`][nwqlib.algorithms.lchs.refinement.LCHSRefinement] |
+        | Lanczos, FixedGCIM | [`ProjectedVerificationOptions`][nwqlib.evidence.verification.ProjectedVerificationOptions], [`EnergyShiftOptions`][nwqlib.evidence.energy_shift.EnergyShiftOptions] |
+        | ADAPT | [`ProjectedVerificationOptions`][nwqlib.evidence.verification.ProjectedVerificationOptions], [`AdaptVerificationOptions`][nwqlib.algorithms.gcim.adapt_verification.AdaptVerificationOptions] |
+        | QHD | [`NumberSectorOptions`][nwqlib.evidence.sector.NumberSectorOptions], [`QHDVerification`][nwqlib.algorithms.qhd.records.QHDVerification] |
+        | QLS | [`QLSVerification`][nwqlib.algorithms.qls.verification.QLSVerification] |
+        | QCELS, SPE, RFE, RWPE | [`QPEVerification`][nwqlib.algorithms.qpe.records.QPEVerification] |
+
+        Except for `LCHSRefinement`, `facts` answers the checks that the
+        options list in `verification_checks`, and
+        [`Certificate.with_verification`][nwqlib.evidence.Certificate.with_verification]
+        attaches it with the same options. `LCHSRefinement` returns error
+        components of the output for `assess` instead.
+
+        Args:
+            checks (object): One options record from the table.
+
+        Returns:
+            verification (tuple): `(receipt, facts)` as described above.
+
+        Raises:
+            ValueError: If no Plan or run data is attached. The Method raises
+                its own error for an options type it does not support.
+
+        Examples:
+            The Gram matrix of an orthonormal trial basis is the identity, so
+            its deficit from positive semidefiniteness is zero:
+
+            >>> from nwqlib import Eigenproblem, solve
+            >>> from nwqlib.algorithms import FixedGCIM
+            >>> from nwqlib.evidence.verification import (
+            ...     ProjectedVerificationOptions)
+            >>> problem = Eigenproblem(A=[[1.0, 0.0], [0.0, -1.0]])
+            >>> method = FixedGCIM(basis=([1.0, 0.0], [0.0, 1.0]))
+            >>> result = solve(problem, method=method, execution="classical")
+            >>> options = ProjectedVerificationOptions(
+            ...     name="projected", comparisons=("gram_psd_deficit",),
+            ...     tolerance=1e-10)
+            >>> receipt, facts = result.verify(checks=options)
+            >>> print(facts[0].fact.quantity, facts[0].fact.value.numerator)
+            projected.gram_psd_deficit 0
         """
         return self.plan.method.verify(self.plan, self, checks=checks)
 
@@ -276,9 +497,15 @@ class Result(Record):
         return "" if unit is None or unit.same_unit(UNSPECIFIED_UNIT) else " " + unit.symbol
 
     def _summary_lines(self):
-        """Supported Result display hook returning lines from existing scalar records.
+        """Return the first lines of `print(result)`, built from the Result's stored values.
 
-        Do not acquire, reanalyze, materialize arrays, or recompute scientific facts.
+        A supported hook for Method authors ([Add a
+        Method](../algorithm_protocol.md#supported-protected-extension-hooks)).
+        An override must not measure, reanalyze, load arrays or recompute
+        error evidence.
+
+        Returns:
+            lines (tuple[str, ...]): The lines.
         """
         return (f"{type(self).__name__}: scientific data in report",)
 
@@ -286,12 +513,13 @@ class Result(Record):
         """Summarize the Result from records it already holds, without computing anything.
 
         The lines are the Method's ``_summary_lines``, then the Method and
-        execution route, the first prepared target, how many observation
-        chunks this reduction used out of those acquired, the attempt count
-        with uncertain attempts and failed host invocations, and the byte-check
-        state of a standalone load. The last line always says that accuracy
-        is not assessed, because only an explicit ``assess`` call compares
-        the Result with an accuracy criterion.
+        execution route, then the first prepared target, how many observation
+        chunks this reduction used out of those acquired, and the attempt
+        count with uncertain attempts and failed host invocations. Without an
+        attached Plan or run data, the corresponding line says so. The last
+        line always says ``accuracy not assessed``, because a Result stores no
+        assessment and only an explicit ``assess`` call compares it with an
+        accuracy criterion.
         """
         lines = list(self._summary_lines())
         if self._plan is None:
@@ -319,18 +547,42 @@ class Result(Record):
         printer.text(f"{type(self).__name__}(...)" if cycle else str(self))
 
     def report(self):
-        """Project existing scientific metadata and acquisition inventory only.
+        """Return the Result's stored values, Plan and run records as a dictionary.
 
-        Arrays/native caches stay with their owners. This does not validate a
-        new scientific pair, reassess accuracy, hydrate data or refresh a Run.
-        Observations are projected with their stored fields and each chunk's
-        ``content_id``, the identity that ``contribution_ids`` name. The
-        identities of the records nested in a chunk, such as its statistics,
-        are left out, so the report computes no identity per stored entry. A
-        probability chunk shows its array manifests and scalar summaries, and
-        no array is loaded: each artifact's ``available`` says whether its
-        payload is accessible, held or readable by its store, without reading
-        it.
+        The dictionary holds the printed summary and the JSON forms of the
+        Plan, the Result, the attempt history, the observations, the
+        preparation records, the manifests of the saved arrays, the forecast,
+        the Allocation and the iteration state of an adaptive Method. It
+        reads stored records only. It loads no array, runs no check,
+        reassesses no accuracy, reanalyzes nothing and does not refresh a
+        Run. Each array manifest
+        comes with `available`, which says whether the array can be read,
+        without reading it. A probability observation shows its array
+        manifests and summary values. Each observation is listed with its
+        `content_id`, the content hash that `contribution_ids` name. The
+        records nested in an observation, such as its statistics, are listed
+        without their own content hashes, so the report computes none per
+        stored entry. The dictionary describes the Result, and it cannot be
+        loaded back. Save with `save`, and read a saved folder without
+        loading Method code with `nwqlib.saved_evidence.read_report`.
+
+        Returns:
+            report (dict): Keys `summary`, `plan`, `result`, `trace`,
+                `observations`, `receipts`, `artifacts`, `forecast`,
+                `allocation` and `controller`. Values that need run data are
+                `None` when none is attached.
+
+        Examples:
+            >>> from nwqlib import Eigenproblem, solve
+            >>> from nwqlib.algorithms import FixedGCIM
+            >>> problem = Eigenproblem(A=[[1.0, 0.0], [0.0, -1.0]])
+            >>> method = FixedGCIM(basis=([1.0, 0.0], [0.0, 1.0]))
+            >>> result = solve(problem, method=method, execution="classical")
+            >>> report = result.report()
+            >>> print(report["summary"].splitlines()[0])
+            Ritz eigenvalue: -1
+            >>> print(report["result"]["eigenvalue"])
+            -1.0
         """
         data = self._data
 
@@ -352,5 +604,23 @@ class Result(Record):
             controller=None if data is None else data.controller)
 
     def save(self, path):
+        """Save this Result with its Plan and run data to a new directory.
+
+        `load_result(path)` reopens the saved Result, and `Result.analyze`
+        can then recompute it with other settings without new measurements.
+        Saving checks that the Result, Plan and data belong together before
+        it writes any file. If saving fails, the new directory is removed.
+        The saved files may total at most 10 GB (decimal).
+
+        Args:
+            path (str | os.PathLike): Directory to create. Its parent must
+                exist and the directory itself must not.
+
+        Returns:
+            path (pathlib.Path): The created directory.
+
+        Raises:
+            FileExistsError: If `path` already exists.
+        """
         from nwqlib.saved_evidence import save_result
         return save_result(self, path)

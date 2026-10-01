@@ -32,6 +32,7 @@ markdown_extensions:
   - admonition
   - toc:
       permalink: true
+  - attr_list
   - pymdownx.highlight
   - pymdownx.superfences:
       custom_fences:
@@ -61,10 +62,15 @@ plugins:
           paths: [src]
           options:
             docstring_style: google
+            docstring_section_style: list
             allow_inspection: false
             force_inspection: false
             filters: ["!^_"]
-            show_if_no_docstring: true
+            show_if_no_docstring: false
+            show_labels: false
+            unwrap_annotated: true
+            show_symbol_type_toc: true
+            line_length: 88
             members_order: source
             separate_signature: true
             show_signature_annotations: true
@@ -77,79 +83,93 @@ plugins:
 
 nav:
   - Home: index.md
-  - Getting Started:
-      - Python Quickstart: quickstart.md
+  - Get started:
+      - Install and first result: quickstart.md
       - Examples: examples.md
       - Why NWQLib: why_nwqlib.md
-      - Command Line: cli.md
-  - User Guides:
-      - Plan, Compare and Solve: scientist.md
-      - Supply Inputs: inputs.md
-      - Estimate Resources: resources.md
-      - Fault-tolerant Resources: fault-tolerant-resources.md
-      - Assess Device Profiles: profiles.md
-      - Search Supplied Choices: search.md
-      - Execute a Plan: prepared_execution.md
-      - Save and Continue a Run: run_archives.md
-      - Save and Reanalyze Results: saved_evidence.md
-      - Verify a Result: verification.md
-  - Algorithm Guides:
-      - Finite Pauli Expectation: algorithms/expectation.md
+  - User guides:
+      - Plan, compare and solve: scientist.md
+      - Choose a problem and output: problems.md
+      - Supply inputs: inputs.md
+      - Estimate resources: resources.md
+      - Estimate fault-tolerant resources: fault-tolerant-resources.md
+      - Check device fit and run time: profiles.md
+      - Rank candidate plans: search.md
+      - Run on a backend: prepared_execution.md
+      - Continue an interrupted run: run_archives.md
+      - Save, load and reanalyze results: saved_evidence.md
+      - Check accuracy and verify a result: verification.md
+      - Use the command line: cli.md
+      - Extend NWQLib:
+          - Run your own circuit: own_circuit.md
+          - Add a method: algorithm_protocol.md
+          - Describe a circuit as a Program: ir.md
+          - Compose blocks: blocks.md
+  - Algorithm guides:
+      - Finite Pauli expectation: algorithms/expectation.md
       - Chebyshev Lanczos: algorithms/lanczos.md
       - LCHS: algorithms/lchs.md
       - QPE: algorithms/qpe.md
       - QLS: algorithms/qls.md
       - GCiM: algorithms/gcim.md
       - QHD: algorithms/qhd.md
-  - Mathematics: mathematics.md
   - Backends:
-      - Choose a Backend: backends.md
+      - Choose a backend: backends.md
       - Local Aer: aer.md
       - NWQ-Sim: nwqsim.md
       - IBM Runtime: ibm.md
       - IonQ: ionq.md
       - Quantinuum Nexus: nexus.md
       - Slurm: slurm.md
-      - QASM Export: qasm-streaming.md
-  - API Reference:
+      - Export OpenQASM: qasm-streaming.md
+  - API reference:
       - Overview: api/index.md
-      - Shared Workflow: api/workflow.md
-      - Evidence and Verification: api/evidence.md
+      - Solve, plan and read results: api/workflow.md
+      - Inputs and input types: api/inputs.md
+      - Resource estimates: api/resources.md
+      - Accuracy and verification: api/evidence.md
+      - Backends, profiles and export: api/backends.md
       - Algorithms:
-          - Pauli Expectation: api/algorithms/expectation.md
+          - Pauli expectation: api/algorithms/expectation.md
           - Lanczos: api/algorithms/lanczos.md
           - LCHS: api/algorithms/lchs.md
           - QPE: api/algorithms/qpe.md
           - QLS: api/algorithms/qls.md
           - GCiM and ADAPT: api/algorithms/gcim.md
           - QHD: api/algorithms/qhd.md
+          - QHD constrained problems and box refinement: api/algorithms/qhd_constrained.md
       - Subroutines:
-          - Block Encoding: api/subroutines/block_encoding.md
+          - Block encoding: api/subroutines/block_encoding.md
           - LCU: api/subroutines/lcu.md
           - Coherent QPE: api/subroutines/qpe.md
           - QSP and QSVT: api/subroutines/qsp.md
-          - State Preparation: api/subroutines/state_preparation.md
-          - Hamiltonian Evolution: api/subroutines/hamiltonian_evolution.md
-          - Fermionic Pools: api/subroutines/fermionic_pool.md
-          - Pauli Decomposition: api/subroutines/pauli_decomposition.md
+          - State preparation: api/subroutines/state_preparation.md
+          - Hamiltonian evolution: api/subroutines/hamiltonian_evolution.md
+          - Fermionic pools: api/subroutines/fermionic_pool.md
+          - Pauli decomposition: api/subroutines/pauli_decomposition.md
           - Trotterization: api/subroutines/trotterization.md
-  - Concepts and Development:
-      - Framework: FRAMEWORK.md
-      - Scientific Records: records/README.md
-      - Error Evidence: error_evidence.md
-      - Programs: ir.md
-      - Selected Blocks: blocks.md
-      - Run Your Own Circuit: own_circuit.md
-      - Add a Method: algorithm_protocol.md
-      - Input Admission Laws: development/input_contracts.md
-      - Execution Contracts: development/execution.md
-      - Report and Runtime Contracts: development/reports.md
-      - Design Rationale: development/design_rationale.md
-      - Analytical Contract Fixture: contract-specimen/README.md
-      - Code Tour: CODE_TOUR.md
-      - Engineering Constants: ENGINEERING_CONSTANTS.md
+      - Extending NWQLib: api/extending.md
+  - Background:
+      - How NWQLib works: how_it_works.md
+      - Glossary: glossary.md
+      - Conventions: conventions.md
+      - Mathematics: mathematics.md
+      - Limitations and open work: ROADMAP.md
+      - Dependency issues: dependency_issues.md
+      - References: references.md
+      - Release notes: release_notes.md
+  - Contributing:
+      - Set up, test and build: development/setup.md
+      - Code tour: CODE_TOUR.md
+      - Contribution policy: FRAMEWORK.md
       - Maintenance: MAINTENANCE.md
-  - Release Notes: release_notes.md
-  - Limitations and Open Work: ROADMAP.md
-  - Dependency Issues: dependency_issues.md
-  - References: references.md
+      - Design rationale: development/design_rationale.md
+      - Record contracts: records/README.md
+      - Input cost controls: development/input_contracts.md
+      - Program checks: development/program_checks.md
+      - Exact dense synthesis: development/dense_synthesis.md
+      - Execution and storage: development/execution.md
+      - Result reporting: development/reports.md
+      - Error evidence internals: error_evidence.md
+      - Engineering constants: ENGINEERING_CONSTANTS.md
+      - Analytical test fixture: contract-specimen/README.md

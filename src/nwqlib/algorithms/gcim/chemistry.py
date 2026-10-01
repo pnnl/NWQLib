@@ -25,41 +25,51 @@ ORBITAL_PHASE_RELATIVE_THRESHOLD = 1.0e-8
 
 @dataclass(frozen=True, kw_only=True)
 class GCIMChemistryProblemData:
-    """Prepared molecular Hamiltonian and NWQLib problem records.
+    """Molecular Hamiltonian, reference state and integrals from `build_gcim_chemistry_problem`.
 
-    Energies and integral coefficients are in Hartree. The builder uses the
-    converged closed-shell RHF orbital frame and interleaved alpha/beta spin modes.
-    Each orbital's sign is fixed so that its first significant AO coefficient is
-    positive, which makes fixed-angle ADAPT-GCIM reproducible across LAPACK builds.
-    In tensor shapes below, n is n_spatial_orbitals.
-    Requested reference calculations provide application context, not solver certification.
+    `build_gcim_chemistry_problem` returns it. `eigenproblem()` gives the
+    `Eigenproblem`, and `adapt_method(...)` an `ADAPT` method with the
+    matching reference state. Energies and integral coefficients are in
+    Hartree. The builder uses the converged closed-shell RHF molecular orbitals
+    and interleaved alpha/beta spin modes. Each orbital's sign is fixed so
+    that its first significant AO coefficient is positive. This removes the
+    dependence on the eigensolver's sign choice, which could flip the
+    generators that contain the orbital and change a fixed-angle ADAPT-GCIM
+    trajectory. It fixes signs only. Degenerate orbitals can still be
+    returned in another rotation of their subspace, and binary64 rounding
+    can still decide between generators whose gradients tie in exact
+    arithmetic ([GCiM guide](../../algorithms/gcim.md#adaptive-generator-coordinates)).
+    In tensor shapes below, n is `n_spatial_orbitals`. Requested reference
+    calculations give application context and do not certify the solver.
+    The fields below are read-only.
 
     Attributes:
         hamiltonian: Jordan-Wigner SparsePauliOp for the selected full or active space,
             including its constant offset and the requested coefficient cutoff.
         reference_preparation: Computational-basis circuit preparing the recorded
-            closed-shell occupations from zero; no chemistry solve occurs on inspection.
+            closed-shell occupations from zero. Inspecting it runs no chemistry solve.
         reference_occupations: Zero/one occupation per qubit in interleaved spatial-orbital
-            alpha/beta order, used by adapt_method to bind the same reference input.
+            alpha/beta order, which `adapt_method` uses as the reference state.
         n_spatial_orbitals: Number of selected spatial orbitals, reduced to the active
             orbital count when an active space was requested.
         num_qubits: Twice n_spatial_orbitals for the Jordan-Wigner spin-orbital register.
-        num_electrons: Electrons in the selected Hamiltonian space; the active electron
-            count when frozen-core reduction is used.
+        num_electrons: Electrons in the selected Hamiltonian space, which is
+            the active electron count when frozen-core reduction is used.
         nuclear_repulsion_energy: Original molecule's nuclear repulsion contribution.
         constant_energy: Scalar offset before Jordan-Wigner mapping: nuclear repulsion
             for the full space, or the returned frozen-core energy for an active space.
             This is not necessarily the entire final Pauli-identity coefficient.
         rhf_energy: Converged full-molecule RHF total energy, including nuclear repulsion.
-        one_body_integrals: Spatial-orbital tensor of shape (n,n) in the RHF frame, or
+        one_body_integrals: Spatial-orbital tensor of shape (n,n) in the RHF orbital basis, or
             the active-space effective one-body tensor with frozen-core contributions.
         two_body_integrals: Spatial-orbital tensor of shape (n,n,n,n), obtained by
             transposing the chemist-ordered integrals with axes (0,2,3,1). After spin
             expansion, entries multiply a_p^dagger a_q^dagger a_r a_s with factor 1/2.
         reference_panel: RHF and explicitly requested MP2/CCSD/CASCI values/statuses.
             Unrequested or failed reference energies stay None with their status/reason.
-        metadata: Geometry/basis, charge, ordering, cutoff, active-space and dependency
-            provenance for this construction; to_dict omits the large integral tensors.
+        metadata: Geometry and basis, charge, ordering, cutoff, active space
+            and dependency versions of this construction. `to_dict` omits the
+            large integral tensors.
     """
 
     hamiltonian: SparsePauliOp
@@ -77,13 +87,23 @@ class GCIMChemistryProblemData:
     metadata: Mapping[str, Any] = field(default_factory=dict)
 
     def eigenproblem(self):
-        """Use the physical molecular Hamiltonian, including its constant offset."""
+        """Return the `Eigenproblem` of `hamiltonian`, in Hartree with its constant offset."""
         from nwqlib.problems.records import Eigenproblem
 
         return Eigenproblem(A=self.hamiltonian, unit="Hartree")
 
     def adapt_method(self, **settings):
-        """Configure ADAPT with the recorded occupation and spatial ordering."""
+        """Return an `ADAPT` method with this molecule's reference state and the spin-adapted pool.
+
+        Args:
+            **settings (object): Further `ADAPT` arguments. They override the defaults
+                set here: `initial_state` (the occupation state of
+                `reference_occupations`), `pool="spin_adapted_sd"` and
+                `n_spatial_orbitals`.
+
+        Returns:
+            method (ADAPT): The configured method.
+        """
         from nwqlib.problems.inputs import ingest_occupation
         from .adapt import ADAPT
 
@@ -98,7 +118,13 @@ class GCIMChemistryProblemData:
         )
 
     def to_dict(self) -> dict[str, Any]:
-        """Return a JSON-like summary without dumping integral tensors."""
+        """Return a JSON-like summary of the fields, without the integral tensors.
+
+        The summary holds the orbital, qubit and electron counts, the
+        nuclear-repulsion, constant and RHF energies, the reference panel,
+        the reference occupations, the Pauli term count of `hamiltonian` and
+        `metadata`.
+        """
 
         return {
             "n_spatial_orbitals": self.n_spatial_orbitals,
@@ -126,47 +152,65 @@ def build_gcim_chemistry_problem(
     active_space: tuple[int, int] | None = None,
     reference_methods: tuple[str, ...] = (),
 ) -> GCIMChemistryProblemData:
-    """Build a closed-shell molecular Hamiltonian for GCiM from geometry.
+    """Build a closed-shell molecular Hamiltonian for GCiM and ADAPT from a geometry.
 
-    The helper intentionally stays small: PySCF performs RHF and MO-integral
-    transforms, NWQLib assembles the spin-orbital FermionOperator convention,
-    and OpenFermion performs only the Jordan-Wigner transform.
-    Additional MP2, CCSD, or active-space CASCI references require an explicit
-    ``reference_methods`` request. Integrals use the RHF orbital frame, with
-    each orbital's first AO coefficient above ``ORBITAL_PHASE_RELATIVE_THRESHOLD``
-    of its largest magnitude made positive.
+    PySCF performs RHF and the molecular-orbital integral transforms, NWQLib
+    assembles the spin-orbital fermionic operator, and OpenFermion performs
+    only the Jordan-Wigner transform. It needs the `chemistry` extra,
+    `pip install "nwqlib[chemistry]"`. MP2, CCSD or active-space CASCI
+    references run only when `reference_methods` requests them. Integrals
+    are in the RHF molecular-orbital basis, with each orbital's first AO coefficient above
+    `1e-8` of its largest magnitude made positive.
 
     The Hamiltonian is
-    ``E_c + sum h_pq a_p^dagger a_q + 1/2 sum h_pqrs a_p^dagger a_q^dagger a_r a_s``
-    over interleaved spin orbitals (``_assemble_spin_orbital_fermion_operator``),
-    mapped by Jordan-Wigner with spin orbital ``j`` on qubit ``j``.
+    `E_c + sum h_pq a_p^dagger a_q + 1/2 sum h_pqrs a_p^dagger a_q^dagger a_r a_s`
+    over interleaved spin orbitals, mapped by Jordan-Wigner with spin orbital
+    j on qubit j.
 
     Args:
-        geometry: PySCF atom specification, for example ``"H 0 0 0; H 0 0 0.74"``.
+        geometry: PySCF atom specification, for example `"H 0 0 0; H 0 0 0.74"`.
         basis: PySCF basis name.
         charge: Total molecular charge.
-        spin: ``2S``. Only 0, closed-shell RHF, is supported.
-        unit: Unit of the coordinates, ``Angstrom`` or ``Bohr``.
-        name: Optional label stored in ``metadata``.
+        spin: `2S`. Only 0, closed-shell RHF, is supported.
+        unit: Unit of the coordinates, `"Angstrom"` or `"Bohr"`.
+        name: Optional label stored in `metadata`.
         coefficient_cutoff: Absolute cutoff in Hartree. Fermionic terms and
             final Pauli coefficients at or below it are dropped, and an
             imaginary part at or below it is set to zero.
-        active_space: Optional ``(n_active_electrons, n_active_orbitals)``.
-            For a molecule of ``N`` electrons the lowest
-            ``(N - n_active_electrons)/2`` RHF orbitals are frozen as doubly
+        active_space: Optional `(n_active_electrons, n_active_orbitals)`.
+            For a molecule of N electrons the lowest
+            `(N - n_active_electrons)/2` RHF orbitals are frozen as doubly
             occupied core, and PySCF CASCI supplies the effective one- and
             two-body integrals and the core energy.
-        reference_methods: Any of ``mp2``, ``ccsd`` and ``casci`` to run as
-            application context. ``casci`` needs ``active_space``.
+        reference_methods: Any of `"mp2"`, `"ccsd"` and `"casci"` to run as
+            application context. `"casci"` needs `active_space`.
 
     Returns:
-        The ``GCIMChemistryProblemData`` of the selected full or active space.
+        data (GCIMChemistryProblemData): The Hamiltonian, reference state and
+            integrals of the selected full or active space.
 
     Raises:
         ValueError: For an open-shell or odd-electron molecule, an invalid
-            active space, an unsupported reference method, ``casci`` without
-            ``active_space``, a negative cutoff or an unconverged RHF.
+            active space, an unsupported reference method, `"casci"` without
+            `active_space`, a negative cutoff or an unconverged RHF.
         ImportError: If PySCF or OpenFermion is not installed.
+
+    Examples:
+        H2 in the STO-3G basis at 0.74 Angstrom maps to four qubits. ADAPT
+        with the default spin-adapted pool returns -1.137284 Hartree, the
+        lowest eigenvalue of `data.hamiltonian` by exact diagonalization,
+        below the RHF energy of -1.116759 Hartree:
+
+        >>> from nwqlib import solve
+        >>> from nwqlib.algorithms.gcim import build_gcim_chemistry_problem
+        >>> data = build_gcim_chemistry_problem("H 0 0 0; H 0 0 0.74")
+        >>> print(data.num_qubits, data.reference_occupations)
+        4 (1, 1, 0, 0)
+        >>> print(round(data.rhf_energy, 6))
+        -1.116759
+        >>> result = solve(data.eigenproblem(), method=data.adapt_method(), seed=7)
+        >>> print(round(result.eigenvalue, 6))
+        -1.137284
     """
 
     methods = tuple(str(method).lower() for method in reference_methods)
@@ -316,7 +360,24 @@ def build_gcim_chemistry_problem(
 
 
 def correlation_fraction(energy: float, e_hf: float, e_ccsd: float) -> float:
-    """Return ``(E - E_HF) / (E_CCSD - E_HF)`` for application context."""
+    """Return the correlation fraction `(E - E_HF) / (E_CCSD - E_HF)` of an energy.
+
+    The fraction gives application context, not a bound on the error of E.
+    `chemistry_reference_diagnostic` uses it with the stored reference
+    energies.
+
+    Args:
+        energy: The energy E to compare.
+        e_hf: The Hartree-Fock energy, in the unit of E.
+        e_ccsd: The CCSD energy, or another reference energy such as CASCI,
+            in the unit of E.
+
+    Returns:
+        fraction (float): `(E - E_HF) / (E_CCSD - E_HF)`.
+
+    Raises:
+        ValueError: If `E_CCSD - E_HF` is zero.
+    """
 
     denominator = float(e_ccsd) - float(e_hf)
     if denominator == 0.0:
@@ -329,7 +390,28 @@ def chemistry_reference_diagnostic(
     *,
     energy: float | None,
 ) -> dict[str, Any] | None:
-    """Return chemistry reference-panel report metadata when present."""
+    """Return the stored chemistry reference energies and correlation fractions for an energy.
+
+    It reads `metadata["chemistry_reference_panel"]`, which
+    `build_gcim_chemistry_problem` stores, and adds the full-space CCSD
+    correlation fraction `(E - E_HF)/(E_CCSD - E_HF)` and the active-space
+    CASCI fraction `(E - E_HF)/(E_CASCI - E_HF)` when the needed energies
+    are present. A zero denominator is recorded as the note
+    `"undefined: E_CCSD == E_HF"` or `"undefined: E_CASCI == E_HF"`. It runs
+    no calculation. The values give application context, not a bound on the
+    error of E or an identification of the ground state. The
+    [GCiM guide](../../algorithms/gcim.md#adaptive-generator-coordinates)
+    prints the report section of such a diagnostic.
+
+    Args:
+        metadata: The `metadata` of a `GCIMChemistryProblemData`.
+        energy: The energy E to compare, for example `result.eigenvalue`, or
+            None.
+
+    Returns:
+        diagnostic (dict | None): The reference panel and the fractions, or
+            None when `metadata` holds no reference panel.
+    """
 
     panel = metadata.get("chemistry_reference_panel")
     if not isinstance(panel, Mapping):
@@ -368,7 +450,21 @@ def chemistry_reference_diagnostic(
 
 
 def chemistry_reference_report_section(diagnostic: Mapping[str, Any]) -> ReportSection:
-    """Render the chemistry reference panel as a report section."""
+    """Format a chemistry reference diagnostic as a "Chemistry References" report section.
+
+    The section lists E_HF, E_MP2 and E_CCSD, plus E_CASCI for an active
+    space, and the correlation fractions that the diagnostic holds. A
+    missing energy shows its recorded status and reason, or `unavailable`.
+    `result.report()` does not include this section, so print or store it
+    beside the report.
+
+    Args:
+        diagnostic: A diagnostic from `chemistry_reference_diagnostic`.
+
+    Returns:
+        section (ReportSection): The formatted lines in `section.lines` and
+            the diagnostic in `section.data`.
+    """
 
     panel = diagnostic["reference_panel"]
     lines = [
@@ -420,7 +516,29 @@ def closed_shell_reference_occupations(
     n_spatial_orbitals: int,
     num_electrons: int,
 ) -> tuple[int, ...]:
-    """Return the RHF occupation bitstring in the GCiM spin-orbital order."""
+    """Return the closed-shell RHF occupation bitstring in interleaved spin-orbital order.
+
+    Spin orbitals `2k` and `2k + 1` are the alpha and beta orbitals of
+    spatial orbital k, and the lowest `num_electrons/2` spatial orbitals are
+    doubly occupied.
+
+    Args:
+        n_spatial_orbitals: Positive number of spatial orbitals.
+        num_electrons: Nonnegative even number of electrons, at most
+            `2*n_spatial_orbitals`.
+
+    Returns:
+        occupations (tuple[int, ...]): `2*n_spatial_orbitals` zeros and ones.
+
+    Raises:
+        ValueError: For an odd electron count or more electrons than the
+            orbitals can hold.
+
+    Examples:
+        >>> from nwqlib.algorithms.gcim import closed_shell_reference_occupations
+        >>> closed_shell_reference_occupations(n_spatial_orbitals=3, num_electrons=2)
+        (1, 1, 0, 0, 0, 0)
+    """
 
     n_spatial_orbitals = integer(n_spatial_orbitals, "n_spatial_orbitals", 1)
     num_electrons = integer(num_electrons, "num_electrons", 0)
@@ -490,13 +608,26 @@ def qubit_operator_to_sparse_pauli(
     num_qubits: int,
     coefficient_cutoff: float = 1.0e-12,
 ) -> SparsePauliOp:
-    """Convert an OpenFermion QubitOperator to Qiskit Pauli labels.
+    """Convert an OpenFermion `QubitOperator` to a Qiskit `SparsePauliOp`.
 
     In a Qiskit label qubit 0 is the rightmost character, so OpenFermion
-    qubit ``j`` becomes label position ``num_qubits - 1 - j``.
-    Terms with magnitude at or below ``coefficient_cutoff`` are dropped, an
-    imaginary part at or below it is set to zero, and equal labels are then
-    combined by ``SparsePauliOp.simplify`` with the same absolute tolerance.
+    qubit j becomes label position `num_qubits - 1 - j`. Terms with
+    magnitude at or below `coefficient_cutoff` are dropped, an imaginary part
+    at or below it is set to zero, and equal labels are then combined by
+    `SparsePauliOp.simplify` with the same absolute tolerance.
+
+    Args:
+        qubit_operator: The OpenFermion `QubitOperator`.
+        num_qubits: Positive number of qubits.
+        coefficient_cutoff: Nonnegative absolute cutoff on coefficients.
+
+    Returns:
+        operator (SparsePauliOp): The converted operator, or the zero
+            operator on `num_qubits` qubits when no term remains.
+
+    Raises:
+        ValueError: If `num_qubits` is not positive, `coefficient_cutoff` is
+            negative, or a term acts on a qubit outside `num_qubits`.
     """
 
     if num_qubits < 1:

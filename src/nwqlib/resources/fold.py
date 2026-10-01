@@ -5,7 +5,8 @@ transpiling or simulating it (docs/FRAMEWORK.md, "Resource Estimation Before
 Execution"). This module walks the same Program that logical lowering
 consumes and combines the laws declared on its selected definitions into
 located quantities, each with its interpretation and original evidence. The
-contract for each quantity is docs/resources.md.
+contract for each quantity is docs/resources.md, and docs/development/execution.md
+("Resource estimate bookkeeping") describes how this fold combines the laws.
 """
 
 from dataclasses import dataclass, replace
@@ -1031,30 +1032,40 @@ class _Fold:
 
 def estimate(construction: SelectedConstruction, *, context: ResourceContext | None = None,
              memo: dict | None = None) -> WorkloadEstimate:
-    """Fold the selected Program under its finite graph/integer admission.
+    """Estimate the resources of a planned circuit description without building or running it.
 
-    This visits distinct contexts and keeps a compact expression table; it does
-    not access numerical payloads, synthesize native gates or expand Repeat.
-    A fold is a function of the construction and the context, so a caller
-    that folds several points of one Plan passes one ``memo`` dictionary for
-    the duration of its operation: an equal (construction identity, context
-    identity) pair then returns the WorkloadEstimate object already folded.
-    The memo belongs to that caller and ends with it; there is no
+    Most callers use [`nwqlib.estimate(plan)`][nwqlib.scientist.estimate],
+    which calls this function on `plan.construction`. The estimate walks the
+    circuit description once per distinct context and keeps symbolic costs
+    in a compact expression table. It reads no numerical input data,
+    synthesizes no gates and does not unroll repeated parts. Its work is
+    limited in proportion to the size checks of the circuit description
+    ([engineering
+    constants](../ENGINEERING_CONSTANTS.md#shared-program-admission-limits)).
+
+    The result depends only on the construction and the context. A caller
+    that estimates several points of one Plan can pass one `memo`
+    dictionary for the duration of its operation, and an equal pair of
+    construction and context then returns the estimate already computed.
+    The `memo` dictionary belongs to that caller, and there is no
     process-wide cache.
 
     Args:
-        construction: The selected Program and definitions, as accepted by logical lowering.
-        context: Metric basis, rotation precision, synthesis choice, resident
-            payloads and batch schedule. The default is the selected logical
-            basis with no residents and an unspecified schedule.
-        memo: Optional dictionary owned by the caller, mapping
-            ``(construction.content_id, context.content_id)`` to the estimate
-            folded for that pair during the caller's operation.
+        construction (SelectedConstruction): The planned circuit description,
+            `plan.construction`.
+        context (ResourceContext | None): Gate basis, rotation precision,
+            synthesis, resident data and batch schedule. `None`, the
+            default, means `ResourceContext()`: the `"selected_logical"`
+            basis, no resident data and an unspecified schedule.
+        memo (dict | None): Optional dictionary owned by the caller, mapping
+            `(construction.content_id, context.content_id)` to the estimate
+            already computed for that pair.
 
     Returns:
-        The WorkloadEstimate. Every quantity is ``planned`` and keeps its
-        interpretation, location and original evidence. A metric without an
-        applicable law is present as unavailable, not as zero.
+        workload (WorkloadEstimate): One quantity per metric and location.
+            Every quantity is `"planned"` and keeps its label, location and
+            original evidence. A metric without an applicable cost rule is
+            present as unavailable, not as zero.
     """
     context = ResourceContext() if context is None else context
     if memo is None:

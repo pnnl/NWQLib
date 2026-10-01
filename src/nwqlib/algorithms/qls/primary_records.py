@@ -470,44 +470,76 @@ class QLSGroupMoments(Record):
 
 
 class QLSAnalysis(Result):
-    """Scientific value and original-coordinate data, attached to one actual Run.
+    """Solution or requested output of `A x = b` from a `QLS` run.
 
-    An exact scalar output (``shots=None``) saves the sufficient statistics
-    of its one acquisition in ``reduction``: the complete native norm, the
-    success-only mass p_alg, the physical-slice mass p and the projected
-    moment q. NormalizedExpectation publishes q/p, QuadraticForm Gamma² q
-    and NormSquared Gamma² p, each with ``norm_squared`` Gamma² p; a
-    NormSquared reduction saves q as zero. Every value shares the
-    acquisition's contribution ID, ``mass_contribution_id``.
+    [`solve`][nwqlib.scientist.solve] returns it for a `QLS` method, and
+    `load_result` reopens a saved one. For the default `Solution` output
+    the answer is `x`, the physical solution in the original coordinates
+    with its scale and phase, in the problem's `unit`. `value` gives the
+    requested output of any kind, the stored array, the `Samples` arrays or
+    the scalar `scalar_value`. The shortcut solvers give a unit direction
+    without the physical magnitude, so `x` is unavailable for them. When a
+    requested quantity cannot be recovered, `unavailable` gives the reason.
+    `epsilon_inv` does not bound the error of these values. Check a result
+    with `result.verify(checks=QLSVerification(...))`. `result.analyze()`
+    takes no settings, so another polynomial needs a new Plan. The fields
+    below are read-only. The fields of
+    [`Result`][nwqlib.core.analysis.Result] are present too.
+
+    An exact scalar output (`shots=None`) saves the statistics of its one
+    readout in `reduction`: the complete norm of the saved state, the
+    success-only mass
+    p_alg, the physical-slice mass p and the projected moment q. A
+    `NormalizedExpectation` reports `q/p`, a `QuadraticForm` `Gamma**2 q`
+    and a `NormSquared` `Gamma**2 p`, each with `norm_squared` equal to
+    `Gamma**2 p`, where Gamma is the physical recovery scale. A
+    `NormSquared` reduction saves q as zero. All these values share the
+    readout's `mass_contribution_id`.
 
     Attributes:
-        scalar_value: Requested scalar in the selected output frame.
-        unavailable: Concrete reason a requested scalar is unavailable.
-        norm_squared: Recovered physical norm-squared estimate, when available.
-        physical_scale: Acquired physical vector scale, not inferred from counts.
-        physical_scale_unavailable: Scope limiting recovery of physical magnitude.
-        numerator: Acquired observable numerator before ratio reduction.
-        numerator_frame: Physical or unit frame of that numerator.
-        algorithm_success_mass: Success-only mass p_alg; empirical for counts.
-        physical_slice_mass: Mass p of the success-and-physical slice, relative
-            to the full acquired population; empirical for counts. None when
-            no acquisition tests the original-coordinate prefix (a padded
-            sampled quadratic form whose group bases all contain X or Y).
-        mass_contribution_id: Original acquisition supplying those masses.
-        artifact: Manifest of explicitly acquired array data; not a display request.
-        applications: Actual numerical/model applications and their recorded work.
-        execution: Selected classical model or quantum acquisition route.
-        submitted_shots: Requested sampled exposure of the mass acquisition,
-            when applicable.
-        returned_shots: Actual returned population of that acquisition before
-            either projection.
-        algorithm_selected_shots: Counts satisfying algorithmic success.
-        physical_selected_shots: Counts also satisfying the conditions and lying
-            in original coordinates.
-        samples: Selected original-coordinate indices and counts, not the full
-            returned population; None for other outputs.
-        reduction: Saved statistics of the exact projected reduction.
-        groups: Weighted moments of the sampled group and mass settings.
+        scalar_value: Requested scalar of a `NormSquared`, `QuadraticForm`
+            or `NormalizedExpectation` output, physical or unit-normalized as
+            that output defines it, or `None`.
+        unavailable: Reason a requested scalar or array is unavailable, or
+            `None`.
+        norm_squared: Recovered physical norm squared `||x||**2`, when
+            available. The shortcut solvers never set it.
+        physical_scale: Physical scale of the obtained vector, from the
+            amplitudes or the classical model, not inferred from counts.
+        physical_scale_unavailable: Why the physical magnitude cannot be
+            recovered, for example for a shortcut's unit direction.
+        numerator: Observable numerator before division by the mass.
+        numerator_frame: Normalization of `numerator`, `"unit"` for a
+            normalized expectation or `"physical"` for a quadratic form.
+        algorithm_success_mass: Success-only mass p_alg, a probability,
+            empirical for counts.
+        physical_slice_mass: Mass p of the success-and-physical slice, a
+            fraction of the whole state, or of all returned shots for counts.
+            `None` when no measurement tests the original-coordinate prefix,
+            a padded sampled quadratic form whose group bases all contain X
+            or Y. For an unpadded output without condition bits, the two
+            masses describe the same outcomes, and the exact and sampled
+            readouts report equal values.
+        mass_contribution_id: Content hash of the measurement that supplies
+            those masses.
+        artifact: Description of the stored solution array. Printing the
+            result does not load it.
+        applications: Classical model applications and their recorded work.
+        execution: `"classical"`, the polynomial model evaluated on the
+            host, or `"quantum"`, the circuits run on a backend.
+        submitted_shots: Shots requested for the mass measurement, when
+            sampled.
+        returned_shots: Shots returned by that measurement, before either
+            selection.
+        algorithm_selected_shots: Counts that satisfy algorithmic success.
+        physical_selected_shots: Counts that also satisfy the conditions and
+            lie in original coordinates.
+        samples: For a `Samples` output, the distinct original-coordinate
+            indices (`samples.indices`) and their counts (`samples.counts`),
+            not all returned shots. `None` for other outputs.
+        reduction: Saved statistics of the exact scalar readout.
+        groups: Weighted moments of each sampled measurement setting, with
+            its Pauli labels, basis and returned and selected shots.
     """
 
     scalar_value: Real | None = None
@@ -569,7 +601,7 @@ class QLSAnalysis(Result):
 
     @property
     def value(self):
-        """The requested output: the stored array, the sample arrays (``QLSSamples``) or the scalar."""
+        """The requested output, the stored array, the `Samples` arrays or the scalar."""
         if self.artifact is not None:
             return self.data.artifact(self.artifact).array
         if self.plan.output.kind == "samples":
@@ -578,11 +610,15 @@ class QLSAnalysis(Result):
 
     @property
     def x(self):
-        """The physical solution ``x`` in the original coordinates.
+        """The physical solution `x` in the original coordinates, a complex array.
 
-        Available for ``Solution`` and physical ``StateVector`` outputs. Any
-        other output raises ``ValueError``. A unit ``StateVector``, the only
-        vector output of the shortcut solvers, carries no physical magnitude.
+        Available for `Solution` and physical `StateVector` outputs, and
+        `None` when the array is unavailable, with the reason in
+        `unavailable`. A unit `StateVector`, the only vector output of the
+        shortcut solvers, carries no physical magnitude.
+
+        Raises:
+            ValueError: For any other output.
         """
         if self.plan.output.kind != "solution" and not (
             self.plan.output.kind == "state_vector" and self.plan.output.normalization == "physical"
@@ -592,16 +628,17 @@ class QLSAnalysis(Result):
 
     @property
     def alpha(self):
-        """The selected encoding normalization ``alpha``."""
+        """The encoding normalization `alpha` chosen at planning."""
         return self.plan.reconstruction.alpha
 
     @property
     def kappa(self):
-        """The selected ``kappa_be``, not the original condition number.
+        """The encoded gap parameter `kappa_be`, not the original condition number.
 
-        With ``kappa="auto"`` it is ``max(1, alpha / sigma_min)`` from the
-        selected endpoint. A supplied numeric ``kappa`` is kept as given,
-        after a check that it covers that value when ``sigma_min`` is known.
+        With `kappa="auto"` it is `max(1, alpha / sigma_min)` from the
+        computed singular endpoint. A supplied numeric `kappa` is kept as
+        given, after a check that it covers that value when `sigma_min` is
+        known.
         """
         return self.plan.reconstruction.kappa_be
 

@@ -17,36 +17,54 @@ def sector_expectations(
     num_qubits: int | None = None,
     reference_spin: float = 0.0,
 ) -> dict[str, Any]:
-    """Return exact ``<N>``, ``<S_z>``, ``<S^2>`` QA metadata for a state.
+    """Return the exact particle number, spin projection and total spin of a state.
 
-    Qubit ``j`` is spin orbital ``j`` in the interleaved order of
-    ``fermionic_pool.spin_orbital``. Even qubits are alpha (``S_z = +1/2``)
-    and odd qubits beta. ``<N>`` and ``<S_z>`` are diagonal in the occupation
-    basis and come from bit probabilities. ``<S^2>`` uses the matrix-free
-    action of ``apply_spin_squared``.
+    The returned dict holds `<N>`, `<S_z>` and `<S^2>` of the normalized
+    state and the spin contamination `<S^2> - s(s+1)` for
+    `s = reference_spin`, which keeps its sign. Qubit j is spin orbital j in
+    the interleaved order of the fermionic pools: even qubits are alpha
+    (`S_z = +1/2`) and odd qubits beta. `<N>` and `<S_z>` are diagonal in the
+    occupation basis and come from bit probabilities. `<S^2>` uses a
+    matrix-free action of `S^2`. These expectations describe the state. A
+    value equal to a sector's eigenvalue does not prove membership in that
+    sector, and the result is marked `"validation_gate": False`.
 
-    Particle number and spin-z expectations sum bit-one probability
-    marginals from reshape views. Their values have the same exact
-    population as the occupation-diagonal dots, with reduction-order error
-    charged separately. Spin-squared keeps its own action and workspace.
-    For the computed probability vector p, ``m_j = sum_(x: x_j = 1) p_x``
-    gives ``<N> = sum_j m_j`` and ``<S_z> = (1/2) sum_j (-1)**j m_j`` by
-    exchanging two finite sums. The view ``p.reshape(-1, 2, 1 << j)[:, 1, :]``
-    supplies the bit-one slice without an index vector, and summing all its
-    entries needs no contiguous flattened copy. At most q marginal scalars
-    are stored, then ``fsum`` forms the two weighted sums. Multiplication by
-    one half is exact when it does not underflow. With ``P = sum p_x``,
-    ``M = N/2`` and ``gamma(r) = r*u/(1 - r*u)``, each marginal error is at
-    most ``gamma(M - 1)*m_j`` for normal arithmetic, and the comparison with
-    the former occupation-diagonal dots on the same p is
-    ``T_N <= q*P*[gamma(N) + gamma(M - 1) + u*(1 + gamma(M - 1))]`` for
-    ``<N>`` and ``T_{S_z} <= T_N/2`` (Higham, Accuracy and Stability of
-    Numerical Algorithms, 2nd ed., Lemma 3.1 and Chapter 3,
+    For the computed probability vector p, `m_j = sum_(x: x_j = 1) p_x`
+    gives `<N> = sum_j m_j` and `<S_z> = (1/2) sum_j (-1)**j m_j` by
+    exchanging two finite sums. At most q marginal scalars are stored, and
+    `fsum` then forms the two weighted sums. Multiplication by one half is
+    exact when it does not underflow. With `P = sum p_x`, `M = N/2`,
+    `gamma(r) = r*u/(1 - r*u)` and unit roundoff u, each marginal error is
+    at most `gamma(M - 1)*m_j` for normal arithmetic. The difference from
+    the occupation-diagonal dot products on the same p is
+    `T_N <= q*P*[gamma(N) + gamma(M - 1) + u*(1 + gamma(M - 1))]` for `<N>`
+    and `T_{S_z} <= T_N/2` (Higham, Accuracy and Stability of Numerical
+    Algorithms, 2nd ed., Lemma 3.1 and Chapter 3,
     doi:10.1137/1.9780898718027). Absolute underflow terms are added if
-    reached. ``spin_contamination`` is
-    ``<S^2> - s(s+1)`` for ``s = reference_spin`` and keeps its sign. These
-    expectations describe the state. A value equal to a sector's eigenvalue
-    does not prove membership in that sector.
+    reached.
+
+    Args:
+        state: State vector of length `2**q`, nonzero. It is normalized
+            before use.
+        num_qubits: Number of qubits q, or None to infer it from the length.
+        reference_spin: Spin quantum number s of the reference sector.
+
+    Returns:
+        expectations (dict): The keys `particle_number`, `spin_z`,
+            `spin_squared`, `reference_spin` and `spin_contamination`, with
+            `label`, `evaluation` and `validation_gate` describing them.
+
+    Raises:
+        ValueError: If the state length is not a power of two, does not
+            match `num_qubits`, or the state is zero.
+
+    Examples:
+        The two-qubit state `|11>` doubly occupies spatial orbital 0:
+
+        >>> from nwqlib.algorithms.gcim import sector_expectations
+        >>> v = sector_expectations([0, 0, 0, 1])
+        >>> print(v["particle_number"], v["spin_z"], v["spin_squared"])
+        2.0 0.0 0.0
     """
 
     vector = np.asarray(state, dtype=complex).reshape(-1)

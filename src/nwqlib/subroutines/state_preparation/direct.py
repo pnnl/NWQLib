@@ -1,6 +1,6 @@
 """Direct state-preparation helpers.
 
-Exact basis, full-uniform, and supported prefix-uniform states use native fast paths. General vectors use conditional magnitude rotations and a phase diagonal without synthesis cutoffs.
+Exact basis, full-uniform, and supported prefix-uniform states use exact fast paths. General vectors use conditional magnitude rotations and a phase diagonal without synthesis cutoffs.
 
 The general path follows Mottonen et al., quant-ph/0407010v1, Sec. III. It applies a binary tree of uniformly controlled RY rotations with the angles of their Eq. (8) and then the phases. The paper interleaves phase-equalizing RZ multiplexors (Eqs. (4) and (5)) with the RY levels and cancels one CX per level, which reaches ``2**(n+1) - 2n - 2`` CX when one end is a basis state (half of the general ``2**(n+2) - 4n - 4`` stated on p. 4). Here all phases form one diagonal after the magnitude tree. Tree and diagonal cost ``2**n - 2`` CX each, ``2 * (2**n - 2)`` in total for a complex state, and a nonnegative vector, such as an LCU coefficient state, omits the diagonal entirely.
 """
@@ -23,15 +23,18 @@ from nwqlib.subroutines._multiplexors import (
 
 @dataclass(frozen=True, kw_only=True)
 class DirectStatePreparation:
-    """Direct state-preparation circuit.
+    """A circuit that prepares a normalized state vector exactly, with the input norm.
 
-    Args:
-        circuit: Circuit that prepares ``normalized_state`` from ``|0...0>``.
+    [`build_qiskit_state_preparation`][nwqlib.subroutines.state_preparation.direct.build_qiskit_state_preparation]
+    returns it. The circuit is `circuit`. The fields below are read-only.
+
+    Attributes:
+        circuit: Circuit that prepares `normalized_state` from `|0...0>`.
         normalized_state: Normalized target-state amplitudes.
         input_norm: 2-norm of the original input vector.
         preparation_l2_error: Phase-sensitive construction error in the ideal-gate model. Zero means no algorithmic approximation. Floating-point synthesis and execution roundoff are not measured by circuit construction.
         num_qubits: Number of qubits in the prepared register.
-        method: State-preparation backend identifier.
+        method: Name of the construction, `"qiskit_state_preparation"`.
     """
 
     circuit: QuantumCircuit
@@ -62,17 +65,35 @@ class DirectStatePreparation:
 
 
 def build_qiskit_state_preparation(vector: Any) -> DirectStatePreparation:
-    """Build a direct state-preparation circuit with exact native fast paths.
+    """Build a circuit that prepares a state vector exactly from `|0...0>`.
 
-    General vectors use a binary magnitude tree and a phase diagonal. Pairwise hypot reductions avoid squared-magnitude underflow. The construction uses ``O(n * 2**n)`` classical arithmetic and ``O(2**n)`` live numerical storage, without a target unitary or state simulation.
+    Basis states, uniform states and uniform prefixes use exact fast paths. General vectors use a binary magnitude tree and a phase diagonal. Pairwise hypot reductions avoid squared-magnitude underflow. The construction uses `O(n * 2**n)` classical arithmetic and `O(2**n)` live numerical storage, without a target unitary or state simulation.
 
     Args:
-        vector: State amplitudes. The input may be unnormalized; the returned
-            metadata records its norm so algorithms can rescale scientific
-            outputs after quantum-state normalization.
+        vector (array_like): Complex state amplitudes of power-of-two
+            length. The input may be unnormalized. The returned record keeps
+            its norm, so algorithms can rescale scientific outputs after
+            quantum-state normalization.
 
     Returns:
-        DirectStatePreparation containing the circuit and normalization data.
+        preparation (DirectStatePreparation): The circuit in
+            `preparation.circuit` and the input norm in
+            `preparation.input_norm`.
+
+    Examples:
+        `[3, 0, 0, 4j]` has norm 5, and the circuit prepares
+        `[0.6, 0, 0, 0.8j]`:
+
+        >>> import numpy as np
+        >>> from qiskit.quantum_info import Statevector
+        >>> from nwqlib.subroutines.state_preparation import (
+        ...     build_qiskit_state_preparation)
+        >>> preparation = build_qiskit_state_preparation([3, 0, 0, 4j])
+        >>> print(preparation.input_norm, preparation.num_qubits)
+        5.0 2
+        >>> state = Statevector(preparation.circuit).data
+        >>> print(np.allclose(state, [0.6, 0, 0, 0.8j]))
+        True
     """
 
     normalized_state, input_norm = normalize_state_vector(vector)

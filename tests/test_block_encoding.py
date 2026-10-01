@@ -1,7 +1,7 @@
 """Tests for the block-encoding subroutines.
 
-The embedding-identity test checks the convention in FRAMEWORK.md,
-"Block-Encoding and QSP Conventions": for every construction and
+The embedding-identity test checks the convention in docs/conventions.md,
+"Block encodings and QSP": for every construction and
 registered instance shape, the circuit's all-zero-ancilla block reproduces
 ``A / alpha`` at 1e-12. No wall-clock assertions anywhere; integer anchors are
 construction-exact quantities only (term counts, ancilla counts, gate counts

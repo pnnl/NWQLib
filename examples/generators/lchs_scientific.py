@@ -5,7 +5,7 @@
 #
 # This notebook solves the penalized heat equation on four grid points with NWQLib's Linear Combination of Hamiltonian Simulations (LCHS). It separates the error of the finite penalty, measured against exact cold ends, from the error of LCHS, measured against the penalized equation it solves.
 #
-# Install with `python -m pip install -e ".[aer,notebook]"` from the repository root · one 10-qubit circuit · about 20 s on a laptop.
+# Install with `python -m pip install "nwqlib[aer,notebook]"`. To work on NWQLib itself, run `python -m pip install -e ".[aer,notebook]"` in a clone of the repository instead. The notebook simulates one 10-qubit circuit and runs in about 20 s on an Apple M3 Max with 36 GiB of memory (Python 3.12.14, Qiskit 2.5.2, Aer 0.17.2).
 #
 # > **How to read this notebook.** The next cells solve the rod and show the answer with its cost.
 # >
@@ -149,7 +149,7 @@ def show_card(result, coordinates, initial, v_penalty, u_dirichlet, predicted, s
         f"{format_value(fact_value(predicted.quantity('cx').fact))} CX gates predicted before building (an upper "
         f"bound for this circuit, Section 2), {'no shots (exact readout)' if shots == 0 else f'{shots:,} shots'}. "
         f"Classical: {format_bytes(fact_value(predicted.quantity('known_memory', location='host').fact))} of "
-        f"host arrays predicted before building (not the process peak), planning work "
+        f"classical arrays predicted before building (not the process peak), planning work "
         f"{result.data.trace.construction_work_reserved:,} units (a planning quantity, not seconds), "
         f"{seconds:.1f} s for plan and solve on this computer.</p>"))
 
@@ -208,7 +208,7 @@ u_dirichlet[interior] = modes @ (np.exp(-decay_rates * FINAL_TIME) * mode_initia
 algorithm_error = np.linalg.norm(v_lchs - v_penalty)     # LCHS against the equation it solves
 penalty_error = np.linalg.norm(v_penalty - u_dirichlet)  # penalty reference against the exact-boundary reference
 combined_error = np.linalg.norm(v_lchs - u_dirichlet)
-predicted = estimate(selected, context=ResourceContext(basis="cx"))  # counts from the resource laws, no circuit built
+predicted = estimate(selected, context=ResourceContext(basis="cx"))  # counts from the resource formulas, no circuit built
 show_card(result, coordinates, initial, v_penalty, u_dirichlet, predicted, seconds)
 
 # %% [markdown]
@@ -216,16 +216,16 @@ show_card(result, coordinates, initial, v_penalty, u_dirichlet, predicted, secon
 #
 # ## 1. Will it run?
 #
-# **`plan` checks the premise of LCHS and reports the circuit width before anything is built.**
+# **`plan` checks the assumption of LCHS and reports the circuit width before anything is built.**
 #
 # - **Equation and sign.** NWQLib solves $\dot v=-Av+f$, so a heat generator $B$ enters as $A=-B$. The source is constant in time.
-# - **Premise.** The Hermitian part $L$ of $A$ must have no negative eigenvalue. Here it has none, so no shift is added (`make_l_psd=False`).
+# - **Assumption.** The Hermitian part $L$ of $A$ must have no negative eigenvalue. Here it has none, so no shift is added (`make_l_psd=False`).
 # - **Size.** Two system qubits hold the four temperatures, and an address register labels the weighted branches. Section 4 lists the width and the address qubits.
 # - **Output.** `result.solution` holds the complex temperatures with scale and phase, from exact simulator readout.
 #
 # ## 2. What it costs
 #
-# **`estimate` gives qubits, CX gates, host memory and planning work before the circuit exists. The run adds the compiled counts, the recorded work and the time.** On a quantum computer, the number of two-qubit CX gates and the circuit depth set its cost before any error correction.
+# **`estimate` gives qubits, CX gates, classical memory and planning work before the circuit exists. The run adds the compiled counts, the recorded work and the time.** On a quantum computer, the number of two-qubit CX gates and the circuit depth set its cost before any error correction.
 #
 # `estimate` counts, for each branch, the gates of the exact synthesis of its $4\times4$ evolution and input preparation, priced at Qiskit's count once the eight address controls are added. `prepare` builds the circuit, and `inspect_resources` compiles a copy with Qiskit. The line under the table gives the time both took.
 
@@ -250,7 +250,7 @@ show_table([
     ("Single-qubit gates", "not predicted", compiled["operations"].get("u", 0)),
     ("Depth", "not predicted", compiled["depth"]),
     ("T gates", "not predicted", "Not in the cx and u basis"),
-], headers=("Quantum ledger", "Predicted by estimate", "Compiled circuit"))
+], headers=("Quantum cost", "Predicted by estimate", "Compiled circuit"))
 print(f"Predicted CX is an upper bound for this circuit, {cx_law / compiled_cx:.2f} × the compiled count "
       f"(Qiskit optimization level 1, {compile_seconds:.0f} s to build and compile). "
       f"Compiled CX per weighted branch: {round(compiled_cx / rec.physical_branches):,} over {rec.physical_branches} branches.")
@@ -258,18 +258,18 @@ print(f"Predicted CX is an upper bound for this circuit, {cx_law / compiled_cx:.
 # %%
 trace = result.data.trace
 show_table([
-    ("Host memory", format_bytes(fact_value(predicted.quantity("known_memory", location="host").fact)),
+    ("Classical memory", format_bytes(fact_value(predicted.quantity("known_memory", location="host").fact)),
      "Not measured here"),
     ("Work [units, a planning quantity, not seconds]",
      fact_value(predicted.quantity("construction_work").fact), trace.construction_work_reserved),
     ("Stored run data", "Not predicted", format_bytes(trace.data_bytes)),
     ("Time on this computer", "Not predicted", f"{seconds:.1f} s for plan and solve, "
      f"{sum(event.timing.seconds for event in trace.events):.1f} s of it in the simulator call"),
-], headers=("Classical ledger", "Before the run", "Measured or recorded by the run"))
+], headers=("Classical cost", "Before the run", "Measured or recorded by the run"))
 
 # %% [markdown]
-# - **Host memory** counts the arrays and payloads the construction declares at the same time. It is not the process peak memory and leaves out native workspace, such as Aer's.
-# - **Work.** `estimate` counts the unique selected definitions and host bindings, an upper bound. The run records the work it reserved, a different population.
+# - **Classical memory** counts the arrays and payloads the construction declares at the same time. It is not the process peak memory and leaves out the simulator's own workspace, such as Aer's.
+# - **Work.** `estimate` counts each distinct circuit definition and classical routine of the construction once, an upper bound. The run records the work it counted, a different quantity.
 # - **Upper bound.** The formula prices every controlled gate of each branch separately, so it lies above the compiled count. Almost all gates sit in SELECT, the step that applies the branch each address selects.
 # - **Not estimated:** physical qubits, error correction, run time on hardware and price.
 #
@@ -353,7 +353,7 @@ limits = trace.limits
 show_table([
     ("Qubits the local simulator accepts", limits.max_simulation_qubits, f"Default. This rod uses {total_qubits}"),
     ("Simulator memory cap", f"{limits.simulator_memory_mb:,} MB", "Default simulator_memory_mb"),
-    ("Address qubits", len(rec.success_bits), f"{rec.physical_branches} weighted branches in {rec.padded_branches} slots"),
+    ("Address qubits", len(rec.success_bits), f"{rec.physical_branches} weighted branches in {rec.padded_branches} address slots"),
 ], headers=("Limit or use", "Value", "Meaning"))
 
 # %% [markdown]
@@ -380,7 +380,7 @@ show_table([
 #
 # The starting point is Schleich, Kharazi, Li and colleagues' [*Arbitrary Boundary Conditions and Constraints in Quantum Algorithms for Differential Equations via Penalty Projections*](https://arxiv.org/html/2506.21751v1). Section III.2.1, Eqs. (130)–(134), studies a two-dimensional heat equation.
 #
-# Section II.2, Problem 7, Eq. (14), introduces the imaginary penalty $-i\lambda P_c$ used here, and Section IV, Eq. (140), restates it for the interaction-picture LCHS algorithm. This notebook takes a **one-dimensional teaching specialization** with the same penalty mechanism.
+# Section II.2, Problem 7, Eq. (14), introduces the imaginary penalty $-i\lambda P_c$ used here, and Section IV, Eq. (140), restates it for the interaction-picture LCHS algorithm. This notebook takes a **one-dimensional special case for teaching** with the same penalty mechanism.
 #
 # Position, time and temperature are dimensionless. $D=4$ and the source rate 298 are the values of the paper's heat experiments, which place a point source of that strength at the center element (arXiv:2506.21751v1, Section III.2.1 and the caption of Figure 5).
 #
@@ -446,7 +446,7 @@ plt.show()
 #
 # $$A=-B_0+i\lambda P_c=L+iH,\qquad L=-B_0\succeq0,\qquad H=\lambda P_c.$$
 #
-# $L\succeq0$ means that every eigenvalue of $L$ is nonnegative. For this periodic stencil, they are $4D\sin^2(\pi m/4)/h^2$, with $m=0,1,2,3$, which gives the premise of the LCHS representation.
+# $L\succeq0$ means that every eigenvalue of $L$ is nonnegative. For this periodic stencil, they are $4D\sin^2(\pi m/4)/h^2$, with $m=0,1,2,3$, which gives the assumption of the LCHS representation.
 
 # %%
 fig, axes = plt.subplots(1, 3, figsize=(11.6, 3.4), layout="constrained")
@@ -596,9 +596,9 @@ plt.show()
 # %% [markdown]
 # ### C. The resource estimate in the default logical basis
 #
-# Each row states the population it counts, such as the simultaneous live footprint for width and memory or the dynamic workload for gate counts.
+# Each row states what it counts, such as the simultaneous live footprint for width and memory or the dynamic workload for gate counts.
 #
-# The CX count of Section 2 belongs to the `cx` resource basis. The default logical basis has no two-qubit law for SELECT or the coefficient preparation, so it reports gate counts as unavailable.
+# The CX count of Section 2 belongs to the `cx` resource basis. The default logical basis has no two-qubit formula for SELECT or the coefficient preparation, so it reports gate counts as unavailable.
 
 # %%
 resources = estimate(selected)
@@ -606,9 +606,9 @@ resource_lookup = {(item.metric, item.location): item for item in resources.quan
 resource_rows = []
 for metric, location, label, meaning in (
     ("logical_width", "logical_device", "Logical width", "All qubits in the selected construction"),
-    ("known_memory", "host", "Known host memory", "Declared arrays and payloads, not process peak RSS or all native workspace"),
-    ("construction_work", None, "Planned construction work", "Selected-definition and binding work proxy, not measured CPU time"),
-    ("operations", None, "Planned operation count", "Unknown unless the selected resource laws provide a value"),
+    ("known_memory", "host", "Known classical memory", "Declared arrays and payloads, not process peak RSS or all simulator workspace"),
+    ("construction_work", None, "Planned construction work", "Work of the circuit definitions and classical routines, a planning count, not measured CPU time"),
+    ("operations", None, "Planned operation count", "Unknown unless the selected resource formulas provide a value"),
     ("two_qubit", None, "Planned two-qubit gates", "Unknown does not mean zero gates"),
     ("logical_depth", None, "Planned circuit depth", "Depth is separate from circuit width"),
 ):
@@ -621,7 +621,7 @@ for metric, location, label, meaning in (
     if fact.assumptions:
         scope += " Conditions: " + ". ".join(fact.assumptions)
     resource_rows.append((label, value, fact.unit.symbol, scope))
-show_table(resource_rows, headers=("Resource", "Value", "Unit", "Population and limits"), digits=6,
+show_table(resource_rows, headers=("Resource", "Value", "Unit", "What it counts and limits"), digits=6,
            details="Resource estimate in the default logical basis")
 
 # %% [markdown]
@@ -649,8 +649,8 @@ show_table([
     ("Section 3 discrepancy", algorithm_error, "Same augmented exponential as this check, so the two values agree to rounding"),
     ("Reference norm", verification_metrics[checks.name + ".reference_norm"], "Closed-form solution L2 norm, in temperature units"),
     ("Conclusion scope", "Finite penalized equation", "Floating-point comparison without a pass threshold or continuum-error bound"),
-    ("Matrix exponentials completed", verification_arguments["expm_completed"], "Actual new reference exponentials recorded in this check"),
-    ("Matrix-vector products completed", verification_arguments["matvec_completed"], "Actual products of the new exponential with the initial vector"),
+    ("Matrix exponentials completed", verification_arguments["expm_completed"], "New reference exponentials recorded in this check"),
+    ("Matrix-vector products completed", verification_arguments["matvec_completed"], "Products of the new exponential with the initial vector"),
 ], digits=6)
 
 # %% [markdown]

@@ -44,11 +44,16 @@ def _input(vector, max_bytes):
 
 @dataclass(frozen=True, kw_only=True)
 class MPSDecomposition:
-    """Immutable MSB-first TT cores for one normalized C-order input tensor.
+    """The tensor-train (MPS) cores of one normalized state vector, most significant qubit first.
 
-    discarded_weight is the sum of squared singular values discarded in the
-    actual sweep. Floating-point truncation metrics are estimates, not bounds
-    on SVD roundoff or fidelity of a synthesized layered circuit.
+    [`decompose_state_to_mps`][nwqlib.subroutines.state_preparation.mps.decompose_state_to_mps]
+    returns it. `discarded_weight` is the sum of squared singular values
+    discarded in the sweep. Floating-point truncation metrics are estimates,
+    not bounds on SVD roundoff or fidelity of a synthesized layered circuit.
+    Construction checks that there are `max(1, n)` cores of shape
+    `(r_i, 2, 1, r_{i+1})` with boundary ranks one, finite and read-only,
+    that `discarded_weight` lies in `[0, 1]` and that `input_norm` is
+    positive. The fields below are read-only.
 
     Attributes:
         cores: Immutable MSB-first TT cores with shape (left rank, physical size, 1, right rank).
@@ -58,9 +63,9 @@ class MPSDecomposition:
         max_bond_dim: Requested retained-rank cap, or None for no explicit rank cap.
         threshold: Individual singular-value truncation threshold, not a total error tolerance.
         discarded_weight: Sum of discarded squared singular values for the normalized TT-SVD input.
-        input_id: Identity of the actual normalized input used by compression.
+        input_id: Content hash of the normalized input that was compressed.
         input_norm: Positive norm removed from the original input before TT-SVD.
-        provenance: Compression construction and ordering information retained with the cores.
+        provenance: How the cores were computed and ordered, with the source of the algorithm.
     """
 
     cores: tuple[np.ndarray, ...]
@@ -102,6 +107,7 @@ class MPSDecomposition:
 
     @property
     def core_bytes(self):
+        """Total bytes of the stored core arrays."""
         return sum(core.nbytes for core in self.cores)
 
     # max_products=1_000_000_000 here and in the contraction functions below is
@@ -109,7 +115,30 @@ class MPSDecomposition:
     # in docs/ENGINEERING_CONSTANTS.md. Revisit for a deliberately larger
     # requested materialization.
     def to_statevector(self, *, max_bytes=DEFAULT_INPUT_BYTES, max_products=1_000_000_000):
-        """Explicitly contract the raw compressed tensor; no normalization or SVD."""
+        """Contract the stored cores into the raw compressed vector, without renormalizing it or computing an SVD.
+
+        The vector approximates the normalized input. It is not rescaled by
+        `input_norm`.
+
+        Args:
+            max_bytes (int): Default 10 GB (decimal, `10_000_000_000`
+                bytes). Limit on the stored cores plus the known arrays of
+                each contraction step and of the output vector, checked
+                before each step. It does not measure process memory.
+            max_products (int): Default `1_000_000_000`. Limit on the
+                scalar multiplications of the whole contraction, the sum
+                over steps of the step's output entries times the
+                contracted bond rank, checked before each step.
+
+        Returns:
+            vector (numpy.ndarray): The `original_dimension = 2**num_qubits`
+                amplitudes, in the order of the compressed input.
+
+        Raises:
+            ValueError: If a contraction step or the output would exceed
+                `max_bytes` or `max_products`, or if either limit is not a
+                positive integer.
+        """
         return _reconstruct_cores(self.cores, max_bytes=max_bytes, max_products=max_products)
 
     def to_dict(self):
@@ -123,24 +152,31 @@ class MPSDecomposition:
 
 @dataclass(frozen=True, kw_only=True)
 class MPSCompressionAnalysis:
-    """Scalar view sharing a decomposition; optional measurements name their reference.
+    """Truncation estimates of an MPS decomposition, and an optional comparison with a reference vector.
+
+    [`analyze_mps_state_compression`][nwqlib.subroutines.state_preparation.mps.analyze_mps_state_compression]
+    returns it. The estimates follow from the discarded weight alone. The
+    `reference_*`, `measured_*`, `raw_measured_fidelity` and
+    `fidelity_roundoff_window` fields are filled only when a reference was
+    supplied. The fields below are read-only.
 
     Attributes:
-        decomposition: Shared compressed tensor and original input provenance.
+        decomposition: The analyzed decomposition, shared, not copied.
         estimated_raw_l2: Floating estimate sqrt(discarded_weight) under the TT-SVD exact-arithmetic relation.
         estimated_norm_squared: Floating estimate 1-discarded_weight for the raw compressed tensor.
         estimated_normalized_fidelity: Estimated normalized fidelity from that relation, or None for an undefined zero tensor.
-        reference_id: Identity of an explicitly supplied comparison reference; None when absent.
-        reference_matches_input: Whether the supplied reference identity matches the compressed input; None without a reference.
+        reference_id: Content hash of the supplied comparison reference after normalization, or None without one.
+        reference_matches_input: Whether that hash matches the compressed input, or None without a reference.
         reference_norm: Norm of the supplied reference before normalization; None without one.
         measured_raw_l2: Explicitly measured raw-tensor distance to the normalized reference, or None if not computed.
-        measured_normalized_fidelity: Admitted normalized fidelity to the supplied reference, or None if unavailable.
+        measured_normalized_fidelity: Measured normalized fidelity to the supplied reference, clipped to [0, 1], or None if unavailable.
         raw_measured_fidelity: Computed ``|<t,r>|**2 / (<t,t> <r,r>)`` for the normalized reference t
             and the raw tensor r before clipping to [0, 1], or None if unmeasured.
         fidelity_roundoff_window: Bound on how far rounding can push that value above one, from
-            ``nwqlib._numerics.normalized_fidelity_with_window``. None if unmeasured. It is never
+            NWQLib's rounding analysis of this evaluation (see the
+            [constants registry](../../ENGINEERING_CONSTANTS.md)). None if unmeasured. It is never
             an approximation allowance.
-        method: Name of the compression-analysis construction.
+        method: Name of the analysis, `"mps_ttsvd_analysis"`.
     """
 
     decomposition: MPSDecomposition
@@ -157,6 +193,7 @@ class MPSCompressionAnalysis:
     method: str = "mps_ttsvd_analysis"
 
     def to_dict(self):
+        """Return a JSON-like record of the analysis, with the decomposition's scalar metadata."""
         result = {key: value for key, value in vars(self).items() if key != "decomposition"}
         result["decomposition"] = self.decomposition.to_dict()
         result["metric_basis"] = "TT-SVD exact-arithmetic relation evaluated as floating estimates; explicit reference metrics only when requested"
@@ -165,7 +202,7 @@ class MPSCompressionAnalysis:
 
 def decompose_state_to_mps(vector, *, max_bond_dim=None, threshold=1e-14,
                            max_bytes=DEFAULT_INPUT_BYTES, max_svd_work=DEFAULT_MAX_SVD_WORK):
-    """Normalize one bounded vector and run TT-SVD without reconstruction.
+    """Normalize a state vector and compute its tensor-train (MPS) cores by TT-SVD, without reconstructing the state.
 
     Each site follows steps 4 to 7 of Oseledets (2011),
     doi:10.1137/090752286, Algorithm 1
@@ -179,7 +216,26 @@ def decompose_state_to_mps(vector, *, max_bond_dim=None, threshold=1e-14,
     instead drops every singular value at or below ``threshold``
     individually, keeps at least one, and then caps the rank at
     ``max_bond_dim``. NumPy C-order makes the cores MSB-first in the
-    original flattened ordering.
+    original flattened ordering. The whole economy-SVD work of the sweep,
+    including factors computed before truncation, is checked before the
+    first SVD.
+
+    Args:
+        vector (array_like): Nonzero state amplitudes of power-of-two
+            length. The input is normalized first.
+        max_bond_dim (int | None): Default `None` (no cap). Largest kept
+            rank at each bond.
+        threshold (float): Default `1e-14`. Singular values at or below it
+            are dropped individually. It is not a total error tolerance.
+        max_bytes (int): Default 10 GB (decimal, `10_000_000_000` bytes).
+            Limit on the known arrays. It does not measure process memory.
+        max_svd_work (int): Default `100_000_000`. Limit on the declared
+            dense-SVD work of the whole sweep, the sum of rows times columns
+            times the smaller dimension over all economy SVDs.
+
+    Returns:
+        decomposition (MPSDecomposition): The cores, bond dimensions and
+            `discarded_weight`.
     """
     target, norm = _input(vector, max_bytes)
     return _decompose_normalized_state(target, max_bond_dim=max_bond_dim, threshold=threshold,
@@ -247,7 +303,30 @@ def _decompose_normalized_state(normalized_state, *, max_bond_dim, threshold,
 
 def analyze_mps_state_compression(decomposition, *, reference=None,
                                   max_bytes=DEFAULT_INPUT_BYTES, max_products=1_000_000_000):
-    """Analyze existing cores; an explicit reference requests one contraction, no SVD."""
+    """Estimate the truncation error of MPS cores, and compare them with a reference vector on request.
+
+    The estimates use only the stored discarded weight D: raw L2 distance
+    `sqrt(D)`, raw norm squared `1 - D` and normalized fidelity `1 - D`,
+    from the orthogonality step in the proof of Oseledets (2011),
+    doi:10.1137/090752286, Theorem 2.2 (p. 2299). They are floating-point
+    estimates, not measured circuit fidelity or certificates. No SVD or
+    contraction runs unless `reference` is given, which requests one
+    contraction of the cores and a numerical comparison.
+
+    Args:
+        decomposition (MPSDecomposition): Cores from `decompose_state_to_mps`.
+        reference (array_like | None): Default `None`. Vector to compare
+            with, normalized first. The result says whether it matches the
+            compressed input.
+        max_bytes (int): Default 10 GB (decimal, `10_000_000_000` bytes).
+            Limit on the arrays of the comparison.
+        max_products (int): Default `1_000_000_000`. Limit on the scalar
+            products of the contraction.
+
+    Returns:
+        analysis (MPSCompressionAnalysis): The estimates, and the measured
+            comparison when a reference was given.
+    """
     if not isinstance(decomposition, MPSDecomposition):
         raise TypeError("analysis requires an existing MPSDecomposition")
     d = decomposition.discarded_weight
@@ -292,13 +371,14 @@ def analyze_mps_state_compression(decomposition, *, reference=None,
 
 
 def layered_construction_size(bond_dimensions, num_layers) -> tuple[int, int]:
-    """Return ``(work, bytes)`` bounds of the layered circuit construction from MPS cores.
+    """Return upper bounds `(work, bytes)` of building the layered circuit from MPS cores.
 
-    The law follows the scikit_tt calls of ``mps_circuit._scikit_tt_mps_from_cores``
-    and ``mps_circuit.mps_to_circuit`` for cores with these bond dimensions,
-    with an upper bound on each TT rank in place of the rank a run reaches.
-    It lives here, without Qiskit, so that LCHS planning can admit the
-    construction without importing an SDK.
+    The law follows the scikit_tt calls of
+    [`mps_to_circuit`][nwqlib.subroutines.state_preparation.mps_circuit.mps_to_circuit],
+    and of the conversion of the cores to a scikit_tt tensor train, for
+    cores with these bond dimensions, with an upper bound on each TT rank in
+    place of the rank a run reaches. It lives here, without Qiskit, so that
+    LCHS planning can check the construction without importing an SDK.
 
     Ranks. Write ``b_j`` for the bond dimensions of n sites and
     ``S_j = min(2**j, 2**(n-j))``. A left sweep of ``TT.ortho`` sets rank
@@ -311,7 +391,7 @@ def layered_construction_size(bond_dimensions, num_layers) -> tuple[int, int]:
     such gate per residual pass, so the working ranks at layer l are at
     most ``min(S_j, 4**l b_j)``.
 
-    Work, in the units of ``_decompose_normalized_state``:
+    Work, in the units of the TT-SVD work limit of `decompose_state_to_mps`:
 
     - An SVD of an m x c core matrix, ``m c min(m, c)``, charged twice
       because scikit_tt repeats a failed ``gesdd`` with ``gesvd``.
@@ -346,9 +426,9 @@ def layered_construction_size(bond_dimensions, num_layers) -> tuple[int, int]:
     product arrays. An untuned allowance of ``32768 + 4096 n`` bytes covers
     the gate MPOs, the Python objects of the TTs and the headers of their
     core arrays. Under tracemalloc these exceeded the array bytes by up to
-    31 kB for ten sites (SciPy 1.18.1, 2026-09-25). Qiskit circuit objects
+    31 kB for ten sites (SciPy 1.18.1). Qiskit circuit objects
     are outside the law, and the two-qubit syntheses have their own
-    admission. Cores whose bond dimensions are all one form a product state,
+    limit check. Cores whose bond dimensions are all one form a product state,
     which the builder prepares site by site without scikit_tt, 64 units per
     site.
     """

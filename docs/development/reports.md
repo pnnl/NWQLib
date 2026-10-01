@@ -1,19 +1,49 @@
-# Scientific results and comparisons
+# Result reporting {#scientific-results-and-comparisons}
 
-The public owners are the original Problem, immutable configured Method, plain `core.planning.Plan`, `core.analysis.Result` and `_prepared_execution.Run`. A Plan contains actual selected construction, realizations, output and Method reconstruction data. There is no second report-only Plan hierarchy. Method archive hooks restore the saved bindings and numerical data without planning again.
+This page gives the rules that a Result follows when it is attached to its data, displayed, reported, compared and saved, for contributors who write a Method or change the reporting code. [Plan, compare and solve](../scientist.md#interpret-and-save-the-result) and [Save, load and reanalyze results](../saved_evidence.md) describe these operations for users.
 
-A Result identifies its Plan, construction, observation view and contributing chunks. Its attached RunData keeps every actual execution event, prepared receipt and physical submission, including successful unused data and failed or uncertain work. Scientific contributors may be a subset of the acquired data, while exposure accounting still covers every acquisition. An analyzer owns the immutable snapshot it consumed. When the Method returns a Result that it has already attached, `Run.resume` publishes it only if it belongs to this Plan and its observations, receipts, forecast, allocation and trace equal the Run's current data. The stored-byte counter is excluded from that comparison because it keeps growing after the Result is captured.
+## What a Result is attached to
 
-`Result.analyze` computes a new explicit reduction from existing data. `Result.assess` checks a stated criterion against actual scoped facts. Neither action invokes acquisition or retrospective method selection. An absent criterion means no accuracy verdict. Original confidence, population and dependence premises belong to their scientific evidence; a later requested confidence cannot overwrite them. Conditional evidence remains conditional, and a component bound does not establish total physical accuracy.
+The public objects are the original Problem, the immutable configured Method, the plain `core.planning.Plan`, `core.analysis.Result` and `_prepared_execution.Run`. A Plan contains the chosen construction, the realizations, the output and the data needed to rebuild the Method. There is no second Plan hierarchy for reports. Method archive hooks restore the saved bindings and numerical data without planning again.
 
-`print(result)` and notebook display lead with the scientific value and its meaning. Each concrete Result supplies this summary: a Ritz value is not a ground-state proof, a QHD candidate is not a global optimum, and QPE describes its actual estimator and prepared population. Array outputs preview at most eight resident elements; larger or unavailable arrays show their shape and physical/unit frame, with the selected output's units. An initial-condition identity can display the supplied resident physical or unit vector, preserving its scale and phase contract; compact or descriptive inputs stay shape-only until an actual array exists. Display never creates that array. Acquisition labels come from the original observation, so a host output kernel remains identified as host work even when the Plan's execution preference is quantum. LCHS identifies its selected realization, including classically exponentiated dense branches. The common footer uses actual prepared targets and acquisition populations, and says `accuracy not assessed` when no assessment is attached. Conditional component facts alone do not change that verdict.
+A Result identifies its Plan, construction, observation view and contributing chunks. Its attached RunData keeps every execution event, prepared receipt and physical submission, including successful unused data and failed or uncertain work. The scientific contributors may be a subset of the acquired data, while exposure accounting still covers every acquisition. An analyzer keeps the immutable snapshot it used. When the Method returns a Result that it has already attached, `Run.resume` publishes it only if it belongs to this Plan and its observations, receipts, forecast, allocation and trace equal the Run's current data. The stored-byte counter is excluded from that comparison because it keeps growing after the Result is captured.
 
-`result.report()` returns a reading dictionary with `summary`, `plan`, `result`, `trace`, `observations`, `receipts`, `artifacts`, `forecast`, `allocation` and `controller`. The Plan includes the original selected construction, output, assumptions and error model; the scientific result includes its original analysis origin, environment, facts and uncertainty. Every collected chunk and prepared receipt remains visible, including unused and uncertain exposure. Artifacts include manifests and resident availability, without array payloads. The controller entry is the existing portable checkpoint text; private numerical and native caches are excluded. The original forecast is not refreshed or reassessed. Unknown values remain `None`, distinct from zero or empty acquired populations.
+`Result.analyze` computes a new explicit reduction from existing data. `Result.assess` checks a stated criterion against the scoped facts. Neither action starts an acquisition or a retrospective method choice. An absent criterion means no accuracy verdict. The original confidence, samples and dependence premises belong to their scientific evidence, and a later requested confidence cannot overwrite them. Conditional evidence stays conditional, and a component bound does not establish total physical accuracy.
 
-Those are report keys, not the on-disk archive envelope. Standalone `result.json` stores `{format, selection, data, result}`; use `nwqlib.saved_evidence.read_report` for the metadata-only saved view and `load_result` for selected executable data. See [saved results](../saved_evidence.md) and [Run archives](../run_archives.md) for their distinct directory/lifetime contracts.
+## Display
 
-Reading a summary or report performs no acquisition, reanalysis, numerical validation, array hydration or copying. A detached Result still reports its scientific record, with unattached Plan and acquisition fields explicitly absent. `Result.save` writes through the archive owner independently of display; the metadata-only saved-report reader remains separate and does not import Method implementations or hydrate arrays.
+`print(result)` and notebook display use `Result.__str__`, which reads only records the Result already holds. Each concrete Result supplies its first lines through the `_summary_lines` hook, which must not acquire, reanalyze, materialize arrays or recompute scientific facts. These lines lead with the scientific value and its meaning. A Ritz value is not a ground-state proof, a QHD candidate is not a global optimum, and QPE describes its estimator and prepared samples.
 
-Comparison keeps candidate Methods and Plans in their supplied order. Missing applicability or resource information remains explicit. Resource context and device profile affect estimates, not scientific inputs or actual native compilation. A selected execution uses the effective backend configuration; its receipt and native inventory describe that configuration. Resource inspection never silently escalates from formula to representative native compilation or full preparation.
+- Array outputs preview at most eight resident elements. Larger or unavailable arrays show their shape and physical or unit frame, with the output's units.
+- An initial condition can display the supplied resident physical or unit vector, keeping its scale and phase convention. Compact or descriptive inputs show only their shape until an actual array exists. Display never creates that array.
+- Acquisition labels come from the original observation, so a host output kernel stays identified as host work even when the Plan's execution preference is quantum.
+- LCHS names its chosen realization, including classically exponentiated dense branches.
 
-Save/load validates lineage and concrete Method associations without repeating numerical kernels, per-gate content hashing or physical simulations. It preserves actual immutable arrays and Method context through the existing archive owner. See [saved results](../saved_evidence.md) and [execution ownership](execution.md).
+The common lines that follow name the Method and execution route, the first prepared target, how many observation chunks the Result used out of those acquired, and the attempt count with uncertain attempts and failed host invocations. The last line always says `accuracy not assessed`, because a Result stores no assessment and only an explicit `assess` call compares it with an accuracy criterion. Conditional component facts do not change that line.
+
+## Report dictionary
+
+`result.report()` returns a dictionary for reading:
+
+| Key | Contents |
+| --- | --- |
+| `summary` | The display text of the Result |
+| `plan` | The original chosen construction, output, assumptions and error model |
+| `result` | The scientific result with its original analysis origin, environment, facts and uncertainty |
+| `trace`, `observations`, `receipts` | Every collected chunk and prepared receipt, including unused and uncertain exposure |
+| `artifacts` | Array manifests and resident availability, without array payloads |
+| `forecast` | The original forecast, not refreshed or reassessed |
+| `allocation` | The supplied Allocation |
+| `controller` | The existing portable checkpoint text. Private numerical and native caches are excluded |
+
+Unknown values stay `None`, distinct from zero or from an empty set of acquired data. The report is not the saved archive. [Save, load and reanalyze results](../saved_evidence.md) describes the `result.json` envelope and the metadata-only `read_report`, and [Continue an interrupted run](../run_archives.md) describes Run folders.
+
+Reading a summary or a report performs no acquisition, reanalysis, numerical validation, array loading or copying. A detached Result still reports its scientific record, with the unattached Plan and acquisition fields explicitly absent. `Result.save` writes through the archive code independently of display.
+
+## Comparison
+
+Comparison keeps candidate Methods and Plans in their supplied order. Missing applicability or resource information stays explicit. Resource context and device profile affect estimates, not scientific inputs or native compilation. An execution uses the effective backend configuration, and its receipt and native inventory describe that configuration. Resource inspection never silently escalates from a formula to a representative native compilation or a full preparation.
+
+## Saving and loading
+
+Saving and loading validate the lineage and the concrete Method associations without repeating numerical kernels, per-gate content hashing or physical simulations. They keep the immutable arrays and the Method context through the existing archive code. See [Save, load and reanalyze results](../saved_evidence.md) and [Execution and storage](execution.md).

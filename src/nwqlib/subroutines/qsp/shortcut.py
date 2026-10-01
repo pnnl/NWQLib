@@ -12,8 +12,7 @@ Lemma 3, item 2, prints this upper bound for ``|K(x)|``, which cannot hold
 for ``eta < 1/3`` because the bound is then negative. The proof, through
 Eq. (63), bounds ``K(x)`` itself. That signed bound is the statement of
 p. 4 and the one behind Eqs. (5) and (17). The circuit and host-model
-owners are ``algorithms/qls/quantum.py`` and
-``algorithms/qls/numerical.py``.
+users are the QLS Method's circuit and its numerical model.
 """
 
 from __future__ import annotations
@@ -40,15 +39,24 @@ _KR_CONSTRUCTION_GRID_POINTS = 2001
 
 @dataclass(frozen=True, kw_only=True)
 class KernelReflectionPolynomial:
-    """Kernel-reflection polynomial ``K`` of Dalzell arXiv:2406.12086v2, App. B.3, Eq. (62).
+    """Kernel-reflection polynomial `K` of Dalzell arXiv:2406.12086v2, App. B.3, Eq. (62).
 
-    The domain gap is ``Delta = 1/kappa_be``.
+    [`plan_kernel_reflection`][nwqlib.subroutines.qsp.shortcut.plan_kernel_reflection]
+    returns a coefficient-free plan, and QLS fills in the coefficients. The
+    domain gap is `Delta = 1/kappa_be`. The fields below are read-only.
 
     Attributes:
         coefficients: Chebyshev coefficients of the even kernel-reflection polynomial; empty for a coefficient-free sizing plan.
-        kr_ell: Integer half-degree selected by Dalzell arXiv:2406.12086v2, Eq. 6.
-        kappa_be: Condition premise of the normalized block-encoding construction.
-        kr_eta: Kernel-reflection approximation parameter in (0,1).
+        kr_ell: Integer half-degree from Dalzell arXiv:2406.12086v2, Eq. 6.
+        kappa_be: Reciprocal of the gap `Delta = 1/kappa_be`, a lower
+            bound on the nonzero singular values of the normalized input.
+            It is not a matrix condition number. QLS passes its polynomial
+            domain parameter, which is at least its encoded gap parameter,
+            `alpha/sigma_min(A)` or the caller's bound on it (the `kappa`
+            setting of [`QLS`][nwqlib.algorithms.qls.method.QLS]). That
+            parameter can exceed `sigma_max(A)/sigma_min(A)`
+            ([QLS guide](../../algorithms/qls.md#inputs-scale-and-padding)).
+        kr_eta: Kernel-reflection approximation parameter in `(0, 1]`.
     """
 
     coefficients: tuple[float, ...]
@@ -90,6 +98,19 @@ def plan_kernel_reflection(kappa_be: float, eta: float) -> KernelReflectionPolyn
     it satisfies the
     degree condition under which Lemma 3 holds with the filter value
     ``F(Delta) <= eta``.
+
+    Args:
+        kappa_be (float): Reciprocal of the gap `Delta`, greater than 1.
+        eta (float): Kernel-reflection approximation parameter, in
+            `(0, 1]`.
+
+    Returns:
+        plan (KernelReflectionPolynomial): Empty `coefficients`, the
+            half-degree `kr_ell` above, and the arguments as `kappa_be` and
+            `kr_eta`. The polynomial degree is `2*kr_ell`.
+
+    Raises:
+        ValueError: If `kappa_be <= 1`, or if `eta` is not in `(0, 1]`.
     """
 
     kappa_be = float(kappa_be)
@@ -107,7 +128,7 @@ def plan_kernel_reflection(kappa_be: float, eta: float) -> KernelReflectionPolyn
 
 
 def kernel_reflection_cost(plan) -> _FitCost:
-    """Return the admission cost of ``_realize_kernel_reflection`` for one plan.
+    """Return the bytes and work counted for computing the kernel-reflection polynomial of one plan.
 
     With degree ``d = 2 ell`` and ``n = max(2001, 8 (d + 1))`` fit nodes,
     ``peak_bytes`` counts 8-byte slots:
@@ -119,7 +140,8 @@ def kernel_reflection_cost(plan) -> _FitCost:
       recurrence vectors of ``chebval``.
     - ``4 (d + 1)``: coefficient vectors.
 
-    ``work`` is ``_linalg_laws.least_squares_work(n, d + 1)`` for the dense
+    ``work`` is NWQLib's work formula for ``numpy.linalg.lstsq`` for an
+    ``n x (d + 1)`` matrix for the dense
     least squares and ``8 n (d + 1)`` for the Vandermonde matrix, the
     degree-``ell`` filter evaluation and the scaling. LAPACK workspace is
     excluded.

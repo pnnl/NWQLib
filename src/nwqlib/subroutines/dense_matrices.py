@@ -5,11 +5,24 @@ import numpy as np
 
 
 def projector_complement_matrix(state: Any, *, dimension: int | None = None) -> np.ndarray:
-    """Return ``I - |state><state|`` for a normalized state vector.
+    """Return the projector `I - |state><state|` onto the complement of a state, as a dense matrix.
 
-    The QLS shortcut forms ``G_t = Q_{b'} A_t`` with ``Q_b = I - b b^dagger``
+    The QLS shortcut forms `G_t = Q_{b'} A_t` with `Q_b = I - b b^dagger`
     (Dalzell, arXiv:2406.12086v2, Eqs. (2) and (11)). The input is
-    normalized here, and a larger ``dimension`` zero-pads it.
+    normalized here, and a larger `dimension` zero-pads it.
+
+    Args:
+        state (array_like): Nonzero state vector.
+        dimension (int | None): Default `None`, which uses the length of
+            `state`. A larger value zero-pads the state.
+
+    Returns:
+        projector (numpy.ndarray): The complex `dimension`-square matrix
+            `I - |s><s|` for the normalized, padded state `s`.
+
+    Raises:
+        ValueError: If the state has zero norm or is longer than
+            `dimension`.
     """
 
     vector = np.asarray(state, dtype=complex).reshape(-1)
