@@ -2,7 +2,7 @@ site_name: NWQLib
 site_description: >-
   Qiskit-based end-to-end quantum algorithm workflows for scientific
   applications
-site_url: ""
+site_url: https://pnnl.github.io/NWQLib/
 repo_url: https://github.com/pnnl/NWQLib
 repo_name: pnnl/NWQLib
 docs_dir: docs
