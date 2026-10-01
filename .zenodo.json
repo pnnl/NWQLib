@@ -1,0 +1,31 @@
+{
+  "title": "NWQLib",
+  "description": "NWQLib applies quantum algorithms to scientific inputs and returns the computed quantities with their methods, resources and evidence. It covers linear systems, linear dynamics, eigenvalue and phase estimation, Pauli expectation values and box-constrained optimization, with resource estimates admitted before any circuit is built and execution on simulators and quantum providers.",
+  "upload_type": "software",
+  "access_right": "open",
+  "license": "BSD-2-Clause",
+  "keywords": [
+    "quantum computing",
+    "quantum algorithms",
+    "quantum linear systems",
+    "Hamiltonian simulation",
+    "quantum phase estimation",
+    "quantum optimization",
+    "resource estimation"
+  ],
+  "creators": [
+    {"name": "Zheng, Muqing", "affiliation": "Pacific Northwest National Laboratory"},
+    {"name": "Liu, Chenxu", "affiliation": "Pacific Northwest National Laboratory"},
+    {"name": "Song, Zhixin", "affiliation": "Pacific Northwest National Laboratory and Georgia Institute of Technology"},
+    {"name": "Wu, Zeguan", "affiliation": "Pacific Northwest National Laboratory and University of Pittsburgh"},
+    {"name": "Li, Xiangyu", "affiliation": "Pacific Northwest National Laboratory"},
+    {"name": "Li, Mingze", "affiliation": "Pacific Northwest National Laboratory"},
+    {"name": "Bauman, Nicholas P.", "affiliation": "Pacific Northwest National Laboratory"},
+    {"name": "Stein, Samuel A.", "affiliation": "Pacific Northwest National Laboratory"},
+    {"name": "Mülmenstädt, Johannes", "affiliation": "Pacific Northwest National Laboratory"},
+    {"name": "Chen, Yousu", "affiliation": "Pacific Northwest National Laboratory"},
+    {"name": "Wiebe, Nathan", "affiliation": "Pacific Northwest National Laboratory and University of Toronto"},
+    {"name": "Li, Ang", "affiliation": "Pacific Northwest National Laboratory and University of Washington"},
+    {"name": "Kowalski, Karol", "affiliation": "Pacific Northwest National Laboratory"}
+  ]
+}

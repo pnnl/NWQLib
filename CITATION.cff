@@ -1,0 +1,50 @@
+cff-version: 1.2.0
+message: "If you use NWQLib, please cite it as below."
+title: "NWQLib"
+abstract: "NWQLib applies quantum algorithms to scientific inputs and returns the computed quantities with their methods, resources and evidence."
+type: software
+version: 1.0.0
+date-released: 2026-09-30
+license: BSD-2-Clause
+repository-code: "https://github.com/pnnl/NWQLib"
+url: "https://pnnl.github.io/NWQLib/"
+authors:
+  - family-names: Zheng
+    given-names: Muqing
+    affiliation: Pacific Northwest National Laboratory
+  - family-names: Liu
+    given-names: Chenxu
+    affiliation: Pacific Northwest National Laboratory
+  - family-names: Song
+    given-names: Zhixin
+    affiliation: Pacific Northwest National Laboratory and Georgia Institute of Technology
+  - family-names: Wu
+    given-names: Zeguan
+    affiliation: Pacific Northwest National Laboratory and University of Pittsburgh
+  - family-names: Li
+    given-names: Xiangyu
+    affiliation: Pacific Northwest National Laboratory
+  - family-names: Li
+    given-names: Mingze
+    affiliation: Pacific Northwest National Laboratory
+  - family-names: Bauman
+    given-names: Nicholas P.
+    affiliation: Pacific Northwest National Laboratory
+  - family-names: Stein
+    given-names: Samuel A.
+    affiliation: Pacific Northwest National Laboratory
+  - family-names: Mülmenstädt
+    given-names: Johannes
+    affiliation: Pacific Northwest National Laboratory
+  - family-names: Chen
+    given-names: Yousu
+    affiliation: Pacific Northwest National Laboratory
+  - family-names: Wiebe
+    given-names: Nathan
+    affiliation: Pacific Northwest National Laboratory and University of Toronto
+  - family-names: Li
+    given-names: Ang
+    affiliation: Pacific Northwest National Laboratory and University of Washington
+  - family-names: Kowalski
+    given-names: Karol
+    affiliation: Pacific Northwest National Laboratory
