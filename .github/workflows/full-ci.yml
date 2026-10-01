@@ -48,7 +48,7 @@ jobs:
         if: matrix.environment == 'latest'
         run: |
           python -m pip install --upgrade pip
-          python -m pip install --upgrade --upgrade-strategy eager --only-final=:all: -e ".[dev,aer,qasm,docs,notebook,chemistry,ibm,ionq,tensor]" pytest-cov
+          python -m pip install --upgrade --upgrade-strategy eager --only-final=:all: -e ".[dev,aer,qasm,docs,notebook,chemistry,ibm,ionq,tensor]" pytest-cov "scikit_tt @ git+https://github.com/PGelss/scikit_tt.git"
       - name: Check dependency consistency
         run: python -m pip check
       - name: Verify latest direct dependencies

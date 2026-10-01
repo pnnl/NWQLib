@@ -1,14 +1,16 @@
 # NWQLib: Northwest Quantum Library
 
+[![DOI](https://zenodo.org/badge/DOI/10.5281/zenodo.23074265.svg)](https://doi.org/10.5281/zenodo.23074265)
+
+**Documentation: <https://pnnl.github.io/NWQLib/>**
+
 NWQLib applies quantum algorithms to scientific problems. A workflow connects your inputs and requested output to a selected method, execution and a report of the result, evidence and resources. Native circuit execution uses Qiskit and an explicitly selected backend.
 
 IR# PNNL-SA-227989
 
 ## Start here
 
-**The [example notebooks](examples/) solve complete scientific problems from input to result, error and circuit cost, and the [examples guide](docs/examples.md) points you to the one that matches your problem.**
-
-**The [mathematics page](docs/mathematics.md) states the bounds, resource laws and error budgets that NWQLib uses, each with its proof or source and the code that implements it.**
+**The [example notebooks](examples/) solve complete scientific problems from input to result, error and circuit cost, and the [examples guide](docs/examples.md) points you to the one that matches your problem. The [mathematics page](docs/mathematics.md) states the bounds, resource laws and error budgets that NWQLib uses, each with its proof or source and the code that implements it.**
 
 From a source checkout, install the package with the local Aer executor:
 

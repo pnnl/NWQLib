@@ -194,7 +194,7 @@ Current extras are self-contained with their direct requirements:
 
 - `qiskit`: `qiskit>=2.5.2` for native intake, lowering, export and selected kernels.
 - `aer`: Qiskit and `qiskit-aer>=0.17.2` for local execution.
-- `tensor`: Qiskit and `scikit_tt` for circuit MPS preparation.
+- `tensor`: Qiskit for circuit MPS preparation. The MPS route also needs `scikit_tt`, which is not on PyPI, so install it separately with `python -m pip install "scikit_tt @ git+https://github.com/PGelss/scikit_tt.git"` (the stable environment pins its commit in `ENVIRONMENT_LOCK.txt`).
 - `qasm`: Qiskit, OpenQASM parser and Qiskit QASM3 importer for explicit materialization.
 - `chemistry`: Qiskit, PySCF and OpenFermion for chemistry input preparation.
 - `ibm`: Qiskit and `qiskit-ibm-runtime>=0.49.0` for admitted Runtime operations.

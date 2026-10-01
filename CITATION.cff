@@ -8,6 +8,11 @@ date-released: 2026-09-30
 license: BSD-2-Clause
 repository-code: "https://github.com/pnnl/NWQLib"
 url: "https://pnnl.github.io/NWQLib/"
+doi: 10.5281/zenodo.23074266
+identifiers:
+  - type: doi
+    value: 10.5281/zenodo.23074265
+    description: "The concept DOI of NWQLib, resolving to the latest version."
 authors:
   - family-names: Zheng
     given-names: Muqing

@@ -23,6 +23,7 @@ dependencies = [
 
 [project.urls]
 Homepage = "https://github.com/pnnl/NWQLib"
+Documentation = "https://pnnl.github.io/NWQLib/"
 Repository = "https://github.com/pnnl/NWQLib"
 
 [project.scripts]
@@ -57,7 +58,6 @@ docs = [
 ]
 tensor = [
     "qiskit>=2.5.2",
-    "scikit_tt @ git+https://github.com/PGelss/scikit_tt.git",
 ]
 # qiskit-nature deliberately excluded (maintainer decision, 2026-07-03): it pins
 # tightly to qiskit releases and would couple the Qiskit
