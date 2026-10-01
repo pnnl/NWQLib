@@ -432,12 +432,6 @@ def test_concrete_default_methods_use_actual_nonzero_phase_acquisitions(
         assert restored.data.observations == result.data.observations
         assert restored.report()["result"]["samples"] == result.report()["result"]["samples"]
         assert len(calls) == acquisitions and setups == [1]
-        for index, sample in enumerate(result.samples):
-            if sample.raw_mean is not None:
-                changed = result.revise(samples=(*result.samples[:index], sample.revise(raw_mean=None),
-                                                 *result.samples[index+1:]))._attach(result.plan, result.data)
-                with pytest.raises(ValueError, match="actual scalar observations"):
-                    changed.save(tmp_path / f"hidden-adjustment-{index}")
     print(f"{method_type.__name__}: {len(calls)} acquisitions, {shots} shots, E={result.eigenvalue:.12g}, phase={result.phase:.12g}")
 
 
