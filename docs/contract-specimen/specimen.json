@@ -1,0 +1,1232 @@
+{
+  "schema_version": "nwqlib.contract-specimen/1",
+  "records": [
+    {
+      "id": "request",
+      "kind": "Request",
+      "payload": {
+        "hamiltonian": {
+          "labels": [
+            "IIIX",
+            "IIIZ",
+            "IIZI",
+            "IZII",
+            "ZIII"
+          ],
+          "coefficients": [
+            1,
+            1,
+            1,
+            1,
+            1
+          ],
+          "units": "input_energy"
+        },
+        "reference": {
+          "system_basis_index": 14,
+          "display_bits": "1110",
+          "x_system_qubits": [
+            1,
+            2,
+            3
+          ]
+        },
+        "system_qubits": 4,
+        "qubit_order": "little_endian",
+        "label_order": "Qiskit_display",
+        "output": "lowest_projected_energy",
+        "accuracy_target": {
+          "absolute": "1/1000",
+          "unit": "input_energy"
+        }
+      },
+      "refs": [],
+      "sha256": "30ec950efb03ec51049a8fd8783200b3c00d01a4500017f51ccc6f3c445dc5ab"
+    },
+    {
+      "id": "plan",
+      "kind": "Plan",
+      "payload": {
+        "algorithm": "chebyshev_lanczos",
+        "krylov_dimension": 2,
+        "alpha": 5,
+        "required_moments": [
+          1,
+          2,
+          3
+        ],
+        "known_moments": {
+          "0": "1"
+        },
+        "registers": {
+          "index": [
+            0,
+            1,
+            2
+          ],
+          "system": [
+            3,
+            4,
+            5,
+            6
+          ]
+        },
+        "program": {
+          "definitions": {
+            "walk": {
+              "type": "Sequence",
+              "children": [
+                {
+                  "type": "BlockCall",
+                  "block": "SELECT"
+                },
+                {
+                  "type": "BlockCall",
+                  "block": "PREP_inverse"
+                },
+                {
+                  "type": "BlockCall",
+                  "block": "zero_reflection"
+                },
+                {
+                  "type": "BlockCall",
+                  "block": "PREP"
+                }
+              ]
+            }
+          },
+          "root": {
+            "type": "MeasurementBatch",
+            "settings": [
+              {
+                "id": "mu_1",
+                "degree": 1,
+                "body": {
+                  "type": "Sequence",
+                  "children": [
+                    {
+                      "type": "BlockCall",
+                      "block": "reference"
+                    },
+                    {
+                      "type": "BlockCall",
+                      "block": "PREP"
+                    },
+                    {
+                      "type": "Repeat",
+                      "count": 0,
+                      "body": {
+                        "type": "BlockCall",
+                        "block": "walk"
+                      }
+                    },
+                    {
+                      "type": "BlockCall",
+                      "block": "SELECT_basis"
+                    },
+                    {
+                      "type": "BlockCall",
+                      "block": "measure",
+                      "qubits": [
+                        0
+                      ]
+                    },
+                    {
+                      "type": "BlockCall",
+                      "block": "measure",
+                      "qubits": [
+                        1
+                      ]
+                    },
+                    {
+                      "type": "BlockCall",
+                      "block": "measure",
+                      "qubits": [
+                        2
+                      ]
+                    },
+                    {
+                      "type": "BlockCall",
+                      "block": "measure",
+                      "qubits": [
+                        3
+                      ]
+                    },
+                    {
+                      "type": "BlockCall",
+                      "block": "measure",
+                      "qubits": [
+                        4
+                      ]
+                    },
+                    {
+                      "type": "BlockCall",
+                      "block": "measure",
+                      "qubits": [
+                        5
+                      ]
+                    },
+                    {
+                      "type": "BlockCall",
+                      "block": "measure",
+                      "qubits": [
+                        6
+                      ]
+                    }
+                  ]
+                }
+              },
+              {
+                "id": "mu_2",
+                "degree": 2,
+                "body": {
+                  "type": "Sequence",
+                  "children": [
+                    {
+                      "type": "BlockCall",
+                      "block": "reference"
+                    },
+                    {
+                      "type": "BlockCall",
+                      "block": "PREP"
+                    },
+                    {
+                      "type": "Repeat",
+                      "count": 1,
+                      "body": {
+                        "type": "BlockCall",
+                        "block": "walk"
+                      }
+                    },
+                    {
+                      "type": "BlockCall",
+                      "block": "PREP_inverse"
+                    },
+                    {
+                      "type": "BlockCall",
+                      "block": "measure",
+                      "qubits": [
+                        0
+                      ]
+                    },
+                    {
+                      "type": "BlockCall",
+                      "block": "measure",
+                      "qubits": [
+                        1
+                      ]
+                    },
+                    {
+                      "type": "BlockCall",
+                      "block": "measure",
+                      "qubits": [
+                        2
+                      ]
+                    }
+                  ]
+                }
+              },
+              {
+                "id": "mu_3",
+                "degree": 3,
+                "body": {
+                  "type": "Sequence",
+                  "children": [
+                    {
+                      "type": "BlockCall",
+                      "block": "reference"
+                    },
+                    {
+                      "type": "BlockCall",
+                      "block": "PREP"
+                    },
+                    {
+                      "type": "Repeat",
+                      "count": 1,
+                      "body": {
+                        "type": "BlockCall",
+                        "block": "walk"
+                      }
+                    },
+                    {
+                      "type": "BlockCall",
+                      "block": "SELECT_basis"
+                    },
+                    {
+                      "type": "BlockCall",
+                      "block": "measure",
+                      "qubits": [
+                        0
+                      ]
+                    },
+                    {
+                      "type": "BlockCall",
+                      "block": "measure",
+                      "qubits": [
+                        1
+                      ]
+                    },
+                    {
+                      "type": "BlockCall",
+                      "block": "measure",
+                      "qubits": [
+                        2
+                      ]
+                    },
+                    {
+                      "type": "BlockCall",
+                      "block": "measure",
+                      "qubits": [
+                        3
+                      ]
+                    },
+                    {
+                      "type": "BlockCall",
+                      "block": "measure",
+                      "qubits": [
+                        4
+                      ]
+                    },
+                    {
+                      "type": "BlockCall",
+                      "block": "measure",
+                      "qubits": [
+                        5
+                      ]
+                    },
+                    {
+                      "type": "BlockCall",
+                      "block": "measure",
+                      "qubits": [
+                        6
+                      ]
+                    }
+                  ]
+                }
+              }
+            ]
+          }
+        },
+        "block_semantics": {
+          "PREP": "|0^3> -> (|0>+|1>+|2>+|3>+|4>)/sqrt(5)",
+          "SELECT": "sum_j |j><j| tensor P_j; j=0..4 in request label order; identity for j=5..7",
+          "zero_reflection": "2|0^3><0^3|-I",
+          "walk": "R U; U=SELECT; R=PREP zero_reflection PREP_inverse",
+          "SELECT_basis": "index-label-controlled H for X; identity for I/Z",
+          "reference": "|0000> -> |1110>; exact norm one; inverse/control legal; no dirty ancillas"
+        },
+        "readout": {
+          "state": "(R U)^floor(k/2) |G,psi>",
+          "odd": "mu_k=<SELECT>; after SELECT_basis decode signed system parity keyed by index",
+          "even": "mu_k=<R>; after PREP_inverse decode +1 for index=0 else -1",
+          "term_table": [
+            {
+              "index": 0,
+              "label": "IIIX",
+              "sign": 1,
+              "parity_mask": 1
+            },
+            {
+              "index": 1,
+              "label": "IIIZ",
+              "sign": 1,
+              "parity_mask": 1
+            },
+            {
+              "index": 2,
+              "label": "IIZI",
+              "sign": 1,
+              "parity_mask": 2
+            },
+            {
+              "index": 3,
+              "label": "IZII",
+              "sign": 1,
+              "parity_mask": 4
+            },
+            {
+              "index": 4,
+              "label": "ZIII",
+              "sign": 1,
+              "parity_mask": 8
+            }
+          ],
+          "padding_outcome": 0,
+          "postselection": false
+        },
+        "phase_budgets": {
+          "backend_calls": 0,
+          "shots": 0,
+          "target_compilations": 0,
+          "analysis": "fixed 2x2 rational pencil; no reference solve"
+        }
+      },
+      "refs": [
+        {
+          "id": "request",
+          "sha256": "30ec950efb03ec51049a8fd8783200b3c00d01a4500017f51ccc6f3c445dc5ab"
+        }
+      ],
+      "sha256": "5104112c6a05369eefeef554a9878522e0cc6a5e68336799612d1669c37dfe25"
+    },
+    {
+      "id": "realization",
+      "kind": "Realization",
+      "payload": {
+        "choice": "direct_x",
+        "reference": {
+          "type": "Sequence",
+          "children": [
+            {
+              "type": "BlockCall",
+              "block": "X",
+              "qubits": [
+                4
+              ]
+            },
+            {
+              "type": "BlockCall",
+              "block": "X",
+              "qubits": [
+                5
+              ]
+            },
+            {
+              "type": "BlockCall",
+              "block": "X",
+              "qubits": [
+                6
+              ]
+            }
+          ]
+        },
+        "bindings": "all logical register/degree bindings resolved",
+        "evidence_kind": "analytical_fixture"
+      },
+      "refs": [
+        {
+          "id": "plan",
+          "sha256": "5104112c6a05369eefeef554a9878522e0cc6a5e68336799612d1669c37dfe25"
+        }
+      ],
+      "sha256": "ccd108f657a7f693e15aa58f5dfa94dc607dbbf2eccfb82235d5967adfa6272e"
+    },
+    {
+      "id": "prepared",
+      "kind": "PreparedArtifact",
+      "payload": {
+        "format": "nwqlib.logical-recipe-fixture/1",
+        "program": {
+          "definitions": {
+            "walk": {
+              "type": "Sequence",
+              "children": [
+                {
+                  "type": "BlockCall",
+                  "block": "SELECT"
+                },
+                {
+                  "type": "BlockCall",
+                  "block": "PREP_inverse"
+                },
+                {
+                  "type": "BlockCall",
+                  "block": "zero_reflection"
+                },
+                {
+                  "type": "BlockCall",
+                  "block": "PREP"
+                }
+              ]
+            }
+          },
+          "root": {
+            "type": "MeasurementBatch",
+            "settings": [
+              {
+                "id": "mu_1",
+                "degree": 1,
+                "body": {
+                  "type": "Sequence",
+                  "children": [
+                    {
+                      "type": "Sequence",
+                      "children": [
+                        {
+                          "type": "BlockCall",
+                          "block": "X",
+                          "qubits": [
+                            4
+                          ]
+                        },
+                        {
+                          "type": "BlockCall",
+                          "block": "X",
+                          "qubits": [
+                            5
+                          ]
+                        },
+                        {
+                          "type": "BlockCall",
+                          "block": "X",
+                          "qubits": [
+                            6
+                          ]
+                        }
+                      ]
+                    },
+                    {
+                      "type": "BlockCall",
+                      "block": "PREP"
+                    },
+                    {
+                      "type": "Repeat",
+                      "count": 0,
+                      "body": {
+                        "type": "BlockCall",
+                        "block": "walk"
+                      }
+                    },
+                    {
+                      "type": "BlockCall",
+                      "block": "SELECT_basis"
+                    },
+                    {
+                      "type": "BlockCall",
+                      "block": "measure",
+                      "qubits": [
+                        0
+                      ]
+                    },
+                    {
+                      "type": "BlockCall",
+                      "block": "measure",
+                      "qubits": [
+                        1
+                      ]
+                    },
+                    {
+                      "type": "BlockCall",
+                      "block": "measure",
+                      "qubits": [
+                        2
+                      ]
+                    },
+                    {
+                      "type": "BlockCall",
+                      "block": "measure",
+                      "qubits": [
+                        3
+                      ]
+                    },
+                    {
+                      "type": "BlockCall",
+                      "block": "measure",
+                      "qubits": [
+                        4
+                      ]
+                    },
+                    {
+                      "type": "BlockCall",
+                      "block": "measure",
+                      "qubits": [
+                        5
+                      ]
+                    },
+                    {
+                      "type": "BlockCall",
+                      "block": "measure",
+                      "qubits": [
+                        6
+                      ]
+                    }
+                  ]
+                }
+              },
+              {
+                "id": "mu_2",
+                "degree": 2,
+                "body": {
+                  "type": "Sequence",
+                  "children": [
+                    {
+                      "type": "Sequence",
+                      "children": [
+                        {
+                          "type": "BlockCall",
+                          "block": "X",
+                          "qubits": [
+                            4
+                          ]
+                        },
+                        {
+                          "type": "BlockCall",
+                          "block": "X",
+                          "qubits": [
+                            5
+                          ]
+                        },
+                        {
+                          "type": "BlockCall",
+                          "block": "X",
+                          "qubits": [
+                            6
+                          ]
+                        }
+                      ]
+                    },
+                    {
+                      "type": "BlockCall",
+                      "block": "PREP"
+                    },
+                    {
+                      "type": "Repeat",
+                      "count": 1,
+                      "body": {
+                        "type": "BlockCall",
+                        "block": "walk"
+                      }
+                    },
+                    {
+                      "type": "BlockCall",
+                      "block": "PREP_inverse"
+                    },
+                    {
+                      "type": "BlockCall",
+                      "block": "measure",
+                      "qubits": [
+                        0
+                      ]
+                    },
+                    {
+                      "type": "BlockCall",
+                      "block": "measure",
+                      "qubits": [
+                        1
+                      ]
+                    },
+                    {
+                      "type": "BlockCall",
+                      "block": "measure",
+                      "qubits": [
+                        2
+                      ]
+                    }
+                  ]
+                }
+              },
+              {
+                "id": "mu_3",
+                "degree": 3,
+                "body": {
+                  "type": "Sequence",
+                  "children": [
+                    {
+                      "type": "Sequence",
+                      "children": [
+                        {
+                          "type": "BlockCall",
+                          "block": "X",
+                          "qubits": [
+                            4
+                          ]
+                        },
+                        {
+                          "type": "BlockCall",
+                          "block": "X",
+                          "qubits": [
+                            5
+                          ]
+                        },
+                        {
+                          "type": "BlockCall",
+                          "block": "X",
+                          "qubits": [
+                            6
+                          ]
+                        }
+                      ]
+                    },
+                    {
+                      "type": "BlockCall",
+                      "block": "PREP"
+                    },
+                    {
+                      "type": "Repeat",
+                      "count": 1,
+                      "body": {
+                        "type": "BlockCall",
+                        "block": "walk"
+                      }
+                    },
+                    {
+                      "type": "BlockCall",
+                      "block": "SELECT_basis"
+                    },
+                    {
+                      "type": "BlockCall",
+                      "block": "measure",
+                      "qubits": [
+                        0
+                      ]
+                    },
+                    {
+                      "type": "BlockCall",
+                      "block": "measure",
+                      "qubits": [
+                        1
+                      ]
+                    },
+                    {
+                      "type": "BlockCall",
+                      "block": "measure",
+                      "qubits": [
+                        2
+                      ]
+                    },
+                    {
+                      "type": "BlockCall",
+                      "block": "measure",
+                      "qubits": [
+                        3
+                      ]
+                    },
+                    {
+                      "type": "BlockCall",
+                      "block": "measure",
+                      "qubits": [
+                        4
+                      ]
+                    },
+                    {
+                      "type": "BlockCall",
+                      "block": "measure",
+                      "qubits": [
+                        5
+                      ]
+                    },
+                    {
+                      "type": "BlockCall",
+                      "block": "measure",
+                      "qubits": [
+                        6
+                      ]
+                    }
+                  ]
+                }
+              }
+            ]
+          }
+        },
+        "program_sha256": "ac458636cca7d39338e7909b5e0ec145abc7cedbd8ad329c6a739ea05729f334",
+        "lifecycle": "logical_fixture_prepared",
+        "target_compilation": "not_run",
+        "submission_ready": false,
+        "compiler": null,
+        "target": "analytical-fixture",
+        "layout": {
+          "index": [
+            0,
+            1,
+            2
+          ],
+          "system": [
+            3,
+            4,
+            5,
+            6
+          ]
+        },
+        "remaining_requirements": [
+          "target selection",
+          "capability and capacity assessment",
+          "compilation",
+          "execution approval"
+        ]
+      },
+      "refs": [
+        {
+          "id": "realization",
+          "sha256": "ccd108f657a7f693e15aa58f5dfa94dc607dbbf2eccfb82235d5967adfa6272e"
+        }
+      ],
+      "sha256": "c786fc00d15538dcb2db73884ade0ed73090004137831eeeef870317636ecebf"
+    },
+    {
+      "id": "workload",
+      "kind": "WorkloadEstimate",
+      "payload": {
+        "stage": "logical",
+        "lifecycle": "planned",
+        "population": "one invocation per required moment setting; no shots multiplier",
+        "basis": [
+          "X",
+          "H",
+          "Z",
+          "PREP",
+          "PREP_inverse",
+          "SELECT",
+          "zero_reflection",
+          "SELECT_basis",
+          "measure"
+        ],
+        "inventory": {
+          "X": 9,
+          "H": 0,
+          "Z": 0,
+          "PREP": 5,
+          "PREP_inverse": 3,
+          "SELECT": 2,
+          "zero_reflection": 2,
+          "SELECT_basis": 2,
+          "measure": 17
+        },
+        "unit": "dynamic_logical_invocations",
+        "evidence_kind": "exact_structural_relation",
+        "system_width": 4,
+        "index_width": 3,
+        "logical_width": 7,
+        "required_settings": 3,
+        "stored_walk_definitions": 1,
+        "native_gates": null,
+        "T_count": null,
+        "compiled_depth": null,
+        "compiler_workspace_bytes": null,
+        "runtime_seconds": null,
+        "currency_cost": null,
+        "unknown_reason": "no native lowering, synthesis precision, compiler, device or calibrated cost model"
+      },
+      "refs": [
+        {
+          "id": "realization",
+          "sha256": "ccd108f657a7f693e15aa58f5dfa94dc607dbbf2eccfb82235d5967adfa6272e"
+        },
+        {
+          "id": "prepared",
+          "sha256": "c786fc00d15538dcb2db73884ade0ed73090004137831eeeef870317636ecebf"
+        }
+      ],
+      "sha256": "2e613baee4dcdf05e0a381645c30c50695392742b4a7c1d6543dc8dc70666415"
+    },
+    {
+      "id": "profile",
+      "kind": "DeviceProfile",
+      "payload": {
+        "name": "analytical-fixture",
+        "version": "1",
+        "capabilities": [
+          "exact_expectation_fixture"
+        ],
+        "device_qubit_capacity": null,
+        "workspace_model": null,
+        "runtime_model": null,
+        "calibration": null,
+        "freshness": "not_applicable_no_device_snapshot"
+      },
+      "refs": [],
+      "sha256": "3b98162fe7fffd91b998ab4b2687f028a5bafb9fdb44dfaa242da27e67f78e87"
+    },
+    {
+      "id": "allocation",
+      "kind": "Allocation",
+      "payload": {
+        "device_qubits": null,
+        "memory_bytes": null,
+        "concurrency": null,
+        "backend_jobs_allowed": 0
+      },
+      "refs": [
+        {
+          "id": "profile",
+          "sha256": "3b98162fe7fffd91b998ab4b2687f028a5bafb9fdb44dfaa242da27e67f78e87"
+        }
+      ],
+      "sha256": "a3aba3d7bcb3e48953fdff818234dabb8c0abe8be998592a2e505dccfd6f335a"
+    },
+    {
+      "id": "assessment",
+      "kind": "Assessment",
+      "payload": {
+        "logical_width": 7,
+        "capacity": "UNKNOWN",
+        "runtime": "UNKNOWN",
+        "cost": "UNKNOWN",
+        "real_submission": "NOT_ASSESSED",
+        "reason": "analytical fixture has no device allocation or calibrated model"
+      },
+      "refs": [
+        {
+          "id": "workload",
+          "sha256": "2e613baee4dcdf05e0a381645c30c50695392742b4a7c1d6543dc8dc70666415"
+        },
+        {
+          "id": "profile",
+          "sha256": "3b98162fe7fffd91b998ab4b2687f028a5bafb9fdb44dfaa242da27e67f78e87"
+        },
+        {
+          "id": "allocation",
+          "sha256": "a3aba3d7bcb3e48953fdff818234dabb8c0abe8be998592a2e505dccfd6f335a"
+        }
+      ],
+      "sha256": "bf723de43377bffe18a4e54944ce200511b9be99804222619cc03293816826e5"
+    },
+    {
+      "id": "trace",
+      "kind": "ExecutionTrace",
+      "payload": {
+        "status": "fixture_complete",
+        "evidence_kind": "analytical_fixture",
+        "prepared_id": "prepared",
+        "target": "analytical-fixture",
+        "planned_settings": 3,
+        "logical_prepared_settings": 3,
+        "target_prepared_settings": 0,
+        "submitted_settings": 0,
+        "executed_settings": 0,
+        "returned_shots": 0,
+        "backend_jobs": [],
+        "measured_runtime_seconds": null,
+        "fixture_events": [
+          {
+            "id": "fixture_mu_1",
+            "setting": "mu_1",
+            "attempt": "analytical-1",
+            "chunk": "exact-1",
+            "source": "analytical-moment-identity/1"
+          },
+          {
+            "id": "fixture_mu_2",
+            "setting": "mu_2",
+            "attempt": "analytical-1",
+            "chunk": "exact-2",
+            "source": "analytical-moment-identity/1"
+          },
+          {
+            "id": "fixture_mu_3",
+            "setting": "mu_3",
+            "attempt": "analytical-1",
+            "chunk": "exact-3",
+            "source": "analytical-moment-identity/1"
+          }
+        ]
+      },
+      "refs": [
+        {
+          "id": "prepared",
+          "sha256": "c786fc00d15538dcb2db73884ade0ed73090004137831eeeef870317636ecebf"
+        },
+        {
+          "id": "assessment",
+          "sha256": "bf723de43377bffe18a4e54944ce200511b9be99804222619cc03293816826e5"
+        }
+      ],
+      "sha256": "1623848d219877cddd744b33b77bb934551b7b292a35e68234303ac2b204bcf9"
+    },
+    {
+      "id": "observations",
+      "kind": "ObservationView",
+      "payload": {
+        "coverage": "complete",
+        "kind": "exact_expectation_fixture",
+        "known_moments": {
+          "0": "1"
+        },
+        "contributions": [
+          {
+            "setting": "mu_1",
+            "degree": 1,
+            "expectation": "-2/5",
+            "trace_event": "fixture_mu_1",
+            "attempt": "analytical-1",
+            "chunk": "exact-1",
+            "prepared_id": "prepared",
+            "parameter_point": "fixed-H-and-reference",
+            "measured_qubits": [
+              0,
+              1,
+              2,
+              3,
+              4,
+              5,
+              6
+            ],
+            "returned_shots": null,
+            "conditioning": "none",
+            "uncertainty": "not_applicable_exact_fixture"
+          },
+          {
+            "setting": "mu_2",
+            "degree": 2,
+            "expectation": "-3/5",
+            "trace_event": "fixture_mu_2",
+            "attempt": "analytical-1",
+            "chunk": "exact-2",
+            "prepared_id": "prepared",
+            "parameter_point": "fixed-H-and-reference",
+            "measured_qubits": [
+              0,
+              1,
+              2
+            ],
+            "returned_shots": null,
+            "conditioning": "none",
+            "uncertainty": "not_applicable_exact_fixture"
+          },
+          {
+            "setting": "mu_3",
+            "degree": 3,
+            "expectation": "86/125",
+            "trace_event": "fixture_mu_3",
+            "attempt": "analytical-1",
+            "chunk": "exact-3",
+            "prepared_id": "prepared",
+            "parameter_point": "fixed-H-and-reference",
+            "measured_qubits": [
+              0,
+              1,
+              2,
+              3,
+              4,
+              5,
+              6
+            ],
+            "returned_shots": null,
+            "conditioning": "none",
+            "uncertainty": "not_applicable_exact_fixture"
+          }
+        ]
+      },
+      "refs": [
+        {
+          "id": "plan",
+          "sha256": "5104112c6a05369eefeef554a9878522e0cc6a5e68336799612d1669c37dfe25"
+        },
+        {
+          "id": "prepared",
+          "sha256": "c786fc00d15538dcb2db73884ade0ed73090004137831eeeef870317636ecebf"
+        },
+        {
+          "id": "trace",
+          "sha256": "1623848d219877cddd744b33b77bb934551b7b292a35e68234303ac2b204bcf9"
+        }
+      ],
+      "sha256": "79b26e3e737e6ef71d4ea505f5fbadfe6c389bc7872199866adc2939dedac944"
+    },
+    {
+      "id": "provenance",
+      "kind": "Provenance",
+      "payload": {
+        "origin": "synthetic_analytical_contract_fixture",
+        "generator": "docs/scripts/contract_specimen.py@1",
+        "source_revision": "6d5172da8943a39b0a997e53ba9da089e61d5d88",
+        "source_revision_role": "implementation_starting_point",
+        "software_environment": "not_a_backend_run; generator environment not claimed as execution provenance",
+        "moment_evidence": {
+          "method": "invariant_sector_exact_algebra",
+          "basis_indices": [
+            14,
+            15
+          ],
+          "restricted_H": [
+            [
+              -2,
+              1
+            ],
+            [
+              1,
+              -4
+            ]
+          ],
+          "raw_power_moments": [
+            1,
+            -2,
+            5,
+            -16
+          ]
+        },
+        "ground_evidence": {
+          "method": "commuting_tensor_factors",
+          "spectator_sums": [
+            -3,
+            -1,
+            1,
+            3
+          ],
+          "local_eigenvalues": "plus_or_minus_sqrt(2)",
+          "minimum": "-3-sqrt(2)",
+          "scope": "full_16_dimensional_H_analytical_fixture"
+        },
+        "data_storage": "exact sufficient moments and compact recipes; no raw shots or full states exist"
+      },
+      "refs": [
+        {
+          "id": "request",
+          "sha256": "30ec950efb03ec51049a8fd8783200b3c00d01a4500017f51ccc6f3c445dc5ab"
+        }
+      ],
+      "sha256": "f9c9bf5c90397b8062b18c9ede6f5d40f06715e9302a6adb2030533f3a94ba59"
+    },
+    {
+      "id": "result",
+      "kind": "Result",
+      "payload": {
+        "type": "ProjectedEnergyResult",
+        "status": "final",
+        "coverage": "complete",
+        "unit": "input_energy",
+        "pencil": {
+          "overlap": [
+            [
+              "1",
+              "-2/5"
+            ],
+            [
+              "-2/5",
+              "1/5"
+            ]
+          ],
+          "hamiltonian": [
+            [
+              "-2",
+              "1"
+            ],
+            [
+              "1",
+              "-16/25"
+            ]
+          ]
+        },
+        "energy": {
+          "rational": -3,
+          "sqrt_coefficient": -1,
+          "radicand": 2
+        },
+        "interpretation": "lowest eigenvalue in span{psi,(H/5)psi}",
+        "statistical_interval": null,
+        "ground_accuracy_certificate": true,
+        "evidence_kind": "analytical_fixture",
+        "missing_moments": []
+      },
+      "refs": [
+        {
+          "id": "request",
+          "sha256": "30ec950efb03ec51049a8fd8783200b3c00d01a4500017f51ccc6f3c445dc5ab"
+        },
+        {
+          "id": "plan",
+          "sha256": "5104112c6a05369eefeef554a9878522e0cc6a5e68336799612d1669c37dfe25"
+        },
+        {
+          "id": "observations",
+          "sha256": "79b26e3e737e6ef71d4ea505f5fbadfe6c389bc7872199866adc2939dedac944"
+        },
+        {
+          "id": "trace",
+          "sha256": "1623848d219877cddd744b33b77bb934551b7b292a35e68234303ac2b204bcf9"
+        },
+        {
+          "id": "provenance",
+          "sha256": "f9c9bf5c90397b8062b18c9ede6f5d40f06715e9302a6adb2030533f3a94ba59"
+        }
+      ],
+      "sha256": "997248c70e552235fa906e7f6e4fb9db779358066d5407933c5003db25429f9d"
+    },
+    {
+      "id": "errors",
+      "kind": "ErrorModel",
+      "payload": {
+        "target": "lowest_projected_energy",
+        "unit": "input_energy",
+        "terms": [
+          {
+            "name": "sampling",
+            "evidence_kind": "not_applicable",
+            "composition_role": "listed_only",
+            "coverage": "exact_fixture_only",
+            "bound": null
+          },
+          {
+            "name": "implementation",
+            "evidence_kind": "unknown",
+            "composition_role": "listed_only",
+            "coverage": "no_compiled_or_executed_artifact",
+            "bound": null
+          },
+          {
+            "name": "subspace",
+            "evidence_kind": "proved_relation",
+            "composition_role": "conditional_term",
+            "coverage": "analytical_full_spectrum",
+            "target": "additional_ground_identification_claim",
+            "bound": "0"
+          }
+        ],
+        "requested_accuracy": "1/1000",
+        "backend_total_error_bound": null
+      },
+      "refs": [
+        {
+          "id": "request",
+          "sha256": "30ec950efb03ec51049a8fd8783200b3c00d01a4500017f51ccc6f3c445dc5ab"
+        },
+        {
+          "id": "result",
+          "sha256": "997248c70e552235fa906e7f6e4fb9db779358066d5407933c5003db25429f9d"
+        }
+      ],
+      "sha256": "47ca78fd25579ef647e65d5d4c8b6bcd2e10c51399c549de9dc67270a736f256"
+    },
+    {
+      "id": "claims",
+      "kind": "ClaimAssessments",
+      "payload": {
+        "assessments": [
+          {
+            "claim": "projected_energy",
+            "status": "PASS",
+            "method": "exact_rational_pencil",
+            "coverage": "analytical_fixture"
+          },
+          {
+            "claim": "near_spectrum",
+            "status": "PASS",
+            "method": "invariant_sector_eigenpair",
+            "coverage": "analytical_fixture"
+          },
+          {
+            "claim": "ground_accuracy",
+            "status": "PASS",
+            "method": "independent_full_spectrum_identification",
+            "coverage": "analytical_fixture_only"
+          },
+          {
+            "claim": "backend_accuracy",
+            "status": "NOT_RUN",
+            "method": "none",
+            "coverage": "none"
+          }
+        ],
+        "target_status": "established_for_analytical_fixture_only"
+      },
+      "refs": [
+        {
+          "id": "result",
+          "sha256": "997248c70e552235fa906e7f6e4fb9db779358066d5407933c5003db25429f9d"
+        },
+        {
+          "id": "errors",
+          "sha256": "47ca78fd25579ef647e65d5d4c8b6bcd2e10c51399c549de9dc67270a736f256"
+        },
+        {
+          "id": "provenance",
+          "sha256": "f9c9bf5c90397b8062b18c9ede6f5d40f06715e9302a6adb2030533f3a94ba59"
+        },
+        {
+          "id": "prepared",
+          "sha256": "c786fc00d15538dcb2db73884ade0ed73090004137831eeeef870317636ecebf"
+        }
+      ],
+      "sha256": "612734984075cc5de95ed7290818b8a9080ed3e696525f8bcd2d590260215785"
+    }
+  ]
+}

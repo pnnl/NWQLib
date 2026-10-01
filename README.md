@@ -61,7 +61,7 @@ The notebooks in `examples/` apply NWQLib to molecular ground-state energy, a li
 | Energy estimates from moments or a selected subspace | [Chebyshev Lanczos](docs/algorithms/lanczos.md), [fixed and adaptive GCiM](docs/algorithms/gcim.md) |
 | Phase or energy estimation | [QPE: QCELS, RWPE, SPE and RFE](docs/algorithms/qpe.md) |
 | Time-independent linear dynamics | [LCHS](docs/algorithms/lchs.md) |
-| Linear systems | [QLS](docs/algorithms/qls.md) |
+| Linear systems | [QLS: QSVT inverse polynomial (`qsvt_inverse`, the default) and the Dalzell kernel shortcut (`shortcut_native_svp`, `shortcut_dilation`)](docs/algorithms/qls.md) |
 | Box-constrained optimization | [QHD](docs/algorithms/qhd.md) |
 | Optimization over a box with equality or inequality constraints | [QHD augmented Lagrangian](docs/algorithms/qhd.md#constrained-problems) |
 
@@ -98,3 +98,5 @@ Affiliations are those at the time of contribution.
 This work was supported by Pacific Northwest National Laboratory's Quantum Algorithms and Architecture for Domain Science (QuAADS) Laboratory Directed Research and Development (LDRD) Initiative. This material is based upon work supported by the U.S. Department of Energy, Office of Science, National Quantum Information Science Research Centers, Quantum Science Center (QSC). The Pacific Northwest National Laboratory is operated by Battelle for the U.S. Department of Energy under Contract DE-AC05-76RL01830.
 
 [Algorithm and subroutine references](docs/references.md).
+
+NWQLib is released under the BSD 2-Clause License; see `LICENSE`.

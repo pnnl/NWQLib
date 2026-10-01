@@ -1,0 +1,28 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1120" height="365" viewBox="0 0 1120 365" role="img" aria-labelledby="title desc">
+  <title id="title">A small D1Q3 collision example for Dalzell QLS</title>
+  <desc id="desc">Conserved density and momentum fix equilibrium for one periodic node. Three populations give a 15-coordinate time history. Dalzell QLS produces a normalized solution direction using a 32-by-32 base unitary and ten total qubits.</desc>
+  <defs><marker id="arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto"><path d="M0 0 L10 5 L0 10 z" fill="#475569"/></marker></defs>
+  <rect width="1120" height="365" rx="16" fill="#f8fafc"/>
+  <g font-family="Arial, sans-serif" fill="#172b4d">
+    <text x="28" y="36" font-size="23" font-weight="bold">D1Q3 collision with a small linear system</text>
+    <text x="28" y="63" font-size="15" fill="#475569">Conceptual diagram · the invariant-sector reduction preserves the physical single-node trajectory</text>
+    <rect x="28" y="96" width="318" height="130" rx="12" fill="#e0f2fe" stroke="#0072b2"/>
+    <text x="48" y="128" font-size="18" font-weight="bold">Three physical populations</text>
+    <text x="48" y="159" font-size="16">Density and momentum stay constant</text>
+    <text x="48" y="190" font-size="16">Equilibrium is fixed during collision</text>
+    <rect x="388" y="96" width="318" height="130" rx="12" fill="#fff2d4" stroke="#d18a00"/>
+    <text x="408" y="128" font-size="18" font-weight="bold">15-coordinate time history</text>
+    <text x="408" y="159" font-size="16">Initial → two Euler steps → two copies</text>
+    <text x="408" y="190" font-size="16">A x = b, including a constant source</text>
+    <rect x="748" y="96" width="344" height="130" rx="12" fill="#dcfce7" stroke="#009e73"/>
+    <text x="768" y="128" font-size="18" font-weight="bold">Dalzell kernel-reflection QLS</text>
+    <text x="768" y="159" font-size="16">32 × 32 base unitary · 10 total qubits</text>
+    <text x="768" y="190" font-size="16">Output: normalized solution direction</text>
+    <text x="28" y="274" font-size="18" font-weight="bold">Read the two kinds of output separately</text>
+    <text x="28" y="305" font-size="16">Classical analytic reference: physical populations and relaxation over time</text>
+    <text x="28" y="335" font-size="16">Quantum output: normalized amplitudes, coordinate probabilities, and success mass</text>
+  </g>
+  <g fill="none" stroke="#475569" stroke-width="2" marker-end="url(#arrow)">
+    <path d="M346 162 H382"/><path d="M706 162 H742"/>
+  </g>
+</svg>

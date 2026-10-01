@@ -1,0 +1,155 @@
+site_name: NWQLib
+site_description: >-
+  Qiskit-based end-to-end quantum algorithm workflows for scientific
+  applications
+site_url: ""
+repo_url: https://github.com/pnnl/NWQLib
+repo_name: pnnl/NWQLib
+docs_dir: docs
+site_dir: site
+exclude_docs: |
+  scripts/
+  ENVIRONMENT_LOCK.txt
+
+theme:
+  name: material
+  features:
+    - navigation.tabs
+    - navigation.sections
+    - navigation.top
+    - content.code.copy
+  palette:
+    - scheme: default
+      toggle:
+        icon: material/brightness-7
+        name: Dark mode
+    - scheme: slate
+      toggle:
+        icon: material/brightness-4
+        name: Light mode
+
+markdown_extensions:
+  - admonition
+  - toc:
+      permalink: true
+  - pymdownx.highlight
+  - pymdownx.superfences:
+      custom_fences:
+        - name: math
+          class: arithmatex
+          format: !!python/object/apply:pymdownx.arithmatex.arithmatex_fenced_format {kwds: {mode: generic}}
+  - pymdownx.arithmatex:
+      generic: true
+      inline_syntax: [dollar]
+      block_syntax: [dollar]
+
+extra_javascript:
+  - javascripts/mathjax.js
+  - https://cdn.jsdelivr.net/npm/mathjax@3.2.2/es5/tex-mml-chtml.js
+
+validation:
+  links:
+    not_found: warn
+    absolute_links: warn
+    unrecognized_links: warn
+
+plugins:
+  - search
+  - mkdocstrings:
+      handlers:
+        python:
+          paths: [src]
+          options:
+            docstring_style: google
+            allow_inspection: false
+            force_inspection: false
+            filters: ["!^_"]
+            show_if_no_docstring: true
+            members_order: source
+            separate_signature: true
+            show_signature_annotations: true
+            signature_crossrefs: true
+            merge_init_into_class: true
+            show_root_heading: true
+            show_root_full_path: false
+            show_source: false
+            summary: false
+
+nav:
+  - Home: index.md
+  - Getting Started:
+      - Python Quickstart: quickstart.md
+      - Examples: examples.md
+      - Why NWQLib: why_nwqlib.md
+      - Command Line: cli.md
+  - User Guides:
+      - Plan, Compare and Solve: scientist.md
+      - Supply Inputs: inputs.md
+      - Estimate Resources: resources.md
+      - Fault-tolerant Resources: fault-tolerant-resources.md
+      - Assess Device Profiles: profiles.md
+      - Search Supplied Choices: search.md
+      - Execute a Plan: prepared_execution.md
+      - Save and Continue a Run: run_archives.md
+      - Save and Reanalyze Results: saved_evidence.md
+      - Verify a Result: verification.md
+  - Algorithm Guides:
+      - Finite Pauli Expectation: algorithms/expectation.md
+      - Chebyshev Lanczos: algorithms/lanczos.md
+      - LCHS: algorithms/lchs.md
+      - QPE: algorithms/qpe.md
+      - QLS: algorithms/qls.md
+      - GCiM: algorithms/gcim.md
+      - QHD: algorithms/qhd.md
+  - Mathematics: mathematics.md
+  - Backends:
+      - Choose a Backend: backends.md
+      - Local Aer: aer.md
+      - NWQ-Sim: nwqsim.md
+      - IBM Runtime: ibm.md
+      - IonQ: ionq.md
+      - Quantinuum Nexus: nexus.md
+      - Slurm: slurm.md
+      - QASM Export: qasm-streaming.md
+  - API Reference:
+      - Overview: api/index.md
+      - Shared Workflow: api/workflow.md
+      - Evidence and Verification: api/evidence.md
+      - Algorithms:
+          - Pauli Expectation: api/algorithms/expectation.md
+          - Lanczos: api/algorithms/lanczos.md
+          - LCHS: api/algorithms/lchs.md
+          - QPE: api/algorithms/qpe.md
+          - QLS: api/algorithms/qls.md
+          - GCiM and ADAPT: api/algorithms/gcim.md
+          - QHD: api/algorithms/qhd.md
+      - Subroutines:
+          - Block Encoding: api/subroutines/block_encoding.md
+          - LCU: api/subroutines/lcu.md
+          - Coherent QPE: api/subroutines/qpe.md
+          - QSP and QSVT: api/subroutines/qsp.md
+          - State Preparation: api/subroutines/state_preparation.md
+          - Hamiltonian Evolution: api/subroutines/hamiltonian_evolution.md
+          - Fermionic Pools: api/subroutines/fermionic_pool.md
+          - Pauli Decomposition: api/subroutines/pauli_decomposition.md
+          - Trotterization: api/subroutines/trotterization.md
+  - Concepts and Development:
+      - Framework: FRAMEWORK.md
+      - Scientific Records: records/README.md
+      - Error Evidence: error_evidence.md
+      - Programs: ir.md
+      - Selected Blocks: blocks.md
+      - Run Your Own Circuit: own_circuit.md
+      - Add a Method: algorithm_protocol.md
+      - Input Admission Laws: development/input_contracts.md
+      - Execution Contracts: development/execution.md
+      - Report and Runtime Contracts: development/reports.md
+      - Design Rationale: development/design_rationale.md
+      - Analytical Contract Fixture: contract-specimen/README.md
+      - Code Tour: CODE_TOUR.md
+      - Engineering Constants: ENGINEERING_CONSTANTS.md
+      - Maintenance: MAINTENANCE.md
+  - Release Notes: release_notes.md
+  - Limitations and Open Work: ROADMAP.md
+  - Dependency Issues: dependency_issues.md
+  - References: references.md

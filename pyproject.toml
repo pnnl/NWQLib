@@ -1,0 +1,133 @@
+[build-system]
+requires = ["setuptools>=77.0", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "nwqlib"
+version = "1.0.0"
+description = "Evidence-aware quantum algorithms and scientific workflows."
+readme = "README.md"
+license = "BSD-2-Clause"
+license-files = ["LICENSE"]
+requires-python = ">=3.12"  # stable baseline minimum; CI also checks the latest Python
+authors = [
+    {name = "NWQLib developers"},
+]
+dependencies = [
+    "numpy>=2.5.2",
+    "scipy>=1.18.1",
+    "sympy>=1.14.0",
+    "pydantic>=2.13.5,<3",
+
+]
+
+[project.urls]
+Homepage = "https://github.com/pnnl/NWQLib"
+Repository = "https://github.com/pnnl/NWQLib"
+
+[project.scripts]
+nwqlib = "nwqlib.cli:main"
+
+[project.optional-dependencies]
+# Each selected scientific group includes its direct SDK requirements.
+qiskit = ["qiskit>=2.5.2"]
+aer = ["qiskit>=2.5.2", "qiskit-aer>=0.17.2"]
+nwqec = ["qiskit>=2.5.2", "nwqec==0.1.2"]
+qre = ["qdk[qre]==1.32.3"]
+dev = [
+    "jsonschema>=4.26.0",
+    "pytest>=7.0",
+    "pytest-xdist>=3.0",
+    "ruff>=0.1",
+]
+qasm = [
+    "qiskit>=2.5.2",
+    "openqasm3[parser]>=1.0.1",
+    "qiskit-qasm3-import>=0.6.0",
+]
+notebook = [
+    "jupyter>=1.0",
+    "ipykernel>=6.0",
+    "nbclient>=0.10",
+    "matplotlib>=3.7",
+]
+docs = [
+    "mkdocs-material>=9.5",
+    "mkdocstrings[python]>=0.25",
+]
+tensor = [
+    "qiskit>=2.5.2",
+    "scikit_tt @ git+https://github.com/PGelss/scikit_tt.git",
+]
+# qiskit-nature deliberately excluded (maintainer decision, 2026-07-03): it pins
+# tightly to qiskit releases and would couple the Qiskit
+# environment to its update cycle, and its role here (fermion-to-qubit
+# mapping, problem records) is covered by openfermion plus in-repo code.
+chemistry = [
+    "qiskit>=2.5.2",
+    "openfermion>=1.5",
+    "pyscf>=2.6",
+]
+ibm = [
+    "qiskit>=2.5.2",
+    # Qualified public Runtime V2 transport and result models.
+    "qiskit-ibm-runtime>=0.49.0",
+]
+ionq = [
+    "qiskit>=2.5.2",
+    "qiskit-ionq>=1.1.1",
+    # Floors follow the validated stable environment (ENVIRONMENT_LOCK.txt).
+    "requests>=2.34.2",
+    # HTTPResponse.read(amt) returns at most amt decoded bytes from urllib3 2
+    # on, which bounds the IonQ response reader at max_response_bytes + 1.
+    # 2.6.0 through 2.8.0 fix streaming-reader security issues: decompression
+    # into the library buffer on small reads (GHSA-2xpw-w6gg-jr37), a bypass of
+    # that safeguard, and unbounded chunk-size lines in chunked responses.
+    "urllib3>=2.8.0",
+]
+nexus = [
+    "qiskit>=2.5.2",
+    "qnexus>=0.49.0",
+    "pytket>=2.18.1",
+    "pytket-qiskit>=0.78.0",
+    # qnexus 0.49 imports selene_core.trace but omits its dependency metadata.
+    "selene-core>=0.3.2",
+]
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.setuptools.package-data]
+nwqlib = ["py.typed"]
+"nwqlib.backends" = ["_native/*.cpp"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["src"]
+addopts = "-q"
+
+[tool.ruff]
+line-length = 100
+target-version = "py312"
+
+[tool.ruff.lint]
+explicit-preview-rules = true
+select = [
+    "E4",
+    "E7",
+    "E9",
+    "F",
+    "D417",
+    "DOC102",
+]
+ignore = [
+    "E741",
+]
+preview = true
+
+[tool.ruff.lint.per-file-ignores]
+# PEP 562 resolves these deliberately lazy package attributes at runtime.
+"src/nwqlib/__init__.py" = ["F822"]
+"src/nwqlib/subroutines/state_preparation/__init__.py" = ["F822"]
+# A notebook source may import a name in a later cell, where it is first used.
+"examples/generators/*.py" = ["E402"]

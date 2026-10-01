@@ -1,0 +1,122 @@
+name: Full CI
+
+on:
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event_name == 'pull_request' && github.ref || github.run_id }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+jobs:
+  checks:
+    name: Checks (${{ matrix.environment }})
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    strategy:
+      fail-fast: false
+      matrix:
+        # Both environments exercise the same NWQLib checkout and package version.
+        environment: [stable, latest]
+    steps:
+      - uses: actions/checkout@v4
+      - name: Set up validated Python
+        if: matrix.environment == 'stable'
+        uses: actions/setup-python@v5
+        with:
+          python-version-file: .python-version
+          cache: pip
+          cache-dependency-path: |
+            pyproject.toml
+            docs/ENVIRONMENT_LOCK.txt
+      - name: Set up latest stable Python
+        if: matrix.environment == 'latest'
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.x"
+          check-latest: true
+          allow-prereleases: false
+          cache: pip
+          cache-dependency-path: pyproject.toml
+      - name: Install validated dependencies
+        if: matrix.environment == 'stable'
+        run: |
+          python -m pip install --upgrade -c docs/ENVIRONMENT_LOCK.txt pip
+          python -m pip install -c docs/ENVIRONMENT_LOCK.txt --build-constraint docs/ENVIRONMENT_LOCK.txt -e ".[dev,aer,qasm,docs,notebook,chemistry,ibm,ionq]" "$(sed -n '/^scikit_tt @ /p' docs/ENVIRONMENT_LOCK.txt)" pytest-cov
+      - name: Install latest stable dependencies
+        if: matrix.environment == 'latest'
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install --upgrade --upgrade-strategy eager --only-final=:all: -e ".[dev,aer,qasm,docs,notebook,chemistry,ibm,ionq,tensor]" pytest-cov
+      - name: Check dependency consistency
+        run: python -m pip check
+      - name: Verify latest direct dependencies
+        if: matrix.environment == 'latest'
+        run: |
+          python - <<'PY'
+          import json
+          import subprocess
+          import sys
+          import tomllib
+          from pathlib import Path
+
+          from packaging.requirements import Requirement
+          from packaging.utils import canonicalize_name
+
+          project = tomllib.loads(Path("pyproject.toml").read_text())["project"]
+          requirements = list(project["dependencies"])
+          for extra in ("dev", "aer", "qasm", "docs", "notebook", "chemistry", "ibm", "ionq", "tensor"):
+              requirements.extend(project["optional-dependencies"][extra])
+          direct = {
+              canonicalize_name(requirement.name)
+              for spec in requirements
+              if (requirement := Requirement(spec)).url is None
+              and (requirement.marker is None or requirement.marker.evaluate())
+          }
+          outdated = json.loads(subprocess.check_output(
+              [sys.executable, "-m", "pip", "list", "--outdated", "--format=json"],
+              text=True,
+          ))
+          failures = [
+              f"{package['name']}: installed {package['version']}, latest {package['latest_version']}"
+              for package in outdated
+              if canonicalize_name(package["name"]) in direct
+          ]
+          if failures:
+              raise SystemExit("Direct dependencies fell behind their latest stable releases:\n"
+                               + "\n".join(failures))
+          print("All selected direct index dependencies use their latest stable releases.")
+          PY
+      - name: Import provider SDK symbols without credentials
+        run: |
+          python - <<'PY'
+          from qiskit_ibm_runtime import QiskitRuntimeService, SamplerV2
+          from qiskit_ionq import IonQProvider
+          PY
+      - run: ruff check .
+      - run: python docs/scripts/contract_specimen.py --check
+      - run: python -m mkdocs build --strict
+      - run: python docs/scripts/policy_lint.py --site-dir site
+      - name: Run full test suite with coverage
+        run: OMP_NUM_THREADS=1 python -m pytest -n auto --cov=nwqlib --cov-report=xml --cov-report=term
+      - name: Publish coverage summary
+        run: |
+          python - <<'PY' >> "$GITHUB_STEP_SUMMARY"
+          import xml.etree.ElementTree as ET
+          rate = float(ET.parse("coverage.xml").getroot().get("line-rate"))
+          print(f"Line coverage (report-only): {100.0 * rate:.1f}%")
+          PY
+      - name: Record resolved environment
+        if: always()
+        run: |
+          python --version > environment.txt
+          python -m pip freeze >> environment.txt
+          cat environment.txt
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: validation-${{ matrix.environment }}
+          path: |
+            environment.txt
+            coverage.xml

@@ -1,0 +1,28 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1120" height="370" viewBox="0 0 1120 370" role="img" aria-labelledby="title desc">
+  <title id="title">Heat flow with a boundary penalty and LCHS</title>
+  <desc id="desc">Four grid points define a rod with two constrained endpoints. A complex penalty gives a four-coordinate matrix. LCHS combines 160 weighted branches in a ten-qubit circuit. Two references distinguish LCHS approximation error from finite-penalty error.</desc>
+  <defs><marker id="arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto"><path d="M0 0 L10 5 L0 10 z" fill="#475569"/></marker></defs>
+  <rect width="1120" height="370" rx="16" fill="#f8fafc"/>
+  <g font-family="Arial, sans-serif" fill="#172b4d">
+    <text x="28" y="37" font-size="23" font-weight="bold">Heat flow: the equation, the boundary approximation, and LCHS</text>
+    <text x="28" y="66" font-size="15" fill="#475569">Four physical coordinates · 32 kernel nodes · four source-time nodes · 10 total qubits</text>
+    <rect x="28" y="95" width="316" height="134" rx="12" fill="#e0f2fe" stroke="#0072b2"/>
+    <text x="48" y="125" font-size="18" font-weight="bold">Cold ends and a heater</text>
+    <line x1="66" y1="164" x2="296" y2="164" stroke="#64748b" stroke-width="3"/>
+    <g stroke="#d55e00" stroke-width="3"><path d="M59 157 L73 171 M73 157 L59 171 M289 157 L303 171 M303 157 L289 171"/></g>
+    <circle cx="143" cy="164" r="7" fill="#0072b2"/><circle cx="219" cy="164" r="9" fill="#e69f00"/>
+    <text x="49" y="207" font-size="15">x = 0</text><text x="202" y="207" font-size="15">2/3</text><text x="283" y="207" font-size="15">1</text>
+    <rect x="390" y="95" width="316" height="134" rx="12" fill="#fff2d4" stroke="#d18a00"/>
+    <text x="410" y="125" font-size="18" font-weight="bold">Finite boundary penalty</text>
+    <text x="410" y="162" font-size="17">A = L + i H,   H = lambda Pc</text>
+    <text x="410" y="199" font-size="15">The endpoint penalty rotates phase</text>
+    <rect x="752" y="95" width="340" height="134" rx="12" fill="#dcfce7" stroke="#009e73"/>
+    <text x="772" y="125" font-size="18" font-weight="bold">LCHS plus a constant source</text>
+    <text x="772" y="162" font-size="17">160 branches in 256 address slots</text>
+    <text x="772" y="199" font-size="15">Output: a physical complex vector</text>
+    <text x="28" y="274" font-size="18" font-weight="bold">Two reference comparisons answer different questions</text>
+    <text x="28" y="307" font-size="16">LCHS vs. the penalized equation: error from the finite LCHS construction</text>
+    <text x="28" y="340" font-size="16">Penalized equation vs. exact cold ends: error from the finite boundary penalty</text>
+  </g>
+  <g fill="none" stroke="#475569" stroke-width="2" marker-end="url(#arrow)"><path d="M344 163 H382"/><path d="M706 163 H744"/></g>
+</svg>

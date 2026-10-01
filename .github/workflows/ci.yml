@@ -1,0 +1,31 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  quick:
+    name: Quick checks
+    # Full CI owns these checks for pull requests targeting main.
+    if: github.event_name != 'pull_request' || github.base_ref != 'main'
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version-file: .python-version
+          cache: pip
+          cache-dependency-path: docs/ENVIRONMENT_LOCK.txt
+      - run: python -m pip install --upgrade -c docs/ENVIRONMENT_LOCK.txt pip
+      - run: python -m pip install -c docs/ENVIRONMENT_LOCK.txt --build-constraint docs/ENVIRONMENT_LOCK.txt ruff jsonschema 'pydantic>=2.13.5,<3' 'numpy>=2.5.2' 'scipy>=1.18.1' 'sympy>=1.14.0'
+      - run: ruff check .
+      - run: python docs/scripts/policy_lint.py
+      - run: python docs/scripts/contract_specimen.py --check
+      - run: python docs/scripts/check_core_records.py
+      - run: python docs/scripts/check_prepared_records.py

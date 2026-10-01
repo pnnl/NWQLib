@@ -1,0 +1,5 @@
+include LICENSE
+include .python-version mkdocs.yml CONTRIBUTING.md
+recursive-include docs *.md *.txt *.py *.json
+recursive-include examples *.md *.py *.ipynb
+recursive-include tests *.py *.json

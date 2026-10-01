@@ -1,0 +1,13 @@
+# Contributing
+
+NWQLib provides quantum algorithm workflows with explicitly selected native SDK extras. Before changing algorithm behavior, read [docs/FRAMEWORK.md](docs/FRAMEWORK.md) for the package contract, execution modes, backend capability policy, reporting standards, and testing expectations. The package root lazily exposes scientist and finite-search operations; import additional public classes and functions from their owning subpackage. Keep changes scoped to one focused capability or fix. Avoid new dependencies unless the framework requires them, and record user-facing behavior through typed records, validation results, reports, and focused tests. Before submitting changes, run the checks in [docs/MAINTENANCE.md](docs/MAINTENANCE.md). A Method that submits your own circuit and returns its counts needs a `descriptor` and two hooks, `plan` and `analyze`, shown in [docs/own_circuit.md](docs/own_circuit.md).
+
+## Environment Lock
+
+`docs/ENVIRONMENT_LOCK.txt` records the interpreter version and exact package versions used for validation. When resuming work, verify the selected interpreter, imported source location and dependency versions before using their results as evidence. Resumption does not automatically recreate or change an environment. Follow [docs/MAINTENANCE.md](docs/MAINTENANCE.md) for the selected environment and checks appropriate to an authorized dependency change.
+
+Public dataclass docstrings use an `Args:` or `Attributes:` section that names every field exactly once. Literal-valued fields list their accepted spellings. Scientific quantities state non-obvious units, normalization, and shape.
+
+Example notebooks are generated from their percent-format sources in `examples/generators/`. Edit the source, regenerate the notebook, and run the freshness check rather than maintaining two independent copies of example logic.
+
+Generated figures identify their reproducible input or are marked as illustrative. Captions state whether plotted resources describe a full algorithm circuit, an oracle, or a subroutine, and synthesis comparisons name the method, state family, seed, and approximation parameters. Mathematical quantities must satisfy their actual domains before evidence is assessed. A justified roundoff adjustment requires an explicit scale-aware policy, retention of the raw value and disclosure of the adjustment. Signed statistical estimators retain their distinct meaning; formatting must not silently turn them into bounded physical quantities. See [Mathematical Definitions Before Evidence](docs/FRAMEWORK.md#mathematical-definitions-before-evidence).

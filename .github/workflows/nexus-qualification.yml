@@ -1,0 +1,70 @@
+name: Nexus Offline Qualification
+
+on:
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event_name == 'pull_request' && github.ref || github.run_id }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+jobs:
+  nexus:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version-file: .python-version
+          cache: pip
+          cache-dependency-path: |
+            pyproject.toml
+            docs/ENVIRONMENT_LOCK.txt
+            .github/workflows/nexus-qualification.yml
+      - name: Resolve qualified dependencies with pandas 3 kept
+        run: |
+          python -m pip install --upgrade -c docs/ENVIRONMENT_LOCK.txt pip
+          python -m pip install -c docs/ENVIRONMENT_LOCK.txt --build-constraint docs/ENVIRONMENT_LOCK.txt -e ".[dev,aer]" \
+            'click>=8.1,<9' 'colorama>=0.4,<1' 'httpx>=0,<1' 'hugr==0.18.6' \
+            'nest-asyncio2>=1.6,<2' 'pandas==3.0.5' 'pydantic-settings>=2,<3' \
+            'pydantic>=2.4,<3' 'pyjwt>=2.10.1,<3' 'pytket==2.18.1' \
+            'quantinuum-schemas==7.8.2' 'rich>=13.6,<14' 'websockets>11,<16' \
+            'pytket-qiskit==0.78.0' 'selene-core==0.3.2'
+          # Only this SDK bypasses its declared pandas upper cap. All other
+          # dependencies, including its undeclared selene import, resolve above.
+          python -m pip install --no-deps qnexus==0.49.0
+      - name: Require exactly the qualified metadata conflict
+        run: |
+          python - <<'PY'
+          import subprocess
+          import sys
+          result = subprocess.run([sys.executable, "-m", "pip", "check"], capture_output=True, text=True)
+          print(result.stdout, end="")
+          expected = "qnexus 0.49.0 has requirement pandas<3,>=2, but you have pandas 3.0.5."
+          if result.returncode != 1 or result.stdout.strip() != expected or result.stderr.strip():
+              raise SystemExit("Dependency state differs from the one explicitly qualified conflict: " + result.stderr)
+          PY
+      - name: Require the real SDK before offline tests
+        run: |
+          python - <<'PY'
+          import qnexus
+          import selene_core.trace
+          from pytket.extensions.qiskit import qiskit_to_tk
+          from pytket.backends.backendresult import BackendResult
+          PY
+      - name: Exercise SDK decoding and durable workflow without service calls
+        run: python -m pytest tests/test_nexus_backend.py tests/test_nexus_sdk.py tests/test_nexus_workflow.py --junitxml=nexus-results.xml
+      - name: Record resolved environment
+        if: always()
+        run: |
+          python --version > nexus-environment.txt
+          python -m pip freeze >> nexus-environment.txt
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: nexus-offline-qualification
+          path: |
+            nexus-environment.txt
+            nexus-results.xml
