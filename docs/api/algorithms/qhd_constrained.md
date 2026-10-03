@@ -14,6 +14,7 @@ The guide's section on [constrained problems](../../algorithms/qhd.md#constraine
 | Refine the box of an unconstrained problem | [`refine_box`][nwqlib.algorithms.qhd.refinement.refine_box] with [`BoxRefinement`][nwqlib.algorithms.qhd.refinement_records.BoxRefinement] options |
 | Continue or reopen a refinement | [`resume_box_refinement`][nwqlib.algorithms.qhd.refinement.resume_box_refinement], [`load_box_refinement`][nwqlib.algorithms.qhd.refinement.load_box_refinement] |
 | Read the levels of a refinement | [`BoxRefinementResult`][nwqlib.algorithms.qhd.refinement_records.BoxRefinementResult], [`RefinementLevel`][nwqlib.algorithms.qhd.refinement_records.RefinementLevel] |
+| Read selected region mass bounds from counts | `print(result)` or `result.report()` on either result type, with [simultaneous coverage](../../algorithms/qhd.md#box-refinement) over the configured run |
 
 ## Solve a constrained problem
 
@@ -46,6 +47,8 @@ The guide's section on [constrained problems](../../algorithms/qhd.md#constraine
       heading_level: 3
 
 ## Read a constrained run
+
+With counts and refinement, `print(result)` and `result.report()` include mass lower bounds for each level's backend-sampled distribution conditioned on valid decoding. The default 95% confidence covers all rounds and levels together. Both result types accept `report(failure_probability=alpha)` and explicit `None` to omit the statistical report. The method entries below give the parameter and returned fields.
 
 `ConstrainedQHDResult.record` is an `AugmentedLagrangianRecord`, which keeps one `ALIteration` per round, with the round's point and update in `ALEvaluation` and its counts in `ALResources`. Under `inequality_form="slack"` or `"auto"`, `InnerRepresentation`, `SlackAxis` and `FormTrial` record each round's resolved choice. Feasibility, complementarity and the stopping status describe the chosen point and its multipliers. A stopping status does not assess optimality.
 

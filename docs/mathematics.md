@@ -91,7 +91,7 @@ Result and proposition numbers are stable identifiers, cited in the documentatio
 | **QHD: box refinement** | |
 | [Proposition 48. Search-model normalization and affine invariance](#r48) | Range normalization of the search model and its invariance under positive affine maps of box and objective, in exact table arithmetic |
 | Proposition 48, [Selection across refinement levels](#selection-across-refinement-levels) | A conditional bound on the round objective of the point chosen across completed refinement levels |
-| [Proposition 49. Marginal refinement and guaranteed joint mass](#r49) | A lower bound on the joint mass of the refined box from its axis marginal masses, by the union bound |
+| [Proposition 49. Marginal refinement and guaranteed joint mass](#r49) | Joint mass from marginals and simultaneous selected region coverage using Hoeffding and Clopper–Pearson bounds |
 | Proposition 49, [Finite-shot confidence](#finite-shot-confidence) | A population joint-mass bound from counts, simultaneous over levels, axes and intervals, and sufficient shot counts |
 | [Proposition 50. A sufficient stall condition and the limitation of a valley split](#r50) | The stall condition, what a valley split keeps, and the count test for a resolved valley |
 | **QHD: fault-tolerant resources** | |
@@ -1474,150 +1474,144 @@ With one level the $2\eta$ term is unnecessary. Partial observation replaces $G_
 
 **Provenance: Improved from a reference. Evidence: proved for any joint distribution on valid grid points, and for finite shots under the stated sampling model.**
 
-**Statement.** For any joint distribution on the valid grid points, a product box whose axis intervals hold conditional marginal masses $m_j$ has conditional joint mass at least $\max(0,1-\sum_j(1-m_j))$. A per-axis threshold $\eta=1-\delta/d$ therefore guarantees joint mass at least $1-\delta$, while the marginal rule of [Wu et al., Eqs. (12)–(13)][Wu] alone gives joint mass neither $\eta$ nor $\prod_jm_j$. Under the four sampling premises of [Finite-shot confidence](#finite-shot-confidence), with probability at least $1-\alpha$, simultaneously at every covered level with $S_z\ge1$ valid outcomes, on every axis and for every candidate interval, the empirical interval mass is within $\epsilon_z=\sqrt{\log(2HJ/\alpha)/(2S_z)}$ of the population mass, with $H$ and $J$ as defined there. This gives a lower bound on the population mass of the product box, a bound for the chosen region of a stall split, and sufficient shot counts. These statements concern the position distribution actually sampled at each level. They bound no systematic difference between that population and an ideal quantum evolution, they do not combine across levels into the mass of the final box under the first level's distribution, and a box with high certified mass need not contain a global minimizer.
+**Statement.** A product box whose axis intervals have conditional marginal masses $m_j$ has conditional joint mass at least $\max(0,1-\sum_j(1-m_j))$. For sampled refinement, let $P_z$ be the level's backend-sampled distribution conditioned on valid decoding and the earlier history, and let $B_z$ be its selected old-grid region. Under the premises below, with probability at least $1-\alpha$, all covered levels simultaneously satisfy
 
-Let axis interval $I_j$ hold conditional marginal mass $m_j$. The product box has conditional joint mass at least
+```math
+P_z(B_z)\ge L_z:=\max\{L_{H,z},L_{CP,z}\}.
+```
+
+The two lower bounds use Hoeffding and one-sided Clopper–Pearson (CP), each with half the total failure budget. They cover selection of both the region and the larger bound from the same counts ([Wu et al., arXiv:2605.12066][WuCoverage]). The derivation here specifies the statistical events and the formulas evaluated by `report()`.
+
+For the marginal relation, the complement of a product event is the union of the coordinate complements. Therefore
 
 ```math
 p_{\rm box}\ge\max\left(0,1-\sum_j(1-m_j)\right).
 ```
 
-Thus per-axis threshold $\eta=1-\delta/d$ guarantees joint mass at least $1-\delta$. The marginal rule of [Wu et al., Eqs. (12)–(13)][Wu] alone does not give joint mass $\eta$ or $\prod_jm_j$.
+Population marginal masses at least $\eta=1-\delta/d$ imply joint mass at least $1-\delta$. The distribution $\begin{pmatrix}0.8&0.1\\0.1&0\end{pmatrix}$, with index zero selected on both axes, attains the bound with marginals $0.9$ and joint mass $0.8$. Thus neither the threshold $0.9$ nor the product $0.81$ is a joint-mass lower bound. Applied to exact empirical frequencies, the same relation bounds the empirical distribution.
 
-**Proof.** The complement of the product event is the union of the coordinate complements, so the union bound gives the formula. The distribution $\begin{pmatrix}0.8&0.1\\0.1&0\end{pmatrix}$, with both first-coordinate intervals selected, has marginals $0.9$ and joint mass $0.8$, attaining the bound and falling below $0.81$.
-
-Centered cells put internal box faces at midpoints of neighboring grid coordinates, differing from the left-endpoint cells of Wu et al., Eq. (14). Ordered resolved coordinates give ordered internal faces, so the resulting interval is nonempty, contains the selected grid points, and stays inside the parent interval. Periodic refinement uses an ordinary interval at a specified seam and consequently depends on that seam. With count-derived marginals, the formula describes the empirical joint distribution, and the finite-shot part below bounds the joint mass of the sampled population.
+Centered cells put internal box faces at midpoints of neighboring grid coordinates, differing from the left-endpoint cells of [Wu et al., Eq. (14)][Wu]. Ordered resolved coordinates give ordered internal faces, so the next box is nonempty, contains the selected grid points and stays inside the parent box. The statistical event is the selected set of old-grid indices. Periodic refinement uses a nonwrapping interval at the seam fixed by the level's parent box.
 
 #### Finite-shot confidence
 
-Let $d$ be the number of variables and $K$ the number of grid points per variable. Fix a failure allowance $0<\alpha<1$ and, before observing any counts, an upper bound $H\ge1$ on the total number of sampled refinement levels covered by the statement. Number those levels chronologically by $z$. The history before level $z$ may determine its box, augmented-Lagrangian objective, initial state and sampling population. Conditional on that history, the statement assumes four sampling premises.
+Fix $0<\alpha<1$ and a maximum number $H\ge1$ of covered levels before inspecting any counts. Number levels chronologically by $z$, with earlier history $\mathcal F_{z-1}$. The level has $d_z$ coordinates and $K$ grid points per coordinate. Its dimension includes every slack coordinate of an augmented-Lagrangian inner problem. The sampling premises are as follows.
 
-1. The level's grid, its ordering and, on a periodic axis, its seam are fixed before its counts are observed. Each valid decoded outcome supplies all $d$ coordinates on that grid.
-2. At a level with $S_z\ge1$ valid outcomes, the valid decoded positions are independent draws from one population $P_z$. For one-hot readout, $P_z$ is the backend's position distribution conditional on exactly one excitation in each variable's register. For binary readout, every full-register outcome decodes to a grid point, so all returned draws are valid.
-3. The sample size is fixed before the positions are inspected, or a raw shot count chosen from the earlier history is followed by validity filtering. In the second case $S_z$ is random, and independence must hold conditional on the validity indicators as well as the earlier history. The formulas use the realized number of valid draws. They do not cover stopping acquisition when the observed interval mass first looks favorable, discarding valid outcomes selectively, or pooling batches with different populations.
-4. Every level in the claimed scope counts against $H$. One standalone refinement can use $H$ equal to `max_levels`. A constrained run with at most $R$ augmented-Lagrangian rounds and at most $L$ refinement levels in each round can use $H=RL$. Early stopping is allowed, but a smaller realized level count cannot replace $H$ after the data are inspected.
+1. Given $\mathcal F_{z-1}$, the grid, coordinate ordering, periodic seam, raw shot count and sampling distribution are fixed before this batch's positions are inspected. They may depend on earlier levels.
+2. The raw draws are conditionally independent and identically distributed. Every valid decoded draw gives all $d_z$ coordinates. For one-hot encoding, validity means exactly one excitation in each variable register. For binary encoding, every complete register outcome is valid. Thus $P_z(B)=\Pr(X\in B\mid\text{valid decoding},\mathcal F_{z-1})$.
+3. All valid draws in the batch are used. The guarantee does not cover stopping shots according to the positions already seen, selectively discarding valid draws, pooling different sampling populations, correlated shots or drift within the sampled batch.
+4. $H$ covers the whole claimed run. Standalone refinement uses `max_levels`. An augmented-Lagrangian run uses `max_iterations * max_levels`, including early termination. A new round's local level numbering does not reset this budget.
 
-The statement concerns the population actually sampled and bounds no systematic difference between that population and an ideal quantum evolution. A level with no valid outcomes supplies no mass certificate. The simultaneous statement covers the levels that occur and have $S_z\ge1$, without conditioning on the later event that the whole run finishes successfully.
+Let $S_z$ be the realized number of valid draws. For fixed raw shot count, the joint law factors over raw draws. Conditioning each factor on its validity indicator leaves the valid positions independent with law $P_z$. The formulas can therefore condition on the full validity pattern and use its realized $S_z$, then average over patterns. A level with $S_z=0$, or one never reached, supplies no bound. The simultaneous statement covers levels that occur with valid draws without conditioning on the later event that the whole run finishes successfully.
 
-For a Dirichlet axis, or a periodic axis at the seam fixed by its parent box, the candidate intervals of one axis and the number of marginal events over all axes are
+Each axis has the family of nonempty, nonwrapping intervals
 
 ```math
 \mathcal I_K=\{\{a,a+1,\ldots,b\}:0\le a\le b\le K-1\},\qquad
-J=d\,|\mathcal I_K|=\frac{dK(K+1)}2.
+I_K=|\mathcal I_K|=\sum_{a=0}^{K-1}(K-a)=\frac{K(K+1)}2.
 ```
 
-Write $X_j$ for the decoded grid index of axis $j$ in a valid outcome. For $I\in\mathcal I_K$, let $p_{z,j}(I)=P_z(X_j\in I)$ and let $\widehat p_{z,j}(I)$ be its exact empirical frequency among the $S_z$ valid outcomes. Define
+The marginal family has $J_z=d_z I_K$ events and the joint-box family has $N_z=I_K^{d_z}$ events. The greedy interval starts at a largest marginal entry and grows by frontier neighbors, so all its outputs belong to this family. The same families cover the selected mode, growth path, endpoints, split axis, valley and split side. The implementation uses their counts or logarithms without enumerating the boxes. Choosing a seam from the current batch or allowing wrapping intervals would require a different candidate family.
+
+For an ordinary level, $B_z$ is the product of `level.intervals`. At a stall split, its selected axis keeps $[0,v]$ or $[v,K-1]$, including the valley index $v$, and all other axes keep $[0,K-1]$. The stored `joint_mass` still concerns the ordinary intervals, which cover the whole box at a split. The new integer counts describe the selected region itself.
+
+Write $C_{z,j}$ for valid draws whose coordinate $j$ lies in the selected interval, and $M_z$ for draws in their intersection. They come from the same joint observations, so
 
 ```math
-\epsilon_z=\sqrt{\frac{\log(2HJ/\alpha)}{2S_z}}.
+\max\left\{0,S_z-\sum_j(S_z-C_{z,j})\right\}\le M_z\le\min_j C_{z,j}\le S_z.
 ```
 
-With probability at least $1-\alpha$, simultaneously at every covered level, on every axis and for every candidate interval,
+`RefinementLevel` stores $S_z$ as `valid_count`, $C_{z,j}$ as `region_axis_counts` and $M_z$ as `region_count`. `returned_shots` is the raw returned count. The confidence calculation uses these integers, while `axis_masses`, `joint_mass` and `joint_mass_bound` keep their existing rounded empirical meanings.
+
+#### Hoeffding bound
+
+For a fixed level, axis and candidate interval, its hit indicators are Bernoulli variables under the conditional sampling model. [Hoeffding, Theorem 1 and Eqs. (1.4), (2.3)][Hoeffding] gives
 
 ```math
-\left|\widehat p_{z,j}(I)-p_{z,j}(I)\right|\le\epsilon_z.
+\Pr(|\widehat p-p|>e\mid\mathcal F_{z-1},\text{validity indicators})\le2e^{-2S_z e^2}.
 ```
 
-In particular, the statement holds for the data-selected intervals $I_{z,j}$ returned by `_axis_interval`. Write $\widehat m_{z,j}=\widehat p_{z,j}(I_{z,j})$ and $m_{z,j}=p_{z,j}(I_{z,j})$. On the same event,
+For completeness, the centered Bernoulli log moment-generating function $g(t)=\log(1-p+pe^t)-pt$ has $g(0)=g'(0)=0$ and $g''(t)=q_t(1-q_t)\le1/4$, where $q_t=pe^t/(1-p+pe^t)$. Hence $g(t)\le t^2/8$. Independence and exponential Markov give an upper-tail bound $\exp(-tS_z e+S_z t^2/8)$, minimized at $t=4e$. Repeating for the lower tail gives the displayed two-sided bound. The cases $p=0$ and $p=1$ are deterministic.
+
+Allocate $\alpha_H=\alpha/2$ to this method over the whole run. A union bound over all $J_z$ marginal events gives per-level failure probability at most $\alpha/(2H)$ with
 
 ```math
-m_{z,j}\ge \ell_{z,j}:=\max(0,\widehat m_{z,j}-\epsilon_z),
+\epsilon_z=\sqrt{\frac{\log(4HJ_z/\alpha)}{2S_z}},\qquad
+2J_z e^{-2S_z\epsilon_z^2}=\frac{\alpha}{2H}.
 ```
 
-and the population mass of the product box satisfies
+On this event every selected marginal mass is at least $C_{z,j}/S_z-\epsilon_z$. A whole axis has population mass one exactly. Let $A_z$ contain the axes whose selected interval is not whole and put $q_z=|A_z|$. Applying the complement union bound only to these axes gives
 
 ```math
-p_{z,\rm box}:=P_z\!\left(\bigcap_{j=1}^d\{X_j\in I_{z,j}\}\right)
-\ge \max\left(0,1-\sum_{j=1}^d(1-\ell_{z,j})\right).
+L_{H,z}=\max\left\{0,1-\sum_{j\in A_z}\left(1-\frac{C_{z,j}}{S_z}\right)-q_z\epsilon_z\right\}.
 ```
 
-An axis that keeps all $K$ indices has $m_{z,j}=1$ exactly, so its $\ell_{z,j}$ may be replaced by $1$. The marginal bound of this proposition evaluated at the empirical masses, $\widehat B_z$, gives a simpler and possibly smaller lower bound,
+The implementation first forms the integer misses $D_z=\sum_{j\in A_z}(S_z-C_{z,j})$, then evaluates $\max(0,\max(0,S_z-D_z)/S_z-q_z\epsilon_z)$. This is the same nonnegative bound. If an individual marginal lower bound is negative, the final joint bound is also zero, so clipping each marginal first gives the same result. A split has $q_z=1$ and pays one radius. The correction still uses $J_z=d_z I_K$ because the active axes were selected from the data.
+
+#### Clopper–Pearson bound and joint selection
+
+For any fixed candidate box $B$, its hit count $M_B$ has distribution $\operatorname{Bin}(S_z,p_B)$ under the same conditioning. The [Clopper–Pearson construction][ClopperPearson] inverts the one-sided binomial test. With $I_x(a,b)$ the regularized incomplete beta function, define
 
 ```math
-\widehat B_z=\max\left(0,1-\sum_{j=1}^d(1-\widehat m_{z,j})\right),\qquad
-p_{z,\rm box}\ge\max(0,\widehat B_z-d\epsilon_z).
+\beta_z=\frac{\alpha}{2HN_z},\qquad
+L_{CP}(M,S,\beta)=
+\begin{cases}
+0,&M=0,\\
+I^{-1}_{\beta}(M,S-M+1),&1\le M\le S.
+\end{cases}
 ```
 
-For ordinary refinement, a sufficient empirical per-axis threshold for population joint mass at least $1-\delta$, where $0<\delta<1$, is
+For $M\ge1$, the endpoint solves $\Pr_{p=L_{CP}}[\operatorname{Bin}(S,p)\ge M]=\beta$. The right tail increases with $p$, so test inversion gives $\Pr_p(L_{CP}(M,S,\beta)>p)\le\beta$. A union bound over all $N_z$ candidate boxes makes their CP bounds simultaneous with conditional failure probability at most $N_z\beta_z=\alpha/(2H)$. The selected box is one of them, so $L_{CP,z}=L_{CP}(M_z,S_z,\beta_z)$ is covered even though the same counts selected its coordinates. This is a frequentist lower bound without a prior.
+
+When $M_z=S_z$, the right tail is $p^{S_z}$ and the endpoint has the closed form
 
 ```math
-\widehat m_{z,j}\ge\eta\ge1-\frac{\delta}{d}+\epsilon_z
-\quad\text{for every }j.
+L_{CP,z}=\exp\!\left(\frac{\log\beta_z}{S_z}\right),\qquad
+\log\beta_z=\log\alpha-\log2-\log H-d_z\log I_K.
 ```
 
-For a common valid sample size $S$, write $\epsilon_S$ for $\epsilon_z$. The same event permits this common radius at any level with $S_z\ge S$, because the radius decreases as the valid count increases. An interval error $e>0$ is achieved by
+All observed samples hitting a smaller region still gives a mathematical CP bound strictly below one. If the selected region contains the entire valid grid support, its conditional mass is one independently of sampling, and the report returns one directly.
+
+Let $E_z$ be failure of either method's simultaneous event at level $z$, and take $E_z$ empty when the level is absent or has no valid sample. Each method has conditional failure probability at most $\alpha/(2H)$, so $\Pr(E_z\mid\mathcal F_{z-1})\le\alpha/H$ after averaging over validity patterns. The methods need not be independent. Conditional averaging and the union bound over levels give
 
 ```math
-S\ge\left\lceil\frac{\log(2HJ/\alpha)}{2e^2}\right\rceil.
+\Pr\!\left(\bigcup_{z=1}^{H}E_z\right)
+\le\sum_{z=1}^{H}\mathbb E\!\left[\Pr(E_z\mid\mathcal F_{z-1})\right]
+\le\alpha.
 ```
 
-For a fixed empirical threshold $0<\eta\le1$, set $\tau=\eta-1+\delta/d$. If $\tau>0$, a sufficient shot count is
+Outside that union, both lower bounds hold at every covered level, and therefore their maximum does too. The dimension and candidate family may vary with earlier history because they are fixed under each level's conditioning. The implementation uses the actual $d_z$, including slack coordinates. It neither reduces $H$ after early stopping nor substitutes a data-selected active-axis count for $d_z$ in either family correction.
+
+#### Sufficient valid-shot budgets
+
+For a common sufficient budget across levels, fix a dimension upper bound $d$ before sampling and use $J=dI_K$ and $\epsilon_S=\sqrt{\log(4HJ/\alpha)/(2S)}$. Let $0<\eta\le1$ and $0<\delta<1$. For an ordinary box whose exact empirical marginal frequencies are all at least $\eta$, Hoeffding gives population mass at least $1-\delta$ whenever $\eta\ge1-\delta/d+\epsilon_S$. For $e>0$ and $\tau=\eta-1+\delta/d>0$, sufficient integer budgets are
 
 ```math
-S\ge\left\lceil\frac{\log(2HJ/\alpha)}{2(\eta-1+\delta/d)^2}\right\rceil.
+S\ge\left\lceil\frac{\log(4HJ/\alpha)}{2e^2}\right\rceil
+\quad\text{for }\epsilon_S\le e,\qquad
+S\ge\left\lceil\frac{\log(4HJ/\alpha)}{2\tau^2}\right\rceil
+\quad\text{for mass at least }1-\delta.
 ```
 
-The threshold $1-\delta/d+\epsilon_S$ is at most one when
+The empirical threshold can be at most one when $S\ge\lceil d^2\log(4HJ/\alpha)/(2\delta^2)\rceil$. These are sufficient budgets for this argument, not necessary sample sizes for a particular distribution. When $\tau\le0$, the threshold alone gives no positive-radius guarantee of the requested mass, although the actual counts can give a stronger bound.
+
+For a level of dimension $d_z$ where the selected region receives all valid draws, $M=S$, a target mass $0<c<1$ has the CP sufficient budget
 
 ```math
-S\ge\left\lceil\frac{d^2\log(2HJ/\alpha)}{2\delta^2}\right\rceil.
+S\ge\left\lceil\frac{\log(\alpha/(2H I_K^{d_z}))}{\log c}\right\rceil.
 ```
 
-These budgets are sufficient for this concentration argument. They are not lower bounds on the shots that a particular distribution needs. When $\tau\le0$, the fixed threshold alone cannot give the requested $1-\delta$ guarantee through this formula, although the observed interval masses can support a stronger conclusion, especially when whole axes are kept.
+With $K=64$, $d_z=2$, $H=60$, $c=.99$ and $\alpha=.05$, the budget is 2295 valid draws. This result assumes the observed all-hit event and does not promise that a future batch will satisfy it. One-hot validity filtering can also make the valid count smaller than the raw shot count. At $\eta=.9999$ and $S=2295$, the integer threshold $C_j\ge\lceil\eta S\rceil$ still requires every marginal to receive all valid draws.
 
-At a stall split the ordinary intervals cover every axis, so `axis_masses`, `joint_mass_bound` and `joint_mass` still describe the whole current box. `_stall_split` then replaces `next_box` by one region, the index interval $I_*=[0,v]$ or $[v,K-1]$ of a chosen axis $j_*$, which includes the valley index $v$, with every other axis whole. Both choices belong to $\mathcal I_K$, so the same event certifies the actual split box. Let $\widehat q_z$ be the exact empirical mass of the chosen region, recomputed from its integer decoded counts. The stored `split.region_masses[split.chosen]` is a rounded approximation to this mass. On the same event,
+For general $\eta$, actual integer counts satisfying $C_j\ge\lceil\eta S\rceil$ imply $M\ge\max(0,S-d(S-\lceil\eta S\rceil))$. The ceiling can make this threshold-derived bound decrease locally as $S$ grows. It is not a monotone curve suitable for unqualified binary search. The existing interval rule uses rounded marginal accumulation, so the report always uses the observed integers rather than replacing them by the nominal threshold. The library does not adjust shots from these formulas.
 
-```math
-P_z(\text{chosen split region})
-=p_{z,j_*}(I_*)\ge\max(0,\widehat q_z-\epsilon_z).
-```
+#### Numerical evaluation and interpretation
 
-Only one marginal error enters, because every other axis has mass one exactly. The nominal `mass_threshold` does not bound $\widehat q_z$ from below, so the ordinary threshold guarantee does not carry through a split unless the chosen region meets the required mass criterion on its own. The count screen of Proposition 50 has its own failure allowance and supplies no interval radius, so claiming both interval coverage and valley resolution requires accounting for both allowances.
+`_coverage.py` evaluates the formulas in binary64. Logarithms avoid forming $I_K^d$ or a possibly underflowing $\alpha/2$. For $0<M<S$, the inverse uses `scipy.special.betaincinv(M, S-M+1, exp(log_beta))` only when $S+1\le2^{53}$, so both integer shape parameters are exactly representable, and the target beta is at least the smallest normal binary64 value. These representation checks do not supply an inverse error bound. Large shapes and extreme tails can lose relative tail accuracy, and a returned quantile can be subnormal or round to zero.
 
-The correction applies to the marginal bound `joint_mass_bound`. When joint observations supply `joint_mass`, it is the observed mass of the selected product event itself, marked `joint_mass_kind="empirical"` for counts, and it can exceed the marginal bound because it uses the correlations in the observations. The statement does not justify subtracting a single $\epsilon_z$ from `joint_mass` as though that product event had been fixed before sampling. Each $p_{z,\rm box}$ concerns the level-$z$ population and that level's intervals. Later levels generally sample different populations, so simultaneous confidence across levels does not turn these bounds into the mass of the final box under the first level's distribution, and they must not be multiplied as if the levels were successive conditionings of one distribution.
+The $M=0$, all-hit and full-support cases use their separate formulas. Nonfinite inverse values, values outside $[0,1]$, and CP values rounded to one are unavailable. The report then uses the Hoeffding bound with its original half-budget. It does not reallocate the unused CP share after seeing the counts. Ordinary logarithm, square root, exponential and inverse-beta evaluation give numerical approximations to the mathematical bounds, not directed-rounding enclosures. The report marks `numerical_evaluation="binary64"`, uses approximate wording and preserves near-one values in its display. A reported deterministic one denotes the entire valid grid support of the level's conditional distribution.
 
-The conclusion concerns sampled position probability. A distribution can put arbitrarily little probability near a global minimizer, so even a box with high certified mass need not contain it. Near-tied marginal peaks can exchange empirical order, and the uniform statement covers the resulting interval without certifying that its starting peak is the population peak. Neither the mass bound nor the valley screen supplies minimizer preservation or peak reproduction.
+The bounds concern each level's backend-sampled distribution conditioned on valid decoding. For noisy one-hot readout, a conditional mass of one says nothing about the fraction of raw outcomes that decode validly. The bounds do not cover systematic differences from ideal quantum evolution, global-minimizer preservation or augmented-Lagrangian convergence. Different levels generally sample different populations, so their bounds cannot be multiplied into the final box's mass under the initial distribution. The valley-resolution screen of Proposition 50 has its own failure allowance. A claim combining that screen with region coverage must account for both.
 
-The level record (`RefinementLevel`) stores $S_z$ as the integer `valid_count` and the returned raw shot count as the integer `returned_shots`. The stored `axis_masses` are binary64 sums of rounded count ratios, so a strict certificate recomputes each selected empirical mass from the integer decoded counts and evaluates the radius upward and the final bound downward, while the uniform event still covers whichever interval the rounded selection returns. Alternatively, under correctly rounded division and addition without overflow or underflow of nonzero quantities, a stored mass $\widetilde m_{z,j}$ satisfies $\widetilde m_{z,j}\le\beta_K\widehat m_{z,j}$ with $\beta_K=(1+u)^{K+1}/(1-u)$, which gives $m_{z,j}\ge\max(0,\widetilde m_{z,j}/\beta_K-\epsilon_z)$ on the same event.
-
-**Proof.** For a fixed first index $a$ there are $K-a$ possible last indices, so $|\mathcal I_K|=\sum_{a=0}^{K-1}(K-a)=K(K+1)/2$. `_axis_interval` starts at a largest marginal entry and adds one frontier neighbor at a time, so every intermediate and final interval belongs to $\mathcal I_K$. The family covers every possible output, without assuming that each member is attainable or that the greedy interval is the shortest. Counting only the starting cells would leave the data-selected endpoints uncovered. On a Dirichlet axis, `_next_box` changes the physical faces but not the number of candidate index intervals, and the statistical event is the selected set of decoded old-grid indices that `_joint_mass` uses. On a periodic axis, `_axis_interval` does not connect index $K-1$ back to index $0$, and the parent box fixes the seam before the level is sampled. A later seam may depend on earlier counts through the new box, but conditioning on the earlier history fixes it, so seam selection adds no factor $K$. Selecting a seam after inspecting the same counts, or allowing wrapping intervals, would instead need the $K(K-1)+1$ distinct nonempty cyclic intervals. The union bound needs the $J$ marginal events, not the $|\mathcal I_K|^d$ product boxes.
-
-Fix a level, axis and candidate interval, and condition on the earlier history and a valid sample size $S\ge1$. The indicators $Y_s=\mathbf1\{X_{s,j}\in I\}$ are independent Bernoulli variables with mean $p=p_{z,j}(I)$, and $\widehat p=S^{-1}\sum_sY_s$. Hoeffding's bounded-variable inequality gives
-
-```math
-\Pr(|\widehat p-p|>e\mid\text{history},S)\le2\exp(-2Se^2).
-```
-
-In the Bernoulli case, $g(t)=\log(1-p+pe^t)-pt$ has $g(0)=g'(0)=0$ and $g''(t)=q_t(1-q_t)\le1/4$ with $q_t=pe^t/(1-p+pe^t)$, so Taylor's theorem gives $g(t)\le t^2/8$. Independence and exponential Markov then give $\Pr(\sum_s(Y_s-p)>Se)\le\exp(-tSe+St^2/8)$ for $t>0$, and $t=4e$ gives $e^{-2Se^2}$. The same calculation for $-\sum_s(Y_s-p)$ bounds the lower tail, and the cases $p=0$ and $p=1$ are deterministic [Hoeffding, Theorem 1 and Eqs. (1.4), (2.3)][Hoeffding].
-
-A union bound over the $J$ intervals and axes at level $z$ gives conditional failure probability at most
-
-```math
-2J\exp(-2S_z\epsilon_z^2)
-=2J\exp\!\left(-\log\frac{2HJ}{\alpha}\right)
-=\frac{\alpha}{H}.
-```
-
-This event covers all intervals before one is selected, so choosing the mode, the greedy growth path and the endpoints from the same counts costs no further probability. The coordinates of a single shot may be correlated, because the proof uses only independence between shots in the fixed conditional population. For a fixed raw shot count, one-hot validity filtering preserves the argument. Factorizing the joint law of the independent raw shots and conditioning each factor on its own validity indicator shows that, given any pattern of valid and invalid shots, the $S_z$ valid positions are independent with law $P_z(\cdot)=\Pr(\cdot\mid\text{valid},\text{history})$. The bound $\alpha/H$ holds for every pattern with $S_z\ge1$, so averaging over those patterns gives the same bound, and an empty valid sample is left without a certificate. In particular, `shots=4096` means 4096 requested raw draws per level, not 4096 valid one-hot outcomes.
-
-Let $F_z$ be failure of the interval inequalities at the $z$th sampled level with a nonempty valid sample, and take $F_z$ empty if that level is never reached or has no valid sample. With $\mathcal F_{z-1}$ the earlier history, the tower property and a union bound give
-
-```math
-\Pr\!\left(\bigcup_{z=1}^H F_z\right)
-\le\sum_{z=1}^H\mathbb E\!\left[\Pr(F_z\mid\mathcal F_{z-1})\right]
-\le\sum_{z=1}^H\frac{\alpha}{H}=\alpha.
-```
-
-This covers boxes, initial states and augmented-Lagrangian objectives chosen adaptively from previous levels. Each constrained round runs its own refinement, whose local `RefinementLevel.level` starts again at one, so a statement spanning several rounds counts the levels of all of them. `max_iterations` times `max_levels`, $15\times3=45$ at the defaults, is an available horizon for a whole run.
-
-At one level let $A_j=\{X_j\in I_{z,j}\}$. The complement of the product event is $\bigcup_jA_j^c$, so
-
-```math
-1-p_{z,\rm box}=P_z\!\left(\bigcup_jA_j^c\right)
-\le\sum_jP_z(A_j^c)=\sum_j(1-m_{z,j}).
-```
-
-Substituting $m_{z,j}\ge\ell_{z,j}$ proves the clipped bound. Substituting the weaker $m_{z,j}\ge\widehat m_{z,j}-\epsilon_z$ gives $p_{z,\rm box}\ge\max(0,1-\sum_j(1-\widehat m_{z,j})-d\epsilon_z)=\max(0,\widehat B_z-d\epsilon_z)$, where the equality also holds when the untruncated empirical expression is negative, because both sides are then zero. No independence between axes is used. If each empirical mass is at least $\eta$, the same substitution gives $p_{z,\rm box}\ge\max(0,1-d(1-\eta+\epsilon_z))$, which is at least $1-\delta$ when $\eta\ge1-\delta/d+\epsilon_z$. For fixed $\eta$ this requires $\epsilon_z\le\tau$. Squaring for $\tau>0$ and solving $\log(2HJ/\alpha)/(2S_z)\le\tau^2$ for the integer $S_z$ gives the threshold shot count. Taking $\eta=1$ gives $\tau=\delta/d$ and the feasibility count, and replacing $\tau$ by $e$ gives the error-budget count. At a stall split the chosen region is the event $\{X_{j_*}\in I_*\}$ with every other axis whole, so the interval inequality for $I_*$ gives its bound directly.
 
 <a id="r50"></a>
 ### Proposition 50. A sufficient stall condition and the limitation of a valley split
@@ -2275,7 +2269,7 @@ Code locations below are paths in the NWQLib repository. A name after a double c
 | [46. AL equations](#r46) | R | `src/nwqlib/algorithms/qhd/constrained.py::_effective_objective`, `src/nwqlib/algorithms/qhd/constrained.py::_normalized`, `src/nwqlib/algorithms/qhd/constrained.py::_update`, `src/nwqlib/algorithms/qhd/constrained.py::_original_multiplier` | `tests/test_qhd_augmented_lagrangian.py`, independent grid updates | Standard normalized PHR construction with exact-arithmetic scaling scope |
 | [47. AL stopping](#r47) | D | `src/nwqlib/algorithms/qhd/constrained.py::_stationarity`, `src/nwqlib/algorithms/qhd/constrained.py::solve_augmented_lagrangian` | `tests/test_qhd_augmented_lagrangian.py::test_feasible_complementary_can_stop_away_from_the_feasible_grid_minimum` | Finite-grid limitation and objective-gap bound |
 | [48. Conditional search invariance](#r48) | D | `src/nwqlib/algorithms/qhd/refinement.py::_level_problem`, `src/nwqlib/algorithms/qhd/_outer.py::range_bound` | `tests/test_qhd_refinement.py::test_search_model_levels_are_invariant_under_affine_maps_of_box_and_objective` | Affine invariance for corresponding tables and a homogeneous range rule, with a conditional numerical bound |
-| [49. Joint refinement mass](#r49) | I | `src/nwqlib/algorithms/qhd/refinement.py::_joint_mass_bound`, `src/nwqlib/algorithms/qhd/refinement.py::_next_box`, `src/nwqlib/algorithms/qhd/refinement.py::_axis_interval`, `src/nwqlib/algorithms/qhd/refinement.py::_joint_mass` | `tests/test_qhd_refinement.py::test_joint_mass_bound_is_attained_and_is_neither_eta_nor_the_product` | Missing joint guarantee supplied by the sharp union bound, and a simultaneous finite-shot population bound over the implemented interval family |
+| [49. Joint refinement mass](#r49) | I | `src/nwqlib/algorithms/qhd/refinement.py::_joint_mass_bound`, `src/nwqlib/algorithms/qhd/refinement.py::_next_box`, `src/nwqlib/algorithms/qhd/refinement.py::_axis_interval`, `src/nwqlib/algorithms/qhd/refinement.py::_joint_mass`, `src/nwqlib/algorithms/qhd/_coverage.py::bounds_from_counts`, `src/nwqlib/algorithms/qhd/_coverage.py::coverage` | `tests/test_qhd_refinement.py::test_joint_mass_bound_is_attained_and_is_neither_eta_nor_the_product`, `tests/test_qhd_refinement.py::test_selected_region_coverage_uses_both_bounds_and_preserves_numerical_limits` | Sharp marginal union bound and simultaneous finite-shot selected region coverage, including data selection and all configured levels |
 | [50. Stall split](#r50) | D | `src/nwqlib/algorithms/qhd/refinement.py::_stall_split`, `src/nwqlib/algorithms/qhd/refinement.py::_tabulated_objective`, `src/nwqlib/algorithms/qhd/refinement.py::_refine` | `tests/test_qhd_refinement.py::test_stall_split_follows_the_end_mass_lemma_and_the_clearest_valley` | Stall condition and realized-prefix comparison using a fixed relative objective |
 | [51. AL/refinement composition](#r51) | D | `src/nwqlib/algorithms/qhd/constrained.py::_refined_choice`, `src/nwqlib/algorithms/qhd/refinement.py::refine_box` | `tests/test_qhd_augmented_lagrangian.py::test_refined_rounds_stay_within_the_distance_bound_to_the_kkt_point` | New combination bound with independently checkable inner premises |
 | [52. Clifford/T allocation](#r52) | D | `src/nwqlib/algorithms/qhd/resources.py::clifford_distance`, `src/nwqlib/algorithms/qhd/resources.py::synthesis_projection` | `tests/test_qhd_resources.py` | Finite replacement budget and optimal continuous allocation for a fixed cost model |
@@ -2304,6 +2298,7 @@ Code locations below are paths in the NWQLib repository. A name after a double c
 The equation and theorem locators in the text refer to the versions below.
 
 - [Hoeffding][Hoeffding]. W. Hoeffding, “Probability Inequalities for Sums of Bounded Random Variables,” JASA 58, 13–30 (1963). DOI 10.1080/01621459.1963.10500830.
+- [Clopper and Pearson][ClopperPearson]. “The Use of Confidence or Fiducial Limits Illustrated in the Case of the Binomial.” Biometrika 26(4), 404–413 (1934). DOI 10.1093/biomet/26.4.404.
 - [Ding and Lin][QCELS]. “Even Shorter Quantum Circuit for Phase Estimation on Early Fault-Tolerant Quantum Computers with Applications to Ground-State Energy Estimation.” arXiv:2211.11973v2.
 - [Wan, Berta and Campbell][SPE]. “Randomized Quantum Algorithm for Statistical Phase Estimation.” arXiv:2110.12071v2.
 - [Kshirsagar, Katabarwa and Johnson][RFE]. “On proving the robustness of algorithms for early fault-tolerant quantum computers.” arXiv:2209.11322v3.
@@ -2341,7 +2336,7 @@ The equation and theorem locators in the text refer to the versions below.
 - [Childs, Su, Tran, Wiebe and Zhu][Trotter]. “Theory of Trotter Error with Commutator Scaling.” Physical Review X 11, 011020 (2021). DOI 10.1103/PhysRevX.11.011020. Preprint arXiv:1912.08854v3 has different proposition and equation numbers.
 - [Leng, Hickman, Li and Wu][Leng]. “Quantum Hamiltonian Descent.” arXiv:2303.01471v1.
 - [Kushnir, Leng, Peng, Fan and Wu][QHDOPT]. “QHDOPT: A Software for Nonlinear Optimization with Quantum Hamiltonian Descent.” arXiv:2409.03121v1.
-- [Wu et al.][Wu]. “Benchmarking and Resource Analysis for Augmented-Lagrangian Quantum Hamiltonian Descent.” arXiv:2605.12066v1.
+- [Wu et al.][WuCoverage]. “Benchmarking and Resource Analysis for Augmented-Lagrangian Quantum Hamiltonian Descent.” arXiv:2605.12066. Algorithm equation locators use [arXiv:2605.12066v1][Wu].
 - [Liu et al.][Liu]. “Encoding Choices and Fault-Tolerant Resource Estimates for Digital Quantum Hamiltonian Descent.” arXiv:2607.16996v1.
 - [Strang][Strang]. “On the Construction and Comparison of Difference Schemes.” SIAM Journal on Numerical Analysis 5, 506–517 (1968). DOI 10.1137/0705041.
 - [Ogita, Rump and Oishi][CompSum]. “Accurate Sum and Dot Product.” SIAM Journal on Scientific Computing 26, 1955–1988 (2005). DOI 10.1137/030601818.
@@ -2353,6 +2348,7 @@ The equation and theorem locators in the text refer to the versions below.
 - [Zhu, Argentati and Knyazev][ResidualBounds]. “Bounds for the Rayleigh quotient and the spectrum of self-adjoint operators.” SIAM Journal on Matrix Analysis and Applications 34, 244–256 (2013), arXiv:1207.3240v2.
 
 [Hoeffding]: https://doi.org/10.1080/01621459.1963.10500830
+[ClopperPearson]: https://doi.org/10.1093/biomet/26.4.404
 [QCELS]: https://arxiv.org/abs/2211.11973v2
 [SPE]: https://arxiv.org/abs/2110.12071v2
 [RFE]: https://arxiv.org/abs/2209.11322v3
@@ -2391,6 +2387,7 @@ The equation and theorem locators in the text refer to the versions below.
 [Leng]: https://arxiv.org/abs/2303.01471v1
 [QHDOPT]: https://arxiv.org/abs/2409.03121v1
 [Wu]: https://arxiv.org/abs/2605.12066v1
+[WuCoverage]: https://arxiv.org/abs/2605.12066
 [Liu]: https://arxiv.org/abs/2607.16996v1
 [Strang]: https://doi.org/10.1137/0705041
 [CompSum]: https://doi.org/10.1137/030601818

@@ -1,5 +1,6 @@
 """QHD box refinement: centered box rule, finite-grid error, joint mass, search-model invariance and stops."""
 
+from decimal import Decimal, localcontext
 from fractions import Fraction
 from math import fsum, isfinite, log, sqrt
 
@@ -198,7 +199,7 @@ def test_joint_mass_bound_is_attained_and_is_neither_eta_nor_the_product(monkeyp
     assert entry["interval_event"] == "product of the kept intervals" and entry["split_region_mass"] is None
     assert (f"Level 1 interval mass: {level.joint_mass:.8g} (exact-readout). Marginal union-bound formula: "
             f"{level.joint_mass_bound:.8g}.") in report["summary"].splitlines()
-    assert report["confidence"]["levels"] == [] and "interval radius" not in report["summary"]
+    assert report["confidence"] is None and "simultaneous confidence" not in report["summary"]
 
 
 @pytest.mark.parametrize("shots,keep_state", [(256, False), (None, False), (None, True)])
@@ -233,9 +234,18 @@ def test_native_binary_joint_mass_decodes_the_binary_register(shots, keep_state)
               if all(first <= (z >> (j * b)) % k <= last for j, (first, last) in enumerate(level.intervals))]
     assert level.joint_mass == fsum(inside) / inner.valid_mass
     assert level.joint_mass_kind == ("empirical" if shots else "exact")
+    if shots:
+        observed = list(zip(histogram.index_list(), histogram.weights.tolist()))
+        axes = tuple(sum(count for z, count in observed if first <= (z >> (j * b)) % k <= last)
+                     for j, (first, last) in enumerate(level.intervals))
+        joint = sum(count for z, count in observed if all(
+            first <= (z >> (j * b)) % k <= last for j, (first, last) in enumerate(level.intervals)))
+        assert (level.region_axis_counts, level.region_count) == (axes, joint)
+    else:
+        assert level.region_axis_counts is None and level.region_count is None
 
 
-def test_a_sampled_level_keeps_the_integer_totals_of_its_result(tmp_path):
+def test_a_sampled_level_keeps_the_integer_totals_of_its_result(tmp_path, monkeypatch):
     """A counts level copies ``valid_count`` and ``returned_shots`` from its QHD result, and both survive its directory.
 
     They are the S_z and the raw draw count of the finite-shot statement of
@@ -277,38 +287,63 @@ def test_a_sampled_level_keeps_the_integer_totals_of_its_result(tmp_path):
             returned = sum(chunk.returned_shots for chunk in chunks)
             assert (level.valid_count, level.returned_shots) == (inner.valid_count, inner.returned_shots)
             assert (level.valid_count, level.returned_shots) == (valid, returned)
+            # A valid one-hot word 1 << i decodes to grid index i. This
+            # one-dimensional intersection is also its single axis event.
+            first, last = level.intervals[0]
+            kept = sum(count for chunk in chunks
+                       for index, count in zip(chunk.histogram().index_list(), chunk.histogram().weights.tolist())
+                       if index.bit_count() == 1 and first <= index.bit_length() - 1 <= last)
+            assert (level.region_axis_counts, level.region_count) == ((kept,), kept)
         totals.append([(level.valid_count, level.returned_shots) for level in run.levels])
     assert totals[0] == totals[1]
     assert all(returned == 64 for _, returned in totals[0]) and any(valid < 64 for valid, _ in totals[0])
     saved = json.loads((directory / "controller.json").read_text())
-    (directory / "controller.json").write_text(json.dumps({**saved, "format": "qhd.refinement_run/4"}))
-    with pytest.raises(ValueError, match="holds format 'qhd.refinement_run/4', not 'qhd.refinement_run/5'"):
+    (directory / "controller.json").write_text(json.dumps({**saved, "format": "qhd.refinement_run/5"}))
+    with pytest.raises(ValueError, match="holds format 'qhd.refinement_run/5', not 'qhd.refinement_run/6'"):
         resume_box_refinement(directory, backend=backend, progress=False)
-    # The report's radius of Proposition 49 (docs/mathematics.md) uses each level's valid draws, not its
-    # 64 returned shots, with H = max_levels = 2 and J = d K (K + 1)/2 = 6 interval events. The
-    # evaluation order differs from the report's, so the comparison allows a few roundings.
+    # qhd._coverage.interval_radius uses each level's valid draws, not its 64
+    # returned shots. H = 2 and J = 6; alpha/2 goes to each method. The
+    # independent expression has a different order, allowing eight roundings.
     alpha = 0.05
-    report = result.report(failure_probability=alpha)
+    report = result.report()
+    assert report == result.report(failure_probability=alpha)
+    assert report["summary"] == str(result)
     assert report["confidence"]["horizon"] == 2
+    assert report["confidence"]["budget_fractions"] == dict(hoeffding=0.5, clopper_pearson=0.5)
     for entry, level in zip(report["confidence"]["levels"], result.levels, strict=True):
-        radius = sqrt(log(2 * 2 * 6 / alpha) / (2 * level.valid_count))
+        radius = sqrt(log(4 * 2 * 6 / alpha) / (2 * level.valid_count))
         assert (entry["level"], entry["valid_count"], entry["marginal_events"]) == (level.level, level.valid_count, 6)
+        assert (entry["axis_counts"], entry["joint_count"]) == (list(level.region_axis_counts), level.region_count)
         assert entry["radius"] == pytest.approx(radius, rel=8 * UNIT_ROUNDOFF, abs=0)
-        assert (f"Level {level.level} Proposition 49 interval radius: approximately {entry['radius']:.8g}, using "
-                f"{level.valid_count} valid draws, horizon 2, and failure probability 0.05, conditional on its "
-                "sampling premises.") in report["summary"].splitlines()
-    assert any(entry["radius"] > sqrt(log(2 * 2 * 6 / alpha) / (2 * 64)) for entry in report["confidence"]["levels"])
-    # Every allowed alpha gives a finite radius and a strict-JSON report, also where 2 H J/alpha exceeds the
-    # binary64 range. The reference evaluates log(2 H J/alpha) in 50-digit arithmetic.
+        assert entry["lower_bound"] == max(entry["hoeffding_lower"], entry["cp_lower"])
+        assert f"Level {level.level} selected region mass lower bound:" in report["summary"]
+        # Independent binomial right-tail inversion of qhd._coverage.cp_lower.
+        # The 1e-9 relative tail residual is the advisor's development check,
+        # not a production inverse error bound or directed-rounding claim.
+        with localcontext() as context:
+            context.prec = 75
+            n, m, p = level.valid_count, level.region_count, Decimal.from_float(entry["cp_lower"])
+            term = tail = p**n
+            # Successively add P(X=n-f) using its exact ratio to P(X=n-f+1).
+            for failures in range(1, n - m + 1):
+                term *= Decimal(n - failures + 1) / failures * (1 - p) / p
+                tail += term
+            beta = Decimal.from_float(alpha) / (2 * 2 * 6)
+            assert abs(tail / beta - 1) <= Decimal("1e-9")
+    assert any(entry["radius"] > sqrt(log(4 * 2 * 6 / alpha) / (2 * 64)) for entry in report["confidence"]["levels"])
+    # Tiny alpha preserves the original Hoeffding half-budget when the CP
+    # tail is outside its normal binary64 range. The radius oracle uses 50 digits.
     for tiny in (1e-308, 5e-324):
         small = result.report(failure_probability=tiny)
         json.dumps(small, allow_nan=False)
         for entry, level in zip(small["confidence"]["levels"], result.levels, strict=True):
             with mpmath.workdps(50):
-                reference = float(mpmath.sqrt(mpmath.log(mpmath.mpf(24) / mpmath.mpf(tiny))
+                reference = float(mpmath.sqrt(mpmath.log(mpmath.mpf(48) / mpmath.mpf(tiny))
                                               / (2 * level.valid_count)))
             assert isfinite(entry["radius"])
             assert entry["radius"] == pytest.approx(reference, rel=8 * UNIT_ROUNDOFF, abs=0)
+            assert entry["cp_lower"] is None and entry["cp_unavailable"] == "beta_tail_below_normal_range"
+            assert entry["lower_bound"] == entry["hoeffding_lower"]
     # The counts refinement saves and loads without a backend, with its counts and level Results.
     from nwqlib.algorithms.qhd import load_box_refinement
 
@@ -316,6 +351,70 @@ def test_a_sampled_level_keeps_the_integer_totals_of_its_result(tmp_path):
     assert loaded.content_id == result.content_id and loaded.problem.content_id == problem.content_id
     assert [(inner.content_id, inner.valid_count) for inner in loaded.results] == [
         (level.result_id, level.valid_count) for level in result.levels]
+    _forbid_record_work(monkeypatch)
+    assert loaded.report() == report
+    with monkeypatch.context() as patch:
+        patch.setattr("scipy.special.betaincinv", lambda *args: pytest.fail("disabled coverage evaluated CP"))
+        assert result.report(failure_probability=None)["confidence"] is None
+
+
+def test_selected_region_coverage_uses_both_bounds_and_preserves_numerical_limits():
+    """Independent scalar relations of qhd._coverage, without another QHD trajectory."""
+    from nwqlib.algorithms.qhd._coverage import bounds_from_counts, coverage_lines
+
+    # For M=S, the binomial right tail is p**S, so the lower endpoint is
+    # beta**(1/S). Evaluate that defining relation with 75-digit powers,
+    # independently of the implementation's exp(log_beta/S).
+    full_hits = bounds_from_counts(n=2000, axis_counts=(2000, 2000), joint_count=2000,
+                                   intervals=((0, 62), (0, 62)), k=64, horizon=60, alpha=0.05)
+    with localcontext() as context:
+        context.prec = 75
+        beta = Decimal.from_float(0.05) / (2 * 60 * (64 * 65 // 2)**2)
+        p = Decimal.from_float(full_hits["cp_lower"])
+        # The same advisor-specified development residual as the tail sum below.
+        assert abs(p**2000 / beta - 1) <= Decimal("1e-9")
+    assert full_hits["lower_bound"] == full_hits["cp_lower"] < 1
+    assert full_hits["selected_method"] == "clopper_pearson"
+
+    # Three full axes need no marginal error subtraction, so Hoeffding
+    # wins here. Its event family still includes all four axes. The CP
+    # oracle independently sums the binomial right tail at 75 digits.
+    mixed = bounds_from_counts(n=2000, axis_counts=(1600, 2000, 2000, 2000), joint_count=1600,
+                               intervals=((0, 0), (0, 31), (0, 31), (0, 31)),
+                               k=32, horizon=19, alpha=0.05)
+    expected_h = 0.8 - sqrt(log(4 * 19 * 4 * (32 * 33 // 2) / 0.05) / 4000)
+    assert mixed["hoeffding_lower"] == pytest.approx(expected_h, rel=8 * UNIT_ROUNDOFF, abs=0)
+    assert mixed["lower_bound"] == mixed["hoeffding_lower"] > mixed["cp_lower"]
+    assert mixed["selected_method"] == "hoeffding"
+    with localcontext() as context:
+        context.prec = 75
+        p = Decimal.from_float(mixed["cp_lower"])
+        term = tail = p**2000
+        for failures in range(1, 401):
+            term *= Decimal(2001 - failures) / failures * (1 - p) / p
+            tail += term
+        beta = Decimal.from_float(0.05) / (2 * 19 * (32 * 33 // 2)**4)
+        # Advisor's development residual, not an inverse error certificate.
+        assert abs(tail / beta - 1) <= Decimal("1e-9")
+
+    kw = dict(intervals=((0, 0),), k=2, horizon=3, alpha=0.05)
+    zero = bounds_from_counts(n=10, axis_counts=(0,), joint_count=0, **kw)
+    assert zero["lower_bound"] == zero["cp_lower"] == 0
+    whole = bounds_from_counts(n=10, axis_counts=(10,), joint_count=10,
+                               intervals=((0, 1),), k=2, horizon=3, alpha=0.05)
+    assert whole["lower_bound"] == 1 and whole["selected_method"] == "full_support"
+    huge = 2**63 - 1
+    rounded = bounds_from_counts(n=huge, axis_counts=(huge,), joint_count=huge, **kw)
+    # The exact all-hit lower bound is below one. A rounded CP endpoint
+    # is unavailable, retaining Hoeffding's original half-budget.
+    assert rounded["cp_lower"] is None and rounded["cp_unavailable"] == "beta_lower_rounded_to_one"
+    assert rounded["lower_bound"] == rounded["hoeffding_lower"] < 1
+    row = dict(round=None, level=1, valid_count=huge, **rounded)
+    text = "\n".join(coverage_lines(dict(failure_probability=0.05, horizon=3, levels=[row])))
+    assert f"approximately {rounded['lower_bound']!r}" in text
+    shapes = bounds_from_counts(n=huge, axis_counts=(huge - 1,), joint_count=huge - 1, **kw)
+    assert shapes["cp_lower"] is None and shapes["cp_unavailable"] == "beta_shapes_not_exactly_representable"
+    assert shapes["lower_bound"] == shapes["hoeffding_lower"]
 
 
 @pytest.mark.parametrize("scaling", ["search_model", "physical"])
@@ -852,9 +951,17 @@ def test_stall_split_needs_a_valley_that_the_shots_resolve():
         assert gap > 0 and (gap * gap > 2 * bound if resolved else gap * gap < bound / 2)
         if resolved:
             assert (level.split.axis, level.split.valley) == (1, 2)
+            # The actual retained side includes the valley. The pre-split
+            # interval box is whole, so reusing its count S would be wrong.
+            split = level.split
+            selected = c[:split.valley + 1] if split.chosen == 0 else c[split.valley:]
+            kept = sum(selected)
+            assert 0 < kept < valid
+            assert (level.region_axis_counts, level.region_count) == ((valid, kept), kept)
         else:
             assert level.split is None and result.termination == "box_unchanged"
             assert level.split_declined == "no valley passes the count screen"
+            assert (level.region_axis_counts, level.region_count) == ((valid, valid), valid)
 
 
 @pytest.mark.parametrize("scaling,gain,steps,total_time", [("search_model", 1.0, 10, 4.0), ("physical", None, 8, 2.0)])
@@ -979,6 +1086,7 @@ def _forbid_record_work(monkeypatch):
         monkeypatch.setattr(f"nwqlib.scientist.{name}", forbid)
     monkeypatch.setattr("nwqlib.algorithms.qhd.resources.run_resources", forbid)
     monkeypatch.setattr(ArtifactHandle, "array", property(forbid))
+    monkeypatch.setattr("nwqlib.execution.ObservationChunk.histogram", forbid)
 
 
 def test_a_split_refinement_summarizes_saves_and_loads_from_its_records(monkeypatch, tmp_path):
@@ -1042,7 +1150,7 @@ def test_a_split_refinement_summarizes_saves_and_loads_from_its_records(monkeypa
     entry = report["levels"][0]
     assert entry["interval_event"] == "product of the kept intervals, the whole level box at a stall split"
     assert entry["split_region_mass"] == 58 / 256 and entry["mode_status"] == "unresolved"
-    assert report["confidence"]["levels"] == [] and "interval radius" not in report["summary"]
+    assert report["confidence"] is None and "simultaneous confidence" not in report["summary"]
     assert any("whole level box" in statement for statement in report["statements"])
     assert report["inner_results"] == [first.result_id, second.result_id]
     # The read count is in observed values, not passes. Each level reads its 25 kept amplitudes once, when
@@ -1083,8 +1191,9 @@ def test_an_early_stop_and_a_zero_level_record_report_stored_counts_and_unavaila
 
     A counts refinement with ``max_levels=4`` stops with box_unchanged after one level, so the horizon of
     Proposition 49 (docs/mathematics.md) stays H = 4, not the one completed level: the radius is
-    ``sqrt(log(2 H J/alpha)/(2 S))`` with J = d K (K + 1)/2 = 6 and the level's S valid draws.
-    Without a failure probability the report states no confidence level. A zero-level record that stopped
+    ``sqrt(log(4 H J/alpha)/(2 S))`` with J = d K (K + 1)/2 = 6 and the level's S valid draws,
+    because qhd._coverage allocates half of alpha to each method. The default report includes coverage;
+    explicit None suppresses it. A zero-level record that stopped
     with budget_exhausted and a stopped level whose CX and shot counts are unknown reports both as
     unavailable with their stored reasons, never as zero, and has no selected point.
     """
@@ -1107,26 +1216,34 @@ def test_an_early_stop_and_a_zero_level_record_report_stored_counts_and_unavaila
     _forbid_record_work(monkeypatch)
     alpha = 0.1
     report = early.report(failure_probability=alpha)
-    radius = sqrt(log(2 * 4 * 6 / alpha) / (2 * level.valid_count))
+    radius = sqrt(log(4 * 4 * 6 / alpha) / (2 * level.valid_count))
     (entry,) = report["confidence"]["levels"]
-    assert report["confidence"]["horizon"] == 4 and entry["radius"] == pytest.approx(radius, rel=8 * UNIT_ROUNDOFF)
-    assert "horizon 4, and failure probability 0.1" in report["summary"]
+    assert report["confidence"]["horizon"] == 4 and entry["radius"] == pytest.approx(radius, rel=8 * UNIT_ROUNDOFF, abs=0)
+    assert "horizon 4, failure probability 0.1" in report["summary"]
+    assert entry["lower_bound"] == 1.0 and entry["selected_method"] == "full_support"
     lines = str(early).splitlines()
     assert f"Level 1 interval mass: {level.joint_mass:.8g} (empirical). Marginal union-bound formula: " \
            f"{level.joint_mass_bound:.8g}." in lines
     assert f"Raw-shot reservations: {early.resources.shots}. Returned shots at completed levels: 64." in lines
-    assert early.report()["confidence"] is None and not any("radius" in line for line in lines)
+    assert early.report()["confidence"]["failure_probability"] == 0.05
+    assert any("simultaneous confidence 95%" in line for line in lines)
+    omitted = early.report(failure_probability=None)
+    assert omitted["confidence"] is None and "simultaneous confidence" not in omitted["summary"]
     # A counts level keeps 0 < S <= R with valid_mass S/R and an empirical joint mass, and every level of a
     # refinement with shots is a counts level.
     for update, message in ((dict(valid_count=None), "counts level records"),
                             (dict(returned_shots=level.valid_count - 1), "counts level records"),
                             (dict(valid_mass=level.valid_mass / 2), "counts level records"),
-                            (dict(joint_mass_kind="exact"), "empirical exactly for counts")):
+                            (dict(joint_mass_kind="exact"), "empirical exactly for counts"),
+                            (dict(region_axis_counts=(level.valid_count + 1,)), "region_axis_counts"),
+                            (dict(region_count=level.valid_count - 1), "region_count")):
         with pytest.raises(ValueError, match=message):
             level.revise(**update)
     with pytest.raises(ValueError, match="with shots records counts"):
         early.revise(shots=None)
-    assert any(statement.startswith("No confidence level is stored.") for statement in early.report()["statements"])
+    for invalid in (True, 0, 1, float("nan")):
+        with pytest.raises(ValueError, match="failure_probability"):
+            early.report(failure_probability=invalid)
     resources = report["resources"]["total"]
     assert resources["shots"]["meaning"].startswith("raw-shot reservations")
     assert resources["cx"]["meaning"].startswith("upper bound") and resources["circuit_attempts"]["meaning"].startswith(
@@ -1144,6 +1261,7 @@ def test_an_early_stop_and_a_zero_level_record_report_stored_counts_and_unavaila
     assert counts["total"]["cx"]["value"] is None and counts["stopped"]["shots"]["value"] is None
     assert counts["total"]["cx"]["unavailable"] == "level 1: its preparation raised"
     assert counts["t_cost"]["value"] is None and counts["max_plannings"]["value"] == 8
+    assert empty.report()["confidence"] is None
 
 
 def test_a_saved_refinement_refuses_mismatched_attachments_formats_and_folders(monkeypatch, tmp_path):

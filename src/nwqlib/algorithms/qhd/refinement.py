@@ -78,10 +78,8 @@ from .refinement_records import (
 )
 
 # The saved standalone refinement (BoxRefinementResult.save). The format
-# changes with the fields of the record, and another format is refused rather
-# than converted, since NWQLib owes no compatibility with the development
-# schemas that preceded release 1.0 (docs/FRAMEWORK.md, "API stability").
-ARCHIVE_FORMAT = "qhd.refinement/3"
+# changes with the fields of the record (docs/FRAMEWORK.md, "API stability").
+ARCHIVE_FORMAT = "qhd.refinement/4"
 ARCHIVE_RECORD = "refinement.json"
 
 
@@ -1039,6 +1037,8 @@ class _LevelReadout:
         grid = _grid(plan)
         d, k = grid.num_variables, grid.num_grid_points
         self.shape, self.valid_mass = (k,) * d, result.valid_mass
+        self.valid_count = result.valid_count
+        self.region_axis_counts, self.region_count, self.split_marginal_counts = None, None, None
         observation = plan.resolve("qhd").resolved_observation(plan)[1]
         self.kind, self.state, self.grid, self.flat, self.values = "exact", None, None, None, None
         self.available, self.counts, self._formed = True, False, False
@@ -1234,14 +1234,31 @@ class _LevelReadout:
             return fsum(terms()) / self.valid_mass
         points = np.stack(np.unravel_index(self.flat, self.shape), axis=-1).reshape(-1, len(self.shape))
         inside = np.ones(self.flat.shape, dtype=bool)
+        axes = []
         for j, (first, last) in enumerate(intervals):
-            inside &= (points[:, j] >= first) & (points[:, j] <= last)
+            if (first, last) == (0, self.shape[j] - 1):
+                if self.counts:
+                    axes.append(self.valid_count)
+                continue
+            selected = (points[:, j] >= first) & (points[:, j] <= last)
+            if self.counts:
+                axes.append(self._count_mask(selected))
+            inside &= selected
         if self.counts:
-            # The exact integer count in the box, divided once by the returned shots.
-            numerator = (sum(value for value, keep in zip(self.values, inside.tolist(), strict=True) if keep)
-                         if isinstance(self.values, list) else int(np.sum(self.values[inside], dtype=np.int64)))
-            return numerator / self.denominator / self.valid_mass
+            # C_j and M count the same valid draws in the marginal events and
+            # their intersection. Preserve the existing mass evaluation order.
+            self.region_axis_counts = tuple(axes)
+            self.region_count = self._count_mask(inside)
+            return self.region_count / self.denominator / self.valid_mass
         return fsum(self.values[inside].tolist()) / self.valid_mass
+
+    def _count_mask(self, mask):
+        """Sum selected integer counts in the readout's existing integer representation."""
+        import numpy as np
+
+        if isinstance(self.values, list):
+            return sum(value for value, keep in zip(self.values, mask.tolist(), strict=True) if keep)
+        return int(np.sum(self.values[mask], dtype=np.int64))
 
 
 def _joint_mass(readout, intervals):
@@ -1409,6 +1426,7 @@ def _valley_admission(result, readout, rows, levels):
                 np.add.at(axis, points[j], readout.values)
                 counts.append(axis.tolist())
             valid = int(np.sum(readout.values, dtype=np.int64))
+        readout.split_marginal_counts = counts
         # 2 N log(2 H d K/alpha), the squared threshold, as an exact rational upper bound.
         log_term = math.log(float(Fraction(2 * levels * d * k) / _FALSE_VALLEY_ALLOWANCE))
         bound = Fraction(2 * valid) * Fraction(log_term) * (1 + Fraction(1, 2**40))
@@ -2046,7 +2064,7 @@ def _check_attachments(result, problem, results):
 def save_archive(result, path):
     """Write ``result`` to the new directory ``path`` and return its path (``BoxRefinementResult.save``).
 
-    The directory holds ``refinement.json`` (format ``qhd.refinement/3``)
+    The directory holds ``refinement.json`` (format ``qhd.refinement/4``)
     with the portable refinement record and the problem record, which keeps
     the bounds, units and identity of the original problem, and
     ``problem.pickle`` with its live SymPy objective and variables, read
@@ -2850,6 +2868,15 @@ def _refine(problem, qhd, options, execution, shots, backend, root, limits, prog
                         del readout
                         break
                     next_box = split.regions[split.chosen]
+                    if readout.counts:
+                        # The retained old-grid event includes the valley on
+                        # either side; every other axis keeps all S valid draws.
+                        first, last = ((0, split.valley) if split.chosen == 0
+                                       else (split.valley, grid.num_grid_points - 1))
+                        kept = sum(readout.split_marginal_counts[split.axis][first:last + 1])
+                        readout.region_count = kept
+                        readout.region_axis_counts = tuple(
+                            kept if j == split.axis else readout.valid_count for j in range(grid.num_variables))
                     evaluations += 2
         level = RefinementLevel(
             level=len(levels) + 1,
@@ -2870,6 +2897,8 @@ def _refine(problem, qhd, options, execution, shots, backend, root, limits, prog
             valid_mass=result.valid_mass,
             valid_count=result.valid_count,
             returned_shots=result.returned_shots,
+            region_axis_counts=readout.region_axis_counts,
+            region_count=readout.region_count,
             # The readout's own status under every point rule. No refinement rule reads it.
             mode_status=result.mode_status,
             point_indices=indices,

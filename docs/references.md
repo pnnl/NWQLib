@@ -33,9 +33,12 @@ The lifecycle, record, execution and backend contracts have no paper source. [De
     - The Expectation shot selection and binary intervals cite Theorem 1, and the Lanczos Gram sampling bound cites Theorem 2.
     - The count screen that admits a stall-split valley in QHD box refinement applies Theorem 1 with both tails and a union bound over cells and levels.
     - Eqs. (4.11) and (4.16), p. 22, in the proof of Theorem 2: the exponential bound behind that count screen. The paper notes that this proof also gives a direct derivation of Eq. (2.3).
-    - The finite-shot interval and joint-mass bound of QHD box refinement ([Proposition 49](mathematics.md#r49)) applies Theorem 1 and Eqs. (1.4), (2.3) with a union bound over the contiguous index intervals of every axis and over levels.
+    - The Hoeffding branch of QHD's selected region coverage ([Proposition 49](mathematics.md#r49)) applies Theorem 1 and Eqs. (1.4), (2.3) with a union bound over contiguous index intervals and levels, using half the total failure budget.
     - NWQLib's binary inference uses the bounded-variable convention X in [-1,1]. Weighted Pauli sums apply the triangle inequality and a union bound over the predeclared setting family.
     - Sampling-model premises and binary64 evaluation remain explicit, as described in the [expectation guide](algorithms/expectation.md).
+
+ - Clopper, C. J., & Pearson, E. S. (1934). *The Use of Confidence or Fiducial Limits Illustrated in the Case of the Binomial*. Biometrika 26(4), 404–413. [DOI](https://doi.org/10.1093/biomet/26.4.404).
+    - QHD's selected region coverage uses one-sided binomial-test inversion, with a union bound over all candidate joint boxes and levels. It receives the other half of the failure budget in [Proposition 49](mathematics.md#r49).
 
 ## ADAPT-VQE
 
@@ -160,6 +163,7 @@ Sources listed in other sections:
  - Kushnir, S., Leng, J., Peng, Y., Fan, L., & Wu, X. (2025). QHDOPT: A Software for Nonlinear Optimization with Quantum Hamiltonian Descent. INFORMS Journal on Computing, 37(1), 107–124. [10.1287/ijoc.2024.0587](https://doi.org/10.1287/ijoc.2024.0587) [arXiv 2409.03121v1](https://arxiv.org/abs/2409.03121v1)
     - QHDOPT, arXiv:2409.03121v1, Sec. 2.1: NWQLib's default quadratic schedule, given as an example. The paper reports that schedules of this form work well for many test problems.
  - Wu, Z., Li, M., Zheng, M., Wang, M., Liu, J., Stein, S., Li, A., Chen, Y., & Liu, C. (2026). Benchmarking and Resource Analysis for Augmented-Lagrangian Quantum Hamiltonian Descent. [arXiv 2605.12066v1](https://arxiv.org/abs/2605.12066v1)
+    - Selected region coverage for adaptive box refinement ([arXiv:2605.12066](https://arxiv.org/abs/2605.12066)) uses Hoeffding and one-sided Clopper–Pearson bounds, with the sampling assumptions and full derivation in [Proposition 49](mathematics.md#r49).
     - Eq. (15) of arXiv:2605.12066v1, Sec. VI, p. 7: the shifted cubic schedule.
     - arXiv:2605.12066v1, Section IV.A, Eqs. (9)–(10): the one-hot occupation-operator encoding that NWQLib's potential follows.
     - Sec. III.B, Eqs. (6)–(8): the equality terms and multiplier update of the augmented-Lagrangian layer, whose inequality term comes from Rockafellar (below).

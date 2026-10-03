@@ -8,7 +8,9 @@ counts, whose text of wall times and measured timings varies in length, and the 
 contain them (``resume_augmented_lagrangian`` states the rule).
 """
 
+from decimal import Decimal, localcontext
 import json
+from math import log, sqrt
 import os
 import re
 from pathlib import Path
@@ -290,6 +292,42 @@ def test_refined_rounds_resume_between_levels_and_inside_a_pending_level_run(tmp
     totals = run_resources(resumed, synthesis_epsilon=1e-4)
     assert totals.model_dump() == run_resources(whole, synthesis_epsilon=1e-4).model_dump()
     assert totals.arbitrary_rotations == resumed.record.resources.arbitrary_rotations
+    # The same counts trajectory supplies all six selected-region events.
+    # PendingBackend returns (1, 1):48 and (2, 0):16; eta=.6 selects {1}
+    # on both axes, so C_x = C_y = M = 48, S = 64 independently of the
+    # coverage helper. Its Proposition 49 budget covers the whole AL run.
+    before = dict(counted), len(PendingBackend.launches), list(PendingBackend.refreshes)
+    with patch("nwqlib.execution.ObservationChunk.histogram", side_effect=AssertionError("report read observations")):
+        for run in (whole, resumed):
+            report = run.report()
+            confidence = report["confidence"]
+            assert confidence["horizon"] == 6 and confidence["failure_probability"] == 0.05
+            assert report["summary"] == str(run)
+            assert "simultaneous confidence 95%" in report["summary"]
+            expected = [(item.iteration, level) for item in run.iterations for level in item.refinement.levels]
+            assert len(confidence["levels"]) == 6
+            for row, (iteration, level) in zip(confidence["levels"], expected, strict=True):
+                assert (row["round"], row["level"], row["result_id"]) == (iteration, level.level, level.result_id)
+                assert (row["dimension"], row["axis_counts"], row["joint_count"], row["valid_count"]) == (2, [48, 48], 48, 64)
+                # Eight binary64 roundings cover the different evaluation order.
+                radius = sqrt(log(4 * 6 * 12 / 0.05) / 128)
+                assert row["radius"] == pytest.approx(radius, rel=8 * 2.0**-53, abs=0)
+                # Independent binomial-tail residual of qhd._coverage.cp_lower;
+                # the advisor's 1e-9 check is not a production error bound.
+                with localcontext() as context:
+                    context.prec = 75
+                    p = Decimal.from_float(row["cp_lower"])
+                    term = tail = p**64
+                    for failures in range(1, 17):
+                        term *= Decimal(65 - failures) / failures * (1 - p) / p
+                        tail += term
+                    beta = Decimal.from_float(0.05) / (2 * 6 * 6**2)
+                    assert abs(tail / beta - 1) <= Decimal("1e-9")
+            custom = run.report(failure_probability=0.1)
+            assert "horizon 6, failure probability 0.1" in custom["summary"]
+            assert custom["confidence"]["levels"][0]["lower_bound"] > confidence["levels"][0]["lower_bound"]
+            assert run.report(failure_probability=None)["confidence"] is None
+    assert (dict(counted), len(PendingBackend.launches), list(PendingBackend.refreshes)) == before
 
 
 def test_a_standalone_refinement_resumes_between_levels(tmp_path, counted):

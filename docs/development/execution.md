@@ -311,7 +311,7 @@ The small `test_native_ucgate_qpy_limitation_canary` test exercises raw QPY on o
 
 QPE archives use `qpe/<estimator>/7`, which also store the selected polar base of a unitary input. QCELS keeps analysis source `qpe.qcels.analysis` version 3, and the other estimators use `qpe.analysis` version 3. Earlier development formats require their original source/environment.
 
-The QHD constrained controller uses `qhd.constrained_run/4`, and a standalone refinement controller uses `qhd.refinement_run/5`. A saved constrained-result archive uses `qhd.constrained/3`, and a saved standalone refinement archive uses `qhd.refinement/3`, both with inner QHD Results in `qhd/7`. These format names belong to the layer and Method records, separately from the common Run and Result formats.
+The QHD constrained controller uses `qhd.constrained_run/5`, and a standalone refinement controller uses `qhd.refinement_run/6`. A saved constrained-result archive uses `qhd.constrained/4`, and a saved standalone refinement archive uses `qhd.refinement/4`, both with inner QHD Results in `qhd/7`. These format names belong to the layer and Method records, separately from the common Run and Result formats.
 
 ## Backend adapter contract {#backend-adapter-contract}
 

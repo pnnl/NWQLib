@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "nwqlib"
-version = "1.0.0.post2"
+version = "1.0.0.post3"
 description = "Evidence-aware quantum algorithms and scientific workflows."
 readme = "README.md"
 license = "BSD-2-Clause"

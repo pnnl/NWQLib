@@ -6,6 +6,7 @@ from pydantic import Field, PrivateAttr, model_validator
 
 from nwqlib.core.records import ContentID, Nonnegative, PositiveInt, Real, Record, Text
 from nwqlib.operators.access import Count
+from ._coverage import DEFAULT_FAILURE_PROBABILITY, coverage, coverage_lines
 from ._outer import total_counts
 from .initial_state import GaussianState
 from .method import QHD
@@ -535,6 +536,12 @@ class RefinementLevel(Record):
         returned_shots: The result's ``returned_shots`` for counts, the raw number of
             returned draws among which ``valid_count`` decoded to a grid point, or None
             for exact readout.
+        region_axis_counts: Integer counts of valid draws in each axis interval of the
+            selected region, or None for exact readout. For a split, the selected axis
+            keeps its chosen side including the valley. Every other axis is whole.
+        region_count: Integer count of valid draws in the intersection of those axis
+            intervals, or None for exact readout. These counts describe the selected
+            split region when a split replaces the ordinary interval box.
         mode_status: Mode-resolution status of this level's QHD readout among its
             positive observed valid points. Copied from the inner Result regardless of
             point_rule. It describes the readout's tie representative, including when
@@ -634,6 +641,8 @@ class RefinementLevel(Record):
     valid_mass: Nonnegative
     valid_count: Count | None
     returned_shots: Count | None
+    region_axis_counts: tuple[Count, ...] | None
+    region_count: Count | None
     mode_status: ModeStatus
     point_indices: tuple[Count, ...] | None
     point: tuple[Real, ...]
@@ -700,6 +709,18 @@ class RefinementLevel(Record):
                              "quotient, and an exact-readout level neither count")
         if self.joint_mass_kind is not None and (self.joint_mass_kind == "empirical") != (self.valid_count is not None):
             raise ValueError("a direct joint mass is empirical exactly for counts")
+        if self.valid_count is None:
+            if self.region_axis_counts is not None or self.region_count is not None:
+                raise ValueError("an exact-readout level has no region counts")
+        else:
+            counts, n = self.region_axis_counts, self.valid_count
+            if counts is None or len(counts) != d or any(count > n for count in counts):
+                raise ValueError("region_axis_counts needs one count between zero and valid_count per variable")
+            # The intersection has at most each marginal's count. The union
+            # of their complements has at most sum_j (S - C_j) draws, so its
+            # complement has at least max(0, S - sum_j (S - C_j)).
+            if self.region_count is None or not max(0, n - sum(n - count for count in counts)) <= self.region_count <= min(counts):
+                raise ValueError("region_count must lie between the marginal union lower bound and every axis count")
         return self
 
     @property
@@ -977,16 +998,18 @@ class BoxRefinementResult(Record):
         selected point and how it was selected, each level's interval mass
         with its readout kind, its chosen split-region mass and its readout
         mode status, and the CX and shot accounting (``report`` gives the
-        meaning of every count).
+        meaning of every count). Counts also give the default simultaneous
+        95% coverage bounds for the selected regions.
         """
-        return "\n".join(self._summary_lines())
+        return "\n".join(self._summary_lines(self._confidence(DEFAULT_FAILURE_PROBABILITY)))
 
-    def _summary_lines(self, failure_probability=None):
-        """Return the display lines of ``__str__`` and, with a failure probability, the radius of each level.
+    def _confidence(self, failure_probability):
+        """Evaluate the shared coverage formula over the configured refinement horizon."""
+        return coverage(((None, level) for level in self.levels), k=self.qhd.num_grid_points,
+                        horizon=self.options.max_levels, failure_probability=failure_probability)
 
-        Every line reads stored fields. The radius is ``_radius`` of the
-        level's valid count.
-        """
+    def _summary_lines(self, confidence):
+        """Return the stored-field summary and the already evaluated coverage bounds."""
         options = self.options
         lines = [f"Box refinement stopped: {self.termination}. Completed levels: {len(self.levels)} of at most "
                  f"{options.max_levels}.", _TERMINATION_TEXT[self.termination]]
@@ -1015,11 +1038,7 @@ class BoxRefinementResult(Record):
                 lines.append(f"Level {level.level} chosen split-region {readout} mass: "
                              f"{_number(level.split.region_masses[level.split.chosen])}.")
             lines.append(f"Level {level.level} readout mode status: {level.mode_status}.")
-            if failure_probability is not None and level.valid_count:
-                lines.append(f"Level {level.level} Proposition 49 interval radius: approximately "
-                             f"{_number(self._radius(level, failure_probability))}, using {level.valid_count} "
-                             f"valid draws, horizon {options.max_levels}, and failure probability "
-                             f"{failure_probability!r}, conditional on its sampling premises.")
+        lines.extend(coverage_lines(confidence))
         resources, reasons = self.resources, dict(self.resources.unavailable)
         cx = resources.cx if resources.cx is not None else f"unavailable ({reasons['cx']})"
         shots = resources.shots if resources.shots is not None else f"unavailable ({reasons['shots']})"
@@ -1033,36 +1052,7 @@ class BoxRefinementResult(Record):
         lines.append(f"Raw-shot reservations: {shots}. Returned shots at completed levels: {returned}.")
         return lines
 
-    def _radius(self, level, failure_probability):
-        """Return epsilon_z of Proposition 49 of docs/mathematics.md for ``level``, evaluated in binary64.
-
-        Conditional on the earlier history and the validity indicators, the
-        level's S_z = ``valid_count`` >= 1 valid positions are independent
-        draws from one fixed level population, with the sample size chosen
-        without inspecting them, and alpha and the horizon H =
-        ``options.max_levels`` are fixed before the counts are observed. The
-        nonwrapping interval family has K (K + 1)/2 members per axis, so the
-        d axes give J = d K (K + 1)/2 marginal events. For each fixed interval
-        Hoeffding's inequality gives ``Pr(abs(m_hat - m) > e) <=
-        2 exp(-2 S_z e**2)``, and a union bound over the level's J events
-        gives at most ``2 J exp(-2 S_z e**2)``, which is at most alpha/H for
-        ``e**2 >= log(2 H J/alpha)/(2 S_z)``. Conditional averaging and a union
-        bound over at most H levels give failure probability at most alpha,
-        and an early stop does not change the configured H. With the positive
-        integer ``A = H d K (K + 1) = 2 H J``, the exact identity
-        ``log(A/alpha) = log(A) - log(alpha)`` for A > 0 and alpha > 0 gives
-        ``epsilon_z = sqrt((log(A) - log(alpha))/(2 S_z))`` without the
-        quotient A/alpha, which overflows binary64 for a small allowed alpha.
-        Ordinary ``log`` and ``sqrt`` give an approximate evaluation, not a
-        directed-rounding enclosure.
-        """
-        from math import log, sqrt
-
-        d, k = len(level.box), self.qhd.num_grid_points
-        numerator = log(self.options.max_levels * d * k * (k + 1)) - log(failure_probability)
-        return sqrt(numerator / (2 * level.valid_count))
-
-    def _statements(self, failure_probability):
+    def _statements(self, confidence):
         """Interpretation sentences that follow from the stored record only (``report``)."""
         lines = [_TERMINATION_TEXT[self.termination] + " A stopping reason is an operational stop, not a "
                  "convergence certificate."]
@@ -1083,7 +1073,9 @@ class BoxRefinementResult(Record):
                          "joint_mass is the observed mass of that product event, available when the level Result "
                          "kept joint observations. Under exact readout, joint_mass_kind='exact' identifies the "
                          "nonsampled readout, not exact real arithmetic. Under counts both fields describe the "
-                         "empirical distribution of the returned sample. Neither uncorrected binary64 field is a "
+                         "empirical distribution of the returned sample conditioned on valid decoding. "
+                         "The population bounds concern the level's backend-sampled distribution under the same "
+                         "valid-decoding condition. Neither uncorrected binary64 field is a "
                          "directed-rounding population certificate.")
             lines.append("Each mass concerns its own level's population and old-grid event. Levels change the "
                          "Hamiltonian, box and initial state, so their masses cannot be multiplied to obtain the "
@@ -1094,22 +1086,8 @@ class BoxRefinementResult(Record):
             lines.append("At a stall split every kept interval covers its axis, so that level's interval masses "
                          "describe the whole level box. The chosen region's stored mass is reported separately, "
                          "and discarded_mass is the other region's.")
-        if any(level.valid_count is not None for level in self.levels):
-            if failure_probability is None:
-                lines.append("No confidence level is stored. report(failure_probability=alpha), with alpha fixed "
-                             "before the counts are inspected, evaluates the interval radius of Proposition 49.")
-            else:
-                lines.append("The radius epsilon_z = sqrt(log(H d K (K + 1)/alpha)/(2 S_z)) uses the configured "
-                             "horizon H = max_levels, J = d K (K + 1)/2 marginal interval events and the S_z valid "
-                             "draws of level z, not its raw or returned shots. It is an approximate binary64 "
-                             "evaluation of the conditional confidence formula of Proposition 49 of "
-                             "docs/mathematics.md under its sampling premises, which this report does not verify. "
-                             "On that event each kept interval's population mass is at least its exact empirical "
-                             "mass minus epsilon_z, and a chosen split region's likewise. The stored masses are "
-                             "rounded, so a strict bound first divides each by beta_K = (1 + u)**(K + 1)/(1 - u). "
-                             "Subtracting epsilon_z from joint_mass has no justification from this event, and a "
-                             "refinement nested in an augmented-Lagrangian claim needs the whole run's horizon. "
-                             "Levels without valid draws have no radius.")
+        if confidence is not None:
+            lines.append(confidence["meaning"])
         lines.append("T cost is unavailable in this record-only report. run_resources(..., synthesis_epsilon=...) "
                      "gives an estimate with its model and budget.")
         return lines
@@ -1145,42 +1123,48 @@ class BoxRefinementResult(Record):
                         "synthesis_epsilon=...) gives an estimate with its model and budget"),
         )
 
-    def report(self, *, failure_probability=None):
+    def report(self, *, failure_probability=DEFAULT_FAILURE_PROBABILITY):
         """Return a JSON-ready report of the refinement built only from its stored fields.
 
-        It plans, evaluates, measures and loads nothing, reconstructs no state and calls no
-        resource estimate. `levels` gives each level's readout kind, counts, intervals,
+        It performs no planning, objective evaluation, measurement or loading, reconstructs
+        no state and calls no resource estimate. `levels` gives each level's readout kind, counts, intervals,
         masses and the event they describe, its chosen split-region mass and its readout
         mode status. `resources` gives each count with its unavailable reason and its
-        meaning. Without `failure_probability` the report states the stored empirical
-        quantities and their meaning, and `confidence` is None. With a failure probability
-        alpha, 0 < alpha < 1, fixed before the counts are inspected, `confidence` gives the
-        horizon H, the number J of marginal interval events and, for each level with valid
-        draws S_z, the radius `epsilon_z = sqrt((log(A) - log(alpha))/(2 S_z))` with
-        `A = H d K (K + 1) = 2 H J`. It is an approximate binary64 evaluation of the
-        conditional confidence formula of [Proposition 49](../../mathematics.md#r49), not a
-        directed-rounding enclosure.
+        meaning. By default, `confidence` gives a population-mass lower bound for each
+        selected region in the level's backend-sampled distribution conditioned on valid
+        decoding, with simultaneous 95% confidence over the configured maximum
+        number of levels. Hoeffding and one-sided Clopper–Pearson bounds each receive
+        half the failure budget, and the larger available bound is reported. A split
+        uses its chosen side including the valley. The bounds use stored integer counts
+        and the sampling assumptions of [Proposition 49](../../mathematics.md#r49).
+        They are binary64 evaluations, not directed-rounding enclosures. Exact readout,
+        no completed counts levels, or explicit `None` gives `confidence=None`.
 
         Args:
-            failure_probability (float | None): Default `None`. The alpha of the confidence
-                statement, strictly between 0 and 1, fixed before the counts are inspected.
+            failure_probability (float | None): Default `0.05`. Total failure probability
+                alpha, strictly between 0 and 1 and fixed before inspecting the counts.
+                Set to `None` to omit the statistical report.
 
         Returns:
             report (dict): JSON-ready data with the `summary` text, its `statements`, the
                 `record`, the `levels`, `confidence`, the `resources` and the level Results'
                 content hashes in `inner_results`.
+
+        Raises:
+            ValueError: If `failure_probability` is neither `None` nor a number strictly
+                between 0 and 1.
+
+        Examples:
+            `result.report()` includes the default bounds.
+            `result.report(failure_probability=None)` omits them.
         """
-        if failure_probability is not None and (
-            isinstance(failure_probability, bool) or not isinstance(failure_probability, (int, float))
-            or not 0 < failure_probability < 1
-        ):
-            raise ValueError("failure_probability must be a number strictly between 0 and 1, or None")
-        alpha = None if failure_probability is None else float(failure_probability)
-        k = self.qhd.num_grid_points
+        confidence = self._confidence(failure_probability)
         levels = [
             dict(level=level.level, mode_status=level.mode_status,
                  readout="exact" if level.returned_shots is None else "counts",
                  valid_count=level.valid_count, returned_shots=level.returned_shots,
+                 region_axis_counts=None if level.region_axis_counts is None else list(level.region_axis_counts),
+                 region_count=level.region_count,
                  intervals=[list(interval) for interval in level.intervals], axis_masses=list(level.axis_masses),
                  joint_mass=level.joint_mass, joint_mass_kind=level.joint_mass_kind,
                  joint_mass_bound=level.joint_mass_bound,
@@ -1189,22 +1173,14 @@ class BoxRefinementResult(Record):
                  split_region_mass=None if level.split is None else level.split.region_masses[level.split.chosen])
             for level in self.levels
         ]
-        confidence = None if alpha is None else dict(
-            failure_probability=alpha, horizon=self.options.max_levels,
-            meaning="approximate evaluation of the conditional confidence formula of Proposition 49 of "
-                    "docs/mathematics.md under its sampling premises",
-            levels=[dict(level=level.level, valid_count=level.valid_count,
-                         marginal_events=len(level.box) * k * (k + 1) // 2, radius=self._radius(level, alpha))
-                    for level in self.levels if level.valid_count],
-        )
-        return dict(summary="\n".join(self._summary_lines(alpha)), statements=self._statements(alpha),
+        return dict(summary="\n".join(self._summary_lines(confidence)), statements=self._statements(confidence),
                     record=self.model_dump(mode="json"), levels=levels, confidence=confidence,
                     resources=self._resource_report(), inner_results=[level.result_id for level in self.levels])
 
     def save(self, path):
         """Write this refinement and its completed level Results to a new directory.
 
-        The directory holds `refinement.json` (format `qhd.refinement/3`) with the portable
+        The directory holds `refinement.json` (format `qhd.refinement/4`) with the portable
         refinement record and the problem record, which keeps the bounds, units and content
         hash of the original problem, and `problem.pickle` with its live SymPy objective and
         variables. Each completed level z keeps its Result, saved by its own archive with

@@ -1,5 +1,11 @@
 # Release notes
 
+## v1.0.0.post3 (2026-10-02)
+
+Counts-based QHD box refinement and augmented-Lagrangian runs with refinement now include selected region mass lower bounds in `print(result)` and `result.report()`. The default 95% confidence covers the configured run, and the mass is conditional on valid decoding of the level's backend-sampled distribution. The report compares Hoeffding and one-sided Clopper–Pearson bounds after allocating half the failure budget to each method.
+
+`BoxRefinementResult.report()` now defaults to `failure_probability=0.05`, and `ConstrainedQHDResult.report()` accepts the same parameter. Pass `None` to omit the statistical report. Each completed level records `region_axis_counts` and `region_count`. The outer archive formats are `qhd.refinement/4` and `qhd.constrained/4`, and the controller formats are `qhd.refinement_run/6` and `qhd.constrained_run/5`. Earlier outer formats cannot be loaded or resumed by these readers.
+
 ## v1.0.0.post2 (2026-10-01)
 
 This release changes documentation, one error message and repository settings. Code that runs with v1.0.0.post1 runs unchanged, with the same results.

@@ -1039,6 +1039,13 @@ def test_saved_refined_run_reloads_its_levels_and_a_plain_run_keeps_its_layout(t
     assert sorted(p.relative_to(path).as_posix() for p in path.glob("iterations/*/*")) == [
         f"iterations/{item.iteration}/result" for item in plain.iterations]
     assert load_augmented_lagrangian(path).record.content_id == plain.record.content_id
+    # Neither exact refinement nor a plain AL run has a sampled selected-box
+    # event. Neither report may call the beta inverse for that absent event.
+    with patch("scipy.special.betaincinv", side_effect=AssertionError("exact/plain report evaluated CP")):
+        assert result.report()["confidence"] is None
+        assert plain.report()["confidence"] is None
+        with pytest.raises(ValueError, match="failure_probability"):
+            plain.report(failure_probability=0)
 
 
 def test_a_nonfinite_objective_at_a_later_refined_point_ends_the_run_and_keeps_the_earlier_rounds():

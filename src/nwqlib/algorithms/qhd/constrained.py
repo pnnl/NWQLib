@@ -69,6 +69,7 @@ from typing import Any, Callable
 import sympy as sp
 
 from nwqlib.problems.records import ConstrainedOptimization
+from ._coverage import DEFAULT_FAILURE_PROBABILITY, coverage, coverage_lines, validate_alpha
 from .constrained_records import (
     ALEvaluation,
     ALIteration,
@@ -121,7 +122,7 @@ from .potential import coerce_real_scalar
 from .refinement import ARCHIVE_RECORD as REFINEMENT_RECORD, _refine, check_refinement_options
 from .refinement_records import BoxRefinement, RefinementLevel
 
-ARCHIVE_FORMAT = "qhd.constrained/3"
+ARCHIVE_FORMAT = "qhd.constrained/4"
 
 # Functions whose derivative is undefined or discontinuous somewhere. The
 # stationarity diagnostic is not applicable to a problem that contains one,
@@ -3145,7 +3146,7 @@ class ConstrainedQHDResult:
         return lines
 
     def __str__(self):
-        """Summarize the run from its record, without computing anything.
+        """Summarize the run and its default coverage bounds from stored records.
 
         Multipliers are listed by the problem position of their constraint.
         When the best round chose a most probable grid point, its copied mode
@@ -3156,6 +3157,21 @@ class ConstrainedQHDResult:
         (``records.QHDAnalysis``), since a resolved mode of observed counts
         gives no proof of the mode of the sampled population.
         """
+        return "\n".join(self._summary_lines(self._confidence(DEFAULT_FAILURE_PROBABILITY)))
+
+    def _confidence(self, failure_probability):
+        """Evaluate refinement coverage with one horizon for the whole AL run."""
+        alpha = validate_alpha(failure_probability)
+        record = self.record
+        if alpha is None or record.refinement is None:
+            return None
+        return coverage(((item.iteration, level) for item in record.iterations for level in item.refinement.levels),
+                        k=record.qhd.num_grid_points,
+                        horizon=record.options.max_iterations * record.refinement.max_levels,
+                        failure_probability=alpha)
+
+    def _summary_lines(self, confidence):
+        """Build the display from stored fields and the already evaluated coverage bounds."""
         record, best, last = self.record, self.best, self.last
         lines = [f"Constrained QHD (augmented Lagrangian): {record.termination} after "
                  f"{len(record.iterations)} rounds; execution: {record.execution}"]
@@ -3201,7 +3217,8 @@ class ConstrainedQHDResult:
                      f"evaluations, {counts['evolution_work']} evolution units, {counts['layer_work']} layer units; "
                      f"the configuration admits at most {record.admitted_work_bound} host work units over the run")
         lines += self._statements()
-        return "\n".join(lines)
+        lines.extend(coverage_lines(confidence))
+        return lines
 
     def _forms(self, item):
         """Name a round's inequality forms by problem position, with its slack-grid error bound when it has slacks."""
@@ -3216,10 +3233,10 @@ class ConstrainedQHDResult:
     def __repr__(self):
         return str(self)
 
-    def report(self):
+    def report(self, *, failure_probability=DEFAULT_FAILURE_PROBABILITY):
         """Return a JSON-ready report built only from the stored record and content hashes.
 
-        It evaluates, plans and measures nothing. `multipliers` maps each constraint's
+        It performs no objective evaluation, planning or measurement. `multipliers` maps each constraint's
         problem position, as a string, to its original-unit multiplier estimate
         (`multipliers()`), separately for equalities and inequalities, and is None when no
         round chose a point or a value lies outside the normal binary64 range, which a
@@ -3229,10 +3246,42 @@ class ConstrainedQHDResult:
         `inequality_forms` holds, per round, the form of each kept inequality by problem
         position, the round's slack-grid error bound and why the policy chose the forms
         (`InnerRepresentation`), and is None under `inequality_form="phr"`.
+
+        With counts and box refinement, `confidence` contains selected region mass lower
+        bounds for each level's backend-sampled distribution conditioned on valid decoding,
+        with simultaneous 95% confidence by default. The horizon is
+        `max_iterations * max_levels` for the whole run, including early termination.
+        Hoeffding and one-sided Clopper–Pearson bounds each use half the failure budget;
+        each level reports the larger available bound. The dimension includes its slack
+        coordinates. The sampling assumptions and binary64 evaluation are those of
+        [Proposition 49](../../mathematics.md#r49). Exact readout, no refinement, no completed
+        counts levels, or explicit `None` gives `confidence=None`.
+
+        Args:
+            failure_probability (float | None): Default `0.05`. Total failure probability
+                alpha, strictly between 0 and 1 and fixed before inspecting the counts.
+                Set to `None` to omit the statistical report.
+
+        Returns:
+            report (dict): JSON-ready summary, interpretation statements, stored record,
+                multipliers, inner Result hashes, refinement details, coverage bounds and
+                inequality forms.
+
+        Raises:
+            ValueError: If `failure_probability` is neither `None` nor a number strictly
+                between 0 and 1.
+
+        Examples:
+            `result.report()` includes the default bounds.
+            `result.report(failure_probability=0.01)` uses a total failure probability of 0.01.
         """
+        confidence = self._confidence(failure_probability)
         multipliers = self._positioned_multipliers()[0]
         refined = self.record.refinement is not None
-        return dict(summary=str(self), statements=self._statements(),
+        statements = self._statements()
+        if confidence is not None:
+            statements.append(confidence["meaning"])
+        return dict(summary="\n".join(self._summary_lines(confidence)), statements=statements, confidence=confidence,
                     record=self.record.model_dump(mode="json"),
                     multipliers=None if multipliers is None else dict(
                         equalities={str(i): value for i, value in multipliers[0].items()},
@@ -3252,12 +3301,12 @@ class ConstrainedQHDResult:
     def save(self, path):
         """Write the run to a new directory and return its path.
 
-        The directory holds `constrained.json` (format `qhd.constrained/3`) with the record,
+        The directory holds `constrained.json` (format `qhd.constrained/4`) with the record,
         `problem.pickle` with the live SymPy objective, variables and constraints, and
         `iterations/<k>/result/`, each inner Result saved by its own archive. With
         refinement each completed level z of round k has its Result under
         `iterations/<k>/levels/<z>/result/` instead, and the record nests the refinement
-        records. One format, `qhd.constrained/3`, covers both shapes, because the record
+        records. One format, `qhd.constrained/4`, covers both shapes, because the record
         itself says which shape a folder has. `load_augmented_lagrangian` reads it back. The
         archive stores the problem itself, because no Plan holds a ConstrainedOptimization.
         A failed save removes the directory.

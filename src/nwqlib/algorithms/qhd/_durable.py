@@ -72,10 +72,9 @@ from ._outer import HeaderlessRun
 RECORD = "controller.json"
 PROBLEM = "problem.pickle"
 NOISE = "noise-model.json"
-# One format per layer. They change with the fields of the outer record, and a directory of another
-# format is refused rather than converted, since NWQLib owes no compatibility with the development
-# schemas that preceded release 1.0 (docs/FRAMEWORK.md, "API stability").
-FORMATS = {"constrained": "qhd.constrained_run/4", "refinement": "qhd.refinement_run/5"}
+# One format per layer, changing with the outer record's fields
+# (docs/FRAMEWORK.md, "API stability").
+FORMATS = {"constrained": "qhd.constrained_run/5", "refinement": "qhd.refinement_run/6"}
 RESUME = {"constrained": "resume_augmented_lagrangian", "refinement": "resume_box_refinement"}
 
 
