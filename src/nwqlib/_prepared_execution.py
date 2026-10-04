@@ -140,7 +140,7 @@ from nwqlib.execution import (
     RunFailed, ScalarValue, SubmissionRecord, TimingObservation,
 )
 from nwqlib._run_journal import (
-    RUN_FORMAT, JSONBytesExceeded, LocalJournal, PreparationCharge, WorkflowItem, encode, encode_records,
+    RUN_FORMAT, JSONBytesExceeded, LocalJournal, PreparationCharge, WorkflowItem, encode_records,
     unsupported_run_format,
 )
 from nwqlib.ir.validation import AdmissionStepsExceeded, _Admission, admission_refusal
@@ -346,7 +346,7 @@ class Run:
                 from nwqlib._run_archive import initialize
                 initialize(self)
             self._write((("header", "run", dict(format=RUN_FORMAT, run_id=identity,
-                plan_id=plan.content_id, plan=plan.to_record(), backend=None if backend is None else backend.model_dump(mode="json"),
+                plan_id=plan.content_id, backend=None if backend is None else backend.model_dump(mode="json"),
                 limits=limits, forecast=forecast, allocation=allocation)), ("rng", "current", self.rng.snapshot())))
         except BaseException as error:
             if self.directory is not None:
@@ -562,7 +562,7 @@ class Run:
         journal = state["journal"]
         if journal is not None:
             try:
-                journal.commit(encoded.records, collected=collected, payloads=payloads,
+                journal.commit(records, collected=collected, payloads=payloads,
                                deleted=deleted, encoded=encoded, replaced=replaced_sizes)
             except BaseException:
                 state["storage_failed"] = True
@@ -1600,7 +1600,7 @@ class Run:
     def artifacts(self):
         """The store of the arrays this Run has saved, created on first use.
 
-        Read one array with `hydrate(manifest)`, or take the handles from
+        Read one array with `artifacts.get(manifest)`, or take the handles from
         `run.data.artifacts`.
         """
         # The store shares the Run lock and routes each publication through the
@@ -1717,28 +1717,8 @@ class Run:
         self._state["artifact_payloads"].update(batch["payload_refs"])
         self._state["publication_batch"] = None
 
-    def hydrate(self, manifest):
-        """Return the handle of one saved array, reading its bytes from the Run's folder once.
-
-        Nothing is measured or recomputed. The array is read on first use and
-        kept for the life of the Run. A probability observation and an array
-        handle of this Run read through the same store.
-
-        Args:
-            manifest (ArtifactManifest): The array's manifest.
-
-        Returns:
-            handle (ArtifactHandle): The array's handle.
-
-        Raises:
-            ValueError: If the Run has no saved bytes for the array.
-        """
-        if not self.artifacts.available(manifest):
-            raise ValueError("run has no saved bytes for this requested array")
-        return self.artifacts.get(manifest)
-
     @classmethod
-    def _restore(cls, plan, *, backend, directory, archive_files, selection, progress=None):
+    def _restore(cls, plan, *, backend, directory, archive_files, selection, saved_limits, progress=None):
         """Open an original frontier without new preparation or acquisition.
 
         The journal is read in dependency order by the steps called below, each
@@ -1769,19 +1749,18 @@ class Run:
         has for a new Run (``__init__``).
         """
         path = Path(directory)
-        saved_limits = cls._saved_manifest(path, selection["file"])
         journal = LocalJournal(path / "run.sqlite", saved_limits.max_data_bytes, create=False, restore_limits=True)
         try:
             result = cls._restored_header(plan, backend, path, journal, progress)
             result._restore_sizes(journal)
             result._restore_limits(journal)
             result._restore_rng(journal)
-            result._restore_preparations(plan, journal)
+            result._restore_preparations(journal)
             result._restore_checkpoint(journal)
             uncertain = result._restore_submissions(journal)
             result._restore_observations(journal)
-            result._restore_workflow(plan, journal)
-            result._restore_publications(plan, journal)
+            result._restore_workflow(journal)
+            result._restore_publications(journal)
             from nwqlib._run_archive import restore_caches
             restore_caches(result, archive_files, selection)
             if uncertain:
@@ -1790,28 +1769,6 @@ class Run:
         except BaseException:
             journal.close()
             raise
-
-    @staticmethod
-    def _saved_manifest(path, selection_file):
-        """Return the ExecutionLimits recorded in ``run.json``.
-
-        The small manifest holds the format, the name of the selection file and
-        the limits in force when the folder was written. It contains no
-        executable imports or scientific arrays. Its one MiB read cap bounds the
-        text parsed before the journal supplies the current data allowance.
-        ``_run_archive.load`` checks the cap before its own read, and this
-        check repeats it for this second read. The manifest must name the
-        selection file that ``load`` already read.
-        """
-        manifest_path = path / "run.json"
-        if manifest_path.stat().st_size > 1024**2:
-            raise ValueError("run header exceeds one MiB")
-        saved = json.loads(manifest_path.read_text())
-        if saved.get("format") != RUN_FORMAT:
-            raise unsupported_run_format(saved.get("format"))
-        if saved.get("selection") != selection_file:
-            raise ValueError("saved run manifest names another selection file")
-        return ExecutionLimits.model_validate(saved["limits"])
 
     @classmethod
     def _restored_header(cls, plan, backend, path, journal, progress=None):
@@ -1828,7 +1785,7 @@ class Run:
         header = headers[0][1]
         if header.get("format") != RUN_FORMAT:
             raise unsupported_run_format(header.get("format"), "saved run journal")
-        if header["plan_id"] != plan.content_id or header["plan"] != plan.to_record():
+        if header["plan_id"] != plan.content_id:
             raise ValueError("saved run differs from its original selected Plan")
         configuration = None if backend is None else backend.model_dump(mode="json")
         if configuration != header["backend"]:
@@ -1873,7 +1830,7 @@ class Run:
         for _, fields, _ in journal.rows("rng"):
             self._state["rng"] = RandomStreams.restore(RandomState.model_validate(fields))
 
-    def _restore_preparations(self, plan, journal):
+    def _restore_preparations(self, journal):
         """Restore receipts, preparation charges, remote preparations and payload sizes.
 
         Identities and charges come from the saved records. No quantum circuit
@@ -1882,21 +1839,14 @@ class Run:
         2 of the module docstring), which stays counted against the limits. Its
         reserved synthesis work stays charged too. A charge refused by
         ``max_synthesis_work`` names no checkpoint preparation, because its
-        experiment was left unprepared (``Run._charge_synthesis``). A charge
-        that names a missing receipt, or a receipt of another execution kind,
-        raises.
+        experiment was left unprepared (``Run._charge_synthesis``).
         """
         state = self._state
         for key, fields, _ in journal.rows("prepared"):
             record = PreparedArtifact.model_validate(fields)
-            if key != record.content_id or record.plan_id != plan.content_id:
-                raise ValueError("saved preparation differs from its original Plan")
-            record.realization.validate_plan(plan)
             state["prepared_artifacts"][key] = record
         for key, fields, _ in journal.rows("preparation"):
             charge = PreparationCharge.model_validate(fields)
-            if key != charge.preparation_id:
-                raise ValueError("saved preparation identity differs from its original charge")
             state["preparations"] += 1
             state["host_preparations"] += int(charge.execution == "host_kernel")
             state["preparation_charges"][key] = charge
@@ -1904,21 +1854,15 @@ class Run:
             if charge.checkpoint_sequence is not None and charge.synthesis_refused is None:
                 state["checkpoint_preparations"][charge.checkpoint_sequence] = key
             if charge.prepared_id is not None:
-                record = state["prepared_artifacts"].get(charge.prepared_id)
-                if record is None or record.execution != charge.execution:
-                    raise ValueError("saved preparation has no matching successful receipt")
+                record = state["prepared_artifacts"][charge.prepared_id]
                 state["local_prepared_ids"].append(charge.prepared_id)
                 state["construction_work"] += record.construction_work_reserved
                 state["host_preparation_work"] += record.host_preparation_work_reserved
         for key, fields, _ in journal.rows("remote_preparation"):
             record = PendingPreparation.model_validate(fields)
-            if record.preparation_id != key or record.run_id != self.run_id:
-                raise ValueError("saved remote preparation belongs to another run")
             state["remote_preparations"][key] = record
         for key, fields, _ in journal.rows("payload"):
             reference = PayloadRef.model_validate(fields)
-            if reference.content_id != key:
-                raise ValueError("saved payload differs from its original reference")
             if reference.format not in ARRAY_PAYLOAD_FORMATS:
                 state["payload_sizes"][key] = reference.bytes
                 state["payload_bytes"] += reference.bytes
@@ -1927,12 +1871,11 @@ class Run:
         """Restore the controller checkpoint, one header naming its fields and one row per field."""
         state = self._state
         headers = list(journal.rows("checkpoint"))
-        saved = {key: fields for key, fields, _ in journal.rows("checkpoint_field")}
+        saved = dict(journal.connection.execute("SELECT key,payload FROM records WHERE kind='checkpoint_field'"))
         if headers:
             _, header, _ = headers[0]
             state["checkpoint_sequence"] = header["sequence"]
-            state["checkpoint_fields"] = {name: encode(saved[name], self.limits.max_data_bytes)
-                                          for name in header["fields"]}
+            state["checkpoint_fields"] = {name: saved[name] for name in header["fields"]}
 
     def _restore_submissions(self, journal):
         """Restore submissions and attempts, returning the uncertain revisions not yet written.
@@ -1984,8 +1927,6 @@ class Run:
                                and getattr(self.backend, "supports_synchronous", True) is True)
         for key, fields, _ in journal.rows("submission"):
             submission = SubmissionRecord.model_validate(fields)
-            if submission.submission_id != key or submission.run_id != self.run_id:
-                raise ValueError("saved submission belongs to another run")
             changed = False
             if submission.status == "intent":
                 submission = submission.revise(status="uncertain", failure="interrupted before acknowledgement")
@@ -2002,8 +1943,6 @@ class Run:
                 state["submission_items"][item.attempt] = item
         for key, fields, _ in journal.rows("event"):
             event = ConsumptionEvent.model_validate(fields)
-            if key != event.attempt or event.prepared_id not in state["prepared_artifacts"]:
-                raise ValueError("saved attempt has no original preparation receipt")
             submission = state["submissions"].get(event.submission)
             if event.status == "reserved" and (event.execution == "host_kernel" or submission is None
                     or submission.status in {"uncertain", "failed", "cancelled"}):
@@ -2036,16 +1975,12 @@ class Run:
             # (_run_journal._row_value), whose rows were restored first. A
             # point chunk takes its point's one-point readout, built once per
             # receipt for all of its points.
-            receipt = state["prepared_artifacts"].get(fields.get("prepared_id"))
-            if receipt is None:
-                raise ValueError("saved observation has no preparation receipt in this run")
+            receipt = state["prepared_artifacts"][fields["prepared_id"]]
             observation = receipt.observation
             if fields.get("point") is not None:
                 if receipt.content_id not in readouts:
                     readouts[receipt.content_id] = observation.point_observations()
-                observation = readouts[receipt.content_id].get(fields["point"])
-                if observation is None or fields.get("trajectory_id") != receipt.observation.content_id:
-                    raise ValueError("saved point observation differs from its receipt's trajectory")
+                observation = readouts[receipt.content_id][fields["point"]]
             # A probability chunk reads its arrays through the Run's store on
             # first use; nothing is hydrated here.
             chunk = ObservationChunk.model_validate(dict(fields, observation=observation))._attach_store(self.artifacts)
@@ -2083,21 +2018,16 @@ class Run:
                 for item in submission.items:
                     state["pending_output"].pop(item.attempt, None)
 
-    def _restore_workflow(self, plan, journal):
+    def _restore_workflow(self, journal):
         """Restore the static workflow rows (commit 1) and the cancellation or termination control row."""
         state = self._state
         for key, fields, _ in journal.rows("workflow_item"):
             item = WorkflowItem.model_validate(fields)
-            item.realization.validate_plan(plan)
-            if item.prepared_id is not None and item.prepared_id not in state["prepared_artifacts"]:
-                raise ValueError("saved workflow item has no actual preparation")
-            if item.attempt is not None and self.attempt_record(item.attempt).prepared_id != item.prepared_id:
-                raise ValueError("saved workflow attempt differs from its original preparation")
             state["workflow_items"][key] = item
         for _, control, _ in journal.rows("control"):
             state.update(cancel_requested=control["cancel_requested"], termination_reason=control["termination_reason"])
 
-    def _restore_publications(self, plan, journal):
+    def _restore_publications(self, journal):
         """Reopen the manifests of published arrays and charge their bytes."""
         state = self._state
         manifests = {}
@@ -2105,8 +2035,6 @@ class Run:
         for _, row, _ in journal.rows("publication"):
             if row.get("manifest") is not None:
                 manifest = ArtifactManifest.model_validate(row["manifest"])
-                if manifest.plan_id != plan.content_id:
-                    raise ValueError("saved array belongs to another Plan")
                 manifests[manifest.content_id] = manifest
                 if row.get("payload") is not None:
                     state["artifact_payloads"][manifest.content_id] = PayloadRef.model_validate(row["payload"])
@@ -2644,7 +2572,7 @@ def prepare_experiment(point, *, run, runtime=None, reduction_allowance=None, he
     run.progress("prepare")
     if host:
         return _prepare_host(point, construction, observation, runtime, charge, run, items, setting)
-    from nwqlib.blocks.lowering import _lower_qiskit, lower_definition
+    from nwqlib.blocks.lowering import _lower_qiskit
     specializations = {}
     selected = {record.content_id for record in construction.selections}
     blocks = tuple(block for block in plan.blocks if block.record.content_id in selected)
@@ -2661,8 +2589,6 @@ def prepare_experiment(point, *, run, runtime=None, reduction_allowance=None, he
             specialization_cache=(state["specializations"], specializations), method_context=run._method_context,
             max_direct_amplitudes=run.limits.max_direct_amplitudes, synthesis_charge=run._charge_synthesis,
             max_qubits=min(4096, run.limits.max_simulation_qubits) if getattr(run.backend, "kind", None) in LOCAL_SIMULATORS else 4096)
-        if logical.construction_id != construction.content_id:
-            raise ValueError("native lowering differs from the selected construction")
         owned = logical.circuit
         # The bound logical body is the lowered logical circuit, one operation
         # per bound call, before native lowering expands any of them. A
@@ -2684,7 +2610,7 @@ def prepare_experiment(point, *, run, runtime=None, reduction_allowance=None, he
             for scheduled in observation.positions:
                 for definition in () if scheduled.view is None else (scheduled.view.tail, scheduled.view.inverse):
                     if definition not in views:
-                        lowered = lower_definition(construction, definition, blocks=blocks,
+                        lowered = _lower_qiskit(construction, definition=definition, blocks=blocks,
                             definition_cache=state["definitions"],
                             specialization_cache=(state["specializations"], specializations),
                             method_context=run._method_context,

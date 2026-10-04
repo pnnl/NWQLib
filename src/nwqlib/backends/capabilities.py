@@ -13,7 +13,7 @@ does not list.
 from __future__ import annotations
 
 from enum import Enum
-from typing import Iterable, Literal
+from typing import Literal
 
 from pydantic import StrictBool, model_validator
 
@@ -152,44 +152,6 @@ class BackendTarget(Record):
                 raise ValueError("duplicate instruction support")
             object.__setattr__(self, "instructions", tuple(sorted(self.instructions, key=lambda item: item.content_id)))
         return self
-
-    def missing_capabilities(
-        self, required: Iterable[BackendCapability]
-    ) -> frozenset[BackendCapability]:
-        """Return required capabilities that this target does not support."""
-
-        return frozenset(required) - frozenset(self.capabilities or ())
-
-
-def capability_set(*capabilities: BackendCapability) -> frozenset[BackendCapability]:
-    """Build an immutable backend capability set."""
-
-    return frozenset(capabilities)
-
-
-def require_backend_capabilities(
-    backend_target: BackendTarget,
-    required: Iterable[BackendCapability],
-    *,
-    context: str,
-) -> None:
-    """Raise an actionable error when a target misses required capabilities."""
-
-    required_set = frozenset(required)
-    missing = backend_target.missing_capabilities(required_set)
-    if not missing:
-        return
-    required_names = ", ".join(sorted(capability.value for capability in required_set))
-    missing_names = ", ".join(sorted(capability.value for capability in missing))
-    available_names = ", ".join(
-        sorted(capability.value for capability in backend_target.capabilities or ())
-    ) if backend_target.capabilities is not None else "unknown"
-    raise ValueError(
-        f"{context} requires backend capabilities [{required_names}], "
-        f"but backend target {backend_target.name!r} is missing [{missing_names}]. "
-        f"Available capabilities: [{available_names}]."
-    )
-
 
 def unsupported_readout(target, observation):
     """Name the first part of ``observation`` that ``target`` does not declare, or return None.

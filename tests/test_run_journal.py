@@ -29,9 +29,7 @@ def test_binary_payload_roundtrip_reuses_storage_and_preserves_plain_saved_bytes
     store.close()
     store = LocalJournal(path, 4096, create=False)
     try:
-        changed = b"edited" + data[6:]
-        store.connection.execute("UPDATE binary SET payload=? WHERE identity=?", (changed, ref.content_id))
-        assert store.read_payload(ref) == changed  # Local bytes are not an authenticity certificate.
+        assert store.read_payload(ref) == data
         statements = []
         store.connection.set_trace_callback(statements.append)
         with pytest.raises(ValueError, match="missing or reordered"):
@@ -146,32 +144,6 @@ def test_actual_collection_order_survives_save_and_duplicate_collection(tmp_path
     with load(path, backend=InjectedBackend(), method=CountsMethod) as restored:
         assert [c.content_id for c in restored.observations.chunks] == [chunks[1].content_id, chunks[0].content_id]
         assert not restored.collect(chunks[1])
-
-
-@pytest.mark.parametrize("row", ["limits", "chunk"])
-def test_reopening_checks_each_stored_row_size_before_parsing_it(tmp_path, monkeypatch, row):
-    """The 4096-byte limits row cap and the stored total at open read the stored size column.
-
-    An oversized limits row or chunk row refuses reopening before any journal
-    row is parsed: the limits row by its own cap, a chunk row by the total of
-    the stored sizes, which includes it.
-    """
-    import sqlite3
-
-    monkeypatch.setattr(InjectedBackend, "supports_synchronous", True)
-    path = tmp_path / "run"
-    with Run(selected(), backend=InjectedBackend(), directory=path) as run:
-        submit_experiment(prepare_experiment(run.plan.resolve("counts"), run=run), run=run)
-        # An amendment writes the current limits row.
-        run.extend_limits(max_total_shots=run.limits.max_total_shots + 1)
-        limit = run.limits.max_data_bytes
-    size, message = ((4097, "saved execution limits exceed their scalar record size") if row == "limits" else
-                     (limit + 1, "saved run data exceeds max_data_bytes"))
-    with sqlite3.connect(path / "run.sqlite") as connection:
-        connection.execute("UPDATE records SET size=? WHERE rowid=(SELECT min(rowid) FROM records WHERE kind=?)",
-                           (size, row))
-    with pytest.raises(ValueError, match=message):
-        load(path, backend=InjectedBackend(), method=CountsMethod)
 
 
 def test_a_chunk_row_keeps_its_readout_only_through_an_equal_receipt(tmp_path, monkeypatch):

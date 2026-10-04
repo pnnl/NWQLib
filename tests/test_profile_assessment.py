@@ -11,7 +11,7 @@ from nwqlib.backends.assessment import (
     _assessment_inputs,
     _assess_capability, _assess_capacity, _assess_time, _select_workload,
 )
-from nwqlib.backends.profiles import DeviceProfile, ModelUncertainty, TimeCoefficient, TimeModel
+from nwqlib.backends.profiles import ModelUncertainty, TimeCoefficient, TimeModel
 from nwqlib.blocks import SelectedConstruction
 from nwqlib.core import Limit, Unit
 from nwqlib.core.planning import Experiment, ReadoutDetails
@@ -103,10 +103,6 @@ def test_current_target_profile_allocation_identity_and_interchange():
     assert unsupported.model_dump(mode="json")["capabilities"] == []
     with pytest.raises(ValueError, match="exactly one"):
         InstructionSupport(max_qubits=1)
-    with pytest.raises(ValueError, match="content_id"):
-        data = json.loads(inputs[2].model_dump_json())
-        data["configuration"]["precision"] = "complex64"
-        DeviceProfile.model_validate(data)
     with pytest.raises(ValueError):
         inputs[3].revise(locations=("gpu0", "gpu0"))
     with pytest.raises(ValueError, match="capacity stocks"):

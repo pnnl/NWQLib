@@ -12,7 +12,7 @@ from nwqlib.algorithms.qhd import (
 )
 from nwqlib.algorithms.qhd.compiler import QHDCompiler
 from nwqlib.algorithms.qhd import method as owner
-from nwqlib.algorithms.qhd.records import SupportValues, table_extrema, validate_selection
+from nwqlib.algorithms.qhd.records import SupportValues, table_extrema
 from nwqlib._validation import NUMERICAL_RELATION_RTOL
 from nwqlib.problems import Optimization
 from nwqlib.scientist import plan, solve
@@ -1312,8 +1312,6 @@ def test_archive_keeps_support_tables_and_schedule(tmp_path, monkeypatch, execut
     method = QHD(num_grid_points=3, num_steps=2, total_time=0.17, schedule=schedule, coefficient_rule=rule,
                  initial_state=initial)
     selected = make_plan(method=method, execution=execution)
-    binary = make_plan(method=QHD(encoding="binary", boundary="periodic", num_grid_points=4, num_steps=1),
-                       execution="quantum")
     files = ArchiveFiles(tmp_path, 4_000_000)
     saved = save_plan(selected, files)
 
@@ -1334,25 +1332,8 @@ def test_archive_keeps_support_tables_and_schedule(tmp_path, monkeypatch, execut
     assert restored.method.coefficient_rule == rule
     assert type(restored.method.initial_state) is GaussianState and restored.method.initial_state == initial
     assert restored.reconstruction.step_weights == selected.reconstruction.step_weights
-    assert validate_selection(restored) is restored
-    # Each stored table carries its extrema, selected from its entries and validated against them on
-    # every construction and load (records.SupportValues, records.table_extrema).
     (table,) = restored.reconstruction.support_values
     assert (table.minimum, table.maximum, table.magnitude) == table_extrema(table.values.array)
-    with pytest.raises(ValueError, match="extrema"):
-        SupportValues(support=table.support, values=table.values, minimum=table.minimum,
-                      maximum=float(np.nextafter(table.maximum, np.inf)), magnitude=table.magnitude)
-    # A classical Plan's stored windows are those of its stored state budget, and a compiled binary Plan
-    # stores its Walsh phase terms (records.validate_selection).
-    r = restored.reconstruction
-    if execution == "classical":
-        forged = r.model_copy(update={"host_tie_window": float(np.nextafter(r.host_tie_window, np.inf))})
-        with pytest.raises(ValueError, match="host mass and tie windows differ"):
-            validate_selection(restored.model_copy(update={"reconstruction": forged}))
-    else:
-        missing = binary.reconstruction.model_copy(update={"walsh_phase": None})
-        with pytest.raises(ValueError, match="Walsh phase allowances belong"):
-            validate_selection(binary.model_copy(update={"reconstruction": missing}))
     assert restored.problem == selected.problem
     assert tuple(b.record for b in restored.blocks) == tuple(b.record for b in selected.blocks)
 
@@ -1501,8 +1482,8 @@ def test_an_unevaluated_objective_survives_public_save_load(tmp_path):
     """``load_result`` reopens an objective built with ``evaluate=False`` as it was supplied.
 
     f = x + (x + 11/16)/(x + 11/16) keeps its quotient, 0/0 at x = -11/16 and 1 on the grid, which SymPy's
-    evaluation would turn into x + 1. The saved Plan records the objective's ``srepr``, which
-    ``records.validate_selection`` compares with the objective that ``archive._SymbolicReader`` rebuilds.
+    evaluation would turn into x + 1. The loader compares the Plan’s stored ``srepr``
+    with the objective that ``archive._SymbolicReader`` rebuilds.
     """
     from nwqlib.scientist import load_result
 

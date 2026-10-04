@@ -2987,7 +2987,7 @@ class ExpectationMethod(Method):
         if plan.execution == "classical":
             return dict(
                 format="expectation/5",
-                plan=files.write_plan(plan),
+                plan=plan.to_record(),
                 problem=files.write_problem(plan.problem),
                 output=files.write_output(plan.output),
                 method=self.model_dump(mode="json", exclude_computed_fields=True),
@@ -3011,7 +3011,7 @@ class ExpectationMethod(Method):
             )
         return dict(
             format="expectation/5",
-            plan=files.write_plan(plan),
+            plan=plan.to_record(),
             problem=files.write_problem(plan.problem),
             output=files.write_output(plan.output),
             method=self.model_dump(mode="json", exclude_computed_fields=True),

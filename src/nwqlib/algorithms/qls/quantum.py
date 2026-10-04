@@ -536,15 +536,6 @@ def _stored_terms(rec, output, *, max_bytes):
     return _canonical_terms(tuple((label, c.real) for label, c in rows), width)
 
 
-def _observable_rows(plan):
-    """Return the canonical ``(label, coefficient)`` rows of the Plan's stored scalar observable.
-
-    Each row carries its own label, so sampled analysis associates a
-    coefficient with a group member by label rather than by position.
-    """
-    return _stored_terms(plan.reconstruction, plan.output, max_bytes=plan.method.max_bytes)
-
-
 def _readout(method, output, terms, rec, *, shots):
     """Select the QLS readout acquisitions and charge QWC grouping to ``max_work``.
 
@@ -1248,77 +1239,8 @@ def plan_quantum(
         rhs=rhs,
         svd=svd,
     )
-    # This Program was just built from these phases, queries, projectors and
-    # readout, so validate_selected_body need not rebuild and compare it.
-    plan._cache["qls_phase_relation_checked"] = True
-    plan._cache["qls_body_validated"] = True
     validate_selection(plan)
     return plan
-
-
-def validate_selected_body(plan):
-    """Check physical projectors and phase/query arguments against their actual selected Program
-    uses.
-    """
-    rec = plan.reconstruction
-    if not rec.phase_solution or not rec.width or not rec.settings or plan.construction.kernels:
-        raise ValueError("quantum QLS requires actual selected phases, body and readout")
-    if _layout(rec, plan.method.solver) != dict(
-        width=rec.width, coordinates=rec.coordinates, success=rec.success, conditions=rec.conditions
-    ):
-        raise ValueError("QLS selected projectors differ from its actual coordinates and solver")
-    # Check the Wx-to-projector phase conversion, including global phase,
-    # before trusting the Program as an implementation of the selected polynomial.
-    if not plan._cache.get("qls_phase_relation_checked"):
-        from nwqlib.subroutines.qsp.phases import wx_phases_to_reflection
-
-        phases, global_phase = wx_phases_to_reflection(rec.phase_solution)
-        expressions = {entry.id: entry.value for entry in plan.construction.program.expressions}
-        expected = {f"projector_rz_{i}_angle": 2 * float(value) for i, value in enumerate(phases)}
-        expected["qsp_global_phase_angle"] = float(global_phase)
-        for name, value in expected.items():
-            expression = expressions.get(name)
-            if not isinstance(expression, Constant) or expression.value != Float64(value=value):
-                raise ValueError("QLS Program differs from its actual selected phase arguments")
-        queries = tuple(selection for selection in plan.construction.selections
-            if selection.signature.name.startswith("original_A_query"))
-        if not queries or any(selection.choice != rec.encoding_id
-            or selection.semantics.base_semantics is None
-            or selection.semantics.base_semantics.input != rec.encoding_operator
-            or selection.semantics.base_semantics.alpha != rec.alpha
-            or selection.semantics.base_semantics.epsilon != rec.encoding_error for selection in queries):
-            raise ValueError("QLS query records differ from the selected original encoding contract")
-        plan._cache["qls_phase_relation_checked"] = True
-    if plan._bound:
-        base, prep = plan._native["base"], plan._native["preparation"]
-        base.validate()
-        if (
-            base.original.reference != plan.problem.A.reference
-            or base.encoded.reference != rec.encoding_operator
-            or base.selected.record.content_id != rec.encoding_id
-            or prep.record.content_id != rec.preparation_id
-            or prep.record.semantics.preparation != prep._payload.preparation
-            or prep._payload.reference != plan._native["rhs"].reference
-            or rec.original_dimension == rec.padded_dimension
-            and prep._payload.reference != plan.problem.b.reference
-        ):
-            raise ValueError(
-                "QLS cached base/preparation differs from its original selected inputs"
-            )
-        if plan._cache.get("qls_body_validated"):
-            return
-        expected, experiments, blocks = _program(
-            plan.method, plan.problem, plan.output, plan.shots, rec, base, prep
-        )
-        if (
-            expected != plan.construction
-            or experiments != plan.experiments
-            or tuple(b.record for b in blocks) != tuple(b.record for b in plan.blocks)
-        ):
-            raise ValueError(
-                "QLS Program differs from actual selected phases, queries, projectors or readout"
-            )
-        plan._cache["qls_body_validated"] = True
 
 
 def _acquisitions(plan, data):
@@ -1576,7 +1498,7 @@ def _counts_statistics(plan, chunks, rows=None):
     if not isinstance(output, (QuadraticForm, NormalizedExpectation)):
         return fields
     conditional = isinstance(output, NormalizedExpectation) and not padded
-    rows = _observable_rows(plan) if rows is None else rows
+    rows = _stored_terms(plan.reconstruction, plan.output, max_bytes=plan.method.max_bytes) if rows is None else rows
     identity = fsum(c for label, c in rows if all(axis == "I" for axis in label))
     coefficients = {}
     for label, c in rows:
@@ -1760,7 +1682,7 @@ def analyze_quantum(plan, data):
         algorithm, physical = pair_float(reduction.success_mass), pair_float(reduction.physical_mass)
         scalar, numerator, norm, scale, unavailable = _exact_outputs(reduction, rec.recovery, output)
     else:
-        rows = _observable_rows(plan)
+        rows = _stored_terms(plan.reconstruction, plan.output, max_bytes=plan.method.max_bytes)
         fields = _counts_statistics(plan, chunks, rows)
         algorithm = fields.pop("algorithm_success_mass")
         physical = fields.pop("physical_slice_mass")

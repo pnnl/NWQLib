@@ -29,33 +29,10 @@ built-in Methods or an explicitly supplied class.
 
 from contextlib import contextmanager
 import json
-from math import isfinite
 from pathlib import Path
 
 
 CACHE_FILE_PREFIX = ".nwqlib-cache-"
-
-
-def _json_pairs(pairs):
-    """Build a JSON object, rejecting a repeated key that ``json.loads`` would otherwise overwrite."""
-    result = {}
-    for key, value in pairs:
-        if key in result:
-            raise ValueError(f"duplicate JSON key: {key}")
-        result[key] = value
-    return result
-
-
-def _json_finite(text):
-    """Parse a JSON real literal or constant, rejecting NaN, Infinity and literals such as ``1e999`` that overflow.
-
-    ``read_json`` passes it as both ``parse_float`` and ``parse_constant``.
-    Integer literals do not reach it.
-    """
-    value = float(text)
-    if not isfinite(value):
-        raise ValueError("archive JSON numbers must be finite")
-    return value
 
 
 def _json_scalar(value):
@@ -280,22 +257,9 @@ class ArchiveFiles:
             stream.write(b"\n")
 
     def read_json(self, name):
-        """Read one JSON file, with bounded nesting and strict values.
-
-        A folder opened with an allowance charges the file size before the text
-        is read (``read_path``). The standard parser is recursive, so its
-        recursion limit bounds container nesting, and a deeper file raises
-        ``ValueError`` instead of ``RecursionError``.
-        Duplicate keys and nonfinite numbers reject.
-        """
+        """Read one JSON file, charging its size against the folder allowance first."""
         with self.read_path(name).open(encoding="utf-8") as stream:
-            text = stream.read()
-        try:
-            return json.loads(text, object_pairs_hook=_json_pairs,
-                              parse_float=_json_finite, parse_constant=_json_finite)
-        except RecursionError as error:
-            raise ValueError(f"archive JSON file {name!r} nesting exceeds the JSON parser's recursion "
-                             "limit") from error
+            return json.load(stream)
 
     def write_array(self, name, array):
         """Save ``array`` as NPY without pickles, once per array object, and return its file name."""
@@ -459,10 +423,6 @@ class ArchiveFiles:
         """Load a cached native instruction from its one-operation QPY circuit (``write_instruction``)."""
         if name not in self._read_instructions:
             circuit = self.read_circuit(name)
-            # The wrapper is storage only; an edited global phase belongs in
-            # the instruction definition, where QPY can preserve its meaning.
-            if len(circuit.data) != 1 or circuit.global_phase != 0:
-                raise ValueError("cached instruction QPY requires one operation and zero wrapper phase")
             self._read_instructions[name] = circuit.data[0].operation
             instruction = self._read_instructions[name]
             self._remember("instructions", instruction, name)
@@ -515,8 +475,6 @@ class ArchiveFiles:
         re-ingested on load.
         """
         from nwqlib.problems.inputs import StateInput
-        if type(data) is not dict or set(data) != {"manifest", "preparation", "physical", "direction", "circuit"}:
-            raise ValueError("invalid saved state envelope")
         state = StateInput.from_record(dict(format="nwqlib.state_input/2",
             manifest=data["manifest"], preparation=data["preparation"]))
         manifest, spec = state.manifest, state.preparation
@@ -604,21 +562,12 @@ class ArchiveFiles:
         """
         from nwqlib.operators.inputs import OperatorInput
         from nwqlib.operators._pauli import PauliTerms
-        if type(data) is not dict or not {"manifest", "structure"} <= set(data):
-            raise ValueError("invalid saved operator envelope")
         declared = OperatorInput.from_record(dict(format="nwqlib.operator_input/2",
             manifest=data["manifest"], structure=data["structure"]))
         manifest = declared.manifest
         representation = manifest.reference.representation
         if "declaration_only" in data:
-            if data["declaration_only"] is not True or set(data) != {"manifest", "structure", "declaration_only"}:
-                raise ValueError("invalid saved operator declaration")
             return declared
-        fields = {"periodic_stencil": {"parameters"}, "dense": {"array"},
-                  "csr": {"sparse_type", "shape", "arrays"}, "csc": {"sparse_type", "shape", "arrays"},
-                  "pauli": {"num_qubits", "x", "z", "coefficients"}}
-        if representation not in fields or set(data) != {"manifest", "structure"} | fields[representation]:
-            raise ValueError("invalid saved operator representation envelope")
         dimension = manifest.basis.dimension
         if representation == "periodic_stencil":
             from nwqlib.operators.inputs import PeriodicStencil
@@ -762,27 +711,11 @@ class ArchiveFiles:
         return classes[fields["kind"]].model_validate(fields)
 
     @staticmethod
-    def write_plan(plan):
-        """Return the Plan's JSON description.
-
-        Its Problem, Method and output entries are descriptions only.
-        `read_plan` replaces them with the objects that their own readers
-        restored.
-
-        Args:
-            plan (Plan): The Plan.
-
-        Returns:
-            description (dict): The Plan's JSON description.
-        """
-        return plan.to_record()
-
-    @staticmethod
     def read_plan(data, *, problem, method, output, reconstruction=None):
         """Rebuild a Plan from its JSON description and the Problem, Method and output already restored.
 
         Args:
-            data (dict): The description that `write_plan` returned.
+            data (dict): The description returned by `Plan.to_record()`.
             problem (ProblemRecord): The restored Problem.
             method (Method): The restored Method.
             output (OutputRecord): The restored output.
@@ -819,28 +752,24 @@ def method_class(name, supplied=None):
 
 
 def save_plan(plan, files):
-    """Save selected data through the Method's hook, with its class name and Plan identity."""
+    """Save selected data through the Method's hook, with its class name."""
     writer = getattr(plan.method, "save_archive", None)
     if not callable(writer):
         raise TypeError(f"{type(plan.method).__name__} requires callable save_archive(plan, files) "
                         "for selected-data persistence; see docs/algorithm_protocol.md")
     return dict(method=f"{type(plan.method).__module__}.{type(plan.method).__qualname__}",
-                plan_id=plan.content_id, selected=writer(plan, files))
+                selected=writer(plan, files))
 
 
 def load_plan(data, files, *, method=None):
     """Restore the selected Plan through the Method's hook, without planning again.
 
-    The restored Plan must have the saved content identity. The Method's
-    hook restores its selected construction data from the saved files.
+    The Method restores its selected construction data from the saved files.
     """
-    from nwqlib.core.planning import Plan
     cls = method_class(data["method"], method)
     reader = getattr(cls, "load_archive", None)
     if not callable(reader):
         raise TypeError(f"{cls.__name__} requires callable load_archive(saved, files) "
                         "for selected-data persistence; see docs/algorithm_protocol.md")
     plan = reader(data["selected"], files)
-    if not isinstance(plan, Plan) or type(plan.method) is not cls or plan.content_id != data["plan_id"]:
-        raise ValueError("saved selection differs from its original Plan identity")
     return plan

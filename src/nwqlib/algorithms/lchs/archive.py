@@ -193,7 +193,7 @@ def save(method,plan,files):
                     selected.append(dict(constructor=key,payload=data.write(block._payload)))
                 else:
                     selected.append(dict(constructor=key))
-    saved = dict(format='lchs/9',plan=files.write_plan(plan),problem=files.write_problem(plan.problem),
+    saved = dict(format='lchs/9',plan=plan.to_record(),problem=files.write_problem(plan.problem),
         output=files.write_output(plan.output),method=method.model_dump(mode='json',exclude_computed_fields=True))
     # Written after the problem, so an input array shared with the native
     # payload keeps its problem file name.

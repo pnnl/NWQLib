@@ -91,10 +91,3 @@ def test_noise_archive_preserves_parameters_channels_and_qubit_associations(tmp_
         assert actual.value == expected_result.value
         assert sum(chunk.returned_shots for chunk in actual.data.observations.chunks) == 8
         assert sum(chunk.returned_shots for chunk in expected_result.data.observations.chunks) == 8
-
-
-def test_noise_loader_rejects_unrepresented_conditions():
-    from nwqlib._run_archive import _load_noise_model
-    with pytest.raises(ValueError, match="instruction fields"):
-        _load_noise_model({"basis_gates": ["x"], "errors": [dict(type="qerror", operations=["x"], probabilities=[1.],
-            instructions=[[dict(name="x", qubits=[0], conditional=1)]])]})

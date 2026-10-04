@@ -372,7 +372,6 @@ def test_analysis_origin_admits_actual_inputs_before_metadata_and_keeps_unknown_
     monkeypatch.setattr(owner, "version", missing)
     for fields in (
         dict(analyzer="not a Source"),
-        dict(analyzer=source, method_id="invalid"),
         dict(analyzer=source, dependencies=(object(),)),
         dict(analyzer=source, dependencies=("a", "a"), max_dependencies=1),
     ):
@@ -388,35 +387,17 @@ def test_analysis_origin_admits_actual_inputs_before_metadata_and_keeps_unknown_
     assert origin.analyzer == source and origin.method_id is None
 
 
-def test_malformed_saved_metadata_rejects_before_method_loading(tmp_path, monkeypatch):
-    import nwqlib.saved_evidence as owner
+def test_saved_metadata_roundtrip_and_read_allowance(tmp_path, monkeypatch):
     from nwqlib._choice_archive import ArchiveFiles
 
     result = constant_result()
     folder = result.save(tmp_path / "metadata")
-    path = folder / "result.json"
-    original = path.read_text()
     calls = []
 
     def forbidden(*args, **kwargs):
         calls.append(True)
-        pytest.fail("malformed JSON reached selected Method loading")
+        pytest.fail("over-budget JSON reached the parser")
 
-    with monkeypatch.context() as patch:
-        patch.setattr(owner, "load_plan", forbidden)
-        for malformed, reason in (
-            (
-                '{"format":"bad",' + original[1:],
-                "duplicate",
-            ),
-            ('{"unselected":NaN,' + original[1:], "finite"),
-            ('{"unselected":1e999,' + original[1:], "finite"),
-        ):
-            path.write_text(malformed)
-            with pytest.raises(ValueError, match=reason):
-                nwqlib.load_result(folder)
-            assert not calls
-    path.write_text(original)
     assert nwqlib.load_result(folder).eigenvalue == 2.0
     # The existing file-byte allowance is checked before allocating/parsing JSON.
     with monkeypatch.context() as patch:

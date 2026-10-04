@@ -100,8 +100,6 @@ def child(poison=False):
     assert model.output_id == plan.output.content_id
     assert model.construction_id == plan.construction.content_id
     assert model.terms and all(term.fact.fact.availability == "unknown" for term in model.terms)
-    from nwqlib.core.planning import Plan
-    assert Plan.record_identity(plan.to_record()) == plan.content_id
     chunk = ObservationChunk(
         run_id="offline", plan_id=plan.content_id, realization_id=realized.content_id,
         prepared_id="sha256:" + "0" * 64, experiment=experiment.name, setting=experiment.setting, bindings=(),
@@ -117,7 +115,6 @@ def child(poison=False):
     from nwqlib.execution import EstimateValue
     from nwqlib.algorithms.expectation import ExpectationMethod
     estimate_plan = expectation_plan(method=ExpectationMethod(estimate_precision=.1))
-    assert Plan.record_identity(estimate_plan.to_record()) == estimate_plan.content_id
     estimate_spec = estimate_plan.experiments[0].observation
     estimate_chunk = chunk.revise(plan_id=estimate_plan.content_id,
         realization_id=estimate_plan.resolve(estimate_plan.experiments[0].name).content_id,

@@ -297,11 +297,6 @@ class Directory:
             json.dump(data, stream, ensure_ascii=False, allow_nan=False, separators=(",", ":"))
         os.replace(temporary, target)
 
-    def commit_levels(self, levels, blocked):
-        """Commit the completed levels of the refinement in progress, keeping the committed rounds (``Frontier``)."""
-        self.commit(levels=levels, blocked=blocked)
-
-
 @dataclass(frozen=True)
 class Frontier:
     """The durable part of one refinement, namely its directory, its level folders and its committed levels.
@@ -314,7 +309,7 @@ class Frontier:
     directory's path for a standalone refinement and its ``iterations/<k>`` folder in round k of the
     augmented-Lagrangian layer. ``levels`` and ``results`` are the levels that a resumed refinement
     already completed and their QHD results, and ``blocked`` the stop that the last of them decided.
-    After each completed level the refinement commits through ``outer.commit_levels``.
+    After each completed level the refinement commits through ``outer.commit``.
     """
 
     outer: "Directory"
@@ -337,7 +332,16 @@ def live_problem(stored, objects):
     """
     fields = stored.model_dump(mode="json", exclude_computed_fields=True)
     fields.update(zip(("objective", "variables", "equalities", "inequalities"), objects))
-    return type(stored).model_validate(fields)
+    problem = type(stored).model_validate(fields)
+    import sympy as sp
+    for name in ("objective", "variables", "equalities", "inequalities")[:len(objects)]:
+        expected, actual = getattr(stored, name), getattr(problem, name)
+        if name == "objective":
+            expected, actual = (expected,), (actual,)
+        if len(expected) != len(actual) or any(
+                saved.expression != sp.srepr(live) for saved, live in zip(expected, actual, strict=True)):
+            raise ValueError("the saved SymPy expressions differ from the stored problem record")
+    return problem
 
 
 def header_committed(folder):

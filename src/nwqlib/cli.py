@@ -118,19 +118,9 @@ def main(argv=None):
                 )
             )
         else:
-            from pathlib import Path
             from nwqlib.saved_evidence import read_report
 
-            # The indented encoder recurses once per level, so it refuses a
-            # hand-edited file nested deeper than its recursion limit that the
-            # C parser accepted.
-            try:
-                text = json.dumps(read_report(args.path), allow_nan=False, indent=2)
-            except RecursionError as error:
-                name = str(Path(args.path) / "result.json")
-                raise ValueError(f"archive JSON file {name!r} nesting exceeds the JSON encoder's "
-                                 "recursion limit") from error
-            print(text)
+            print(json.dumps(read_report(args.path), allow_nan=False, indent=2))
     except NotImplementedError as error:
         parser.exit(2, f"{error}\n")
     except (ValueError, TypeError, LookupError, OSError, ImportError) as error:

@@ -246,7 +246,6 @@ A Result's answer field depends on its Method, as the table in the `Result` entr
         - observations
         - exposure
         - warnings
-        - hydrate
         - artifacts
         - release_native
 

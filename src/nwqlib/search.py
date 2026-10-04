@@ -52,9 +52,6 @@ class Candidate:
             tuple means that no earlier work is recorded, not that it cost
             nothing.
 
-    Raises:
-        TypeError: If `plan` is not a Plan, or another argument has the wrong
-            type.
     """
 
     plan: Plan
@@ -62,26 +59,6 @@ class Candidate:
     facts: tuple[FramedFact, ...] = field(default=(), kw_only=True)
     reference: TargetReference | None = field(default=None, kw_only=True)
     prior_work: tuple[Fact, ...] = field(default=(), kw_only=True)
-
-    def __post_init__(self):
-        """Require the declared record types, so a candidate carries only existing selections and evidence."""
-        if not isinstance(self.plan, Plan):
-            raise TypeError("Candidate requires an already selected Plan")
-        if self.allocation is not None and not isinstance(self.allocation, Allocation):
-            raise TypeError("Candidate allocation must be an explicit Allocation")
-        if type(self.facts) is not tuple or any(
-            not isinstance(fact, FramedFact) for fact in self.facts
-        ):
-            raise TypeError("Candidate facts must be a finite tuple of framed evidence")
-        if type(self.prior_work) is not tuple or any(
-            not isinstance(fact, Fact) for fact in self.prior_work
-        ):
-            raise TypeError(
-                "Candidate prior_work must preserve a finite tuple of supplied occurrences"
-            )
-        if self.reference is not None and not isinstance(self.reference, TargetReference):
-            raise TypeError("Candidate reference must be an existing framed TargetReference")
-
 
 class Objective(Record):
     """A quantity that [`scan`][nwqlib.search.scan] minimizes over its candidates.
@@ -226,9 +203,7 @@ class SearchSelection(Record):
     is listed in `incomparable` instead of being ranked as zero or infinity.
     The front holds only within the rows given. It is not a feasibility
     filter or a global optimum. Validation recomputes both lists from the
-    stored values with exact rational arithmetic and rejects supplied lists
-    that differ, so a saved selection cannot claim a front that its values
-    do not support. The fields below are read-only.
+    stored values with exact rational arithmetic. The fields below are read-only.
 
     Attributes:
         comparison_id: Content hash of the Comparison that this selection
@@ -272,8 +247,7 @@ class SearchSelection(Record):
         the objective's unit, integer counts for shots and width, and a
         predicted duration that is never marked exact. The size limits are
         checked before any comparison. The frontier then follows the class
-        definition with exact rational comparisons. Supplied lists that
-        differ reject, and absent lists are filled in.
+        definition with exact rational comparisons, which determine both lists.
         """
         if not self.values or not self.objectives or len(self.prior_work) != len(self.values):
             raise ValueError("search requires nonempty aligned original rows and objectives")
@@ -316,10 +290,6 @@ class SearchSelection(Record):
             )
         )
         missing = tuple(i for i, row in enumerate(numeric) if None in row)
-        if self.nondominated is not None and self.nondominated != frontier:
-            raise ValueError("frontier differs from the complete strict dominance relation")
-        if self.incomparable is not None and self.incomparable != missing:
-            raise ValueError("incomparable rows differ from unavailable objective values")
         object.__setattr__(self, "nondominated", frontier)
         object.__setattr__(self, "incomparable", missing)
         return self

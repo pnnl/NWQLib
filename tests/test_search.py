@@ -319,8 +319,6 @@ def test_frontier_domain_ties_and_partial_comparability():
     )
     selection = result.selection
     assert selection.nondominated == (0, 2)
-    with pytest.raises(ValueError, match="dominance"):
-        selection.revise(nondominated=(0,))
     fractional = selection.values[0][0].revise(value=Rational(numerator=1, denominator=2))
     with pytest.raises(ValueError, match="integer count"):
         selection.revise(values=((fractional,), *selection.values[1:]))

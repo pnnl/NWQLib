@@ -17,7 +17,6 @@ from nwqlib import (
 )
 from nwqlib.algorithms.qls import QLS, QLSVerification
 from nwqlib.algorithms.qls import quantum, method as owner
-from nwqlib.algorithms.qls.primary_records import validate_selection
 from nwqlib._choice_archive import ArchiveFiles, save_plan, load_plan
 from nwqlib.blocks import select_block_encoding
 from nwqlib.blocks.selection import SelectedBlock
@@ -948,32 +947,6 @@ def test_uncontrolled_adjoint_query_keeps_its_native_multiplexers_in_either_quer
                 assert (ops.get("multiplexer", 0), sum(ops.values())) == (2, 17), order
 
 
-def test_selected_phase_projector_readout_and_query_arguments_are_actual():
-    selected = choose()
-    assert all(s.implementation.name != "qls.coherent" for s in selected.construction.selections)
-    query = next(
-        s for s in selected.construction.selections if s.signature.name.startswith("original_A")
-    )
-    assert query.semantics.base_semantics == selected._native["encoding"].record.semantics
-    changed = selected.revise(
-        reconstruction=selected.reconstruction.revise(
-            phase_solution=tuple(
-                value + 0.1 if i == 0 else value
-                for i, value in enumerate(selected.reconstruction.phase_solution)
-            )
-        )
-    )
-    # revised Plans carry no executable bindings, so validation cannot inherit
-    # a cached acceptance for a changed phase body.
-    with pytest.raises(ValueError, match="actual selected native input"):
-        nwqlib.prepare(changed)
-    native = dict(selected._native)
-    native.pop("blocks", None)
-    changed._bind(blocks=selected.blocks, **native)
-    with pytest.raises(ValueError, match="Program differs"):
-        validate_selection(changed)
-
-
 @pytest.mark.parametrize("solver", ["shortcut_native_svp", "shortcut_dilation"])
 def test_quantum_norm_search_is_rejected_before_polynomial(monkeypatch, solver):
     monkeypatch.setattr(owner, "select_inputs", forbidden)
@@ -1175,6 +1148,8 @@ def test_actual_query_projector_and_phase_populations_match_independent_counts(
             )
 
     walk(program.root)
+    query = next(s for s in selected.construction.selections if s.signature.name.startswith("original_A"))
+    assert query.semantics.base_semantics == selected._native["encoding"].record.semantics
     aq = [row for row in calls if row[0].startswith("original_A_query")]
     rhs = [row for row in calls if row[0].startswith("rhs_query")]
     assert len(aq) == a_queries * r.degree and all(row[0].endswith(f"_c{a_controls}") for row in aq)
@@ -1375,19 +1350,6 @@ def test_explicit_prepared_inventory_uses_actual_selected_circuit_without_submis
     snapshot = prepared.circuits[0]
     assert snapshot.count_ops() == circuit.count_ops() and snapshot is not circuit
     assert not prepared.run.trace.events
-
-
-def test_changed_rhs_payload_cannot_reuse_selected_preparation_record():
-    from nwqlib.problems.inputs import ingest_vector
-    selected=choose(A=np.diag([1.,.5]),b=[1.,1j],solver='shortcut_native_svp')
-    validate_selection(selected)
-    prep=selected._native['preparation']
-    wrong=SelectedBlock.bind(prep.record,payload=ingest_vector([1.,1.]),constructor=prep._constructor)
-    selected._native['preparation']=wrong
-    with pytest.raises(ValueError,match='cached base/preparation'):
-        validate_selection(selected)
-    selected._native['preparation']=prep
-    validate_selection(selected)
 
 
 def test_multi_controlled_x_cx_law_reads_the_stored_synthesis_counts():

@@ -1,7 +1,6 @@
 """SDK-free, bounded OpenQASM 3.0 emission of selected primitive recipes."""
 
 from dataclasses import dataclass
-from hashlib import sha256
 import os
 from pathlib import Path
 import tempfile
@@ -49,11 +48,11 @@ class QasmWriteBudget(Record):
 
 
 class QasmWriteReceipt(Record):
-    """The record of a completed OpenQASM 3 file or stream: what was written, its layouts, counts and digest.
+    """The record of a completed OpenQASM 3 file or stream: what was written, its layouts and counts.
 
     `write_qasm3` and `write_qasm3_file` return it, and
     [`materialize_qasm3_file`][nwqlib.io.materialization.materialize_qasm3_file]
-    checks a file against it. The fields below are read-only. The text describes
+    imports its written file. The fields below are read-only. The text describes
     one circuit template. Writing it runs nothing and collects no observation.
     The counts are syntactic. They count no shots, gate synthesis or SDK
     memory, and they are not hardware estimates.
@@ -81,7 +80,6 @@ class QasmWriteReceipt(Record):
             after expanding loops and calls.
         dynamic_visits: Visits to Program nodes, empty calls and loop bodies
             included.
-        digest: `sha256:` digest of the text.
         completion: `"stream"` from `write_qasm3` or `"file"` from
             `write_qasm3_file`.
         native_bytes: Always `None`, because the SDK memory is not known.
@@ -101,7 +99,6 @@ class QasmWriteReceipt(Record):
     emitted_instructions: Count
     expanded_operations: Count
     dynamic_visits: Count
-    digest: str
     completion: Literal["stream", "file"]
     native_bytes: None = None
     peak_rss: None = None
@@ -116,12 +113,10 @@ class QasmPrefix:
     Attributes:
         bytes_written: Bytes the sink accepted.
         emitted_instructions: Statements the sink accepted completely.
-        digest: `sha256:` digest of exactly the accepted bytes.
     """
 
     bytes_written: int
     emitted_instructions: int
-    digest: str
 
 
 class QasmWriteError(RuntimeError):
@@ -329,12 +324,12 @@ class _Prepared:
             expanded_operations=self.operations, dynamic_visits=self.visits,
         )
         # Validate/bound even the final receipt before exposing artifact bytes.
-        _metadata(self.receipt(budget.max_bytes, budget.max_instructions, "sha256:" + "0" * 64, "stream"), budget)
+        _metadata(self.receipt(budget.max_bytes, budget.max_instructions, "stream"), budget)
 
-    def receipt(self, size, instructions, digest, completion):
-        """The receipt for ``size`` accepted bytes and ``instructions`` statements with their digest."""
+    def receipt(self, size, instructions, completion):
+        """The receipt for ``size`` accepted bytes and ``instructions`` statements."""
         return QasmWriteReceipt(**self.receipt_fields, bytes_written=size, emitted_instructions=instructions,
-                                digest=digest, completion=completion)
+                                completion=completion)
 
     def recipe(self, record, operand):
         """Yield one selected primitive recipe as QASM statements.
@@ -443,13 +438,11 @@ def _write(prepared, sink, cancel, completion):
     """Stream the admitted text in bounded chunks to a blocking binary sink.
 
     A sink may accept fewer bytes than offered. The remainder is offered again
-    until the chunk is complete, and the digest covers exactly the accepted
-    bytes. Cancellation is checked before each fragment and each retry. Any error
+    until the chunk is complete. Cancellation is checked before each fragment and each retry. Any error
     becomes ``QasmWriteError`` carrying the accepted prefix, so a caller can tell
     how much of the file exists without a completed receipt.
     """
     budget = prepared.budget
-    digest = sha256()
     size = instructions = 0
     try:
         fragments = iter(prepared.fragments())
@@ -474,13 +467,12 @@ def _write(prepared, sink, cancel, completion):
                     accepted = sink.write(offered)
                     if type(accepted) is not int or not 0 < accepted <= len(offered):
                         raise ValueError("binary sink must return a positive accepted-byte count")
-                    digest.update(offered[:accepted])
                     size += accepted
                     offset += accepted
             instructions += int(instruction)
-        return prepared.receipt(size, instructions, "sha256:" + digest.hexdigest(), completion)
+        return prepared.receipt(size, instructions, completion)
     except Exception as exc:
-        raise QasmWriteError(str(exc), QasmPrefix(size, instructions, "sha256:" + digest.hexdigest())) from exc
+        raise QasmWriteError(str(exc), QasmPrefix(size, instructions)) from exc
 
 
 def write_qasm3(construction, sink, *, budget: QasmWriteBudget, cancel=None) -> QasmWriteReceipt:
@@ -586,8 +578,8 @@ def write_qasm3_file(construction, path, *, budget: QasmWriteBudget, cancel=None
         if isinstance(exc, Exception):
             error = exc
             if not isinstance(error, QasmWriteError):
-                prefix = (QasmPrefix(receipt.bytes_written, receipt.emitted_instructions, receipt.digest) if receipt
-                          else QasmPrefix(0, 0, "sha256:" + sha256().hexdigest()))
+                prefix = (QasmPrefix(receipt.bytes_written, receipt.emitted_instructions) if receipt
+                          else QasmPrefix(0, 0))
                 error = QasmWriteError(str(exc), prefix)
                 error.__cause__ = exc
             error.secondary += tuple(secondary)

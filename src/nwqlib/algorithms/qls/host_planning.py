@@ -276,10 +276,6 @@ def _admit_query_synthesis(method, original, dimension, *, encoding=None, rhs=No
                           operation="QLS controlled dense-query synthesis")
 
 
-def _events():
-    return dict(svd_calls=0, eigh_calls=0, eigvalsh_calls=0)
-
-
 def _covers_spectral_estimate(bound, estimate):
     """Compare positive finite estimates without an absolute floor or overflow."""
     return estimate <= bound or (estimate - bound) / estimate <= QLS_SPECTRAL_PREMISE_RTOL
@@ -355,7 +351,7 @@ def _spectrum(operator, method, *, alpha=None, factors=None):
     the SVD-values law. The method string and ``spectral_calls`` name the
     factorization actually used.
     """
-    events = _events()
+    events = dict(svd_calls=0, eigh_calls=0, eigvalsh_calls=0)
     lower = upper = None
     source = "user"
     if factors is not None:

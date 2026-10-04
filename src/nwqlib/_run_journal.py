@@ -37,7 +37,7 @@ from nwqlib.operators.access import Count
 # A Method-owned Result field change may instead bump that Method's archive
 # format when load_run checks it before restoring the journal and validating
 # the concrete Result.
-RUN_FORMAT = "nwqlib.run/18"
+RUN_FORMAT = "nwqlib.run/19"
 
 
 def unsupported_run_format(found, where="saved run"):
@@ -248,12 +248,11 @@ def _row_value(kind, value):
 
 @dataclass(frozen=True)
 class _EncodedRecords:
-    """One admitted encoding, bound to the exact original row tuple.
+    """The admitted JSON rows and their encoded sizes.
 
     ``sizes`` holds the UTF-8 byte length of each row's text, in row order.
     """
 
-    records: tuple
     rows: tuple
     sizes: tuple
 
@@ -278,7 +277,7 @@ def encode_records(records, max_bytes):
         remaining -= _json_bound(value, remaining)
         values.append(value)
     encoded = tuple(_encode_admitted(value, max_bytes) for value in values)
-    return _EncodedRecords(records, tuple((kind, key, text) for (kind, key, _), (text, _) in zip(records, encoded)),
+    return _EncodedRecords(tuple((kind, key, text) for (kind, key, _), (text, _) in zip(records, encoded)),
                            tuple(size for _, size in encoded))
 
 
@@ -312,12 +311,9 @@ class LocalJournal:
         The lock is taken before the database is opened, so a second controller
         fails before reading any row. ``create=True`` requires a new file
         (``O_EXCL``), so an existing Run is never initialized twice.
-        ``restore_limits`` reads the current limits row first, under a 4096-byte
-        cap for that scalar record, because an extended ``max_data_bytes`` decides
-        how large the later rows may be. The encoded ``ExecutionLimits`` record is
-        a few hundred bytes, and the untuned 4096-byte cap is registered in
-        docs/ENGINEERING_CONSTANTS.md. Collection ordinals must be exactly 1 to n
-        on chunk rows.
+        ``restore_limits`` reads the current limits before admitting the
+        cumulative stored bytes. Collection ordinals record the order in
+        which the Method consumed observations.
         """
         if os.name != "posix":
             raise ValueError("durable run journals require POSIX advisory locking")
@@ -348,25 +344,17 @@ class LocalJournal:
                     "PRIMARY KEY(identity,ordinal))")
                 self.connection.execute("COMMIT")
             elif restore_limits:
-                size = self.connection.execute("SELECT size FROM records "
-                    "WHERE kind='limits' AND key='current'").fetchone()
-                if size is not None:
-                    if not 1 <= size[0] <= 4096:
-                        raise ValueError("saved execution limits exceed their scalar record size")
+                row = self.connection.execute(
+                    "SELECT payload FROM records WHERE kind='limits' AND key='current'").fetchone()
+                if row is not None:
                     from nwqlib.execution import ExecutionLimits
-                    text, = self.connection.execute("SELECT payload FROM records WHERE kind='limits' AND key='current'").fetchone()
-                    self.max_bytes = ExecutionLimits.model_validate_json(text).max_data_bytes
+                    self.max_bytes = ExecutionLimits.model_validate_json(row[0]).max_data_bytes
             self._data_bytes = self.connection.execute(
                 "SELECT coalesce(sum(size),0) FROM records").fetchone()[0]
             self._data_bytes += self.connection.execute(
                 "SELECT coalesce(sum(length(payload)),0) FROM binary").fetchone()[0]
-            count, distinct, first, last = self.connection.execute(
-                "SELECT count(*),count(DISTINCT collected),min(collected),max(collected) "
-                "FROM records WHERE collected!=0").fetchone()
-            if (count and (distinct != count or first != 1 or last != count)
-                    or self.connection.execute("SELECT 1 FROM records WHERE collected!=0 AND kind!='chunk' LIMIT 1").fetchone()):
-                raise ValueError("saved observations require distinct contiguous collection ordinals")
-            self._collected_count = count
+            self._collected_count = self.connection.execute(
+                "SELECT count(*) FROM records WHERE kind='chunk' AND collected!=0").fetchone()[0]
             self._check_size()
         except BaseException:
             self.close()
@@ -406,13 +394,6 @@ class LocalJournal:
         # receipts and payload associations are never deletable.
         if any(kind not in {"cache", "checkpoint_field"} for kind, _ in removed):
             raise ValueError("only cache rows and checkpoint fields can be deleted from a run journal")
-        if encoded is not None and (type(encoded) is not _EncodedRecords or encoded.records is not records):
-            raise TypeError("encoded rows must be the admitted encoding of these exact records")
-        if encoded is not None and (tuple((kind, key) for kind, key, _ in encoded.rows)
-                != tuple((kind, key) for kind, key, _ in records)
-                or any(type(text) is not str for _, _, text in encoded.rows)
-                or len(encoded.sizes) != len(encoded.rows)):
-            raise ValueError("encoded row inventory differs from the admitted transition")
         if len({reference.content_id for reference, _ in payloads}) != len(payloads):
             raise ValueError("duplicate binary reference in an atomic transition")
         import sqlite3
@@ -423,8 +404,6 @@ class LocalJournal:
             raise
         try:
             if replaced is not None:
-                if set(replaced) != keys | removed:
-                    raise ValueError("replaced row sizes differ from the rows of the transition")
                 previous = dict(replaced)
             else:
                 previous = {}
@@ -450,7 +429,7 @@ class LocalJournal:
             for reference, data in new_payloads:
                 from nwqlib._sqlite_bytes import write_bytes
                 # 1 MiB blocks keep each value far below SQLite's per-value length
-                # limit and bound the buffers of later chunked reads. Run.hydrate
+                # limit and bound the buffers of later chunked reads. ArtifactStore.get
                 # reads with the same block size. Revisit both together.
                 write_bytes(conn, reference.content_id, data, min(1024**2, self.max_bytes))
             for kind, key in removed:
@@ -479,17 +458,11 @@ class LocalJournal:
     def rows(self, kind):
         """Yield ``(key, parsed JSON, collected)`` for each row of ``kind`` in insertion order.
 
-        One query reads each row's key, stored size, collection ordinal and
-        text. The query returns the text only for a row whose stored size is
-        within ``max_bytes``, so a larger row is rejected before its text is
-        read or parsed. ``collected`` is True for a chunk the Method has
-        consumed.
+        The journal admits its total stored bytes before rows are read.
+        ``collected`` is True for a chunk the Method has consumed.
         """
-        for key, size, collected, text in self.connection.execute(
-                "SELECT key,size,collected,CASE WHEN size<=? THEN payload END FROM records WHERE kind=? "
-                "ORDER BY rowid", (self.max_bytes, kind)):
-            if size > self.max_bytes:
-                raise ValueError("saved JSON record exceeds max_data_bytes")
+        for key, text, collected in self.connection.execute(
+                "SELECT key,payload,collected FROM records WHERE kind=? ORDER BY rowid", (kind,)):
             yield key, json.loads(text), bool(collected)
 
     def payload_chunks(self, reference):
@@ -526,8 +499,6 @@ class LocalJournal:
                     raise ValueError("saved binary payload has missing or reordered chunks")
                 data = connection.execute("SELECT payload FROM binary WHERE identity=? AND ordinal=?",
                                           (reference.content_id, ordinal)).fetchone()[0]
-                if type(data) is not bytes or len(data) != size:
-                    raise ValueError("saved binary payload differs from its declared chunk")
                 yield ordinal, data
                 del data
             if total != reference.bytes:
@@ -554,8 +525,6 @@ class LocalJournal:
         for ordinal, size in sizes:
             data = self.connection.execute("SELECT payload FROM binary WHERE identity=? AND ordinal=?",
                                            (reference.content_id, ordinal)).fetchone()[0]
-            if type(data) is not bytes or len(data) != size:
-                raise ValueError("saved binary payload differs from its declared chunk")
             output[offset:offset+size] = data
             offset += size
         return bytes(output)

@@ -220,31 +220,6 @@ def _admit_generator_routes(pool, *, max_bytes, max_products):
     return commuting
 
 
-def _compiler_identity(generator, kind, active_modes, blocks):
-    """Return the sha256 identity that binds a compiler plan's route and blocks to its generator.
-
-    The digest covers the compact sorted-key JSON of the generator snapshot
-    (``adapt_archive._write_generator``), the route kind and the active
-    modes, then for each occupation block its indices, dtype and shape and
-    its C-order bytes. The compiler row stores this identity with its
-    selected route and blocks.
-    """
-    import hashlib
-    import json
-    import numpy as np
-    from .adapt_archive import _write_generator
-
-    compact = dict(sort_keys=True, separators=(",", ":"))
-    digest = hashlib.sha256(
-        json.dumps([_write_generator(generator), kind, [int(m) for m in active_modes]], **compact).encode()
-    )
-    for indices, block in blocks:
-        array = np.ascontiguousarray(block)
-        digest.update(json.dumps([[int(i) for i in indices], array.dtype.str, list(array.shape)], **compact).encode())
-        digest.update(array.tobytes())
-    return "sha256:" + digest.hexdigest()
-
-
 class CompilerPlans:
     """Generator compiler plans built when a generator is first selected, keyed by pool index.
 
@@ -255,33 +230,21 @@ class CompilerPlans:
     entry compiles that same generator object. ``built()`` returns only the
     plans constructed so far, which are the ones a Plan archive and a Run
     checkpoint save (``adapt_archive``). ``saved`` and ``restore`` take
-    ``(pool index, kind, active modes, occupation blocks, identity)``
-    entries saved from an earlier map of the same Plan, where ``identity``
-    is ``_compiler_identity`` of the saved plan and its generator.
+    ``(pool index, kind, active modes, occupation blocks)``
+    entries saved from the same Plan, restoring its compiler blocks by pool index.
     """
 
     def __init__(self, pool, *, max_bytes, max_products, saved=()):
         self._pool = tuple(pool)
         self._limits = dict(max_bytes=max_bytes, max_products=max_products)
         self._built = {}
-        self._identities = {}
         self.restore(saved)
 
     def restore(self, saved):
         """Restore saved compiler plans at their pool indices, keeping entries already built."""
-        for index, kind, modes, blocks, identity in saved:
+        for index, kind, modes, blocks in saved:
             if index not in self._built:
                 self._built[index] = _GeneratorCircuitPlan(kind, self._pool[index], tuple(modes), tuple(blocks))
-                self._identities[index] = identity
-
-    def identity(self, index):
-        """Return ``_compiler_identity`` of the built plan at ``index``, computed once."""
-        if index not in self._identities:
-            plan = self._built[index]
-            self._identities[index] = _compiler_identity(
-                plan.generator, plan.kind, plan.active_modes, plan.occupation_blocks
-            )
-        return self._identities[index]
 
     def __len__(self):
         return len(self._pool)
@@ -1161,7 +1124,7 @@ class ADAPT(Method):
         collected chunks and their order, and a saved Result refers to them
         (``save_run_context``), so a live and a reloaded Result carry the same
         context. ``compiler_plans`` becomes the read-only ``(pool index,
-        kind, active modes, occupation blocks, identity)`` entries built so far, so a
+        kind, active modes, occupation blocks)`` entries built so far, so a
         Result from a reopened Run and its saved copy carry the compiler
         plans of the selected generators, which native verification adopts.
         """

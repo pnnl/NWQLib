@@ -3346,8 +3346,9 @@ def load_augmented_lagrangian(path):
 
     `load_augmented_lagrangian(path)` reads the directory that
     `ConstrainedQHDResult.save` wrote and returns the `ConstrainedQHDResult`. The record
-    is validated with its content hashes. The SymPy objects come back through a reader
-    that resolves SymPy classes only, and the rebuilt problem must have the record's
+    supplies the original problem and completed rounds. The SymPy reader resolves
+    SymPy classes only and compares rebuilt expressions with their stored descriptions.
+    The attached problem must have the record's
     problem hash. Each inner Result is loaded with `load_result` and must have the
     recorded result and Plan hashes, and its Plan's objective the recorded hash of L_k,
     or of the inner objective of the round's representation over the problem's variables
@@ -3452,8 +3453,8 @@ def resume_augmented_lagrangian(directory, *, backend, progress=None, end_at_unf
     and for a noisy Aer run resume binds the noise model saved in the directory to its
     own copy of `backend`, so that the Runs it creates run the original model in a new
     process too. Another backend raises ValueError before anything is reopened, planned
-    or committed. The problem rebuilt from `problem.pickle` must have the content hash
-    of the stored problem record, or ValueError is raised before any completed Result is
+    or committed. The expressions rebuilt from `problem.pickle` must match the stored
+    objective, ordered variables and constraints, or ValueError is raised before any completed Result is
     read or the run advances, since an expression that the reader cannot reproduce would
     otherwise continue the run as another problem. The completed rounds' and levels'
     Results are read from their Runs with `load_run`, and the layer's preprocessing and
@@ -3528,8 +3529,6 @@ def resume_augmented_lagrangian(directory, *, backend, progress=None, end_at_unf
         backend = outer.bind(backend)
         stored = ConstrainedOptimization.model_validate(settings["problem"])
         problem = live_problem(stored, outer.problem())
-        if problem.content_id != stored.content_id:
-            raise ValueError("the live problem differs from the record's problem")
         if saved["record"] is not None:
             record = AugmentedLagrangianRecord.model_validate(saved["record"])
             return ConstrainedQHDResult(record, problem,

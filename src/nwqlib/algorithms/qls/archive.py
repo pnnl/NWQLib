@@ -202,7 +202,7 @@ def save(method, plan, files):
     native = plan._native
     data = dict(
         format="qls/6",
-        plan=files.write_plan(plan),
+        plan=plan.to_record(),
         problem=files.write_problem(plan.problem),
         output=files.write_output(plan.output),
         method=method.model_dump(mode="json", exclude_computed_fields=True),
@@ -221,16 +221,11 @@ def save(method, plan, files):
 
 
 def load(saved, files):
-    """Restore selected QLS inputs and compare the saved Program with its phase/query/readout
-    construction.
+    """Restore selected QLS inputs and bind the saved native payloads.
 
-    Loading solves no phases, runs no decomposition or polynomial fit and
-    performs no reference solve. It rebinds the saved payloads. For a
-    quantum Plan it also rebuilds the Program metadata from the stored
-    reconstruction and rejects the archive when that Program differs from
-    the saved one, so saved observations are always analyzed under the Plan
-    that produced them. That one comparison also marks the loaded Plan's
-    body as validated, so ``validate_selection`` does not rebuild it again.
+    Quantum block bindings are rebuilt from the stored phases and queries.
+    The stored Program and experiments remain the execution description.
+    Loading performs no phase search, decomposition, polynomial fit or reference solve.
     """
     from .quantum import BaseEncoding, _program
 
@@ -252,36 +247,19 @@ def load(saved, files):
         output=files.read_output(saved["output"]),
         reconstruction=rec,
     )
-    if encoding is not None and encoding.record.content_id != rec.encoding_id:
-        raise ValueError("saved QLS inputs differ from the actual selected encoding/RHS")
-    if factors is not None:
-        factors.require_source(problem.A)
     if plan.execution == "classical":
-        if quantum:
-            raise ValueError("saved classical QLS archive carries quantum inputs")
         plan._bind(blocks=(_bind_host(plan),), svd=factors)
     else:
         rhs = files.read_state(saved["rhs"]) if quantum else None
-        if (
-            rhs is None
-            or encoding is None
-            or encoded.reference != rec.encoding_operator
-            or rhs.basis.dimension != rec.padded_dimension
-        ):
-            raise ValueError("saved QLS inputs differ from the actual selected encoding/RHS")
         preparation = SelectedBlock.bind(
             SelectedDefinition.model_validate(saved["preparation"]),
             payload=rhs,
             constructor=_preparation_circuit,
         )
         base = BaseEncoding(encoding, problem.A, encoded, factors, method.max_bytes, method.max_work)
-        construction, experiments, blocks = _program(
+        _, _, blocks = _program(
             method, problem, plan.output, plan.shots, rec, base, preparation
         )
-        if construction != plan.construction or experiments != plan.experiments:
-            raise ValueError(
-                "saved QLS body differs from its actual selected phases/arguments/readout"
-            )
         plan._bind(
             blocks=blocks,
             base=base,
@@ -291,7 +269,4 @@ def load(saved, files):
             rhs=rhs,
             svd=factors,
         )
-        # The comparison above is the body check of validate_selected_body.
-        plan._cache["qls_body_validated"] = True
-    validate_selection(plan)
     return plan

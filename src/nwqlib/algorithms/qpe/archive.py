@@ -3,7 +3,7 @@
 from nwqlib.blocks.selection import SelectedBlock, _preparation_circuit
 from . import powers
 from .method import _Input, _bind_host
-from .records import QPEReconstruction, validate_selection
+from .records import QPEReconstruction
 
 
 def save(method, plan, files):
@@ -44,7 +44,7 @@ def save(method, plan, files):
     return dict(
         format=f"qpe/{method.estimator}/7",
         estimator=method.estimator,
-        plan=files.write_plan(plan),
+        plan=plan.to_record(),
         problem=files.write_problem(plan.problem),
         output=files.write_output(plan.output),
         method=method.model_dump(mode="json", exclude_computed_fields=True),
@@ -81,14 +81,6 @@ def load(method_type, saved, files):
         output=files.read_output(saved["output"]),
         reconstruction=r,
     )
-    validate_selection(plan)
-    if (
-        data.target.reference != r.target
-        or data.reference.preparation != r.preparation
-        or data.tau != r.tau
-        or (None if data.base is None else data.base.reference) != r.selected_base
-    ):
-        raise ValueError("QPE saved native inputs differ from actual selected data")
     if plan.execution == "classical":
         blocks = (_bind_host(plan, data, plan.construction.kernels[0]),)
     else:

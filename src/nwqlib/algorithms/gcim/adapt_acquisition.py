@@ -96,7 +96,7 @@ class AdaptContext:
             ``drive_adapt`` has adopted it, so checkpoints save the compiler
             plans built after the Plan archive was written. Before that, a
             reopened Run holds the saved ``(pool index, kind, active modes,
-            occupation blocks, identity)`` entries here. Result snapshots store the
+            occupation blocks)`` entries here. Result snapshots store the
             built entries (``ADAPT.snapshot_result_context``), which native
             verification adopts.
         result: Result restored with a saved context. The live controller does

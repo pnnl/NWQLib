@@ -382,7 +382,7 @@ class GHZMethod(GHZMethod):
 
         # Store the Plan's portable record, and the supplied circuit as a
         # QPY file beside it.
-        return dict(plan=files.write_plan(plan),
+        return dict(plan=plan.to_record(),
                     blocks=write_blocks(plan.blocks, files))
 
     @classmethod
@@ -403,7 +403,7 @@ class GHZMethod(GHZMethod):
         return plan._bind(blocks=blocks)
 ```
 
-`files.write_plan` returns the Plan's portable record, in which the Problem, Method and output appear as a type name and their fields, and the archive stores it. `files.read_problem` and `files.read_output` rebuild only the built-in Problem and output kinds, so a Method with its own Records rebuilds them from the stored fields with `model_validate`, as above. A Problem that holds a converted operator or state stores it with `files.write_operator` or `files.write_state` and reads it back with the matching reader, as the built-in writer does.
+`plan.to_record()` returns the Plan's portable record, in which the Problem, Method and output appear as a type name and their fields, and the archive stores it. `files.read_problem` and `files.read_output` rebuild only the built-in Problem and output kinds, so a Method with its own Records rebuilds them from the stored fields with `model_validate`, as above. A Problem that holds a converted operator or state stores it with `files.write_operator` or `files.write_state` and reads it back with the matching reader, as the built-in writer does.
 
 With these hooks the same Method runs on a durable Run, and its Result and Run can be saved and reopened. Each target path must not exist yet:
 

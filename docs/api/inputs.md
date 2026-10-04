@@ -219,7 +219,7 @@ Problem and record fields use these types. A field typed `OperatorData` or `Stat
 | `PositiveInt` | An `int` larger than 0 |
 | `Count` | An `int` that is 0 or larger |
 | `Text` | A string that is not empty after surrounding whitespace is removed |
-| `ContentID` | A content hash, `"sha256:"` followed by 64 lowercase hexadecimal digits |
+| `ContentID` | A string identifying record content. NWQLib generates `"sha256:"` followed by 64 lowercase hexadecimal digits |
 | `Unit`, `Scope`, `Source`, `Basis` | Records that label a value's unit, its scope, its source and a coordinate basis |
 | `Float64`, `Complex128`, `Rational` | Scalar records: a finite binary64 value, a complex pair of them, an exact integer ratio in lowest terms |
 | `Symbol`, `Limit` | A named mathematical symbol, and a limit on one resource in one workflow stage |

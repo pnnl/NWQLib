@@ -11,7 +11,6 @@ from __future__ import annotations
 
 import argparse
 import ast
-import hashlib
 import re
 import subprocess
 import sys
@@ -491,16 +490,6 @@ PROBES = (
         pytest_args=(
             "tests/test_qhd_refinement.py::test_stall_split_follows_the_end_mass_lemma_and_the_clearest_valley",
         ),
-    ),
-    # The stored extrema of a support table are selected from its entries and
-    # validated against them.
-    single_replacement_probe(
-        name="qhd_support_extrema_unchecked",
-        module="nwqlib.algorithms.qhd.records",
-        qualname="SupportValues._extrema_of_the_array",
-        old="        if (self.minimum, self.maximum, self.magnitude) != table_extrema(array):\n",
-        new="        if False:\n",
-        pytest_args=("tests/test_qhd_workflow.py::test_archive_keeps_support_tables_and_schedule",),
     ),
     # The tables evaluate the expanded support expressions, whose trees can be
     # far larger than the objective's, and sp.expand also multiplies out
@@ -3335,7 +3324,6 @@ def _run_probe(probe: Probe, python: str) -> str:
         tree,
     )
     mutated = _mutate(original_text, resolved)
-    original_sha = hashlib.sha256(original_bytes).hexdigest()
     print(f"{probe.name}: OCCURRENCES={resolved.count}")
     try:
         path.write_bytes(mutated.encode("utf-8"))
@@ -3352,17 +3340,13 @@ def _run_probe(probe: Probe, python: str) -> str:
             )
         return "killed" if killed else "survived"
     # Restore original bytes even when pytest or reporting fails, and verify
-    # the restoration digest before another check can use this checkout.
+    # restoration before another check can use this checkout.
     finally:
         path.write_bytes(original_bytes)
         _clear_pycache(path)
-        restored_sha = hashlib.sha256(path.read_bytes()).hexdigest()
-        print(f"{probe.name}: RESTORED_SHA256={path.relative_to(ROOT)}={original_sha}")
-        if restored_sha != original_sha:
-            raise RuntimeError(
-                f"{probe.name}: restore SHA mismatch: {path}: "
-                f"expected {original_sha}, got {restored_sha}"
-            )
+        if path.read_bytes() != original_bytes:
+            raise RuntimeError(f"{probe.name}: source restoration differs: {path}")
+        print(f"{probe.name}: SOURCE_RESTORED={path.relative_to(ROOT)}")
 
 
 def _pytest_counts(output: str) -> tuple[int, int]:

@@ -132,7 +132,6 @@ from .records import (
     QHDWalshPhase,
     SupportValues,
     objective_reference,
-    validate_selection,
 )
 
 _ANALYSIS_SOURCE = Source(
@@ -3961,7 +3960,6 @@ class QHD(Method):
         )
         if execution == "classical":
             blocks = (BoundKernel._bind(plan, kernel, lambda: _execute_theory(plan, kernel)),)
-        validate_selection(plan)
         return plan._bind(blocks=blocks)
 
     def _host_construction(self, r, d, source, reference, outputs, size, workspace):
@@ -4496,7 +4494,6 @@ class QHD(Method):
         Exact probabilities are averaged over chunks. ``_readout_window``
         gives each path's tie window from its receipts or host application.
         """
-        validate_selection(plan)
         observations, trace = data.observations, data.trace
         artifacts = data
         if type(plan) is not Plan or plan.method != self or trace.plan_id != plan.content_id:

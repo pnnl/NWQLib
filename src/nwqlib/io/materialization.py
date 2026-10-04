@@ -1,12 +1,12 @@
-"""Explicit source-bound QASM import and loop unrolling, never execution."""
+"""Import a written QASM file and unroll its loops within explicit work limits."""
 
 from dataclasses import dataclass
-from hashlib import sha256
+import os
 from pathlib import Path
 
 from nwqlib.core.records import Record
 from nwqlib.operators.access import Count
-from .streaming import QasmWriteBudget, QasmWriteReceipt, _Prepared, _write
+from .streaming import QasmWriteBudget, QasmWriteReceipt, _Prepared
 
 
 class QasmMaterializationBudget(Record):
@@ -45,7 +45,7 @@ class QasmMaterializationBudget(Record):
 
 @dataclass(frozen=True)
 class QasmMaterialization:
-    """A Qiskit circuit imported from a verified OpenQASM 3 file, with its loops unrolled.
+    """A Qiskit circuit imported from an OpenQASM 3 file, with its loops unrolled.
 
     [`materialize_qasm3_file`][nwqlib.io.materialization.materialize_qasm3_file]
     returns it. The fields below are read-only. Gates are not decomposed and
@@ -54,7 +54,7 @@ class QasmMaterialization:
     Attributes:
         circuit: The imported Qiskit circuit without loops. Gate definitions from
             the file stay as logical gates.
-        source: The verified [`QasmWriteReceipt`][nwqlib.io.streaming.QasmWriteReceipt].
+        source: The writer’s [`QasmWriteReceipt`][nwqlib.io.streaming.QasmWriteReceipt].
         output_nodes: Top-level instructions of `circuit` after unrolling. It can
             differ from `source.expanded_operations`.
         native_bytes: Always `None`, because the allocation size is not known.
@@ -71,13 +71,11 @@ class QasmMaterialization:
 def materialize_qasm3_file(construction, path, receipt: QasmWriteReceipt, *,
                            writer_budget: QasmWriteBudget,
                            budget: QasmMaterializationBudget) -> QasmMaterialization:
-    """Import an OpenQASM 3 file written by `write_qasm3_file` into Qiskit, after checking its bytes against the construction.
+    """Import an OpenQASM 3 file written by `write_qasm3_file` into Qiskit within explicit limits.
 
     The sizes are derived again from the construction and checked against
-    `budget` before the file is opened. The text is then written again into a
-    digest to rebuild the `QasmWriteReceipt`, and the file is read once and its
-    bytes and digest compared with `receipt`, so a `QasmWriteReceipt` alone
-    cannot vouch for other text. Those same bytes go to Qiskit's OpenQASM 3
+    `budget` before the file is opened. Its actual byte size is checked before
+    reading. The text then goes to Qiskit’s OpenQASM 3
     importer and the `UnrollForLoops` pass. Gate definitions stay logical. Z
     with more than two controls in total is rejected before import, because
     the installed importer can synthesize such gates eagerly. It needs the
@@ -94,12 +92,12 @@ def materialize_qasm3_file(construction, path, receipt: QasmWriteReceipt, *,
         budget (QasmMaterializationBudget): The import limits.
 
     Returns:
-        materialization (QasmMaterialization): The imported circuit and its verified `QasmWriteReceipt`.
+        materialization (QasmMaterialization): The imported circuit and its writer’s `QasmWriteReceipt`.
 
     Raises:
         ValueError: If the construction exceeds `budget`, `budget` asks for a
-            memory bound, a Z gate has more than two controls, or the
-            `receipt` or the file bytes do not match the construction.
+            memory bound, a Z gate has more than two controls, or the actual
+            file exceeds the byte limit.
     """
     prepared = _Prepared(construction, writer_budget)
     if budget.required_max_native_bytes is not None or budget.required_max_peak_rss is not None:
@@ -113,23 +111,11 @@ def materialize_qasm3_file(construction, path, receipt: QasmWriteReceipt, *,
         if any(operation.gate == "mc_z" and len(operation.qubits) - 1 + int(record.controlled) > 2
                for operation in record.decomposition):
             raise ValueError("consumer capability: Z with more than two controls requires unadmitted synthesis")
-    if receipt.bytes_written > budget.max_bytes:
-        raise ValueError("QASM stored parsing text exceeds consumer budget")
-
-    class DigestSink:
-        """Accept every chunk and keep nothing, so ``_write`` recomputes the receipt without storing text."""
-
-        def write(self, chunk):
-            return len(chunk)
-
-    prepared.budget = writer_budget.revise(max_bytes=min(writer_budget.max_bytes, budget.max_bytes))
-    expected = _write(prepared, DigestSink(), None, "file")
-    if expected != receipt:
-        raise ValueError("receipt does not match source-derived completed file artifact")
     with Path(path).open("rb") as source:
-        data = source.read(expected.bytes_written + 1)
-    if len(data) != expected.bytes_written or "sha256:" + sha256(data).hexdigest() != expected.digest:
-        raise ValueError("QASM file bytes differ from source-bound artifact")
+        size = os.fstat(source.fileno()).st_size
+        if size > budget.max_bytes:
+            raise ValueError("QASM stored parsing text exceeds consumer budget")
+        data = source.read(size)
     text = data.decode("ascii")
     from nwqlib._optional import optional_import
     optional_import("qiskit", extra="qasm")

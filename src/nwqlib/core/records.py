@@ -22,7 +22,7 @@ Text = Annotated[str, StringConstraints(strict=True, strip_whitespace=True, min_
 Surrounding whitespace is removed, and a string that is then empty is
 rejected. Only a `str` is accepted, not a number or bytes.
 """
-ContentID = Annotated[str, StringConstraints(strict=True, pattern=r"^sha256:[0-9a-f]{64}$")]
+ContentID = Annotated[str, StringConstraints(strict=True)]
 """A content hash: `"sha256:"` followed by 64 lowercase hexadecimal digits.
 
 Every record has one in its `content_id`, computed from its type and fields,
@@ -253,11 +253,10 @@ class Record(BaseModel):
     from it. Build a record with keyword arguments. Unknown fields are
     rejected, and a record cannot be changed after it is built.
     `record.revise(**changes)` returns a validated new record with the
-    changes and leaves the old one unchanged. Every construction, including
-    `model_validate` and `model_validate_json` from saved JSON, runs the
-    full validation, and `model_dump(mode="json")` returns a detached JSON
-    description. Unchecked `model_construct` and Pydantic's legacy `copy`
-    are disabled.
+    changes and leaves the old one unchanged. Constructors, `model_validate`
+    and `model_validate_json` validate field data. An instance of the exact
+    declared type is reused. `model_dump(mode="json")` returns a detached
+    JSON description.
 
     Each record has a content hash, `content_id`. A Result names its Plan,
     an observation its circuit and a resource quantity its evidence by this
@@ -265,9 +264,8 @@ class Record(BaseModel):
     the record's concrete type, so two record classes with equal fields stay
     distinct, its schema version, so a format change cannot collide with
     old data, and its `parent_id`, so a revision stays distinguishable from
-    a separately built record with the same fields. A `content_id` given in
-    saved JSON is checked when the record is loaded, so edited JSON cannot
-    keep a stale hash.
+    a separately built record with the same fields. The identity is computed
+    from the admitted fields when first requested.
 
     Attributes:
         schema_version: Version of the record's format, fixed by its type.
@@ -284,9 +282,9 @@ class Record(BaseModel):
     # returns that instance unchanged: its validators, including heavy
     # admission such as Program admission, do not run again, and it keeps its
     # stored identity and any other stored admission result. Records are frozen
-    # and every construction path runs the full validation, so an instance of
-    # the exact type is an admitted one, and the wrap validator
-    # ``_check_identity`` returns it before any other validator runs.
+    # by their normal constructors. For an instance of the exact type, the
+    # wrap validator
+    # ``_admit_record`` returns it before any other validator runs.
     # ``revise`` and ``model_copy`` still validate a new record from field
     # values, and so does a field or ``model_validate`` that receives an
     # instance of a subclass of the declared type. An instance of any other
@@ -296,8 +294,7 @@ class Record(BaseModel):
     # identity in the slot ``_identity_cache``, and later reads return it. An
     # after-validator may read ``content_id`` before a later validator
     # normalizes a declared field, so each validation that builds a new record
-    # clears the stored identity after all its validators have run and before a
-    # supplied ``content_id`` is checked; an admitted instance returned
+    # clears the stored identity after all its validators have run. An instance returned
     # unchanged keeps it. The slot is neither a field nor a Pydantic private
     # attribute, so equality and hashing never see it, and reading
     # ``content_id`` on one of two equal records keeps them equal. Copies and
@@ -320,30 +317,27 @@ class Record(BaseModel):
 
     @classmethod
     def __get_pydantic_core_schema__(cls, source, handler):
-        """Wrap each Record type's validator with ``_check_identity``.
+        """Wrap each Record type's validator with ``_admit_record``.
 
-        Pydantic calls this hook when it builds a validator, including for a
-        Record nested in another field, so every construction and load path
-        checks a supplied ``content_id`` after model validation. The schema's
-        ``ref`` moves to the wrapper, so a recursive reference also reaches
-        the check. A bare reference, or a schema already wrapped for this
-        class, is returned unchanged, so the check runs once.
+        The wrapper reuses exact-type instances and clears the identity cache
+        after validating new field data. Recursive references reach the same
+        wrapper, which is installed once for each concrete type.
         """
         schema = handler(source)
-        if schema["type"] == "definition-ref" or schema.get("metadata", {}).get("nwqlib.final_identity") is cls:
+        if schema["type"] == "definition-ref" or schema.get("metadata", {}).get("nwqlib.record_admission") is cls:
             return schema
         schema = dict(schema)
         reference = schema.pop("ref", None)
         return core_schema.no_info_wrap_validator_function(
-            cls._check_identity, schema, ref=reference, metadata={"nwqlib.final_identity": cls},
+            cls._admit_record, schema, ref=reference, metadata={"nwqlib.record_admission": cls},
         )
 
     @classmethod
-    def _check_identity(cls, value, handler):
-        """Validate supplied data and require any supplied content_id to match the admitted record.
+    def _admit_record(cls, value, handler):
+        """Validate field data and reuse instances of the exact declared type.
 
-        An instance of exactly this type was admitted when it was built, so it
-        is returned unchanged and no validator runs again (the admitted-instance
+        An instance of exactly this type is returned unchanged and no
+        validator runs again (the admitted-instance
         path of the class docstring). Every Record type's validator is wrapped
         here, so the path covers each type without a per-class guard.
         """
@@ -355,25 +349,15 @@ class Record(BaseModel):
             # do for a mapping. Any other record type reaches the model
             # validator unchanged and is rejected as the wrong type.
             value = {name: getattr(value, name) for name in type(value).model_fields}
-        supplied = None
         if isinstance(value, Mapping):
             value = dict(value)
-        if isinstance(value, dict) and "schema_version" in value:
-            if type(value["schema_version"]) is not int:
-                raise ValueError("schema_version must be an integer")
-        if isinstance(value, dict) and "content_id" in value:
-            value = dict(value)
-            supplied = value.pop("content_id")
-            if not isinstance(supplied, str):
-                raise ValueError("content_id must be a sha256 identity")
+            value.pop("content_id", None)
         record = handler(value)
         if record is not value:
             # A validator may have read content_id before a later validator
             # normalized a field. An instance returned unchanged was admitted
             # before, and its stored identity stays.
             object.__setattr__(record, "_identity_cache", None)
-        if supplied is not None and supplied != record.content_id:
-            raise ValueError("content_id does not match admitted content")
         return record
 
     @computed_field
@@ -407,15 +391,14 @@ class Record(BaseModel):
         its own content hash.
 
         Args:
-            **changes (object): New field values, by field name. `content_id` and
-                `parent_id` cannot be given.
+            **changes (object): New field values, by field name. The parent
+                link is derived from this record.
 
         Returns:
             record (Record): The new record, of the same type.
 
         Raises:
-            ValueError: If `content_id` or `parent_id` is given, or the new
-                values fail validation.
+            ValueError: If the new values fail validation.
 
         Examples:
             >>> from nwqlib.core import Unit
@@ -424,8 +407,6 @@ class Record(BaseModel):
             >>> print(revised.symbol, revised.parent_id == hartree.content_id)
             Hartree True
         """
-        if "content_id" in changes or "parent_id" in changes:
-            raise ValueError("revision identity and parent are derived, not caller updates")
         values = {name: getattr(self, name) for name in type(self).model_fields}
         values.update(changes)
         values["parent_id"] = self.content_id
@@ -436,15 +417,6 @@ class Record(BaseModel):
         if update:
             return self.revise(**update)
         return type(self).model_validate({name: getattr(self, name) for name in type(self).model_fields})
-
-    def copy(self, *, include=None, exclude=None, update=None, deep=False):
-        """Reject Pydantic's legacy unchecked copy operation."""
-        raise TypeError("legacy copy is unavailable; use revise or model_copy for validated records")
-
-    @classmethod
-    def model_construct(cls, _fields_set=None, **values):
-        raise TypeError("use model_validate for public records")
-
 
 class Unit(Record):
     """A unit label with its dimension. NWQLib converts no units and does no unit algebra.

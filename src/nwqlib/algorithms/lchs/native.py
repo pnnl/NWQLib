@@ -466,17 +466,6 @@ def _whole_matrix(route, controls):
     return select_dense_control_route(route, controls) == "whole_matrix"
 
 
-def _direct_controlled_branch(branch, num_control_qubits, branch_index, route="gatewise"):
-    """Control the actual admitted branch definition, including its phase.
-
-    ``controlled`` synthesizes a dense branch unitary exactly on the route
-    that ``route`` selects for ``num_control_qubits`` controls, so the
-    controlled branch equals the controlled matrix to rounding.
-    """
-    from nwqlib.subroutines.qiskit_compat import controlled
-    return controlled(branch.to_gate(),num_control_qubits,ctrl_state=branch_index,route=route)
-
-
 def dense_branch_select_cx(num_system_qubits: int, address_bits: int, route: str = "gatewise") -> int:
     """Upper bound on the CX of one controlled dense branch of the dense_exact SELECT.
 
@@ -493,7 +482,7 @@ def dense_branch_select_cx(num_system_qubits: int, address_bits: int, route: str
     controls add only X gates. A one-qubit branch keeps Qiskit's exact
     definition and takes the gate-wise count below on either route.
 
-    build_branch_select controls each branch with _direct_controlled_branch,
+    build_branch_select controls each branch through the shared control constructor,
     that is qiskit_compat.controlled over the exact synthesis of
     _dense_synthesis.py. Qiskit's add_control then controls every gate of
     that circuit with the a address bits (qiskit/circuit/_add_control.py,
@@ -561,12 +550,13 @@ def build_branch_select(data, branches, route="gatewise"):
     """Return the phase-weighted, whole-branch SELECT. Coefficient PREP is a separate block.
 
     Each branch is controlled on its address through
-    ``_direct_controlled_branch`` on the dense control route ``route``.
+    ``qiskit_compat.controlled`` on the dense control route ``route``.
     ``branches`` may be a generator: each branch and its copy are released
     after its controlled circuit is appended, before the next is produced.
     """
     import numpy as np
     from qiskit import QuantumCircuit
+    from nwqlib.subroutines.qiskit_compat import controlled
     a, q = data.num_control_qubits, data.num_system_qubits
     select = QuantumCircuit(a+q, name="lchs_select")
     for index, (coefficient, branch) in enumerate(zip(data.original_coefficients, branches, strict=True)):
@@ -575,7 +565,7 @@ def build_branch_select(data, branches, route="gatewise"):
         if abs(coefficient) > 0:
             selected.global_phase += float(np.angle(coefficient))
         if a:
-            select.append(_direct_controlled_branch(selected,a,index,route), select.qubits)
+            select.append(controlled(selected.to_gate(), a, ctrl_state=index, route=route), select.qubits)
         else:
             select.compose(selected, inplace=True)
         del branch, selected

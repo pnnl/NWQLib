@@ -85,7 +85,7 @@ Binding the repeat count to one trillion, as in the public operations below, lea
 
 Program holds ordered finite tables: definitions, expressions, parameters, registers, classical values and block signatures. Definition holds a local ID and a discriminated node. Child and body fields contain local IDs, never nested copies of another body. Expression similarly has a local ID and references other expressions. Duplicate IDs, missing references, cycles, unsupported kinds and excessive graph depth reject during construction, including unused definitions. Reusing a definition does not imply reusing a quantum state.
 
-Program and all its parts inherit the core Record identity (a content hash), immutability, detached export and validated revision behavior. JSON keeps reference strings and checks supplied nested identities on reload. Parameters, bindings, widths, mappings, metadata format and data references, premises and the structural limits (`AdmissionLimits`) all enter the identity. Local IDs are reference names, and the enclosing content identity binds their definitions.
+Program and all its parts inherit the core Record identity (a content hash), immutability, detached export and validated revision behavior. JSON preserves the reference strings when records are saved and loaded. Parameters, bindings, widths, mappings, metadata format and data references, premises and the structural limits (`AdmissionLimits`) all enter the identity. Local IDs are reference names, and the enclosing content identity binds their definitions.
 
 The public operations are:
 

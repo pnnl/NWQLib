@@ -246,7 +246,7 @@ def test_native_trajectory_is_one_evolution_that_restores_each_view(runner, tmp_
     from qiskit.quantum_info import Pauli, Statevector
     from nwqlib._prepared_execution import Run, prepare_experiment, refresh_submissions, submit_detached
     from nwqlib.backends import NWQSimBackend
-    from nwqlib.blocks.lowering import lower_definition
+    from nwqlib.blocks.lowering import _lower_qiskit
     from nwqlib.core.planning import ObservationPoint, ReadoutView, RuntimeOptions
     from test_observation_schedule import pauli, trajectory, view_plan
 
@@ -267,8 +267,8 @@ def test_native_trajectory_is_one_evolution_that_restores_each_view(runner, tmp_
     _, construction = plan.resolve("trajectory")._selected_construction(plan)
     selected = {record.content_id for record in construction.selections}
     blocks = tuple(block for block in plan.blocks if block.record.content_id in selected)
-    body = lower_definition(construction, plan.construction.program.root, blocks=blocks).circuit
-    tail = lower_definition(construction, "tail", blocks=blocks).circuit
+    body = _lower_qiskit(construction, definition=plan.construction.program.root, blocks=blocks).circuit
+    tail = _lower_qiskit(construction, definition="tail", blocks=blocks).circuit
     backend = NWQSimBackend(executable=runner, spool=str(tmp_path / "spool"), max_input_bytes=1 << 20,
                             max_output_bytes=1 << 20, max_buffer_bytes=1 << 20)
     with Run(plan, backend=backend, directory=tmp_path / "run", progress=False) as run:

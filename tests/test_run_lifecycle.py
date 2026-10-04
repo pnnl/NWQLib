@@ -45,7 +45,7 @@ class CountsMethod(Method):
             counts=sum(c.returned_shots for c in chunks))
 
     def save_archive(self, plan, files):
-        return dict(plan=files.write_plan(plan), problem=files.write_problem(plan.problem),
+        return dict(plan=plan.to_record(), problem=files.write_problem(plan.problem),
                     output=files.write_output(plan.output))
 
     @classmethod
@@ -57,6 +57,25 @@ class CountsMethod(Method):
 def selected(shots=7):
     return CountsMethod().plan(Eigenproblem(A=[[1, 0], [0, -1]]), output=Samples(),
                               execution="quantum", shots=shots, rng=RandomStreams(31))
+
+
+def test_empty_run_rejects_a_method_loader_that_changes_the_selected_plan(tmp_path, monkeypatch):
+    from nwqlib._run_archive import load
+
+    path = tmp_path / "empty"
+    with Run(selected(), backend=InjectedBackend(), directory=path):
+        pass
+    with load(path, backend=InjectedBackend(), method=CountsMethod) as restored:
+        assert restored.plan.shots == 7 and restored.trace.jobs == 0
+    reader = CountsMethod.load_archive.__func__
+
+    def wrong_shots(cls, saved, files):
+        return reader(cls, saved, files).revise(shots=9)._bind()
+
+    monkeypatch.setattr(CountsMethod, "load_archive", classmethod(wrong_shots))
+    with pytest.raises(ValueError, match="original selected Plan"):
+        load(path, backend=InjectedBackend(), method=CountsMethod)
+    assert InjectedBackend.calls == []
 
 
 class InjectedBackend(Record):
@@ -376,12 +395,6 @@ def test_pending_resume_keeps_seed_caps_and_once_only_collection(tmp_path, monke
         raise AssertionError("cap history restoration replayed scientific work")
     monkeypatch.setattr(CountsMethod, "plan", forbidden)
     monkeypatch.setattr(CountsMethod, "analyze", forbidden)
-    validated = []
-    def validate_data(self, data):
-        # Method-specific saved-data checks need the admitted scientific Plan.
-        assert self.plan.content_id == data.trace.plan_id and self.data is data
-        validated.append(self)
-    monkeypatch.setattr(CountsResult, "validate_data", validate_data, raising=False)
     for source in (path, copy):
         with load(source, backend=InjectedBackend(), method=CountsMethod) as reopened:
             assert reopened.limit_amendments == (first, second)
@@ -389,7 +402,6 @@ def test_pending_resume_keeps_seed_caps_and_once_only_collection(tmp_path, monke
             assert reopened.result.data.trace == captured
             assert reopened.result.report() == report
     assert load_result(saved_result, method=CountsMethod).data.trace == captured
-    assert len(validated) == 3
     assert [c[0] for c in InjectedBackend.calls].count("prepare") == 2
     assert [c[0] for c in InjectedBackend.calls].count("launch") == 1
 

@@ -1354,13 +1354,8 @@ def test_an_unevaluated_objective_reopens_as_supplied_from_a_refinement_archive_
     f = x + (x + 11/16)/(x + 11/16) keeps its quotient, 0/0 at the pole x = -11/16 and 1 elsewhere, which
     SymPy's evaluation would turn into x + 1. ``archive._SymbolicReader`` rebuilds each pickled node that
     evaluation changes with evaluation disabled, so ``resume_box_refinement`` attaches the supplied
-    objective and ``load_box_refinement`` accepts it, with the problem's ``srepr`` and content identity.
-    An archive whose ``problem.pickle`` holds the evaluated form x + 1 is another problem and is refused
-    with the message for any other objective.
+    objective and ``load_box_refinement`` accepts it with the problem's original ``srepr``.
     """
-    import pickle
-    import shutil
-
     from nwqlib.algorithms.qhd import load_box_refinement, resume_box_refinement
 
     quotient = sp.Mul(x + sp.Rational(11, 16), sp.Pow(x + sp.Rational(11, 16), -1, evaluate=False), evaluate=False)
@@ -1370,13 +1365,8 @@ def test_an_unevaluated_objective_reopens_as_supplied_from_a_refinement_archive_
                         options=BoxRefinement(max_levels=1), execution="classical", seed=1,
                         directory=tmp_path / "run", progress=False)
     path = result.save(tmp_path / "saved")
-    # Resuming an ended refinement compares no problem identity, so these assertions detect a changed objective.
     for reopen in (lambda: resume_box_refinement(tmp_path / "run", backend=None),
                    lambda: load_box_refinement(path)):
         reopened = reopen()
         assert sp.srepr(reopened.problem.objective) == sp.srepr(problem.objective)
         assert reopened.problem.content_id == problem.content_id and reopened.content_id == result.content_id
-    shutil.copytree(path, tmp_path / "evaluated")
-    (tmp_path / "evaluated" / "problem.pickle").write_bytes(pickle.dumps((x + 1, (x,)), protocol=5))
-    with pytest.raises(ValueError, match="saved SymPy objective and variables differ"):
-        load_box_refinement(tmp_path / "evaluated")

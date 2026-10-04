@@ -1971,41 +1971,6 @@ def test_a_reopened_problem_keeps_its_supplied_expressions(tmp_path, form, refin
         assert _contents(reopened.save(tmp_path / f"again-{number}")) == _contents(first)
 
 
-def test_a_reopened_problem_other_than_the_supplied_tree_is_refused(tmp_path):
-    """The reopening checks compare the supplied expressions, so their evaluated forms are another problem.
-
-    The run of f = x + q (``_reopened_problem``) is saved, and copies of its archive and of its ended
-    durable directory hold f's evaluated form x + 1 in ``problem.pickle``, or in the saved inner Result
-    the evaluated form of that round's objective L_0. Each is refused with the message that refuses any
-    other problem or objective, and the unchanged archive and directory reopen.
-    """
-    import pickle
-    import shutil
-
-    from nwqlib.algorithms.qhd.archive import _SymbolicReader
-
-    problem = _reopened_problem("objective")
-    _reopened_run(problem, None, tmp_path / "run").save(tmp_path / "saved")
-
-    def edited(source, name, relative):
-        target = tmp_path / name
-        shutil.copytree(tmp_path / source, target)
-        with (target / relative).open("rb") as stream:
-            objective, *rest = _SymbolicReader(stream).load()
-        assert objective.doit() != objective
-        (target / relative).write_bytes(pickle.dumps((objective.doit(), *rest), protocol=5))
-        return target
-
-    with pytest.raises(ValueError, match="the live problem differs from the record's problem"):
-        load_augmented_lagrangian(edited("saved", "archive-problem", "problem.pickle"))
-    with pytest.raises(ValueError, match="QHD reconstruction differs from its actual symbolic objective/order"):
-        load_augmented_lagrangian(edited("saved", "archive-round", "iterations/0/result/objective.pickle"))
-    with pytest.raises(ValueError, match="the live problem differs from the record's problem"):
-        resume_augmented_lagrangian(edited("run", "directory-problem", "problem.pickle"), backend=None)
-    assert load_augmented_lagrangian(tmp_path / "saved").problem.content_id == problem.content_id
-    assert resume_augmented_lagrangian(tmp_path / "run", backend=None).problem.content_id == problem.content_id
-
-
 def test_the_grid_reference_keeps_the_first_feasible_minimum_across_admitted_slabs():
     # constrained_grid_minimum streams C-order slabs sized from max_bytes and replaces its running minimum only
     # on a strictly smaller value. On the interior grid x, y in {-1/2, 0, 1/2}, f = x**2 is least at x = 0 for

@@ -3,12 +3,9 @@
 A saved Result folder holds ``result.json`` (format, selection, data and result)
 and its payload files. Saving checks the associations between Plan, receipts,
 attempts, observations and arrays before any file is written. Reporting checks
-the format, the schemas and identities of the saved records, the canonical Plan
-identity and the association of the Result with its observations. Loading adds
-the Method's archive hook, the Result's ``validate_plan`` and the
-``validate_data`` hook that an extension Result may define. Both operations
-restore the saved data without acquisition, lowering, decomposition, solving
-or reference computation.
+the shared format and returns the metadata. Loading reconstructs concrete records
+through the Method archive hook and attaches the Result to its Plan and observations.
+Both operations use saved data without acquisition or analysis.
 
 Published arrays load as read-only memory maps. Their headers (shape, dtype,
 byte order, size, contiguity) are always checked and a mismatch rejects. That
@@ -31,7 +28,7 @@ from nwqlib.execution import ExecutionTrace, ObservationView, PreparedArtifact
 # field change may instead bump that Method's archive format when load_result
 # checks it before validating the concrete Result. read_report checks shared
 # metadata, leaving Method-owned fields and archive formats uninterpreted.
-RESULT_FORMAT = "nwqlib.result/11"
+RESULT_FORMAT = "nwqlib.result/12"
 
 
 def _validate_recorded_data(plan_id, observations, trace, receipts, manifests):
@@ -182,88 +179,14 @@ def _validate_selection(plan, data):
 def read_report(path):
     """Read current saved metadata without loading Method code or binary data.
 
-    The returned ``metadata_validation`` entry lists what this read checked.
-    Common schemas and record identities are checked, along with the
-    association of the Result with its observations. A canonical saved Plan
-    description is checked against its content identity (Plan schema version 7).
-    The joins of observations to their receipts and attempts were checked when
-    the Result was saved and are not repeated. Method-specific scientific fields
-    require explicit Method loading. Binary payloads stay unread, and analysis
-    does not run.
+    The shared format is checked. The saved mapping is returned directly,
+    without loading native payloads or running analysis.
     """
     files = ArchiveFiles(Path(path), None)
-    return _validated_metadata(files.read_json("result.json"))
-
-
-def _validated_metadata(saved, admitted=None):
-    """One metadata admission path before Method import or native payload reads.
-
-    It checks the current format, record schemas and identities, the canonical
-    Plan identity, and the association of the Result with its observations.
-    The observation joins of ``_validate_recorded_data`` run when a Result is saved, not here. A
-    dictionary passed as ``admitted`` receives the validated manifests,
-    observations, trace, receipts, forecast and allocation, which
-    ``load_data`` then uses without validating them again.
-    """
-    from pydantic import TypeAdapter
-    from nwqlib.artifacts import ArtifactManifest
-    from nwqlib.core.planning import Plan
-    from nwqlib.core.records import ContentID
-    from nwqlib._run_archive import load_provenance
-
-    found = saved.get("format")
-    if found != RESULT_FORMAT:
-        raise ValueError(f"unsupported saved Result format {found!r}. This NWQLib reads only "
-                         f"{RESULT_FORMAT!r}. Open it with the NWQLib release that wrote it, or "
-                         "plan and run the problem again.")
-    selection, result, data = saved["selection"], saved["result"], saved["data"]
-    identity = TypeAdapter(ContentID)
-    plan_id = identity.validate_python(selection["plan_id"])
-    identity.validate_python(result.get("content_id"))
-    # The concrete Result class is deliberately not imported from archive text.
-    common = Result.model_validate({name: result[name] for name in Result.model_fields
-        if name != "schema_version" and name in result})
-    if common.plan_id != plan_id:
-        raise ValueError("saved Result belongs to another Plan")
-    descriptions = selection["selected"].get("plan")
-    verified_plan = False
-    if descriptions is not None:
-        if type(descriptions) is not dict or set(descriptions) != set(Plan.model_fields):
-            raise ValueError("invalid canonical saved Plan metadata")
-        for name, field in Plan.model_fields.items():
-            if name not in {"problem", "method", "output", "reconstruction"}:
-                TypeAdapter(field.rebuild_annotation()).validate_python(descriptions[name])
-        for name in ("problem", "method", "output"):
-            declaration = descriptions[name]
-            if (type(declaration) is not dict or set(declaration) != {"type", "fields"}
-                    or type(declaration["type"]) is not str or type(declaration["fields"]) is not dict):
-                raise ValueError("invalid saved scientific description")
-        if descriptions["method"]["type"] != selection["method"]:
-            raise ValueError("saved Method differs from its canonical Plan description")
-        if Plan.record_identity(descriptions) != plan_id:
-            raise ValueError("saved Plan content_id does not match its metadata")
-        verified_plan = True
-    manifests = []
-    for item in data["artifacts"]:
-        manifests.append(ArtifactManifest.model_validate(item["manifest"]))
-    observations = ObservationView.model_validate(data["observations"])
-    trace = ExecutionTrace.model_validate(data["trace"])
-    receipts = tuple(PreparedArtifact.model_validate(row) for row in data["receipts"])
-    if (common.observation_id != observations.content_id
-            or not set(common.contribution_ids) <= {c.content_id for c in observations.chunks}):
-        raise ValueError("saved Result differs from its actual collected observations")
-    forecast, allocation = load_provenance(data)
-    if admitted is not None:
-        admitted.update(manifests=tuple(manifests), observations=observations, trace=trace, receipts=receipts,
-                        forecast=forecast, allocation=allocation)
-    return {**saved, "metadata_validation": {
-        "common_schemas_and_identities": "checked",
-        "canonical_plan_identity": "checked" if verified_plan else "no canonical Plan description supplied",
-        "result_observation_association": "checked",
-        "observation_receipt_and_attempt_joins": "not checked here because save_result checks them before writing",
-        "method_specific_result_schema_identity_and_scientific_relation": "not checked; explicit Method loading is required",
-        "binary_payload_integrity": "not checked; no arrays or native circuits were read",
-    }}
+    saved = files.read_json("result.json")
+    if saved.get("format") != RESULT_FORMAT:
+        raise ValueError(f"unsupported saved Result format {saved.get('format')!r}")
+    return saved
 
 
 def save_data(data, files, method):
@@ -286,7 +209,7 @@ def save_data(data, files, method):
                    for index, (manifest, array) in enumerate(_saved_arrays(data))])
 
 
-def load_data(data, files, method, *, admitted=None):
+def load_data(data, files, method):
     """Restore RunData with memory-mapped arrays.
 
     Each array's shape, byte count, contiguity and little-endian dtype
@@ -294,23 +217,15 @@ def load_data(data, files, method, *, admitted=None):
     selects) must match its manifest. That check reads only the NPY header, and a mismatched file would
     otherwise be read as data of the wrong shape. The array values are not read.
     A probability chunk reads its arrays through this store when its
-    histogram is first requested. ``admitted`` holds the records that
-    ``_validated_metadata`` already validated from this ``data`` (manifests,
-    observations, trace, receipts, forecast and allocation); they are used
-    as they are instead of being validated and hashed again.
+    histogram is first requested.
     """
     from nwqlib.artifacts import ArtifactManifest, ArtifactStore
     from nwqlib._run_archive import load_provenance
-    if admitted is None:
-        forecast, allocation = load_provenance(data)
-        manifests = tuple(ArtifactManifest.model_validate(item["manifest"]) for item in data["artifacts"])
-        observations = ObservationView.model_validate(data["observations"])
-        trace = ExecutionTrace.model_validate(data["trace"])
-        receipts = tuple(PreparedArtifact.model_validate(row) for row in data["receipts"])
-    else:
-        forecast, allocation = admitted["forecast"], admitted["allocation"]
-        manifests, observations = admitted["manifests"], admitted["observations"]
-        trace, receipts = admitted["trace"], admitted["receipts"]
+    forecast, allocation = load_provenance(data)
+    manifests = tuple(ArtifactManifest.model_validate(item["manifest"]) for item in data["artifacts"])
+    observations = ObservationView.model_validate(data["observations"])
+    trace = ExecutionTrace.model_validate(data["trace"])
+    receipts = tuple(PreparedArtifact.model_validate(row) for row in data["receipts"])
     store = ArtifactStore(max_bytes=DEFAULT_MAX_BYTES)
     store._restore(manifests)
     for manifest, item in zip(manifests, data["artifacts"], strict=True):
@@ -359,24 +274,16 @@ def save_result(result, path):
 def load_result(path, *, method=None):
     """Restore a saved Result with its Plan and RunData, keeping arrays as lazy mmaps.
 
-    The metadata admission (``_validated_metadata``), the Plan identity, the
-    attached Result's ``validate_plan`` and the ``validate_data`` hook that an
-    extension Result may define are checked.
-    The save-time observation joins are not repeated, and array values are not
-    read (see the module docstring).
+    Concrete records are reconstructed and the Result is attached to its
+    original Plan and observations. Array payloads are read on demand.
     """
     files = ArchiveFiles(Path(path), None)
-    saved = files.read_json("result.json")
-    admitted = {}
-    _validated_metadata(saved, admitted)
+    saved = read_report(path)
     plan = load_plan(saved["selection"], files, method=method)
     result_type = getattr(plan.method, "result_type", None)
     if not isinstance(result_type, type) or not issubclass(result_type, Result):
         raise TypeError("Method.result_type must name its concrete Result owner")
     result = result_type.model_validate(saved["result"])
-    data = load_data(saved["data"], files, plan.method, admitted=admitted)
+    data = load_data(saved["data"], files, plan.method)
     result = result._attach(plan, data)
-    validate = getattr(result, "validate_data", None)
-    if callable(validate):
-        validate(data)
     return result

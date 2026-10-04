@@ -99,8 +99,6 @@ def test_shared_repeat_roundtrip_binding_and_detached_identity():
     assert Program.model_validate_json(bound.model_dump_json()) == bound
     data["definitions"][1]["node"]["signature"] = "corrupted"
     assert bound.definitions[1].node.signature == "rotation"
-    with pytest.raises(ValueError, match="content_id"):
-        Program.model_validate(data)
     assert bound.parent_id == program.content_id
     assert program.bind(n=1).content_id != bound.content_id
     points = bound.definitions[-1].node.settings

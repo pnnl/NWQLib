@@ -390,7 +390,7 @@ class HadamardPauliExpectation(Method):
         from nwqlib.blocks._archive import write_blocks
 
         return dict(
-            plan=files.write_plan(plan),
+            plan=plan.to_record(),
             problem=files.write_problem(plan.problem),
             output=files.write_output(plan.output),
             blocks=write_blocks(plan.blocks, files),

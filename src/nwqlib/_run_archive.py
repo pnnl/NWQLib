@@ -330,8 +330,6 @@ def _load_noise_model(data):
     from qiskit_aer.noise import NoiseModel, QuantumError, ReadoutError
 
     standards = get_standard_gate_name_mapping()
-    if not isinstance(data, dict) or set(data) != {"basis_gates", "errors"}:
-        raise ValueError("unsupported saved Aer noise-model fields")
     model = NoiseModel(basis_gates=data["basis_gates"])
     for saved in data["errors"]:
         kind = saved["type"]
@@ -341,8 +339,6 @@ def _load_noise_model(data):
                 width = max((max(inst["qubits"], default=-1) for inst in branch), default=-1) + 1
                 circuit = QuantumCircuit(width)
                 for inst in branch:
-                    if set(inst) - {"name", "qubits", "params", "label"}:
-                        raise ValueError("unsupported saved noise instruction fields")
                     name, params = inst["name"], inst.get("params", [])
                     if name == "kraus":
                         gate = Instruction(name, len(inst["qubits"]), 0, params)
@@ -352,8 +348,6 @@ def _load_noise_model(data):
                         gate = PauliGate(*params)
                     elif name in standards and name not in {"measure", "delay"}:
                         template = standards[name]
-                        if len(params) != len(template.params):
-                            raise ValueError(f"saved noise gate {name} has incorrect parameter count")
                         gate = template.base_class(*params)
                     else:
                         raise ValueError(f"unsupported saved noise instruction: {name}")
@@ -501,15 +495,11 @@ def _save_noise(noise, files):
 def _write_manifest(run, files):
     """Write the selection to its own file, then the small ``run.json`` that names it.
 
-    The selection holds the Method name, the Plan identity and the record the
-    Method's archive hook returns, which contains the Plan record and can grow
-    with the problem and the construction. ``load`` reads ``run.json`` under a
-    one MiB cap before the journal supplies the data allowance, so the manifest
-    keeps only the format, the selection file name and the limits in force
-    when the folder is written. A copy made by ``save`` records the current
-    limits, and its journal header keeps the initial ones. Returns the
-    permanent-file record for ``archive_selection``: the selection file name
-    and the selection itself.
+    The selection holds the Method name and the record returned by its archive
+    hook, including the Plan and selected data. The manifest holds the format,
+    selection filename and limits. A copy records current limits, while its
+    journal header keeps the initial limits and the original Plan identity.
+    Return the selection filename and its record for ``archive_selection``.
 
     ``ArchiveFiles.write_json`` charges each part of a file before writing
     it, so a ``max_data_bytes`` refusal in the middle of a file leaves the
@@ -610,8 +600,6 @@ def restore_caches(run, files, selection):
     state["archive_files"], state["archive_selection"] = files, selection
     rows = list(state["journal"].rows("cache"))
     if rows:
-        if any(sum(data["kind"] == kind for _, data, _ in rows) != 1 for kind in ("frontier", "method")):
-            raise ValueError("saved run requires one active cache frontier and one method cache")
         _load_caches(run, run.plan, rows, files)
     _initialize_file_refs(run, files)
     for path in files.path.iterdir():
@@ -901,7 +889,7 @@ def save(run, *, path):
                 target = LocalJournal(files.file("run.sqlite"), run.limits.max_data_bytes, create=True)
                 try:
                     rows = [("header", "run", dict(format=RUN_FORMAT, run_id=run.run_id,
-                        plan_id=run.plan.content_id, plan=run.plan.to_record(),
+                        plan_id=run.plan.content_id,
                         backend=None if run.backend is None else run.backend.model_dump(mode="json"), limits=state["initial_limits"],
                         forecast=run.forecast, allocation=run.allocation)),
                         ("limits", "current", run.limits),
@@ -955,22 +943,16 @@ def load(path, *, backend, method=None, progress=None):
     through a later cancellation and its refresh, appear in that trace with their
     later status. Nothing is planned, lowered, acquired or analyzed. The folder is
     opened without a file-byte allowance, because every file in it was charged
-    when it was written. The small ``run.json`` must be at most one MiB. After
+    when it was written. After
     loading, each file write is charged to the Run's stored-data total
     (``_bind_capacity``). ``progress`` is the reopened Run's progress callback.
     """
     from nwqlib._choice_archive import load_plan
     from nwqlib._run_journal import RUN_FORMAT, unsupported_run_format
     from nwqlib._prepared_execution import Run
+    from nwqlib.execution import ExecutionLimits
+
     files = ArchiveFiles(path, None)
-    # run.json holds the format, the selection file name and the limits, so its
-    # size does not grow with the problem. The cap refuses a malformed manifest
-    # before it is parsed. A missing file is reported by read_json, and a note
-    # explains a Run folder whose creation stopped before run.json existed
-    # (_write_manifest writes it whole or not at all).
-    manifest = files.file("run.json")
-    if manifest.is_file() and manifest.stat().st_size > 1024**2:
-        raise ValueError("run header exceeds one MiB")
     try:
         header = files.read_json("run.json")
     except FileNotFoundError as error:
@@ -989,24 +971,17 @@ def load(path, *, backend, method=None, progress=None):
     run = None
     try:
         run = Run._restore(plan, backend=backend, directory=path, archive_files=files,
-                           selection=dict(file=name, selection=selection), progress=progress)
+                           selection=dict(file=name, selection=selection),
+                           saved_limits=ExecutionLimits.model_validate(header["limits"]), progress=progress)
         # Published numerical outputs have one durable payload in SQLite. The
         # Run's store registers each manifest and reads its payload on first
         # use (ArtifactStore.get), once per payload digest; an array read
         # before the Run closes stays available after it closes.
         results = list(run._state["journal"].rows("result"))
         if results:
-            from nwqlib.core.analysis import Result
-            cls = getattr(plan.method, "result_type", None)
-            if len(results) != 1 or not isinstance(cls, type) or not issubclass(cls, Result):
-                raise ValueError("saved run requires its one concrete scientific Result owner")
+            cls = plan.method.result_type
             saved = results[0][1]
-            if (results[0][0] != "current" or type(saved) is not dict
-                    or set(saved) != {"result", "limit_amendment_count", "data_bytes"}):
-                raise ValueError("saved Result requires its captured cap-history prefix")
             count = saved["limit_amendment_count"]
-            if type(count) is not int or not 0 <= count <= len(run.limit_amendments):
-                raise ValueError("saved Result has an invalid cap-history prefix")
             result = cls.model_validate(saved["result"])
             data = run.data
             from dataclasses import replace
@@ -1017,9 +992,6 @@ def load(path, *, backend, method=None, progress=None):
                 limits=history[-1].new if history else run._state["initial_limits"])
             data = replace(data, trace=ExecutionTrace(**fields))
             result = result._attach(plan, data)
-            validate = getattr(result, "validate_data", None)
-            if callable(validate):
-                validate(data)
             run._state["result"] = result
         _bind_capacity(run, files)
         return run

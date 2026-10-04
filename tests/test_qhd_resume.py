@@ -420,7 +420,10 @@ def test_level_file_save_and_load_are_admitted_against_the_level_max_bytes(tmp_p
     with pytest.raises(ValueError, match=f"requires {limit} bytes"):
         refinement._LevelTables.load(target, box, qhd=QHD(max_bytes=limit - 1), specs=specs, held_bytes=0)
     again = refinement._LevelTables.load(target, box, qhd=QHD(max_bytes=limit), specs=specs, held_bytes=0)
-    assert [t.content_id for t in again.tables] == [t.content_id for t in stored.tables]
+    assert len(again.tables) == len(stored.tables)
+    for actual, expected in zip(again.tables, stored.tables, strict=True):
+        assert actual.support == expected.support
+        np.testing.assert_array_equal(actual.values.array, expected.values.array)
     assert (again.offset, again.evaluations) == (stored.offset, stored.evaluations)
     # J_v3 = 77 + T(specs) + D(evaluations) + R(offset) on the d = 2 fixture of three tables and
     # 24 evaluations, with a null or -5/2 offset (refinement._level_json_bound).
@@ -484,7 +487,7 @@ def test_resume_refuses_a_problem_that_problem_pickle_does_not_rebuild(tmp_path,
         problem = Optimization(objective=objective, variables=(r,), bounds=((-1.0, 1.0),))
         refined = refine_box(problem, qhd=qhd, options=levels, execution="classical", seed=1, progress=False,
                              directory=directory)
-        message = "the saved SymPy objective and variables differ from the stored problem record"
+        message = "the saved SymPy expressions differ from the stored problem record"
         with pytest.raises(ValueError, match=message):
             load_box_refinement(refined.save(tmp_path / "saved"))
         resume = resume_box_refinement
@@ -496,7 +499,7 @@ def test_resume_refuses_a_problem_that_problem_pickle_does_not_rebuild(tmp_path,
                                        options=AugmentedLagrangian(max_iterations=3, feasibility_tolerance=1e-9),
                                        progress=_stop_at("input", 3), directory=directory)
         assert (len(_committed(directory)["iterations"]), len(_committed(directory)["levels"])) == (2, 0)
-        message = "the live problem differs from the record's problem"
+        message = "the saved SymPy expressions differ from the stored problem record"
         resume = resume_augmented_lagrangian
     # The premise: the reader rebuilds the stored objective as another tree.
     with (directory / "problem.pickle").open("rb") as stream:
@@ -512,7 +515,7 @@ def test_resume_refuses_a_problem_that_problem_pickle_does_not_rebuild(tmp_path,
 
 @pytest.mark.parametrize("kind", ["constrained", "refined", "standalone"])
 def test_an_unevaluated_quotient_resumes_as_the_uninterrupted_run(tmp_path, kind):
-    """An objective kept as supplied passes the identity check of resume and continues as the uninterrupted run.
+    """An objective kept as supplied passes the expression check and continues as the uninterrupted run.
 
     f = x + (x + 2)/(x + 2), built with evaluate=False, has its pole outside [-1, 1], and SymPy's evaluation
     would turn it into x + 1. The rebuilt problem has the stored identity, so an interrupted run resumes,
@@ -585,24 +588,25 @@ def test_a_round_whose_preparation_raised_records_the_work_of_its_durable_run(tm
     assert result.resources.arbitrary_rotations is None and run_resources(result).arbitrary_rotations is None
 
 
-def test_a_round_refused_before_its_journal_header_records_zero_counts_and_its_stored_bytes(tmp_path):
-    """A durable round whose Run is refused before its journal header records known zeros and its stored bytes.
+def test_a_round_refused_before_its_journal_header_records_zero_counts_and_its_stored_bytes(tmp_path, monkeypatch):
+    """A real byte-budget refusal before the header leaves zero execution counts and charges stored files."""
+    from nwqlib._prepared_execution import Run
 
-    With ``max_data_bytes=220000`` round 0 completes, and round 1's Run stores its selected inputs, its
-    selection file and ``run.json`` and is then refused while it commits its journal header, the record that
-    holds its counters. Measured on 2026-09-27 with Python 3.12.14, Qiskit 2.5.2 and Aer 0.17.2 on macOS
-    arm64, every tested limit from 203750 to 241000 gave this refusal, so 220000 lies well inside that
-    band. A change of the stored sizes that moves the band fails the premise assertion below. Nothing is
-    prepared or acquired before the header (``_durable.header_committed``), so every count of the round is
-    zero, its CX bound and rotation count included, and its data bytes are the sizes of the files it stored
-    apart from the journal. The run totals are then known sums over both rounds.
-    """
+    write = Run._write
+
+    def refuse_second_header(run, records=(), **kwargs):
+        if run.directory == tmp_path / "refused" / "iterations" / "1" / "run" and any(
+                kind == "header" for kind, _, _ in records):
+            kwargs["max_data_bytes"] = run._state["external_bytes"]
+        return write(run, records, **kwargs)
+
+    monkeypatch.setattr(Run, "_write", refuse_second_header)
     directory = tmp_path / "refused"
     result = _solve(execution="quantum", shots=64, max_iterations=3, directory=directory,
-                    limits=ExecutionLimits(max_data_bytes=220000))
+                    limits=ExecutionLimits(max_data_bytes=10_000_000))
     folder = directory / "iterations" / "1" / "run"
     assert result.termination == "inner_failed" and len(result.iterations) == 2
-    assert not header_committed(folder), "max_data_bytes=220000 no longer refuses round 1 before its header"
+    assert not header_committed(folder), "the second header did not reach its byte-budget refusal"
     first, refused = (item.resources for item in result.iterations)
     stored = sum(path.stat().st_size for path in folder.iterdir()
                  if path.is_file() and not path.name.startswith("run.sqlite"))

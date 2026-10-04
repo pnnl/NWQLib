@@ -33,11 +33,11 @@ A `Fact` keeps availability, evidence kind, an optional composition role, quanti
 
 ### Immutability
 
-Nested record fields are frozen, typed containers detach caller-owned collections, and the public JSON and dict descriptions are detached copies. `revise(...)` and `model_copy(update=...)` validate the changes and leave the original record untouched. Core and evidence records keep their revision ancestry in `parent_id`. The scientific Problem, output and `Accuracy` inputs leave the revision and schema bookkeeping fields out of their public field set. The unchecked `model_construct` and Pydantic's `.copy(...)` are disabled.
+Nested record fields are frozen, typed containers detach caller-owned collections, and the public JSON and dict descriptions are detached copies. `revise(...)` and `model_copy(update=...)` validate the changes and leave the original record untouched. Core and evidence records keep their revision ancestry in `parent_id`. The scientific Problem, output and `Accuracy` inputs leave the revision and schema bookkeeping fields out of their public field set.
 
 ### Content hash
 
-A record's identity, `content_id`, is the SHA-256 digest of a compact, sorted-key UTF-8 JSON envelope that contains `nwqlib.record/1`, the fully qualified record type and the declared fields. Computed IDs are excluded from the digest input, and ordered collections keep their order. Loading checks every supplied ID, including nested ones, after domain validation and scalar normalization. Omitting an ID does not skip validation. A content hash associates data with content. It does not authenticate a source or prove an external payload. Unit compatibility compares symbol and dimension independently of revision ancestry.
+A record's identity, `content_id`, is the SHA-256 digest of a compact, sorted-key UTF-8 JSON envelope that contains `nwqlib.record/1`, the fully qualified record type and the declared fields. Computed IDs are excluded from the digest input, and ordered collections keep their order. Constructors and mapping or JSON loads validate field data and normalize scalars. An existing instance of the exact declared type is reused, and its identity is computed when requested. A content hash associates data with content. It does not authenticate a source or prove an external payload. Unit compatibility compares symbol and dimension independently of revision ancestry.
 
 ### Exact scalar encodings
 

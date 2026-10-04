@@ -428,11 +428,6 @@ def execute_reduction(point, state, *, bindings, context=None):
     return tuple(arrays)
 
 
-def _canonical_parameters(value):
-    """Canonical compact sorted-key JSON text of one reducer parameter mapping."""
-    return json.dumps(value, sort_keys=True, separators=(",", ":"), ensure_ascii=False, allow_nan=False)
-
-
 class ReadoutView(Record):
     """Optional reference to the selected coherent readout tail and its bound wire mapping.
 
@@ -513,19 +508,12 @@ class ObservationPoint(Record):
     def _parameters(cls, value):
         """Admit a JSON object with a deterministic identity: canonical sorted-key compact text."""
         if isinstance(value, Mapping):
-            try:
-                return _canonical_parameters(dict(value))
-            except (TypeError, ValueError) as error:
-                raise ValueError("reducer parameters must be a JSON-encodable mapping") from error
-        if type(value) is not str:
+            value = dict(value)
+        else:
+            value = json.loads(value)
+        if type(value) is not dict:
             raise ValueError("reducer parameters must be a JSON object")
-        try:
-            decoded = json.loads(value)
-        except ValueError as error:
-            raise ValueError("reducer parameters must be a JSON object") from error
-        if type(decoded) is not dict or _canonical_parameters(decoded) != value:
-            raise ValueError("reducer parameters must be canonical sorted-key compact JSON of an object")
-        return value
+        return json.dumps(value, sort_keys=True, separators=(",", ":"), ensure_ascii=False, allow_nan=False)
 
     @model_validator(mode="after")
     def _point(self):
@@ -898,7 +886,7 @@ class ObservationSpec(ReadoutDetails):
         Raises:
             ValueError: If the trajectory has no such point.
         """
-        return self._point_readout(self.point(point_id))
+        return ObservationSpec(**self.point_readout_fields(self.point(point_id)))
 
     def point_observations(self):
         """Return the single-point readout of every point, by point ID, in one pass over the points.
@@ -907,7 +895,7 @@ class ObservationSpec(ReadoutDetails):
             readouts (dict[str, ObservationSpec]): Each point's readout, as
                 `point_observation` gives it.
         """
-        return {point.id: self._point_readout(point) for point in self.positions}
+        return {point.id: ObservationSpec(**self.point_readout_fields(point)) for point in self.positions}
 
     @classmethod
     def point_readout_fields(cls, point):
@@ -940,9 +928,6 @@ class ObservationSpec(ReadoutDetails):
                       amplitudes=point.amplitudes, population="unconditional",
                       position=point.position if point.kind == "pauli_expectation" else None)
         return fields
-
-    def _point_readout(self, point):
-        return ObservationSpec(**self.point_readout_fields(point))
 
     def unsupported_schedule(self):
         """Describe this readout's multi-point schedule, readout views and reductions, or return `None`.
@@ -1384,20 +1369,12 @@ class Plan(Record):
         # private and excluded, which lets an archive restore the same
         # bindings under the same identity. Cached because the Plan is frozen.
         if "identity" not in self._cache:
-            self._cache["identity"] = self.record_identity(self.to_record())
+            data = dict(format="nwqlib.plan/7",
+                        type=f"{type(self).__module__}.{type(self).__qualname__}", fields=self.to_record())
+            encoded = json.dumps(data, sort_keys=True, separators=(",", ":"), ensure_ascii=False,
+                                 allow_nan=False).encode("utf-8")
+            self._cache["identity"] = "sha256:" + hashlib.sha256(encoded).hexdigest()
         return self._cache["identity"]
-
-    @classmethod
-    def record_identity(cls, fields):
-        """Hash the v7 portable fields without constructing native inputs.
-
-        The saved-evidence reader calls this on stored metadata to check a
-        saved Plan identity without constructing the Plan or its native inputs.
-        """
-        data = dict(format="nwqlib.plan/7", type=f"{cls.__module__}.{cls.__qualname__}", fields=fields)
-        encoded = json.dumps(data, sort_keys=True, separators=(",", ":"), ensure_ascii=False,
-                             allow_nan=False).encode("utf-8")
-        return "sha256:" + hashlib.sha256(encoded).hexdigest()
 
     @property
     def blocks(self):
@@ -1570,30 +1547,13 @@ class Plan(Record):
     def _resolve_selection_once(self, experiment, bindings):
         """Use one merge rule and admit evidence inputs before constructing the point."""
         selected, values = self._effective_point(experiment, bindings)
-        specialized = self._specialize_experiment(selected, MappingProxyType(values))
+        specialized = self.method.specialize_experiment(self, selected, MappingProxyType(values))
         if (type(specialized) is not Experiment or any(
                 getattr(specialized, field) != getattr(selected, field)
                 for field in ("name", "setting", "batch", "setting_index"))):
             raise ValueError("point readout must keep its declared experiment selector")
         selected = specialized
         return selected, self._selected_program(selected, values)
-
-    def _specialize_experiment(self, experiment, values):
-        """Method-owned bounded readout derivation; static selections are unchanged.
-
-        The actual Method owns this scientific relation. The selected Experiment
-        travels with the same Program through preparation, assessment and analysis.
-        """
-        return self.method.specialize_experiment(self, experiment, values)
-
-    def _selected_kernels(self, experiment, program):
-        """Method-owned bounded host declarations at the admitted point.
-
-        A changed declaration keeps its template as parent and the same native
-        input/implementation identities. Its actual scalar/work declaration is
-        part of SelectedConstruction, consumed by the existing fold and host.
-        """
-        return self.method.selected_kernels(self, experiment, program)
 
     def _selected_program(self, selected, values):
         """Construct and validate the complete effective point after admission."""
@@ -1645,7 +1605,7 @@ class Plan(Record):
         own construction object is returned.
         """
         selected, program = self._resolve_selection(experiment, bindings)
-        kernels = self._selected_kernels(selected, program)
+        kernels = self.method.selected_kernels(self, selected, program)
         if type(kernels) is not tuple:
             raise TypeError("selected host declarations require an immutable tuple")
         if kernels != self.construction.kernels:

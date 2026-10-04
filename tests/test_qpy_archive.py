@@ -30,7 +30,7 @@ def test_native_ucgate_qpy_limitation_canary(monkeypatch):
             "Native UCGate QPY failure changed; reassess the archive compatibility codec")
     else:
         pytest.fail("Native UCGate QPY now loads: reassess the compatibility codec, including "
-                    "simplified controls and up_to_diagonal; retain reading of existing archives")
+                    "simplified controls and up_to_diagonal")
 
 
 @pytest.mark.parametrize("layout", ["full", "first", "second", "constant"])
@@ -91,20 +91,13 @@ def test_nested_shared_gate_and_marker_collision_preserve_user_data(tmp_path, mo
     assert circuit.data[0].operation is circuit.data[1].operation is shared
 
 
-def test_codec_keeps_instruction_wrapper_and_reports_entry_on_invalid_header(tmp_path):
-    gate = UCGate([np.eye(2, dtype=complex)], mux_simp=False)
+def test_codec_preserves_instruction_action(tmp_path):
+    gate = UCGate([np.diag([1, 1j])], mux_simp=False)
     files = ArchiveFiles(tmp_path, 10_000)
     name = files.write_instruction("instruction.qpy", gate)
     restored = ArchiveFiles(tmp_path, 10_000).read_instruction(name)
     assert type(restored) is UCGate and restored.num_qubits == 1
-    from nwqlib._qpy_archive import PREFIX, QpyStream
-    path = tmp_path / "bad.qpy"
-    with path.open("wb") as stream:
-        stream.write(PREFIX)
-        qpy.dump(QuantumCircuit(1), QpyStream(stream))
-    with pytest.raises(ValueError, match="container") as caught:
-        ArchiveFiles(tmp_path, 10_000).read_circuit("bad.qpy")
-    assert str(path) in " ".join(caught.value.__notes__)
+    np.testing.assert_allclose(Operator(restored).data, np.diag([1, 1j]), rtol=0, atol=2e-15)
 
 
 def test_codec_write_preserves_existing_byte_cap(tmp_path):

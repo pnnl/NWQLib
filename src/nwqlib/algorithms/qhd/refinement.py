@@ -1911,8 +1911,8 @@ def resume_box_refinement(directory, *, backend, progress=None, end_at_unfinisha
     its completed levels. As in `resume_augmented_lagrangian`, `backend` must have the
     stored configuration, a noisy Aer run gets the noise model saved in the directory
     bound to a copy of `backend`, and another backend raises ValueError before any work.
-    The problem comes back from `problem.pickle` and must have the content hash of the
-    stored problem record, as in `resume_augmented_lagrangian`, or ValueError is raised
+    The expressions rebuilt from `problem.pickle` must match the stored objective
+    and ordered variables, as in `resume_augmented_lagrangian`, or ValueError is raised
     before any level Result is read or the refinement advances. Each completed level's
     Result is read from its Run with `load_run`. The directory is read as the layer
     wrote it, and edits are not detected
@@ -1974,8 +1974,6 @@ def resume_box_refinement(directory, *, backend, progress=None, end_at_unfinisha
         backend = outer.bind(backend)
         stored = Optimization.model_validate(settings["problem"])
         problem = live_problem(stored, outer.problem())
-        if problem.content_id != stored.content_id:
-            raise ValueError("the saved SymPy objective and variables differ from the stored problem record")
         qhd, options = QHD.model_validate(settings["qhd"]), BoxRefinement.model_validate(settings["options"])
         execution, shots = settings["execution"], settings["shots"]
         record = outer.saved["record"]
@@ -2106,14 +2104,12 @@ def load_box_refinement(path):
     """Load a saved standalone refinement without planning, objective evaluation or measurement.
 
     `load_box_refinement(path)` reads the directory that `BoxRefinementResult.save`
-    wrote. It validates the original problem's content hash and each completed level's
-    Result and Plan hashes, and returns a `BoxRefinementResult` with its original
-    problem and level Results attached. Each Plan describes that level's own objective
-    and coordinate box. The record is validated with its content hashes and its own
-    checks, the SymPy objects come back through a reader that resolves SymPy classes
-    only, and the rebuilt problem must have the hash of the stored problem record and of
-    the refinement record. Each level Result is loaded with `load_result`, which
-    validates it with its own Plan and archive. No backend is needed.
+    wrote and returns a `BoxRefinementResult` with its problem and level Results
+    attached. The SymPy reader resolves SymPy classes only and compares the rebuilt
+    expressions with their stored descriptions. The attached problem and each
+    completed level’s Result and Plan must match the refinement record. Each level
+    Plan describes its own objective and coordinate box. Results load through
+    `load_result`. No backend is needed.
 
     Args:
         path (str | Path): The directory that `BoxRefinementResult.save` wrote.
@@ -2135,8 +2131,6 @@ def load_box_refinement(path):
     stored = Optimization.model_validate(saved["problem_record"])
     with files.read_path(saved["problem"]).open("rb") as stream:
         problem = live_problem(stored, _SymbolicReader(stream).load())
-    if problem.content_id != stored.content_id:
-        raise ValueError("the saved SymPy objective and variables differ from the stored problem record")
     results = tuple(load_result(files.path / "levels" / str(level.level) / "result") for level in result.levels)
     _check_attachments(result, problem, results)
     result._problem, result._results = problem, results
@@ -2273,7 +2267,7 @@ def _level_table_phase_bytes(d, specs, json_bytes):
     512 bytes). Then
 
     ``W_save = max(Q + q_max + 12J, Q + I_max) + R_scalar(S)``,
-    ``W_load = max(4J, Q + max(q_max, 9 n_max), Q + I_max) + R_scalar(S)``,
+    ``W_load = max(4J, Q + max(q_max, 9 n_max)) + R_scalar(S)``,
     ``B_save = P_data + H_level + W_save``, ``B_load = P_data + H_level + W_load``.
 
     Save: the frozen tables contribute ``P_data``; the portable tree keeps
@@ -2289,9 +2283,7 @@ def _level_table_phase_bytes(d, specs, json_bytes):
     byte copy dies before ``FrozenArray`` makes its owner, and freezing
     overlaps the decoded raw ``8n_i``, the final owner and the ``n_i``
     finite mask), so with all final ``P_data`` reserved first the extra is
-    ``max(q_i, 9n_i)``; ``Record._check_identity`` reserializes the current
-    table and needs ``I_max`` while the parsed file and final arrays stay
-    live, after the decode phase has ended. These are qualified engineering
+    ``max(q_i, 9n_i)``. These are qualified engineering
     bounds for 64-bit CPython 3.12.14, NumPy 2.5.2, SymPy 1.14.0 and
     Pydantic 2.13.5, for files produced by this writer with the existing
     format check, not a general hostile-JSON parser bound
@@ -2321,8 +2313,7 @@ def _level_table_phase_bytes(d, specs, json_bytes):
                        + max(0, len(support) - 1) + q)
         identity = max(identity, 2 * q + 3 * (record_json + 192) + 512)
     save = resident + max(q_total + q_max + 12 * j, q_total + identity) + scalar
-    load = resident + max(4 * j, q_total + max(q_max, 9 * largest),
-                          q_total + identity) + scalar
+    load = resident + max(4 * j, q_total + max(q_max, 9 * largest)) + scalar
     return save, load
 
 
@@ -2373,9 +2364,9 @@ class _LevelTables:
     name and moved over with ``os.replace``, the commit rule of
     ``_durable``.
 
-    ``load`` checks the format, validates each table as a ``SupportValues``
-    record (dtype, shape and cached extrema derived from its entries) and
-    reads the stored table evaluations and C as saved; ``stored_offset``
+    ``load`` checks the format and reconstructs each ``SupportValues``
+    record with its array and saved extrema. It reads the stored evaluations
+    and C as saved; ``stored_offset``
     reads C from the first level's file. The expected population of a
     resumed search-model level, which sizes the load admission, comes from
     its symbolic decomposition, formed before the load and reused by the level (``_level_problem``), with ``K**|S|`` entries per
@@ -2388,8 +2379,7 @@ class _LevelTables:
     Saving admits the live frozen tables, portable base64 strings, encoder
     buffers, computed record identities and scalar metadata before
     serialization. Loading admits text parsing and, one table at a time,
-    base64 decoding, the new float64 owner, its finite-value mask and the
-    reserialization needed to validate the supplied record identity before
+    base64 decoding, the new float64 owner and its finite-value mask before
     reading the file. Both phases use the level QHD Method's max_bytes with
     other live level and retained-result data included. The file's UTF-8
     length describes outer-directory storage; under the outer-directory
@@ -2898,7 +2888,7 @@ def _refine(problem, qhd, options, execution, shots, backend, root, limits, prog
         del readout
         advance(level, result)
         if frontier is not None:
-            frontier.outer.commit_levels(tuple(levels), blocked)
+            frontier.outer.commit(levels=tuple(levels), blocked=blocked)
     record = BoxRefinementResult(
         problem_id=problem.content_id,
         qhd=qhd,

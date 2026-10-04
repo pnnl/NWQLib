@@ -2463,7 +2463,7 @@ class FixedGCIM(Method):
             indices.append(positions[key])
         return dict(
             format="fixed_gcim/5",
-            plan=files.write_plan(plan),
+            plan=plan.to_record(),
             problem=files.write_problem(plan.problem),
             output=files.write_output(plan.output),
             method=self.model_dump(mode="json", exclude_computed_fields=True),

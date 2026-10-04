@@ -195,7 +195,7 @@ def test_native_signed_centered_two_qubit_public_chain(monkeypatch, terms):
     # matrices (qiskit_compat.inverse_realized_gate): as many native
     # instructions as its forward tail, not an inverted UCG decomposition.
     from qiskit_aer import AerSimulator
-    from nwqlib.blocks.lowering import lower_definition
+    from nwqlib.blocks.lowering import _lower_qiskit
 
     experiment, = plan.experiments
     _, construction = plan.resolve(experiment.name)._selected_construction(plan)
@@ -203,7 +203,7 @@ def test_native_signed_centered_two_qubit_public_chain(monkeypatch, terms):
     blocks = tuple(b for b in plan.blocks if b.record.content_id in identities)
     decompose = aer._AerDecompose(AerSimulator(method="statevector").target)
     forward, inverse = (
-        aer._prepare_execution_circuit(lower_definition(construction, name, blocks=blocks).circuit,
+        aer._prepare_execution_circuit(_lower_qiskit(construction, definition=name, blocks=blocks).circuit,
                                        decompose=decompose, add_save_statevector=False)[0]
         for name in ("signed_readout", "signed_readout_inverse")
     )

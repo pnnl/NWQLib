@@ -762,14 +762,11 @@ class QLSAnalysis(Result):
 
 
 def validate_selection(plan):
-    """Require a Plan whose reconstruction still matches its original selection.
+    """Require a Plan whose reconstruction matches its original inputs and solver.
 
-    Analysis, loading and verification call this before using a Plan. The
-    reconstruction must name the original ``A`` and ``b``, belong to the
-    configured solver and keep any supplied ``alpha`` and ``kappa``. A
-    quantum Plan must also carry its selected phase, query and readout
-    body. A mismatch raises rather than reselecting, so stored data are
-    never interpreted under a different selection.
+    The reconstruction names the original ``A`` and ``b``, belongs to the
+    configured solver and keeps any supplied ``alpha`` and ``kappa``.
+    Classical execution selects one polynomial-model invocation.
     """
     from .method import QLS
 
@@ -792,9 +789,5 @@ def validate_selection(plan):
         raise ValueError("QLS changed its supplied alpha")
     if plan.method.kappa != "auto" and plan.method.kappa != rec.kappa_be:
         raise ValueError("QLS changed its supplied kappa")
-    if plan.execution == "quantum":
-        from .quantum import validate_selected_body
-
-        validate_selected_body(plan)
-    elif len(plan.construction.kernels) != 1 or len(plan.experiments) != 1:
+    if plan.execution == "classical" and (len(plan.construction.kernels) != 1 or len(plan.experiments) != 1):
         raise ValueError("classical QLS selects one actual polynomial-model invocation")

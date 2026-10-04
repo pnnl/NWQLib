@@ -13,24 +13,10 @@ from qiskit_aer import AerSimulator
 from nwqlib.backends import (
     AER_COUNTS_TARGET,
     AER_STATEVECTOR_TARGET,
-    BackendCapability,
-    BackendTarget,
-    capability_set,
     export_qasm,
-    require_backend_capabilities,
 )
 import nwqlib.backends.qiskit_aer as qiskit_aer_backend
 from nwqlib.execution import ExecutionMode
-
-
-def test_backend_capability_mismatch_names_selected_readout_and_target():
-    target = BackendTarget(name="statevector_only", provider="test",
-                          capabilities=capability_set(BackendCapability.STATEVECTOR))
-    require_backend_capabilities(target, capability_set(BackendCapability.STATEVECTOR),
-                                 context="selected amplitudes")
-    with pytest.raises(ValueError, match="selected counts.*statevector_only.*counts"):
-        require_backend_capabilities(target, capability_set(BackendCapability.COUNTS),
-                                     context="selected counts")
 
 
 def _bell_circuit(*, measured: bool = False) -> QuantumCircuit:

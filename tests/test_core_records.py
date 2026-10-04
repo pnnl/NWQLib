@@ -5,7 +5,6 @@ assessment belongs to test_error_model's supported-reference/fallback witness;
 method applicability and achieved results belong to the actual family tests.
 """
 
-import hashlib
 import json
 import math
 from collections import UserDict
@@ -107,12 +106,6 @@ def test_nested_detachment_identity_and_validated_record_revisions():
     assert admitted.assumptions == () and admitted.model_copy().content_id == original_id
     with pytest.raises(ValidationError):
         admitted.model_copy(update={"value": float("inf")})
-    with pytest.raises(TypeError):
-        Fact.model_construct(quantity="unchecked")
-    with pytest.raises(TypeError, match="use revise or model_copy"):
-        admitted.copy(exclude={"unit"})
-    with pytest.raises(ValueError, match="derived"):
-        admitted.revise(parent_id="sha256:" + "a" * 64)
 
 
 def test_scientific_inputs_keep_original_arrays_and_detached_descriptions():
@@ -158,17 +151,11 @@ def test_scientific_inputs_keep_original_arrays_and_detached_descriptions():
     )  # Scientific inputs have no revision bookkeeping field.
 
 
-def test_current_record_formats_and_nested_identities():
-    """Check current formats and nested identities through normal mapping round trips."""
+def test_current_record_formats_and_mapping_roundtrips():
+    """Check current formats through normal mapping round trips."""
     fact = unknown_fact()
     data = fact.model_dump(mode="json")
     assert Fact.model_validate_json(json.dumps(data, sort_keys=True)).content_id == fact.content_id
-    data["unit"]["symbol"] = "eV"
-    with pytest.raises(ValidationError, match="content_id"):
-        Fact.model_validate(data)
-    del data["content_id"]
-    with pytest.raises(ValidationError, match="content_id"):
-        Fact.model_validate(data)  # The unchanged nested ID is also a commitment.
     data = fact.model_dump(mode="json", exclude_computed_fields=True)
     data["schema_version"] = 2
     with pytest.raises(ValidationError):
@@ -194,8 +181,6 @@ def test_qualified_record_identity_and_unit_meaning_are_distinct():
     first = First.Label(symbol="hartree", dimension="energy")
     second = Second.Label(symbol="hartree", dimension="energy")
     assert first.same_unit(second) and first.content_id != second.content_id
-    with pytest.raises(ValidationError, match="content_id"):
-        Second.Label.model_validate(first.model_dump(mode="json"))
     revised = ENERGY.revise()
     assert revised.same_unit(ENERGY) and revised.parent_id == ENERGY.content_id
     assert revised.content_id != ENERGY.content_id
@@ -362,27 +347,9 @@ def test_numeric_encodings_are_exact_and_round_trip():
     payload.update(numerator=2, denominator=4)
     assert Rational.model_validate(payload).content_id == half.content_id
     assert Rational.model_validate_json(json.dumps(payload)) == half
-    # The independently encoded unreduced fields cannot carry the normalized ID.
-    fields = {key: value for key, value in payload.items() if key != "content_id"}
-    encoding = json.dumps(
-        {
-            "identity_encoding": "nwqlib.record/1",
-            "type": "nwqlib.core.records.Rational",
-            "fields": fields,
-        },
-        sort_keys=True,
-        separators=(",", ":"),
-        ensure_ascii=False,
-        allow_nan=False,
-    )
-    payload["content_id"] = "sha256:" + hashlib.sha256(encoding.encode()).hexdigest()
-    with pytest.raises(ValueError, match="content_id does not match"):
-        Rational.model_validate(payload)
     binary = Float64(value=1 / 3)
     assert binary.content_id != third.content_id and isinstance(binary.model_dump()["value"], float)
     assert Float64.model_validate(binary.model_dump(mode="json")) == binary
-    with pytest.raises(ValidationError, match="content_id"):
-        Float64.model_validate({"value": binary.value, "content_id": "sha256:" + "0" * 64})
     assert Float64(value=-0.0).content_id == Float64(value=0.0).content_id
     z = Complex128(real=-0.0, imag=1 / 3)
     reloaded = Complex128.model_validate_json(z.model_dump_json())

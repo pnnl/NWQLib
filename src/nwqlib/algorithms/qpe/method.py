@@ -446,8 +446,7 @@ def _quantum_program(data, queries, selection, options, shots, route):
     phase P(-p*tau*c_I), because controlled(exp(i*a) V) equals P(a) on the
     control followed by controlled V.
 
-    Program layout. Definition ids name the nodes that
-    records.validate_selected_body later checks: ``allocate_*`` and
+    Program layout. Definition ids name the emitted nodes: ``allocate_*`` and
     ``release_*`` for the registers, ``prepare`` and ``h``, ``identity_<p>``
     phases, ``gap_<p>``, ``selected_<p>``, the block calls named by their
     signatures (``common_step`` with ``common_step_<p>`` repeats,
@@ -1192,8 +1191,7 @@ def _host_declaration(data, labels, *, work, payload, pointwise, query_count):
     The kernel computes the estimator signal from one dense eigendecomposition
     and the prepared spectral weights. It is a nominal model, not quantum
     execution or an independent reference. ``work`` and ``payload`` are the
-    size laws the caller admitted, and validate_selected_body checks that the
-    stored Plan repeats them. LAPACK internals and SDK workspace stay unknown.
+    size laws the caller admitted. LAPACK internals and SDK workspace stay unknown.
     """
     law = ResourceLaw(
         metric="classical_work",
@@ -1373,8 +1371,7 @@ def _host_construction(method, data, d, queries, powers):
     experiment with scalars ``z_0``, ``z_1``, and so on. RWPE has one
     experiment per query with the single scalar ``z`` and a symbolic
     ``feedback`` parameter. ``work`` and ``payload`` are the admitted size
-    law of the kernel, which QPEReconstruction stores and
-    validate_selected_body checks.
+    law of the kernel, stored in QPEReconstruction.
     """
     # Size law of the host kernel for dimension D:
     # - 8*D**3 work: the dense eigendecomposition (numerical.nominal_eigensystem).

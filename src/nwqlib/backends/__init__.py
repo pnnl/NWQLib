@@ -10,8 +10,6 @@ from nwqlib.backends.capabilities import (
     BackendCapability,
     BackendTarget,
     InstructionSupport,
-    capability_set,
-    require_backend_capabilities,
 )
 
 # Each native operation has one actual owner. Merely reading a stored target
@@ -45,8 +43,8 @@ _OPERATIONS = {
 }
 
 __all__ = [
-    "BackendCapability", "BackendTarget", "InstructionSupport", "capability_set",
-    "require_backend_capabilities", "export_qasm", *_OPERATIONS,
+    "BackendCapability", "BackendTarget", "InstructionSupport",
+    "export_qasm", *_OPERATIONS,
 ]
 
 

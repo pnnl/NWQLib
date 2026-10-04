@@ -461,7 +461,6 @@ A Method whose Runs or Results are saved implements `save_archive(plan, files)` 
     options:
       heading_level: 3
       members:
-        - write_plan
         - read_plan
         - read_problem
         - read_output

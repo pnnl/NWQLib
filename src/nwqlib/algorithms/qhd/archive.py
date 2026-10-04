@@ -6,7 +6,7 @@ from nwqlib.blocks.kernels import BoundKernel
 from nwqlib.blocks.selection import SelectedBlock
 from nwqlib.problems.records import Optimization
 from .method import QHD, _execute_theory
-from .records import QHDReconstruction, validate_selection
+from .records import QHDReconstruction
 
 # Layout of the Method, reconstruction and QHDAnalysis saved together.
 FORMAT = "qhd/7"
@@ -37,8 +37,7 @@ class _SymbolicReader(pickle.Unpickler):
     identity that the archive records. A node that neither build reproduces
     keeps the evaluated build, or raises its error, and the checks that
     compare the reopened expressions with the records
-    (``records.validate_selection`` and the problem identities of the
-    augmented-Lagrangian and refinement archives) refuse such a build.
+    in ``load`` and ``_durable.live_problem`` refuse such a build.
     """
 
     def find_class(self, module, name):
@@ -185,7 +184,7 @@ def save(method, plan, files):
         pickle.dump((plan.problem.objective, plan.problem.variables), stream, protocol=5)
     return dict(
         format=FORMAT,
-        plan=files.write_plan(plan),
+        plan=plan.to_record(),
         problem=files.write_problem(plan.problem),
         output=files.write_output(plan.output),
         method=method.model_dump(mode="json", exclude_computed_fields=True),
@@ -198,11 +197,9 @@ def load(saved, files):
 
     The Plan is restored from the stored Method, reconstruction and
     SymPy objective without recompiling the schedule or evaluating the
-    objective. ``validate_selection`` compares the stored objective text and
-    variable order with the Problem, checks table supports and shapes, and
-    binds bounds and reconstruction to the selection by content identity.
-    It does not compare table values with the objective. The classical
-    kernel or native block is then bound to the stored reconstruction.
+    objective. The restored objective and ordered variables are compared
+    directly with their stored expression descriptions. The classical kernel
+    or native block is then bound to the stored reconstruction.
     Any other format, including an earlier QHD format, is rejected before a
     file is read.
     """
@@ -218,6 +215,10 @@ def load(saved, files):
     problem = Optimization.model_validate(fields)
     method = QHD.model_validate(saved["method"])
     reconstruction = QHDReconstruction.model_validate(saved["plan"]["reconstruction"])
+    import sympy as sp
+    if (reconstruction.expression != sp.srepr(problem.objective)
+            or reconstruction.symbolic_variables != tuple(sp.srepr(v) for v in problem.variables)):
+        raise ValueError("saved SymPy expressions differ from the selected problem")
     plan = files.read_plan(
         saved["plan"],
         problem=problem,
@@ -225,7 +226,6 @@ def load(saved, files):
         output=files.read_output(saved["output"]),
         reconstruction=reconstruction,
     )
-    validate_selection(plan)
     if plan.execution == "classical":
         (kernel,) = plan.construction.kernels
         blocks = (BoundKernel._bind(plan, kernel, lambda: _execute_theory(plan, kernel)),)

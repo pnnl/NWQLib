@@ -19,10 +19,9 @@ collide.
 Revisit condition: ``test_native_ucgate_qpy_limitation_canary`` in
 ``tests/test_qpy_archive.py`` loads one two-qubit UCGate through raw QPY. It
 fails, asking for a compatibility review, when the installed Qiskit loads the
-gate natively or fails differently. Even then, keep ``decode_circuit`` so that
-existing ``UC1`` files still load. Switch the writer back to raw QPY only after
-checking simplified controls, the ``up_to_diagonal`` flag and executable round
-trips on the new version.
+gate natively or fails differently. Check simplified controls, the
+``up_to_diagonal`` flag and executable round trips when choosing the codec
+for that SDK.
 """
 
 from copy import copy
@@ -183,14 +182,15 @@ def encode_circuit(circuit):
 
         The storage instruction has the gate's width, no clbits and parameters
         ``[header, *matrices]``. The header keeps what the constructor would
-        otherwise recompute or lose: the nominal width, ``simp_contr`` (whether
+        otherwise recompute or lose: ``simp_contr`` (whether
         the table is already simplified, and its one-based active controls),
-        ``up_to_diagonal``, name and label.
+        ``up_to_diagonal``, name and label. The storage instruction carries
+        the nominal width.
         """
         if type(gate) is not UCGate:
             return gate
         simplified, controls = gate.simp_contr
-        header = json.dumps(dict(version=1, qubits=gate.num_qubits, name=gate.name,
+        header = json.dumps(dict(name=gate.name,
             label=gate.label, up_to_diagonal=gate.up_to_diagonal,
             simplified=simplified, controls=sorted(controls)), separators=(",", ":"))
         stored = Instruction(marker, gate.num_qubits, 0, [header, *gate.params])
@@ -208,54 +208,24 @@ def encode_circuit(circuit):
         del result
         encoded.clear()
         result, _ = _graph(circuit, convert, writing=True)
-    result.metadata = dict(version=1, marker=marker, original_metadata=circuit.metadata)
+    result.metadata = dict(marker=marker, original_metadata=circuit.metadata)
     return result
 
 
 def decode_circuit(circuit):
     """Restore an explicitly identified codec container without synthesis."""
-    from qiskit.circuit import Gate, Instruction
+    from qiskit.circuit import Gate
     from qiskit.circuit.library import UCGate
-    import numpy as np
 
     metadata = circuit.metadata
-    if (not isinstance(metadata, dict) or set(metadata) != {"version", "marker", "original_metadata"}
-            or metadata["version"] != 1 or not isinstance(metadata["marker"], str)
-            or not metadata["marker"].startswith("nwqlib_stored_ucgate_v1")):
-        raise ValueError("invalid UCGate QPY storage container")
     marker = metadata["marker"]
 
     def convert(stored):
-        """Rebuild one UCGate from its storage instruction after checking the header.
-
-        The table must hold a power-of-two number of 2x2 arrays. Its length must
-        match the active controls when the table is simplified, or all
-        ``num_qubits - 1`` controls otherwise. Controls are distinct integers from
-        1 to ``num_qubits - 1``, since the target is wire 0 of the gate.
-        """
+        """Rebuild one UCGate with its saved table and active controls."""
         if stored.name != marker:
             return stored
-        if type(stored) is not Instruction or not stored.params or type(stored.params[0]) is not str:
-            raise ValueError("invalid UCGate storage instruction")
         header = json.loads(stored.params[0])
-        fields = {"version", "qubits", "name", "label", "up_to_diagonal", "simplified", "controls"}
-        if (not isinstance(header, dict) or set(header) != fields or header["version"] != 1
-                or type(header["qubits"]) is not int or header["qubits"] != stored.num_qubits
-                or stored.num_qubits < 1 or stored.num_clbits
-                or type(header["name"]) is not str
-                or header["label"] is not None and type(header["label"]) is not str
-                or type(header["up_to_diagonal"]) is not bool or type(header["simplified"]) is not bool):
-            raise ValueError("invalid UCGate storage header")
         params, controls = stored.params[1:], header["controls"]
-        count = len(params)
-        if (not count or count & (count - 1)
-                or any(type(param) is not np.ndarray or param.shape != (2, 2) for param in params)
-                or type(controls) is not list
-                or any(type(bit) is not int or not 1 <= bit < stored.num_qubits for bit in controls)
-                or len(set(controls)) != len(controls)
-                or count.bit_length() - 1 != (len(controls) if header["simplified"] else stored.num_qubits - 1)
-                or not header["simplified"] and controls):
-            raise ValueError("invalid UCGate table/control association")
         # The public constructor would simplify the already simplified table
         # again and infer the wrong nominal width. Base initialization invokes
         # UCGate's ndarray parameter validator without matrix synthesis.

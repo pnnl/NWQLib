@@ -141,18 +141,6 @@ def lower_qiskit(construction: SelectedConstruction, *, blocks: tuple[SelectedBl
                          synthesis_charge=charge)
 
 
-def lower_definition(construction, definition, *, blocks, **options):
-    """Lower one named definition of the selected Program onto its bound registers.
-
-    This is ``_lower_qiskit`` with ``definition``: the construction's
-    bindings, the selected ``blocks`` and the caller's caches and limits
-    (``options``) apply as for the body, and the returned ``LogicalCircuit``
-    has the body's registers, with the definition's gates on the wires its
-    ports name. It lowers a trajectory readout view's tail and inverse.
-    """
-    return _lower_qiskit(construction, blocks=blocks, definition=definition, **options)
-
-
 def _lower_qiskit(construction, *, blocks, max_operations=100_000, max_qubits=4096, max_clbits=4096,
                   max_direct_amplitudes=DEFAULT_MAX_DIRECT_AMPLITUDES,
                   definition_cache=None, specialization_cache=None,
@@ -163,7 +151,7 @@ def _lower_qiskit(construction, *, blocks, max_operations=100_000, max_qubits=40
     default. Another definition, such as the coherent tail or inverse of a
     trajectory readout view, is lowered onto the same registers, with the
     same bindings, selected blocks, caches and limits, so its gates act on
-    the wires its ports name in the bound body (``lower_definition``).
+    the wires its ports name in the bound body.
 
     The context getter creates empty method metadata. Only admitted native
     constructors may populate it, under their selected work/workspace laws.

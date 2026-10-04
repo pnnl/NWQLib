@@ -1408,7 +1408,7 @@ class ObservationChunk(Record):
         except ValueError:
             return False
         return (declaration.content_id == self.trajectory_id
-                and declaration._point_readout(point) == self.observation)
+                and ObservationSpec(**declaration.point_readout_fields(point)) == self.observation)
 
     def validate_unit_bound(self, receipt):
         """Check that exact probabilities, Pauli expectations and branch masses exceed one only within the roundoff window of the executed circuit.

@@ -52,10 +52,10 @@ print(sorted(metadata))
 ```
 
 ```text
-['data', 'format', 'metadata_validation', 'result', 'selection']
+['data', 'format', 'result', 'selection']
 ```
 
-Both `read_report` and `load_result` check the current format, common record schemas and content hashes, and the Result's association with its observations before loading Method code or binary payloads. They also check the canonical `Plan` identity when the Method supplies a canonical Plan description. The dictionary that `read_report` returns lists these checks under `metadata_validation`.
+`read_report` checks the shared format and returns the saved metadata. `load_result` reconstructs the concrete records through the selected Method and attaches the Result to its Plan and observations. Arrays are read when requested.
 
 ## Saved folders are read-only
 
@@ -63,7 +63,7 @@ Treat a saved Result or Run folder as read-only. These checks run on saved data:
 
 | Check | When |
 | --- | --- |
-| The format version, and the content hash of the `Plan` and of every record saved with its hash | Every load |
+| The shared format version | Every load |
 | The header of every backend input array and every saved Result array against its declaration (shape, encoding, byte count and contiguity). The check reads no values. A mismatch is rejected, so a mismatched file is never read as data of the wrong shape | Every load |
 | Backend state and operator headers against their representation, dimensions and encoding. Real, complex, compact and sparse storage is kept without normalization, densification or re-ingestion | Every load |
 | The Method's archive hook reconstructs its selected inputs and saved computation data. For example, LCHS restores its selected `LCHSData` parameters, PREP tensors and periodic Strang payload ([LCHS guide](algorithms/lchs.md#explicit-checks-and-saved-results)) | Every load |
@@ -73,12 +73,7 @@ Treat a saved Result or Run folder as read-only. These checks run on saved data:
 | QHD's observed masses against the roundoff window of their executions (`validate_analysis_masses`) | When QHD analyzes them, not when a Result is loaded |
 | The block order and byte count of a reopened Run's saved array | When the array is first read from the run log. Reopening registers each saved array without reading it |
 
-Loading does not detect:
-
-- Changed array values, sparse indices or digests of arrays and backend inputs. Values are not read and digests are not recomputed.
-- Edits to other saved data, such as the values of backend input arrays and of Result arrays, QPY circuit files, Method caches such as QPE spectra or ADAPT vectors, other saved construction data of the Methods, and the rows of `run.sqlite`. An edited value there can change a later solve, analysis, verification or continuation while the `Plan`'s content hash stays the same.
-
-The folder is local execution data, not an authenticated scientific record. A missing trajectory point makes its dependent quantity incomplete, and loading and analysis never replay the shared prefix to supply it. Validity checks do not replay inference or produce missing numerical evidence. To change an input or a scientific setting, build a new Problem or Method and a new `Plan`.
+A missing trajectory point makes its dependent quantity incomplete, and loading and analysis never replay the shared prefix to supply it. Validity checks do not replay inference or produce missing numerical evidence. To change an input or a scientific setting, build a new Problem or Method and a new `Plan`.
 
 ## Storage and loading cost
 

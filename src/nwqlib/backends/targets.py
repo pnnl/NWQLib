@@ -6,12 +6,12 @@ instruction/readout inventories remain unknown; coarse capabilities alone are
 not a complete execution certification.
 """
 
-from nwqlib.backends.capabilities import BackendCapability, BackendTarget, capability_set
+from nwqlib.backends.capabilities import BackendCapability, BackendTarget
 
 AER_STATEVECTOR_TARGET = BackendTarget(
     name="aer_statevector",
     provider="qiskit_aer",
-    capabilities=capability_set(BackendCapability.STATEVECTOR),
+    capabilities=(BackendCapability.STATEVECTOR,),
     description="Qiskit Aer exact statevector simulator.",
     readouts=("pauli_expectation", "probabilities", "amplitudes", "trajectory"),
     readout_features=("multi_position", "views"),
@@ -31,7 +31,7 @@ inventory.
 AER_COUNTS_TARGET = BackendTarget(
     name="aer_counts",
     provider="qiskit_aer",
-    capabilities=capability_set(BackendCapability.COUNTS, BackendCapability.NOISE_MODEL),
+    capabilities=(BackendCapability.COUNTS, BackendCapability.NOISE_MODEL),
     description="Qiskit Aer finite-shot measured circuit simulator.",
     readouts=("counts",),
 )

@@ -140,8 +140,6 @@ def test_reduction_reserves_its_output_not_its_workspace_and_unknown_reducers_fa
     unknown = ObservationPoint(id="u", position=0, kind="reduction", reducer="unregistered")
     with pytest.raises(ValueError, match="no registered output shape"):
         readout_shape(kind="trajectory", details=trajectory(unknown), width=1, classical_width=0)
-    with pytest.raises(ValueError, match="canonical"):
-        ObservationPoint(id="r", position=0, kind="reduction", reducer="two_complex", parameters='{"b":1, "a":2}')
 
 
 def _fresh_process_json(source):
@@ -1094,7 +1092,7 @@ def test_aer_view_reads_the_rotated_state_and_restores_the_continuation(monkeypa
     import io
     import numpy as np
     from nwqlib.backends import qiskit_aer as aer
-    from nwqlib.blocks.lowering import lower_definition
+    from nwqlib.blocks.lowering import _lower_qiskit
     from qiskit import qpy
     from nwqlib._prepared_execution import submit_experiment
     from qiskit.quantum_info import Pauli, Statevector
@@ -1116,8 +1114,8 @@ def test_aer_view_reads_the_rotated_state_and_restores_the_continuation(monkeypa
     _, construction = plan.resolve("trajectory")._selected_construction(plan)
     selected = {record.content_id for record in construction.selections}
     blocks = tuple(block for block in plan.blocks if block.record.content_id in selected)
-    body = lower_definition(construction, plan.construction.program.root, blocks=blocks).circuit
-    tail = lower_definition(construction, "tail", blocks=blocks).circuit
+    body = _lower_qiskit(construction, definition=plan.construction.program.root, blocks=blocks).circuit
+    tail = _lower_qiskit(construction, definition="tail", blocks=blocks).circuit
     with Run(plan, progress=False) as run:
         handle = prepare(plan.resolve("trajectory"), run=run, runtime=RuntimeOptions(seed=7))
         names = [item.operation.name for item in handle._native.circuit.data]

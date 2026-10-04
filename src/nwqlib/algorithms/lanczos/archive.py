@@ -18,7 +18,7 @@ def save(plan, files):
     """
     return dict(
         format="lanczos/6",
-        plan=files.write_plan(plan),
+        plan=plan.to_record(),
         problem=files.write_problem(plan.problem),
         output=files.write_output(plan.output),
         method=plan.method.model_dump(mode="json", exclude_computed_fields=True),

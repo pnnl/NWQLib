@@ -42,7 +42,7 @@ class AdmissionStepsExceeded(ValueError):
     """A Program's kept field slots or admission work exceed ``AdmissionLimits.max_steps``.
 
     A Method whose ``max_admission_steps`` field sets the ceiling catches this
-    type to name that field (``steps_exceeded``, ``admission_refusal``,
+    type to name that field (``admission_refusal``,
     ``admitted_program``). Raised inside Program construction, it reaches the
     caller wrapped in Pydantic's ValidationError, whose ``errors()`` entry
     keeps it as ``ctx["error"]``.
@@ -102,11 +102,6 @@ def limit_exceeded(error, kinds=(AdmissionStepsExceeded, AdmissionDefinitionsExc
             if isinstance(found, kinds):
                 return found
     return None
-
-
-def steps_exceeded(error):
-    """Return the ``AdmissionStepsExceeded`` that a Program construction error carries, or None."""
-    return limit_exceeded(error, (AdmissionStepsExceeded,))
 
 
 def admission_refusal(option, exceeded, *, subject="the Program"):

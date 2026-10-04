@@ -1,5 +1,14 @@
 # Release notes
 
+## v1.0.1.post1 (2026-10-04)
+
+This release simplifies validation and saved-data loading, and removes forwarding APIs and their supporting code.
+
+- Removes repeated saved-record hash checks, unused ADAPT compiler hashes, QASM file digests and duplicate QPE/QLS Program validation. QHD loading compares the restored expressions directly with their saved descriptions.
+- QASM import checks the actual file size before reading and the construction's work limits before importing. Normal numerical round trips, scientific associations and execution limits keep their independent tests.
+- Use `plan.to_record()` and `run.artifacts.get(manifest)` in place of `ArchiveFiles.write_plan` and `Run.hydrate`. `read_report` returns the saved metadata without the `metadata_validation` entry.
+- The current shared archive formats are `nwqlib.run/19` and `nwqlib.result/12`. Package and citation versions are synchronized at `1.0.1.post1`.
+
 ## v1.0.1 (2026-10-03)
 
 This release simplifies tests and the validation code they support. It removes 107 collected test cases while keeping independent checks of numerical results, resource limits and normal save, load and resume workflows.

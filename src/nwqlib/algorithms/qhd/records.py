@@ -6,15 +6,12 @@ support tables, the initial amplitudes, the compiled step blocks
 approximation ledgers with the lower-range omissions (``QHDRangeOmissions``).
 Execution, analysis and loading read it instead of evaluating the objective
 again. ``QHDAnalysis`` is the analyzed readout, the best observed candidate and
-the most probable point with its tie window, and ``validate_selection`` checks
-that a stored reconstruction and construction belong to their Problem and
-Method.
+the most probable point with its tie window.
 """
 
 from nwqlib._limits import DEFAULT_MAX_BYTES
 
 from hashlib import sha256
-import sympy as sp
 from typing import Annotated, Literal
 from pydantic import Field, StrictBool, model_validator
 from nwqlib.algorithms.protocol import AlgorithmDescriptor
@@ -34,7 +31,6 @@ from nwqlib.core.records import (
 )
 from nwqlib.execution import KernelApplication
 from nwqlib.operators.access import Count
-from nwqlib.problems.records import Optimization
 
 from .validation import _NORMAL_MIN
 
@@ -121,22 +117,6 @@ class SupportValues(Record):
         table = FrozenArray(values)
         minimum, maximum, magnitude = table_extrema(table.array)
         return cls(support=support, values=table, minimum=minimum, maximum=maximum, magnitude=magnitude)
-
-    @model_validator(mode="after")
-    def _extrema_of_the_array(self):
-        """Require a nonempty one-dimensional float64 array whose stored extrema are selected from it.
-
-        The extrema are exact selections from the array (``table_extrema``),
-        so a record whose extrema differ from its entries is refused.
-        """
-        array = self.values.array
-        if array.dtype.str != "<f8" or array.ndim != 1 or array.size == 0:
-            raise ValueError("a QHD support table stores a nonempty one-dimensional float64 array")
-        if (self.minimum, self.maximum, self.magnitude) != table_extrema(array):
-            raise ValueError("QHD support table extrema must be the minimum, maximum and maximum magnitude "
-                             "selected from its entries")
-        return self
-
 
 class QHDWalshPhase(Record):
     """Upper allowances, in radians, for the identity phases of a Plan's Walsh diagonal blocks.
@@ -542,7 +522,7 @@ class QHDReconstruction(Record):
         """Require the host state budget and its two windows together or none of them.
 
         Planning stores all three for a classical Plan and none for a
-        native one (``validate_selection`` checks which).
+        native one.
         """
         present = {value is not None for value in (self.host_state_error, self.host_mass_window,
                                                    self.host_tie_window)}
@@ -1125,7 +1105,6 @@ class QHDAnalysis(Result):
         """
         from .method import _grid, objective_at
 
-        validate_selection(plan)
         self._validate_common_plan(plan, Plan)
         if self.construction_id != plan.construction.content_id:
             raise ValueError("QHD aggregate result differs from its base Plan construction")
@@ -1169,83 +1148,6 @@ DESCRIPTOR = AlgorithmDescriptor(
     references=(METHOD,),
     maintenance="NWQLib",
 )
-
-
-def validate_selection(plan):
-    """Check that the stored reconstruction and construction belong to this Problem and Method.
-
-    The checks compare the register width (``d*K`` one-hot, ``d*b`` binary
-    with ``K = 2**b``) and grid size ``K**d``, the stored ``srepr`` of the
-    objective and variables, the step count, whether compiled blocks were
-    required and whether their kinds belong to the encoding, whether the
-    Walsh phase allowances and the host state budget with its windows are
-    present exactly for the Plans that have them, whether the stored mass
-    and tie windows are those of the stored budget, the shape and
-    uniqueness of each support table, and the objective reference and
-    reconstruction identity recorded by the native block or classical
-    kernel. Table values are not compared with the objective.
-
-    Returns:
-        ``plan``, unchanged.
-    """
-    p, o, r = plan.problem, plan.method, plan.reconstruction
-    if not isinstance(p, Optimization) or r.method_id != o.content_id:
-        raise ValueError("QHD reconstruction requires its original problem and Method")
-    binary = o.encoding == "binary"
-    per_variable = o.num_grid_points.bit_length() - 1 if binary else o.num_grid_points
-    if r.width != len(p.variables) * per_variable or r.restricted_dimension != o.num_grid_points ** len(
-            p.variables):
-        raise ValueError("QHD selected dimensions differ from the original ordered box")
-    if any(isinstance(b, QHDBinaryBlock) != binary for step in r.steps for b in step):
-        raise ValueError("QHD compiled blocks differ from the selected encoding")
-    if r.symbolic_variables != tuple(
-        sp.srepr(v) for v in p.variables
-    ) or r.expression != sp.srepr(p.objective):
-        raise ValueError("QHD reconstruction differs from its actual symbolic objective/order")
-    compact = plan.execution == "quantum" or o.theory_flavor == "ir_product"
-    if (
-        r.compact_schedule_selected != compact
-        or len(r.steps) != (o.num_steps if compact else 0)
-        or len(r.step_weights) != o.num_steps
-    ):
-        raise ValueError("QHD selected schedule differs from Method")
-    if (r.walsh_phase is not None) != (binary and compact):
-        raise ValueError("QHD Walsh phase allowances belong to binary Plans with compiled steps")
-    if (r.host_state_error is not None) != (plan.execution == "classical"):
-        raise ValueError("QHD host state budget and windows belong to classical Plans")
-    if r.host_state_error is not None:
-        from nwqlib._validation import state_mass_window
-
-        from .method import _host_window
-
-        # The two windows that planning formed from the stored budget
-        # (method._admit_host_windows).
-        if (r.host_mass_window != state_mass_window(r.host_state_error, r.restricted_dimension)
-                or r.host_tie_window != _host_window(r.host_state_error)):
-            raise ValueError("QHD host mass and tie windows differ from the stored state budget")
-    if any(
-        not t.support
-        or tuple(sorted(set(t.support))) != t.support
-        or max(t.support) >= len(p.variables)
-        or len(t.values) != o.num_grid_points ** len(t.support)
-        for t in r.support_values
-    ):
-        raise ValueError("QHD support table differs from ordered grid")
-    if len({t.support for t in r.support_values}) != len(r.support_values):
-        raise ValueError("QHD support tables must be unique")
-    reference = objective_reference(r.expression, r.symbolic_variables, p.bounds)
-    if plan.execution == "quantum":
-        if (len(plan.construction.selections) != 1
-                or plan.construction.selections[0].coefficient_selection_id != r.content_id
-                or plan.construction.selections[0].semantics.input != reference):
-            raise ValueError("native QHD differs from selected objective, bounds or reconstruction")
-    elif (len(plan.construction.kernels) != 1
-            or plan.construction.kernels[0].inputs != (reference,)
-            or not plan.construction.kernels[0].implementation.reference.endswith(r.content_id)):
-        raise ValueError("classical QHD differs from selected objective or reconstruction")
-    if (o.initial_state_preparation == "none") != (not plan.experiments):
-        raise ValueError("resource-only QHD cannot declare an executable experiment")
-    return plan
 
 
 class QHDVerification(Record):

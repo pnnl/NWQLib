@@ -269,7 +269,6 @@ def test_published_array_has_one_durable_payload_and_survives_close(tmp_path, su
         np.testing.assert_array_equal(handle.array, case.raw)
         assert "not loaded" not in loaded._array_text(loaded.artifact)
         assert not handle.array.flags.writeable
-        assert restored.hydrate(loaded.artifact) is handle
         assert loaded.artifact.acquisition == result.artifact.acquisition
         assert restored.trace.jobs == 1
     np.testing.assert_array_equal(handle.array, case.raw)
@@ -478,15 +477,8 @@ def test_aer_qpy_restore_preserves_readout_position_and_wire_order(kind):
         assert output["pauli_expectations"] == pytest.approx({"IZ": -1, "ZI": 1}, rel=0, abs=2e-15)
 
 
-def test_plan_size_selection_stays_out_of_the_small_run_manifest(tmp_path):
-    """A multi-MB Plan record lives in the selection file, so load_run can reopen the Run.
-
-    The QHD reconstruction record lists the blocks of every product-formula
-    step. With 80 steps, two variables and six grid points the Plan record is
-    about 3 MB. load_run reads run.json under a one MiB cap before the journal
-    supplies the data allowance, so run.json only names the selection file.
-    Nothing is executed.
-    """
+def test_large_selected_plan_roundtrip(tmp_path):
+    """Reopen a multi-MB selected QHD Plan without executing its circuit."""
     import json
 
     x, y = sp.symbols("x y", real=True)
@@ -499,29 +491,6 @@ def test_plan_size_selection_stays_out_of_the_small_run_manifest(tmp_path):
     with Run(selected, directory=path) as run:
         backend = run.backend
     manifest = json.loads((path / "run.json").read_text())
-    assert (path / "run.json").stat().st_size < 4096
     assert (path / manifest["selection"]).stat().st_size > 1024**2
     with nwqlib.load_run(path, backend=backend) as reopened:
         assert reopened.plan.content_id == selected.content_id
-
-
-def test_oversized_run_manifest_rejects_before_its_selection_is_loaded(tmp_path, monkeypatch):
-    """The one MiB cap on run.json is checked before the manifest is parsed.
-
-    Padding keeps the manifest valid JSON, so only the size check can reject it,
-    and the patched load_plan shows that no selection was read first.
-    """
-    import nwqlib._choice_archive as choice_archive
-    from test_run_lifecycle import InjectedBackend
-
-    path = tmp_path / "run"
-    Run(selected(), backend=InjectedBackend(), directory=path).close()
-    manifest = path / "run.json"
-    manifest.write_text(manifest.read_text() + " " * 1024**2)
-
-    def unexpected(*args, **kwargs):
-        raise AssertionError("the selection was loaded before the manifest size check")
-
-    monkeypatch.setattr(choice_archive, "load_plan", unexpected)
-    with pytest.raises(ValueError, match="run header exceeds one MiB"):
-        nwqlib.load_run(path, backend=InjectedBackend())

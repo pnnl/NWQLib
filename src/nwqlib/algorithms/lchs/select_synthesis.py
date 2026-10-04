@@ -212,7 +212,7 @@ def _branch_controlled_product_formula_resource_law(
 
     native.construct_select builds each physical branch with
     ``_build_product_formula_branch`` and controls it on the c address bits
-    with ``native._direct_controlled_branch``, so Qiskit's add_control
+    with ``qiskit_compat.controlled``, so Qiskit's add_control
     unrolls the branch and controls each of its gates at once. Qiskit 2.5.2
     synthesizes an occurrence of a one-qubit Pauli label as one RZ, RX or RY.
     A longer label becomes an H pair for each X factor, an SX and SXdg pair

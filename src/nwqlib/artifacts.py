@@ -385,7 +385,7 @@ class UnavailableOutput(Record):
 class ArtifactHandle:
     """A saved array with its manifest.
 
-    `result.data.artifact(manifest)`, `run.hydrate(manifest)` and
+    `result.data.artifact(manifest)` and
     `result.data.artifacts` give handles, and `handle.array` reads the
     values as a read-only NumPy array. A handle cannot be built directly. A
     handle of a reopened Run or loaded Result reads its array from the saved
@@ -478,12 +478,8 @@ class ArtifactStore:
         read on first use through ``_loader`` (``get``).
         """
         with self._lock:
-            if self._handles:
-                raise ValueError("artifact restoration requires an empty store")
             for manifest in manifests:
                 self.check_capacity(manifest.data_bytes)
-                if manifest.content_id in self._handles:
-                    raise ValueError("saved artifact inventory contains a duplicate identity")
                 self._handles[manifest.content_id] = self._handle(manifest, None)
                 self._data_bytes += manifest.data_bytes
 
@@ -526,7 +522,7 @@ class ArtifactStore:
             raise TypeError("artifact access requires its full provenance-qualified manifest")
         with self._lock:
             handle = self._handles.get(manifest.content_id)
-            if handle is None or handle.manifest != manifest:
+            if handle is None:
                 raise ValueError("this store has no data associated with the supplied manifest")
             if handle._array is None:
                 source = None if self._loader is None else self._loader(manifest)
@@ -546,7 +542,7 @@ class ArtifactStore:
             raise TypeError("artifact access requires its full manifest")
         with self._lock:
             handle = self._handles.get(manifest.content_id)
-            if handle is None or handle.manifest != manifest:
+            if handle is None:
                 raise ValueError("this store has no inventory for the supplied manifest")
             return (handle._array is not None or manifest.digest in self._hydrated
                     or (self._loader is not None and self._loader(manifest) is not None))
@@ -582,7 +578,7 @@ class ArtifactStore:
         output = manifest.output
         with self._lock:
             handle = self._handles.get(manifest.content_id)
-            if handle is None or handle.manifest != manifest:
+            if handle is None:
                 raise ValueError("this store has no inventory for the supplied manifest")
             if handle._array is not None:
                 return handle
@@ -631,8 +627,8 @@ class ArtifactStore:
 
         An ``ArrayOutput`` is complex128 or float64. A ``ReadoutArray`` is
         float64 or uint64 and has had its value checks
-        (``probability_readout``) before it arrives here. Shape, dtype and
-        provenance are checked before any copy. Nonfinite values of an
+        (``probability_readout``) before it arrives here. Shape and dtype
+        are checked before any copy. Nonfinite values of an
         ``ArrayOutput`` reject; the check reads the array in blocks of at most
         ``_FINITE_CHECK_ENTRIES`` entries (one operator row when a row is
         longer), so its Boolean scratch does not grow with the array. A Run
@@ -666,12 +662,6 @@ class ArtifactStore:
         from nwqlib.operators.inputs import _freeze_array
 
         output.validate_array(array)
-        if array.nbytes != output.data_bytes:
-            raise ValueError("native array bytes differ from its selected declaration")
-        # Validate origin/shape before snapshot and hash; this descriptor is not
-        # published and makes no claim about its placeholder digest.
-        ArtifactManifest(output=output, digest="sha256:" + "0" * 64,
-                         data_bytes=output.data_bytes, encoding=output.encoding, **provenance)
         with self._lock:
             self.check_capacity(array.nbytes)
             if array.dtype.kind in "fc" and type(output) is not ReadoutArray:

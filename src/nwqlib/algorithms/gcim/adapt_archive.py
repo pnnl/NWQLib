@@ -46,18 +46,17 @@ def _read_generator(saved):
 
 
 def _compiler_entries(compilers):
-    """Return ``((pool index, kind, active modes, occupation blocks, identity), ...)`` of built compiler plans.
+    """Return ``((pool index, kind, active modes, occupation blocks), ...)`` of built compiler plans.
 
     ``compilers`` is a Plan's ``adapt.CompilerPlans`` map, or such entries
     saved from one, which a reopened Run's context or a Result snapshot
-    holds. ``identity`` is ``adapt._compiler_identity`` of the plan and its
-    generator. A classical Plan's empty tuple and None give no entries.
+    holds. A classical Plan's empty tuple and None give no entries.
     """
     from .adapt import CompilerPlans
 
     if isinstance(compilers, CompilerPlans):
         return tuple(
-            (index, p.kind, p.active_modes, p.occupation_blocks, compilers.identity(index))
+            (index, p.kind, p.active_modes, p.occupation_blocks)
             for index, p in compilers.built()
         )
     return tuple(compilers or ())
@@ -74,23 +73,21 @@ def _write_compilers(compilers, files):
         dict(
             kind=kind,
             generator=index,
-            identity=identity,
             active_modes=modes,
             blocks=[
                 (indices, files.write_array(f"compiler_{index}_{i}.npy", array))
                 for i, (indices, array) in enumerate(blocks)
             ],
         )
-        for index, kind, modes, blocks, identity in entries
+        for index, kind, modes, blocks in entries
     ]
 
 
 def _read_compilers(rows, files):
-    """Return the ``(pool index, kind, active modes, occupation blocks, identity)`` entries of saved compiler rows.
+    """Return the ``(pool index, kind, active modes, occupation blocks)`` entries of saved compiler rows.
 
-    ``adapt.CompilerPlans.restore`` checks each entry against the admitted
-    generator at its pool index when the Plan archive is loaded and when a
-    reopened Run or a Result adopts its saved context into the Plan's map.
+    ``adapt.CompilerPlans.restore`` binds each entry to the generator at its
+    pool index when a Plan, Run or Result restores the saved context.
     """
     return tuple(
         (
@@ -98,7 +95,6 @@ def _read_compilers(rows, files):
             item["kind"],
             tuple(item["active_modes"]),
             tuple((tuple(indices), files.read_array(array)) for indices, array in item["blocks"]),
-            item["identity"],
         )
         for item in rows
     )
@@ -138,7 +134,7 @@ def save(plan, files):
     )
     return dict(
         format="adapt/6",
-        plan=files.write_plan(plan),
+        plan=plan.to_record(),
         problem=files.write_problem(plan.problem),
         output=files.write_output(plan.output),
         method=method.model_dump(mode="json", exclude_computed_fields=True),
@@ -313,9 +309,9 @@ def load_context(data, files):
     (``ADAPT._load_live_run_context``), and a Result keeps them in its
     RunData. A context that holds inline observations is refused.
     Saved compiler plans return as ``(pool index, kind, active modes,
-    occupation blocks, identity)`` entries, which the reopened Run's
+    occupation blocks)`` entries, which the reopened Run's
     controller adopts into its Plan's map (``adapt_acquisition.drive_adapt``)
-    after ``adapt.CompilerPlans.restore`` checks them against their generators.
+    through ``adapt.CompilerPlans.restore`` at the saved pool indices.
     """
     if not data.get("observations_in_run", False):
         # A chunk rebuilt from archive JSON would have no payload source for

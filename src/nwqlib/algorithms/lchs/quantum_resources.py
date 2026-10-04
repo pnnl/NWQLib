@@ -11,7 +11,6 @@ from nwqlib._limits import DEFAULT_MAX_BYTES
 import numpy as np
 from nwqlib._validation import integer
 from nwqlib.operators.access import _check_bytes
-from .native import _direct_controlled_branch
 
 
 def _native_envelope(limits, width, slots, *, dense=False):
@@ -74,6 +73,7 @@ def _product_formula_occurrence_blocks(
     from collections import Counter
     from qiskit import QuantumCircuit, QuantumRegister
     from qiskit.circuit import Parameter
+    from nwqlib.subroutines.qiskit_compat import controlled
     from qiskit.circuit.library import PauliEvolutionGate
     from qiskit.quantum_info import SparsePauliOp
     from nwqlib.backends.resources import SampledBlock
@@ -97,7 +97,7 @@ def _product_formula_occurrence_blocks(
             step = PauliEvolutionGate(SparsePauliOp(label), time=Parameter(f"theta_{label}")).definition
             step.name = f"pauli_rotation_{label}"
             circuit = QuantumCircuit(num_control_qubits + num_system_qubits)
-            gate = _direct_controlled_branch(step, num_control_qubits, (1 << num_control_qubits) - 1)
+            gate = controlled(step.to_gate(), num_control_qubits, ctrl_state=(1 << num_control_qubits) - 1)
             circuit.append(gate, range(circuit.num_qubits))
             blocks.append(
                 SampledBlock(
@@ -258,6 +258,7 @@ def _pf_samples(payload, data, operation):
     """
     from qiskit import QuantumCircuit
     from qiskit.circuit import Parameter
+    from nwqlib.subroutines.qiskit_compat import controlled
     from .select_synthesis import _product_formula_branch_phase_count
     from nwqlib.subroutines._multiplexors import append_control_diagonal_phases
 
@@ -280,7 +281,7 @@ def _pf_samples(payload, data, operation):
             phase=QuantumCircuit(q,name="selected_branch_phase")
             phase.global_phase=Parameter("selected_branch_phase")
             circuit=QuantumCircuit(a+q)
-            circuit.append(_direct_controlled_branch(phase,a,(1<<a)-1),range(a+q))
+            circuit.append(controlled(phase.to_gate(), a, ctrl_state=(1 << a) - 1),range(a+q))
             yield "branch_phase",circuit,phases
         if masks:
             circuit=QuantumCircuit(1)

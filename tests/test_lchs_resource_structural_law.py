@@ -131,7 +131,7 @@ def test_branch_controlled_phase_law_prices_only_nonzero_physical_branches(
     monkeypatch, phase
 ) -> None:
     from qiskit import QuantumCircuit, transpile
-    from nwqlib.algorithms.lchs.native import _direct_controlled_branch
+    from nwqlib.subroutines.qiskit_compat import controlled
     from nwqlib.algorithms.lchs.select_synthesis import (
         _branch_controlled_product_formula_resource_law,
     )
@@ -163,7 +163,7 @@ def test_branch_controlled_phase_law_prices_only_nonzero_physical_branches(
         node = QuantumCircuit(1)
         node.global_phase = plan.identity_phases[branch]
         node.global_phase += plan.coefficient_phases[branch]
-        built.append(_direct_controlled_branch(node, controls, branch), range(controls + 1))
+        built.append(controlled(node.to_gate(), controls, ctrl_state=branch), range(controls + 1))
     actual_cx = transpile(built, **TRANSPILE_OPTIONS).count_ops().get("cx", 0)
     law = _branch_controlled_product_formula_resource_law(plan)
     # Inspect emitted sample multiplicities before resource transpilation; only

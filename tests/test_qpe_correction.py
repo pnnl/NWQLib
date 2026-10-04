@@ -6,7 +6,6 @@ import pytest
 from nwqlib import Eigenproblem, solve, plan
 from nwqlib.algorithms.qpe import QPEVerification
 from nwqlib.algorithms.qpe.records import validate_selection, energy_phase_turns
-from nwqlib.ir import PortMap
 from nwqlib._counts import CountsSources
 from test_qpe_selected import make_plan
 
@@ -17,53 +16,6 @@ def _with_outcomes(chunk, outcomes):
 
     fields = {name: getattr(chunk, name) for name in type(chunk).model_fields if name != "values"}
     return ObservationChunk.from_histogram(outcomes, **{**fields, "parent_id": chunk.content_id})
-
-
-def changed_node(selected, name, **fields):
-    p = selected.construction.program
-    definitions = tuple(
-        d.revise(node=d.node.revise(**fields)) if d.id == name else d for d in p.definitions
-    )
-    return selected.revise(
-        construction=selected.construction.revise(program=p.revise(definitions=definitions))
-    )
-
-
-@pytest.mark.parametrize(
-    "name,fields",
-    [
-        ("h", dict(ports=(PortMap(port="register", wire="system"),))),
-        ("feedback_0", dict(ports=(PortMap(port="register", wire="system"),))),
-        ("measure_0", dict(wire="system")),
-    ],
-)
-def test_actual_ancilla_wiring_precedes_native_or_analysis(name, fields):
-    selected = make_plan(execution="quantum", shots=7)
-    with pytest.raises(ValueError, match="ancilla|feedback|query|Hadamard|acquisition"):
-        validate_selection(changed_node(selected, name, **fields))
-    validate_selection(selected)
-
-
-def test_zero_power_and_repeat_bind_actual_ir():
-    from nwqlib.operators import ingest_pauli
-
-    selected = make_plan(
-        execution="quantum",
-        estimator="rfe",
-        target=ingest_pauli((("Z", 0.3), ("X", 0.4)), num_qubits=1),
-        controlled_power_error_budget=1e-5,
-    )
-    repeated = next(
-        d
-        for d in selected.construction.program.definitions
-        if d.id.startswith("common_step_") and d.node.count > 1
-    )
-    with pytest.raises(ValueError, match="multiplicity"):
-        validate_selection(changed_node(selected, repeated.id, count=1))
-    assert any(q.power == 0 for q in selected.reconstruction.queries)
-    gap = next(d.id for d in selected.construction.program.definitions if d.id.startswith("gap_"))
-    with pytest.raises(ValueError, match="gap IR"):
-        validate_selection(changed_node(selected, gap, children=("h",)))
 
 
 def test_foreign_target_and_tau_relabel_cannot_reuse_selection():
@@ -161,24 +113,6 @@ def test_same_seed_counts_source_is_not_an_independent_population():
     sources.require_independent(data.observations.chunks[1])
     # Rereading exactly the same acquired source is legal; a controller owns once-only updates.
     sources.require_independent(data.observations.chunks[0])
-
-
-def test_selection_admits_pooled_draws_only_for_fourier_estimators_with_their_shot_population():
-    # A sampled QCELS query cannot stand for several draws, even when its
-    # batch requests the matching population.
-    qcels = make_plan(execution="quantum", shots=7)
-    first = qcels.reconstruction.queries[0]
-    widened = changed_node(qcels, "batch_0", repetitions=14)
-    widened = widened.revise(reconstruction=widened.reconstruction.revise(
-        queries=(first.revise(multiplicity=2), *qcels.reconstruction.queries[1:])))
-    with pytest.raises(ValueError, match="only SPE and RFE queries can combine random draws"):
-        validate_selection(widened)
-    # A pooled SPE query must request shots times its multiplicity.
-    spe = make_plan(estimator="spe", execution="quantum", shots=3, num_samples=2)
-    assert spe.reconstruction.queries[0].multiplicity == 2
-    validate_selection(spe)
-    with pytest.raises(ValueError, match="acquisition/readout differs"):
-        validate_selection(changed_node(spe, "batch_0", repetitions=3))
 
 
 def test_pooled_draw_query_uses_its_received_population_with_its_draw_weight(monkeypatch):
