@@ -185,7 +185,10 @@ def read_report(path):
     files = ArchiveFiles(Path(path), None)
     saved = files.read_json("result.json")
     if saved.get("format") != RESULT_FORMAT:
-        raise ValueError(f"unsupported saved Result format {saved.get('format')!r}")
+        raise ValueError(
+            f"unsupported saved Result format {saved.get('format')!r}, expected {RESULT_FORMAT!r}. "
+            "Open it with the NWQLib release that wrote it, or plan and run the problem again."
+        )
     return saved
 
 

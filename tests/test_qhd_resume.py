@@ -461,19 +461,18 @@ def _files(path):
 
 
 @pytest.mark.parametrize("kind", ["standalone", "constrained"])
-def test_resume_refuses_a_problem_that_problem_pickle_does_not_rebuild(tmp_path, monkeypatch, kind):
-    """Resume compares the rebuilt problem's identity with the stored record before it reads or advances anything.
+def test_an_unevaluated_sum_reopens_and_resumes_only_with_its_original_expression(
+    tmp_path, monkeypatch, counted, kind
+):
+    """A saved Sum keeps its expression, values and completed work through continuation.
 
-    The objective sum_{n=0}^{2} Piecewise((x, x > 0), (x**2, True)), built with evaluation disabled, stores the
-    summand as Mul(1, Piecewise(...)). ``archive._SymbolicReader`` rebuilds neither form of that Mul, since
-    the evaluated build drops it and the unevaluated one wraps it again, so the rebuilt objective is another
-    tree. A completed standalone refinement would otherwise return with that tree attached, and an
-    interrupted refined constrained run would finish its later rounds, and its final record, on it. Each
-    directory is refused with the message that its layer's loader gives, before any Run is reopened or
-    planned, and the directory does not change.
+    Ordinary SymPy unpickling drops the summand's unevaluated Mul(1, ...).
+    That reader must be refused without changing the directory or doing work.
+    The correct reader preserves the original expression and continues once.
     """
+    import pickle
     from nwqlib.algorithms.qhd import load_box_refinement
-    from nwqlib.algorithms.qhd.archive import _SymbolicReader
+    from nwqlib.algorithms.qhd import archive
 
     r = sp.Symbol("x", real=True)
     n = sp.Symbol("n", integer=True)
@@ -485,32 +484,56 @@ def test_resume_refuses_a_problem_that_problem_pickle_does_not_rebuild(tmp_path,
     directory = tmp_path / "run"
     if kind == "standalone":
         problem = Optimization(objective=objective, variables=(r,), bounds=((-1.0, 1.0),))
-        refined = refine_box(problem, qhd=qhd, options=levels, execution="classical", seed=1, progress=False,
-                             directory=directory)
-        message = "the saved SymPy expressions differ from the stored problem record"
-        with pytest.raises(ValueError, match=message):
-            load_box_refinement(refined.save(tmp_path / "saved"))
+        whole = refine_box(problem, qhd=qhd, options=levels, execution="classical", seed=1, progress=False,
+                           directory=directory)
+        saved = whole.save(tmp_path / "saved")
         resume = resume_box_refinement
     else:
         problem = ConstrainedOptimization(objective=objective, variables=(r,), bounds=((-1.0, 1.0),),
                                           equalities=(r + sp.Rational(1, 4),))
+        options = AugmentedLagrangian(max_iterations=3, feasibility_tolerance=1e-9)
+        whole = solve_augmented_lagrangian(problem, qhd=qhd, refinement=levels, execution="classical", seed=1,
+                                          options=options, progress=False, directory=tmp_path / "whole")
+        total_work = dict(counted)
+        counted.update(prepare=0, evolutions=0)
         with pytest.raises(KeyboardInterrupt):
             solve_augmented_lagrangian(problem, qhd=qhd, refinement=levels, execution="classical", seed=1,
-                                       options=AugmentedLagrangian(max_iterations=3, feasibility_tolerance=1e-9),
+                                       options=options,
                                        progress=_stop_at("input", 3), directory=directory)
         assert (len(_committed(directory)["iterations"]), len(_committed(directory)["levels"])) == (2, 0)
-        message = "the saved SymPy expressions differ from the stored problem record"
         resume = resume_augmented_lagrangian
-    # The premise: the reader rebuilds the stored objective as another tree.
+    # The real dependency's default reader changes this normally saved input.
     with (directory / "problem.pickle").open("rb") as stream:
-        rebuilt, *_ = _SymbolicReader(stream).load()
+        rebuilt, *_ = pickle.Unpickler(stream).load()
     assert sp.srepr(rebuilt) != sp.srepr(objective)
     committed, stored = _committed(directory), _files(directory)
-    monkeypatch.setattr("nwqlib.scientist.load_run", lambda *a, **k: pytest.fail("reopened a Run"))
-    monkeypatch.setattr("nwqlib.scientist._plan_with_streams", lambda *a, **k: pytest.fail("planned"))
-    with pytest.raises(ValueError, match=message):
-        resume(directory, backend=None)
+    before = dict(counted)
+    with monkeypatch.context() as patch:
+        patch.setattr(archive, "_SymbolicReader", pickle.Unpickler)
+        patch.setattr("nwqlib.scientist.load_run", lambda *a, **k: pytest.fail("reopened a Run"))
+        patch.setattr("nwqlib.scientist._plan_with_streams", lambda *a, **k: pytest.fail("planned"))
+        if kind == "standalone":
+            with pytest.raises(ValueError, match="expressions differ"):
+                load_box_refinement(saved)
+        with pytest.raises(ValueError, match="expressions differ"):
+            resume(directory, backend=None)
     assert _committed(directory) == committed and _files(directory) == stored
+    assert counted == before
+    resumed = resume(directory, backend=None, progress=False)
+    assert sp.srepr(resumed.problem.objective) == sp.srepr(objective)
+    assert resumed.problem.content_id == problem.content_id
+    for point, expected in ((sp.Rational(-1, 2), sp.Rational(3, 4)),
+                            (sp.Rational(1, 2), sp.Rational(3, 2))):
+        assert resumed.problem.objective.subs(r, point).doit() == expected
+    if kind == "standalone":
+        _assert_same_run(resumed, whole)
+        assert load_box_refinement(saved).content_id == whole.content_id
+        assert counted == before
+    else:
+        _assert_same_run(resumed.record, whole.record)
+        assert [item.run_id for item in resumed.iterations[:2]] == [
+            item["run_id"] for item in committed["iterations"]]
+        assert counted == total_work
 
 
 @pytest.mark.parametrize("kind", ["constrained", "refined", "standalone"])

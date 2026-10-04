@@ -7,7 +7,7 @@
 #
 # > **How to read this notebook.** The overview and "Before committing" come first, and the explanation starts at Section 1.
 # >
-# > - Overview and Before committing: one QLS call at 100 qubits, the result card with its cost, the labels, compiled checks of the gate-count formulas, each plan's quantum and classical cost, and a refusal with its remedy
+# > - Overview and Before committing: one QLS call at 100 qubits, the result card with its cost, the labels, compiled checks of the gate-count formulas, each plan's quantum and classical cost, and a construction-limit refusal
 # > - Sections 1 to 5 and the summary: tune a linear solve, budget heat-flow errors, compare two Hamiltonians, price the QHD encodings and a GCiM trial basis
 # > - Appendices A to F: formulas with independent checks, evidence labels, the capacity assessment, limits at this scale, the full compiled comparison, and cells for your own problem
 

@@ -112,7 +112,7 @@ materialized = materialize_qasm3_file(
 print(materialized.output_nodes)  # 1
 ```
 
-This optional step derives dynamic work from the construction and checks its qubit, bit, operation and node-visit counts before opening the file. It checks the file’s actual size against `max_bytes`, reads the text and passes it to Qiskit’s OpenQASM 3 importer and `UnrollForLoops`. Use the file and construction from the same writer call. A required bound on native bytes or peak memory is refused before import because the importer does not supply one.
+Use the unchanged file, construction and write record from the same writer call. This optional step derives dynamic work from that construction and checks its qubit, bit, operation and node-visit counts before opening the file. It checks the file’s actual size against `max_bytes`, reads the text and passes it to Qiskit’s OpenQASM 3 importer and `UnrollForLoops`. A required bound on native bytes or peak memory is refused before import because the importer does not supply one.
 
 Install `nwqlib[qasm]` to enable it, for example with `pip install "nwqlib[qasm]"`. Select `dev,qasm` together to run its tests. Importing `nwqlib.io` and writing directly remain SDK-free. The `qasm` extra includes Qiskit and both the parser and the importer, and the base install does not include Qiskit.
 

@@ -52,7 +52,7 @@ def test_original_forecast_and_allocation_survive_actual_submission_and_reopen(
     run.close()
     InjectedBackend.status = "completed"
     with nwqlib.load_run(path, backend=InjectedBackend(), method=CountsMethod) as restored:
-        assert restored.forecast.model_dump(mode="json") == forecast.model_dump(mode="json")
+        assert restored.forecast == forecast
         assert restored.allocation == allocation
         assert restored.rng.snapshot() == rng
         result = restored.wait(timeout=1, poll_interval=0)
@@ -62,7 +62,11 @@ def test_original_forecast_and_allocation_survive_actual_submission_and_reopen(
         assert result.data.trace.events[0].assessment_id == original_id
         result.save(tmp_path / "result")
     saved = nwqlib.load_result(tmp_path / "result", method=CountsMethod)
-    assert saved.data.forecast.model_dump(mode="json") == forecast.model_dump(mode="json")
+    assert saved.data.forecast == forecast
+    assert saved.data.forecast != PlanEstimate.model_validate({
+        **{name: getattr(forecast, name) for name in type(forecast).model_fields},
+        "unpredicted": ("another forecast",),
+    })
     assert saved.data.allocation == allocation
     assert saved.data.forecast.assessments[0].predictions[0].seconds.value == 5.5
     assert saved.analyze().data is saved.data
@@ -86,7 +90,7 @@ def test_host_intent_binds_the_original_forecast_without_changing_kernels(tmp_pa
                    for event, receipt in zip(run.trace.events, run.prepared_artifacts, strict=True))
         result.save(tmp_path / "host")
     saved = nwqlib.load_result(tmp_path / "host")
-    assert saved.data.forecast.model_dump(mode="json") == forecast.model_dump(mode="json")
+    assert saved.data.forecast == forecast
     assert saved.data.allocation == allocation
 
 

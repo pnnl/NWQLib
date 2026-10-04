@@ -1991,6 +1991,11 @@ class PlanEstimate(Record):
     _plan_validated: bool = PrivateAttr(default=False)
     _observations: dict = PrivateAttr(default_factory=dict)
 
+    def __eq__(self, other):
+        # Cached lookups and validation state do not change the forecast.
+        return type(self) is type(other) and all(
+            getattr(self, name) == getattr(other, name) for name in type(self).model_fields)
+
     @model_validator(mode="after")
     def _sources(self):
         """Tie every assessment to this estimate and index it by Realization.

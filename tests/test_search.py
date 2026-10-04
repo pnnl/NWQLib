@@ -74,7 +74,7 @@ def test_selected_row_keeps_original_forecast_through_repeated_runs_and_archive(
         assert result.data.trace.events[0].assessment_id == forecast.assessments[0].content_id
         assert sum(event.shots for event in result.data.trace.events) == 7
     restored = load_result(results[0].save(tmp_path / "original"), method=chosen.method)
-    assert restored.data.forecast.model_dump(mode="json") == forecast.model_dump(mode="json")
+    assert restored.data.forecast == forecast
     assert restored.data.allocation == allocation
     with pytest.raises(ApplicabilityError, match="unsupported"):
         prepare(

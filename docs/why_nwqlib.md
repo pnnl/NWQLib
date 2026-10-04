@@ -6,7 +6,7 @@ NWQLib differs from the quantum software packages under [Packages checked](#pack
 2. NWQLib builds Qiskit circuits for block encodings, QSVT linear solvers and LCHS, which Qiskit 2.x does not provide.
 3. It implements ADAPT-GCIM, QCELS, and the augmented-Lagrangian QHD and QHD box refinement of Wu et al., which none of the other packages checked implements as a library.
 4. It estimates the resources of the construction chosen for your input before any circuit is built, and the example notebooks compare these estimates with compiled circuits.
-5. Each Plan states its quantum and classical cost, and a problem that exceeds a limit is refused before anything is built, with a message that names the limit to change.
+5. Each Plan states its quantum and classical cost. Each stage checks its work and memory limits before starting the work they govern, with a refusal that identifies the stage and its constraints.
 
 ## What NWQLib adds
 
@@ -49,7 +49,7 @@ Planning and estimation also work at sizes that cannot be simulated when A and b
 
 ### The quantum and classical cost of a Plan
 
-A Plan carries a quantum cost and a classical cost. The quantum cost counts qubits, CX gates or circuits, and shots. The classical cost counts peak memory in bytes, planning work in work units (a count of operations computed from the input sizes before the work starts, not seconds) and stored bytes. Before anything is built, `plan` and `estimate` state the quantum cost, the planning work and the memory that the resource formulas cover. A problem that exceeds a limit is refused before anything is built, and the message names the limit to change and, for a size or work limit, the amount needed. The result card of every example notebook shows both costs with the measured seconds.
+A Plan carries a quantum cost and a classical cost. The quantum cost counts qubits, CX gates or circuits, and shots. The classical cost counts peak memory in bytes, planning work in work units (a count of operations computed from the input sizes before the work starts, not seconds) and stored bytes. Before circuit construction, `plan` and `estimate` state the quantum cost, the planning work and the memory that the resource formulas cover. Planning, preparation and execution check their own limits before starting the work they govern. A refusal identifies the stage and its constraints, and some stages report a lower bound on the required budget because later requirements are not yet known. The result card of every example notebook shows both costs with the measured seconds.
 
 ## What other packages also provide
 

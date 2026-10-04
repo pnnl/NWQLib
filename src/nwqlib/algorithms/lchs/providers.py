@@ -1238,7 +1238,7 @@ def resolve_provider_config(
     *,
     slot: str,
 ) -> tuple[LCHSKernelProvider | LCHSQuadratureProvider, ResolvedProviderConfig]:
-    """Resolve and strictly validate one provider request.
+    """Resolve one provider request using its defaults and domain checks.
 
     Returns:
         The registered provider and a ResolvedProviderConfig holding every
@@ -1274,8 +1274,9 @@ def resolve_lchs_provider_requests(
 ]:
     """Resolve both requests and enforce the registered pair matrix.
 
-    The LCHS Method calls this at construction, so an unknown name, a bad
-    parameter or a rejected pair fails before any problem data is read.
+    The LCHS Method calls this at construction. Each provider resolves its
+    supported parameters and checks their domains before any problem data
+    is read. An unknown provider name or a rejected pair raises ValueError.
 
     Returns:
         (kernel provider, resolved kernel config, quadrature provider,

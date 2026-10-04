@@ -262,7 +262,7 @@ def test_failed_public_submission_keeps_partial_contributions_and_original_expos
     folder = partial.save(tmp_path / "partial")
     restored = nwqlib.load_result(folder)
     assert restored.data.trace == snapshot.trace
-    assert restored.data.forecast.model_dump(mode="json") == forecast.model_dump(mode="json")
+    assert restored.data.forecast == forecast
     assert (
         restored.data.allocation == allocation
         and restored.contribution_ids == partial.contribution_ids

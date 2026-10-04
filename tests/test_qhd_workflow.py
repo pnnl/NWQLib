@@ -1478,20 +1478,27 @@ def test_candidate_objective_association_survives_public_save_load(tmp_path, mon
         result.revise(most_probable_objective=result.objective - 1.0)
 
 
-def test_an_unevaluated_objective_survives_public_save_load(tmp_path):
+def test_an_unevaluated_objective_survives_public_save_load(tmp_path, monkeypatch):
     """``load_result`` reopens an objective built with ``evaluate=False`` as it was supplied.
 
     f = x + (x + 11/16)/(x + 11/16) keeps its quotient, 0/0 at x = -11/16 and 1 on the grid, which SymPy's
     evaluation would turn into x + 1. The loader compares the Plan’s stored ``srepr``
     with the objective that ``archive._SymbolicReader`` rebuilds.
     """
+    import pickle
+    from nwqlib.algorithms.qhd import archive
     from nwqlib.scientist import load_result
 
     x = sp.Symbol("x")
     quotient = sp.Mul(x + sp.Rational(11, 16), sp.Pow(x + sp.Rational(11, 16), -1, evaluate=False), evaluate=False)
     problem = Optimization(objective=sp.Add(x, quotient, evaluate=False), variables=(x,), bounds=((-1., 1.),))
     result = solve(make_plan(problem, execution="classical"))
-    restored = load_result(result.save(tmp_path / "result"))
+    path = result.save(tmp_path / "result")
+    with monkeypatch.context() as patch:
+        patch.setattr(archive, "_SymbolicReader", pickle.Unpickler)
+        with pytest.raises(ValueError, match="expressions differ"):
+            load_result(path)
+    restored = load_result(path)
     assert sp.srepr(restored.plan.problem.objective) == sp.srepr(problem.objective) != sp.srepr(x + 1)
     assert restored.content_id == result.content_id
 

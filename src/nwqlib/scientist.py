@@ -978,7 +978,6 @@ def load_run(path, *, backend, method=None, progress=None):
             `with load_run(path, backend=backend) as run:`.
 
     Raises:
-        TypeError: If `progress` is not `None`, `False` or a callable.
         ValueError: If the saved records fail their checks, or a Method
             outside NWQLib is saved and `method` is not given or differs from
             it.

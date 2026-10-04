@@ -1,4 +1,4 @@
-"""Import a written QASM file and unroll its loops within explicit work limits."""
+"""Import unchanged QASM writer output after checking its construction's work limits."""
 
 from dataclasses import dataclass
 import os
@@ -15,8 +15,9 @@ class QasmMaterializationBudget(Record):
     Build it with keyword arguments, for example
     `QasmMaterializationBudget(max_bytes=4096, max_qubits=1, max_clbits=0, max_dynamic_visits=100, max_operations=100)`,
     and pass it as `budget=`. The first five fields are required. The counts are
-    derived from the construction and checked before the file is opened. No limit
-    here estimates the importer's memory.
+    derived from the matching construction and checked before the file is
+    opened. Use the unchanged file from that writer call. No limit here
+    estimates the importer's memory.
 
     Attributes:
         max_bytes: Required. Limit on the bytes of the file text.
@@ -73,7 +74,8 @@ def materialize_qasm3_file(construction, path, receipt: QasmWriteReceipt, *,
                            budget: QasmMaterializationBudget) -> QasmMaterialization:
     """Import an OpenQASM 3 file written by `write_qasm3_file` into Qiskit within explicit limits.
 
-    The sizes are derived again from the construction and checked against
+    Use the unchanged file, construction and receipt from the same writer
+    call. The sizes are derived again from the construction and checked against
     `budget` before the file is opened. Its actual byte size is checked before
     reading. The text then goes to Qiskit’s OpenQASM 3
     importer and the `UnrollForLoops` pass. Gate definitions stay logical. Z

@@ -191,7 +191,7 @@ def build_gcim_chemistry_problem(
 
     Raises:
         ValueError: For an open-shell or odd-electron molecule, an invalid
-            active space, an unsupported reference method, `"casci"` without
+            active space, `"casci"` without
             `active_space`, a negative cutoff or an unconverged RHF.
         ImportError: If PySCF or OpenFermion is not installed.
 

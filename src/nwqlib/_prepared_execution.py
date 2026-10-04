@@ -1739,8 +1739,8 @@ class Run:
 
         An interrupted intent may have reached the backend, so its outcome
         becomes uncertain. Reserved events without a known outcome also stay
-        charged. Recovery revisions commit together only after validation, in
-        one final write. Every step before that write only reads the journal.
+        charged. Recovery revisions commit together after the saved state is
+        restored, in one final write. Every step before that write only reads the journal.
         Failure closes the journal and releases the controller lock.
 
         selection is the record that _run_archive.load built: the name of the
@@ -1774,8 +1774,8 @@ class Run:
     def _restored_header(cls, plan, backend, path, journal, progress=None):
         """Check the one journal header against the Plan and backend, then build the Run from it.
 
-        The header fixes the run identity, the initial limits and the forecast
-        and allocation provenance. A different Plan or backend configuration
+        The header supplies the run identity, the initial limits and the saved
+        forecast and allocation. A different Plan or backend configuration
         raises before any other row is read, because the saved acquisitions
         belong to the original selection only.
         """

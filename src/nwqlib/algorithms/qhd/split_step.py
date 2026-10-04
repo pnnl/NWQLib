@@ -536,8 +536,8 @@ def evolve(grid, kinetic_model, reconstruction, dt, state, *, start, ceiling=Non
     ``ceiling`` is that ``state_error`` value when the caller already holds
     it: a split-step Plan stores it at planning as
     ``QHDReconstruction.host_state_error``, from the same grid, kinetic
-    model, tables, step weights, dt and start (``method._admit_host_windows``,
-    checked by ``records.validate_selection``), so the evolution does not
+    model, tables, step weights, dt and start (``method._admit_host_windows``),
+    so the evolution does not
     recompute it. With ``ceiling`` None, as for a reference evolution of a
     Plan of another flavor, whose stored budget is another flavor's or
     None, it is computed here.

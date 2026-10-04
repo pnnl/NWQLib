@@ -1,19 +1,27 @@
 # Release notes
 
+## Unreleased
+
+- Resource forecasts compare by their declared fields, so saving and loading a `PlanEstimate` preserves equality regardless of cached lookups.
+- QHD archives preserve unevaluated SymPy `Sum` expressions through Result loading and refinement or augmented-Lagrangian continuation.
+
 ## v1.0.1.post1 (2026-10-04)
 
 This release simplifies validation and saved-data loading, and removes forwarding APIs and their supporting code.
 
-- Removes repeated saved-record hash checks, unused ADAPT compiler hashes, QASM file digests and duplicate QPE/QLS Program validation. QHD loading compares the restored expressions directly with their saved descriptions.
-- QASM import checks the actual file size before reading and the construction's work limits before importing. Normal numerical round trips, scientific associations and execution limits keep their independent tests.
+- Removes saved-record hash verification, unused ADAPT compiler hashes, QASM file digests and separate QPE/QLS Program checks. QHD loading compares the restored expressions directly with their saved descriptions.
+- QASM import applies construction work limits to unchanged output from the same writer call and checks the file's actual size before reading.
 - Use `plan.to_record()` and `run.artifacts.get(manifest)` in place of `ArchiveFiles.write_plan` and `Run.hydrate`. `read_report` returns the saved metadata without the `metadata_validation` entry.
-- The current shared archive formats are `nwqlib.run/19` and `nwqlib.result/12`. Package and citation versions are synchronized at `1.0.1.post1`.
+- `nwqlib.backends.capability_set`, `require_backend_capabilities` and `BackendTarget.missing_capabilities` are removed. Use a tuple of capabilities when constructing a target and `frozenset(required) - frozenset(target.capabilities or ())` to find missing capabilities. The adapter still checks the instructions and readout it can execute.
+- `QasmWriteReceipt.digest` and `QasmPrefix.digest` are removed. `bytes_written` measures size, not content identity. Remove the `digest` key from separately stored receipt JSON before calling `QasmWriteReceipt.model_validate`.
+- The shared archive formats are `nwqlib.run/19` and `nwqlib.result/12`. This release cannot load earlier shared formats, including those written by v1.0.1. Keep the writer's NWQLib version available to read old results or finish pending runs, or replan and rerun with this release to create new archives. This also applies to Result and Run subfolders of QHD refinement and augmented-Lagrangian archives. Package and citation versions are synchronized at `1.0.1.post1`.
 
 ## v1.0.1 (2026-10-03)
 
 This release simplifies tests and the validation code they support. It removes 107 collected test cases while keeping independent checks of numerical results, resource limits and normal save, load and resume workflows.
 
 - QLS uses the shared Program validation. Preparation and native lowering check their own work limits before constructing circuits, without a separate planning-time simulation of those checks.
+- Several entry points stop explicitly rejecting incorrect shots types, unknown LCHS provider parameters, unknown analysis settings and unsupported chemistry reference names. Use the argument names and types listed in each Method's guide.
 - GCiM analysis, Pauli grouping, QPE census, Trotter bounds and periodic LCHS stop computing additional bounds solely to recommend exact retry limits. Their actual work and memory checks remain in place.
 - Result and Run loaders restore the current saved data with fewer repeated consistency checks. Save-time scientific associations, current format and array-layout checks, explicit Method selection and path restrictions continue to apply. Metadata reports expose the Result's association with its observations as `metadata_validation["result_observation_association"]`.
 - The standalone analytical specimen, its fixtures and its CI checks are removed. Its independent Lanczos moments and projected pencil are checked through the production readout and reconstruction functions.

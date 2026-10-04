@@ -88,7 +88,7 @@ class QPEQuery(Record):
     crossing and Fourier peak do not provide an energy confidence interval.
 
     A counts batch requests ``shots * multiplicity`` repetitions
-    (records.validate_selection), and analysis uses each query's received
+    (method._quantum_program), and analysis uses each query's received
     population (method._static_estimate, method.received_fourier_exposure).
 
     Attributes:

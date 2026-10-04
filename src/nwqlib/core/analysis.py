@@ -322,8 +322,7 @@ class Result(Record):
             result (Result): The new Result.
 
         Raises:
-            ValueError: If no Plan or run data is attached. The Method raises
-                its own error for a setting it does not accept.
+            ValueError: If no Plan or run data is attached.
         """
         result = self.plan.method.analyze(self.plan, self.data, settings=settings)
         if not isinstance(result, Result):

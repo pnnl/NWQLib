@@ -257,7 +257,7 @@ Planning forms the polar factor V once per `Plan` from one SVD, counted as $9D^3
 The code is in `src/nwqlib/algorithms/qpe/`:
 
 - `method.py`: method settings, original inputs, the circuit description, readout and static reconstruction.
-- `records.py`: the meaning of queries, powers and results, and exact validation of the stored evolution.
+- `records.py`: queries, powers and results, with their input, schedule and error-allowance associations.
 - `powers.py`: the signed-power numerical and circuit constructors.
 - `numerical.py`: the QCELS, SPE, RFE and RWPE scalar kernels and their source conventions.
 - `controller.py`: RWPE's Gaussian mean and pending point over the common Run.
@@ -290,4 +290,4 @@ Each row below names the scientific step, paper version, equation and code in `a
 | Classical nominal signal | NWQLib | One dense eigendecomposition and the prepared spectral weights give the noiseless ancilla means | `method._bind_host`, `method._host_construction`, `numerical.overlap` |
 | Coherent phase register and inverse QFT | Cleve–Ekert–Macchiavello–Mosca, arXiv:quant-ph/9708016v1 | Sec. 5. Fig. 6 and Eq. (5.1), p. 10. QFT of Eq. (4.1), p. 8. Readout and its 4/pi**2 bound, Eqs. (5.2)–(5.4), p. 11. The builder docstring maps the paper's bit order to Qiskit's | `subroutines/qpe/coherent.py` |
 
-Independent checks cover two-level signed quadratures, the controlled global phase, mutations of readout wires and arguments, physical-unit conversion, finite likelihoods, non-power-of-two coordinates, rejection of a reused sampling stream and recovery of an interrupted RWPE run. Circuit-level checks of the QPE methods use at most four qubits. The separate coherent QPE subroutine check uses seven, six phase qubits and one system qubit.
+Independent checks cover two-level signed quadratures, the controlled global phase, physical-unit conversion, finite likelihoods, non-power-of-two coordinates, rejection of a reused sampling stream and recovery of an interrupted RWPE run. Circuit-level checks of the QPE methods use at most four qubits. The separate coherent QPE subroutine check uses seven, six phase qubits and one system qubit.

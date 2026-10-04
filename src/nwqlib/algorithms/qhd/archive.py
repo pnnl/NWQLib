@@ -22,7 +22,7 @@ class _SymbolicReader(pickle.Unpickler):
     1, -1, evaluate=False), evaluate=False), evaluate=False)``, would then
     come back evaluated, here as ``x + 1``. Disabling evaluation for the
     whole load is no remedy either, because some constructors form their
-    args with arithmetic of their own: ``Sum`` and ``Integral`` store
+    args with arithmetic of their own: ``Sum`` stores
     ``1*f`` for the summand f, which becomes ``Mul(1, f)`` without
     evaluation.
 
@@ -34,10 +34,11 @@ class _SymbolicReader(pickle.Unpickler):
     a node that was built with ``evaluate=False``. An expression that plain
     unpickling reproduces thus comes back as it does, and a reopened
     objective, variable or constraint keeps the ``srepr`` and content
-    identity that the archive records. A node that neither build reproduces
-    keeps the evaluated build, or raises its error, and the checks that
-    compare the reopened expressions with the records
-    in ``load`` and ``_durable.live_problem`` refuse such a build.
+    identity that the archive records. When neither build reproduces a
+    ``Sum``, its saved args and commutativity reconstruct the node directly.
+    Other unreproduced nodes keep the evaluated build, or raise its error.
+    The expression comparisons in ``load`` and ``_durable.live_problem``
+    refuse a rebuilt problem that differs from the selected one.
     """
 
     def find_class(self, module, name):
@@ -136,7 +137,9 @@ def _build(cls, args, kwargs, state):
     same nodes. An atom, such as a symbol or number, is saved with its name
     or value rather than SymPy args, so it is kept as built. A compound node
     is reproduced when the built object has class ``cls`` and args equal to
-    the saved args.
+    the saved args. A Sum that neither constructor reproduces is rebuilt
+    directly from its saved args, including an unevaluated multiplication
+    by one in its summand.
     """
 
     def construct(evaluate):
@@ -165,11 +168,20 @@ def _build(cls, args, kwargs, state):
         node = construct(False)
         if reproduced(node):
             return node
-        raise
-    if reproduced(node):
-        return node
-    unevaluated = construct(False)
-    return unevaluated if reproduced(unevaluated) else node
+        if cls is not sp.Sum or kwargs or state is not None:
+            raise
+    else:
+        if reproduced(node):
+            return node
+        unevaluated = construct(False)
+        if reproduced(unevaluated):
+            return unevaluated
+    if cls is sp.Sum and not kwargs and state is None:
+        # Sum's constructor multiplies its summand by one, even with
+        # evaluation off. Its saved args already include that operation.
+        node = sp.Expr.__new__(cls, *args)
+        node.is_commutative = args[0].is_commutative
+    return node
 
 
 def save(method, plan, files):
@@ -215,7 +227,6 @@ def load(saved, files):
     problem = Optimization.model_validate(fields)
     method = QHD.model_validate(saved["method"])
     reconstruction = QHDReconstruction.model_validate(saved["plan"]["reconstruction"])
-    import sympy as sp
     if (reconstruction.expression != sp.srepr(problem.objective)
             or reconstruction.symbolic_variables != tuple(sp.srepr(v) for v in problem.variables)):
         raise ValueError("saved SymPy expressions differ from the selected problem")

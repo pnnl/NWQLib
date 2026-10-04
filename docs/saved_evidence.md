@@ -59,7 +59,7 @@ print(sorted(metadata))
 
 ## Saved folders are read-only
 
-Treat a saved Result or Run folder as read-only. These checks run on saved data:
+Treat a saved Result or Run folder as read-only. The checks below support reconstruction of folders written by NWQLib. They do not certify that the files are unchanged.
 
 | Check | When |
 | --- | --- |

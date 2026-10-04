@@ -217,7 +217,10 @@ def load(saved,files):
     Loading never reselects a grid, fits phases or solves an eigensystem.
     """
     if saved.get('format')!='lchs/9':
-        raise ValueError(f"unsupported LCHS archive format {saved.get('format')!r}")
+        raise ValueError(
+            f"unsupported LCHS archive format {saved.get('format')!r}, expected 'lchs/9'. "
+            "Open it with the NWQLib release that wrote it, or plan and run the problem again."
+        )
     method = LCHS.model_validate(saved['method'])
     plan = files.read_plan(saved['plan'],problem=files.read_problem(saved['problem']),method=method,
         output=files.read_output(saved['output']),reconstruction=LCHSReconstruction.model_validate(saved['plan']['reconstruction']))
