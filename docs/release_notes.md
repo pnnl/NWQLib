@@ -1,5 +1,15 @@
 # Release notes
 
+## v1.0.1 (2026-10-03)
+
+This release simplifies tests and the validation code they support. It removes 107 collected test cases while keeping independent checks of numerical results, resource limits and normal save, load and resume workflows.
+
+- QLS uses the shared Program validation. Preparation and native lowering check their own work limits before constructing circuits, without a separate planning-time simulation of those checks.
+- GCiM analysis, Pauli grouping, QPE census, Trotter bounds and periodic LCHS stop computing additional bounds solely to recommend exact retry limits. Their actual work and memory checks remain in place.
+- Result and Run loaders restore the current saved data with fewer repeated consistency checks. Save-time scientific associations, current format and array-layout checks, explicit Method selection and path restrictions continue to apply. Metadata reports expose the Result's association with its observations as `metadata_validation["result_observation_association"]`.
+- The standalone analytical specimen, its fixtures and its CI checks are removed. Its independent Lanczos moments and projected pencil are checked through the production readout and reconstruction functions.
+- QPE sampling tests compare directly with an independently known eigenvalue. Controlled-gate cost tests share circuit construction while checking the distinct gate prices. Other tests drop fixed strategy choices, duplicate cases, exact SDK-version assertions and diagnostics for obvious input misuse. Helpers and documentation used only by those tests are removed with them.
+
 ## v1.0.0.post3 (2026-10-02)
 
 Counts-based QHD box refinement and augmented-Lagrangian runs with refinement now include selected region mass lower bounds in `print(result)` and `result.report()`. The default 95% confidence covers the configured run, and the mass is conditional on valid decoding of the level's backend-sampled distribution. The report compares Hoeffding and one-sided Clopper–Pearson bounds after allocating half the failure budget to each method.

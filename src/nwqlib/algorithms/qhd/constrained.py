@@ -104,9 +104,6 @@ from ._outer import (
     total_counts,
 )
 from ._durable import (
-    FORMATS,
-    RECORD,
-    RESUME,
     Directory,
     Frontier,
     closed_trace,
@@ -119,7 +116,7 @@ from ._durable import (
 from .grid import OneHotGrid
 from .objective import ObjectiveDecomposer, centered_objective, expansion_centers, monomial_bound, node_count
 from .potential import coerce_real_scalar
-from .refinement import ARCHIVE_RECORD as REFINEMENT_RECORD, _refine, check_refinement_options
+from .refinement import _refine, check_refinement_options
 from .refinement_records import BoxRefinement, RefinementLevel
 
 ARCHIVE_FORMAT = "qhd.constrained/4"
@@ -3357,10 +3354,7 @@ def load_augmented_lagrangian(path):
     and the slack variables. With refinement each level's Result must have the result
     and Plan hashes of its `RefinementLevel`. A level Plan solves the level's own
     objective, for the search model the normalized one on the unit box, so it is checked
-    by these hashes and not against the hash of L_k. A saved standalone refinement is
-    refused with the name of `load_box_refinement`, and a saved-run directory of
-    `solve_augmented_lagrangian(..., directory=...)` with the name of
-    `resume_augmented_lagrangian`, which continues it.
+    by these hashes and not against the hash of L_k.
 
     Args:
         path (str | Path): The directory that `ConstrainedQHDResult.save` wrote.
@@ -3374,31 +3368,7 @@ def load_augmented_lagrangian(path):
     from .archive import _SymbolicReader
 
     files = ArchiveFiles(Path(path), None)
-    try:
-        saved = files.read_json("constrained.json")
-    except FileNotFoundError as error:
-        if files.file(REFINEMENT_RECORD).is_file():
-            raise FileNotFoundError(
-                f"{path} is a saved box refinement containing {REFINEMENT_RECORD}, not a saved augmented-Lagrangian "
-                f"result containing constrained.json. Open it with load_box_refinement({str(path)!r})"
-            ) from error
-        if files.file(RECORD).is_file():
-            # Name the resume function of the directory's layer.
-            if files.read_json(RECORD).get("format") == FORMATS["refinement"]:
-                raise FileNotFoundError(
-                    f"{path} is a durable box-refinement directory containing controller.json, not a saved "
-                    f"augmented-Lagrangian result containing constrained.json. Use "
-                    f"{RESUME['refinement']}({str(path)!r}, backend=...) to resume it. An interrupted inner Run "
-                    "may be unable to finish from its recorded work. Save the returned BoxRefinementResult to a "
-                    "new result archive and open that archive with load_box_refinement."
-                ) from error
-            raise FileNotFoundError(
-                f"{path} is a durable run directory containing controller.json, not a saved result containing "
-                f"constrained.json. Use resume_augmented_lagrangian({str(path)!r}, backend=...) to resume it, "
-                "then call save on a returned result to create a saved archive. An interrupted inner Run "
-                "may be unable to finish from its recorded work"
-            ) from error
-        raise
+    saved = files.read_json("constrained.json")
     if saved.get("format") != ARCHIVE_FORMAT:
         raise ValueError(f"unsupported constrained QHD archive format {saved.get('format')!r}, expected "
                          f"{ARCHIVE_FORMAT!r}")

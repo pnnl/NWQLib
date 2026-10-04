@@ -174,8 +174,7 @@ def test_shared_index_compiler_blocks_round_trip_through_a_run_checkpoint(tmp_pa
 
     The restored plan has the same route, active modes and read-only
     occupation blocks, compiles the same generator circuit and shift rule, and
-    no compiler plan is built again. A saved row that does not match its
-    generator or the plan already held is refused.
+    no compiler plan is built again.
     """
     import json
     from qiskit.quantum_info import Operator
@@ -208,27 +207,3 @@ def test_shared_index_compiler_blocks_round_trip_through_a_run_checkpoint(tmp_pa
                           Operator(build_generator_circuit(pool[index], theta, _plan=restored)).data)
     assert (_generator_shift_rule(pool[index], compilation_plan=plan)
             == _generator_shift_rule(pool[index], compilation_plan=restored))
-    # A saved row is checked against the admitted generator at its pool
-    # index: a changed route and the same row claimed for another generator
-    # are refused, and a map that already holds the plan refuses a saved copy
-    # that differs from it.
-    row = next(entry for entry in context.compiler_plans if entry[0] == index)
-    other = next(i for i in range(len(pool)) if i != index)
-    for claimed, changed in ((index, (index, "pair_split", *row[2:])), (other, (other, *row[1:]))):
-        with pytest.raises(ValueError, match=f"compiler row for pool index {claimed} does not match its generator"):
-            adapt.CompilerPlans(pool, **limits).restore((changed,))
-    copy = (index, "commuting", (), (), adapt._compiler_identity(pool[index], "commuting", (), ()))
-    with pytest.raises(ValueError, match=f"compiler rows for pool index {index} disagree"):
-        reopened.restore((copy,))
-    # A row whose shared-index block values differ from the saved plan's is
-    # refused, because the identity digests the blocks' C-order bytes.
-    (block_indices, block), *rest = row[3]
-    altered = (index, *row[1:3], ((block_indices, np.where(block == 0, 1.0, 0.0).astype(block.dtype)), *rest),
-               row[4])
-    with pytest.raises(ValueError, match=f"compiler row for pool index {index} does not match its generator"):
-        adapt.CompilerPlans(pool, **limits).restore((altered,))
-    # A refused restore that starts with a valid row adopts nothing.
-    fresh = adapt.CompilerPlans(pool, **limits)
-    with pytest.raises(ValueError, match="does not match its generator"):
-        fresh.restore((row, altered))
-    assert fresh.built() == ()

@@ -60,11 +60,9 @@ def save(method, plan, files):
 
 
 def load(method_type, saved, files):
-    """Validate saved QPE associations and bind known constructors without rebuilding powers."""
-    if saved["estimator"] != method_type.estimator:
-        raise ValueError("saved QPE estimator differs from its concrete Method")
+    """Bind the saved QPE inputs and known constructors without rebuilding powers."""
     if saved["format"] != f"qpe/{method_type.estimator}/7":
-        raise ValueError("unsupported QPE archive revision; use its original source/environment")
+        raise ValueError("unsupported QPE archive format")
     fields = dict(saved["method"])
     fields["initial_state"] = (
         None if saved["initial_state"] is None else files.read_state(saved["initial_state"])

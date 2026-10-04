@@ -333,9 +333,9 @@ class QLS(Method):
             with the number of its distinct measured registers. Upper limit
             on the planning work of checking the quantum `Program` (NWQLib's
             description of a circuit as named steps), counting its stored
-            fields and the work of validation, preparation and circuit
-            building. A refusal with a complete count names a value that
-            passes. Summing the Program's resource counts may use up to 24
+            fields and the work of each validation, preparation and circuit
+            building check. Each stage applies the limit before doing that
+            work. Summing the Program's resource counts may use up to 24
             times this value. Raising it changes neither the polynomial nor
             any quantum operation. See the
             [planning work limit](../../development/program_checks.md#planning-work-limit).

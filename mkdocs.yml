@@ -172,4 +172,3 @@ nav:
       - Result reporting: development/reports.md
       - Error evidence internals: error_evidence.md
       - Engineering constants: ENGINEERING_CONSTANTS.md
-      - Analytical test fixture: contract-specimen/README.md

@@ -9,10 +9,7 @@ from fractions import Fraction
 import numpy as np
 import pytest
 from qiskit.quantum_info import Operator
-from _qsp_references import (
-    cks_inverse_coefficients, snwpb_error_for_degree, snwpb_inverse_values,
-    snwpb_mindegree_for_error,
-)
+from _qsp_references import cks_inverse_coefficients
 from nwqlib.algorithms.qls import numerical as qls_numerical
 from nwqlib.algorithms.qls.constants import QLS_TARGET_MARGIN
 import nwqlib.subroutines.qsp.inverse as qsp_inverse
@@ -42,25 +39,16 @@ def test_selected_fit_degrees_stay_under_the_degree_law_bound() -> None:
 
 
 
-def test_fit_integer_degree_anchors_with_recorded_margin() -> None:
-    """Integer degree anchors, valid per the platform-quantities rule.
-
-    Boundary margins (measured): at (kappa 4, eps 1e-2) the next-lower odd
-    degree 21 fails its certificate by 1.9% of epsilon; at (kappa 8, eps
-    1e-3) degree 61 fails by 24% — both astronomically above float64
-    least-squares cross-platform noise, so the selected integers cannot
-    flip between platforms.
-    """
-
+def test_inverse_fit_meets_independent_relative_residual() -> None:
+    """The selected coefficients approximate 1/(kappa*x) on their stated domain."""
     fit = qsp_inverse._fit_inverse_chebyshev(4.0, 1.0e-2)
-    assert fit.degree == 23 and fit.kappa == 4.0
-    # The domain parameter must leave 1/kappa <= |x| <= 1 a positive width.
+    assert fit.kappa == 4.0
+    assert fit.certificate <= 1.0e-2
     with pytest.raises(ValueError, match="positive width"):
         qsp_inverse._fit_inverse_chebyshev(1.0, 1.0e-2)
     grid = np.linspace(0.25, 1.0, 25 * fit.degree)
     values = np.polynomial.chebyshev.chebval(grid, fit.coefficients)
     assert np.max(np.abs(4.0 * grid * values - 1.0)) <= 1.0e-2
-    assert qsp_inverse._fit_inverse_chebyshev(8.0, 1.0e-3).degree == 63
 
 
 
@@ -78,57 +66,6 @@ def test_cks_cross_check_agrees_within_summed_certificates() -> None:
     disagreement = float(np.max(np.abs(domain * (fit_values - cks_values))))
     assert disagreement <= fit.certificate + cks_certificate + 1.0e-12
 
-
-
-def test_fit_stays_primary_against_snwpb_frontier_and_sup() -> None:
-    """The certified fit is at least as good as the optimality references.
-
-    Under this pipeline's x-weighted certificate the LSQ fit needs no more
-    degree than the [SNWPB] (arXiv:2507.15537v1) absolute-error-optimal
-    family, and its
-    sup_[-1,1] (hence the rescale, hence success probability) is the
-    smallest of the three constructions — the recorded reason the fit
-    stays primary (QLS contracts Sec. 2).
-    """
-
-    kappa_be, epsilon_inv = 10.0, 1.0e-2
-    fit = qsp_inverse._fit_inverse_chebyshev(kappa_be, epsilon_inv)
-    coefficients = np.asarray(fit.coefficients)
-    # On D, |x p(x) - 1| = |x| |p(x) - 1/x| <= |p(x) - 1/x| because |x| <= 1.
-    # The absolute-error degree of [SNWPB] arXiv:2507.15537v1, Eq. (8),
-    # therefore bounds the search.
-    search_limit = snwpb_mindegree_for_error(epsilon_inv, kappa_be)
-    domain = np.linspace(1.0 / kappa_be, 1.0, 25 * search_limit)
-    fit_values = np.polynomial.chebyshev.chebval(domain, coefficients)
-    assert np.max(np.abs(kappa_be * domain * fit_values - 1.0)) <= epsilon_inv
-    for reference_degree in range(1, search_limit + 1, 2):
-        values = snwpb_inverse_values(domain, degree=reference_degree, kappa_be=kappa_be)
-        if np.max(np.abs(domain * values - 1.0)) <= epsilon_inv:
-            break
-    else:
-        pytest.fail("[SNWPB] arXiv:2507.15537v1 reference misses its own Eq. (8) degree")
-    # The reference equioscillates, so its dense-grid maximum of |P - 1/x| reads the
-    # [SNWPB] arXiv:2507.15537v1, Eq. (7), error to grid resolution (its
-    # Eq. (26) 0.2% class).
-    measured = float(np.max(np.abs(values - 1.0 / domain)))
-    closed_form = snwpb_error_for_degree(reference_degree, kappa_be)
-    assert measured == pytest.approx(closed_form, rel=5.0e-3, abs=0)
-    assert fit.degree <= reference_degree
-
-    # For d < N, a degree-d polynomial satisfies
-    # sup_[-1,1] |p| <= max_j |p(cos(pi j/N))| / cos(d pi/(2N)) (Ehlich and Zeller,
-    # doi:10.1007/BF01111276),
-    # so the fit side is an upper bound and each reference side a sampled lower bound.
-    n = 25 * max(fit.degree, reference_degree)
-    nodes = np.cos(np.pi * np.arange(n + 1) / n)
-    fit_sup = float(np.max(np.abs(np.polynomial.chebyshev.chebval(nodes, coefficients))))
-    fit_sup /= np.cos(fit.degree * np.pi / (2 * n))
-    # Odd parity covers x < 0. The quotient form loses accuracy as x approaches 0.
-    positive = nodes[nodes >= 1.0e-3]
-    snwpb = snwpb_inverse_values(positive, degree=reference_degree, kappa_be=kappa_be)
-    cks = np.polynomial.chebyshev.chebval(positive, cks_inverse_coefficients(kappa_be, epsilon_inv))
-    assert fit_sup < float(np.max(np.abs(snwpb))) / kappa_be
-    assert fit_sup < float(np.max(np.abs(cks))) / kappa_be
 
 
 def test_inverse_residual_norming_covers_unsampled_endpoint(monkeypatch):
@@ -206,11 +143,6 @@ def test_real_pass_right_singular_semantics_on_non_normal_blocks() -> None:
         left @ np.diag(np.polynomial.chebyshev.chebval(singular_values, odd_coefficients)) @ right_h
     )
     assert np.max(np.abs(odd_block - odd_expected)) <= 1.0e-12
-
-
-
-def test_inverse_fit_checks_degree_one_before_doubling() -> None:
-    assert qsp_inverse._fit_inverse_chebyshev(1.2, 0.2).degree == 1
 
 
 

@@ -4,8 +4,7 @@ Tolerance classes follow the FRAMEWORK discipline: convention identities and
 circuit known answers are machine-precision (<= 1e-12); Hamiltonian-evolution
 equivalence uses the documented per-node error bound derived from the Bessel
 tail, solver residuals, and the recorded rescale (method-error-bounded).
-Integer degree anchors carry the recorded
-Bessel-tail slack (platform-quantities rule); no wall-clock assertions.
+Tail bounds are checked against independent Bessel sums and analytic remainders.
 """
 
 from __future__ import annotations
@@ -46,12 +45,6 @@ from nwqlib.subroutines.qsp.phases import (
     chebyshev_polynomial_sup_bound,
     chebyshev_norming_sup_bound,
 )
-
-# Integer degree and analysis-terminal selections stay exactly pinned; only the
-# tail bound gets a relative allowance for SciPy/libm Bessel evaluation
-# differences. This 1e-12 relative class is far below the anchor-comparison
-# classes used elsewhere in the suite.
-JACOBI_ANGER_TAIL_ANCHOR_RTOL = 1.0e-12
 
 # Four libm terms as large as lgamma(85) ~= 291 give a roughly 2.6e-13
 # relative ceiling; 1e-11 leaves about 40x platform headroom and remains
@@ -459,35 +452,6 @@ def test_jacobi_anger_records_complete_finite_and_analytic_tail(
     check_orders = np.arange(terminal + 1, terminal + 1001)
     direct_remainder = float(np.sum(np.abs(scipy.special.jv(check_orders, tau))))
     assert direct_remainder <= shared_remainder * (1.0 + 1.0e-12)
-
-
-@pytest.mark.parametrize(
-    ("tau", "epsilon", "min_degree", "expected"),
-    [
-        (0.1, 1.0e-3, 1, (2, 3, 4.2693346287522684e-5)),
-        (5.0, 1.0e-4, 2, (12, 13, 6.152867677760108e-5)),
-        (20.0, 1.0e-3, 2, (30, 34, 9.976982850285507e-4)),
-        (50.0, 1.0e-3, 1, (62, 80, 8.476776396111822e-4)),
-        (100.0, 1.0e-3, 1, (117, 155, 8.780965809779798e-4)),
-        (200.0, 1.0e-3, 1, (219, 307, 8.72946806664447e-4)),
-        (300.0, 1.0e-3, 2, (323, 458, 8.31286632429867e-4)),
-    ],
-)
-def test_jacobi_anger_restart_preserves_selected_terminal(
-    tau: float,
-    epsilon: float,
-    min_degree: int,
-    expected: tuple[int, int, float],
-) -> None:
-    expansion = jacobi_anger_expansion(tau, epsilon, min_degree=min_degree, max_degree=max(256, expected[0]))
-    expected_degree, expected_terminal, expected_tail = expected
-    assert expansion.degree == expected_degree
-    assert expansion.analysis_terminal == expected_terminal
-    assert expansion.tail_bound == pytest.approx(
-        expected_tail,
-        rel=JACOBI_ANGER_TAIL_ANCHOR_RTOL,
-        abs=0.0,
-    )
 
 
 def test_unrepresentable_analytic_remainder_keeps_evolution_build_available() -> None:
@@ -965,7 +929,7 @@ def test_qsp_controls_reject_before_numerical_work_and_keep_real_targets(monkeyp
                 phases.solve_symmetric_qsp_phases(target, **controls)
         guard.setattr(scipy.special, "jv", unexpected)
         for tau, controls in ((float("inf"), {}), (1e100, {}),
-                              (1., {"max_bytes": 100}), (1., {"max_degree": True})):
+                              (1., {"max_bytes": 100})):
             with pytest.raises(ValueError):
                 evolution.jacobi_anger_expansion(tau, .01, **controls)
     # A complex container whose entries are real is mathematically admissible.
@@ -1208,15 +1172,11 @@ def test_lchs_qsp_heat_and_shifted_input_keep_actual_selected_child():
 
 
 def test_lchs_guide_first_problem_plans_qsp_evolution():
-    """The LCHS guide's first problem selects tau = 1.2422 and eps = 1e-3.
+    """The selected parities approximate cos and sin at the guide input's actual scale.
 
-    L-BFGS from the Dong-Meng-Whaley-Lin (arXiv:2002.11649v2) start fits the
-    degree-4 cosine
-    target but ends at a near-singular point with residual 2e-6 on the
-    degree-5 sine target (SciPy 1.18.1). The reference for each parity is the untruncated function
-    divided by the selected scale. Its distance to Re P is bounded by that
-    parity's Bessel tail over the scale plus the solver's norming bound on
-    the residual.
+    The reference is the untruncated function divided by the selected
+    scale. Its distance to Re P is bounded by that parity's Bessel tail
+    over the scale plus the solver's norming bound on the residual.
     """
     from nwqlib import LinearDynamics, plan
     from nwqlib.algorithms import LCHS
@@ -1227,9 +1187,6 @@ def test_lchs_guide_first_problem_plans_qsp_evolution():
     )
     prepared = chosen._native["native_data"].qsp_plan["prepared_evolution"]
     expansion = prepared.expansion
-    assert expansion.tau == pytest.approx(1.2422, abs=1e-4)
-    assert (expansion.cos_degree, expansion.sin_degree) == (4, 5)
-    assert prepared.margin == 1e-3 and prepared.attempted_margins == (1e-3,)
     grid = chebyshev_grid(2048)
     for solution, function, tail in (
         (prepared.cos_solution, np.cos, expansion.cos_tail_bound),

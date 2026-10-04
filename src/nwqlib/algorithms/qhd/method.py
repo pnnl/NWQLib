@@ -2058,13 +2058,6 @@ def _step_norm_refusal(step, norm, dt, a, b, kinetic, spread):
             + ". ".join(details) + ". Other Plan range and resource limits still apply")
 
 
-def _host_generator_norms(plan):
-    """Yield ``(N, r)`` for each ``expm_multiply`` call of the Plan's classical kernel (``_generator_norms``)."""
-    r = plan.reconstruction
-    return _generator_norms(plan.method.theory_flavor, plan.method, _grid(plan), r.support_values, r.steps,
-                            r.step_weights)
-
-
 def _host_start_error(plan):
     """Return the construction error, in units of u, of the classical kernel's initial vector.
 
@@ -4503,8 +4496,6 @@ class QHD(Method):
         Exact probabilities are averaged over chunks. ``_readout_window``
         gives each path's tie window from its receipts or host application.
         """
-        if settings:
-            raise ValueError("QHD has no post-hoc analysis settings")
         validate_selection(plan)
         observations, trace = data.observations, data.trace
         artifacts = data

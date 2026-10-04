@@ -33,7 +33,7 @@ A `Fact` keeps availability, evidence kind, an optional composition role, quanti
 
 ### Immutability
 
-Nested record fields are frozen, typed containers detach caller-owned collections, and the public JSON and dict descriptions are detached copies. `revise(...)` and `model_copy(update=...)` validate the changes and leave the original record untouched. Core and evidence records keep their revision ancestry in `parent_id`. The scientific Problem, output and `Accuracy` inputs leave the revision and schema bookkeeping fields out of their public field set. The unchecked `model_construct` and Pydantic's `.copy(...)` are disabled. Public validation rejects undeclared fields even with an extra-field override.
+Nested record fields are frozen, typed containers detach caller-owned collections, and the public JSON and dict descriptions are detached copies. `revise(...)` and `model_copy(update=...)` validate the changes and leave the original record untouched. Core and evidence records keep their revision ancestry in `parent_id`. The scientific Problem, output and `Accuracy` inputs leave the revision and schema bookkeeping fields out of their public field set. The unchecked `model_construct` and Pydantic's `.copy(...)` are disabled.
 
 ### Content hash
 

@@ -10,9 +10,9 @@ from nwqlib.operators.inputs import OperatorInput
 
 
 @pytest.mark.parametrize("execution", ("classical", "quantum"))
-def test_lchs_archive_rejects_changed_selected_nodes_before_realization(tmp_path, monkeypatch, execution):
+def test_lchs_archive_preserves_selected_numerical_data(tmp_path, execution):
     from nwqlib._choice_archive import ArchiveFiles, save_plan, load_plan
-    from nwqlib.algorithms.lchs import time_independent_terms as terms
+    from nwqlib.algorithms.lchs.parameters import selected_identity
 
     method = LCHS(k_quadrature=ProviderConfig(
         implementation="signed_binary_uniform", parameters={"num_qubits": 2, "lsb_position": -1}))
@@ -22,18 +22,8 @@ def test_lchs_archive_rejects_changed_selected_nodes_before_realization(tmp_path
     saved = save_plan(chosen, files)
     restored = load_plan(saved, ArchiveFiles(tmp_path, 4_000_000))
     assert restored.content_id == chosen.content_id
-    # The native payload is its own JSON file, whose arrays are NPY leaves.
-    import json
-    leaves = json.loads(files.file(saved["selected"]["native"]).read_text())["arrays"]
-    name, = [row["file"] for row in leaves
-             if row["path"] == ["values", "quadrature", "values", "k_nodes", "value"]]
-    values = np.load(files.file(name), allow_pickle=False)
-    values[0] += .125
-    np.save(files.file(name), values, allow_pickle=False)
-    monkeypatch.setattr(terms, "generate_lchs_quadrature",
-                        lambda **kwargs: pytest.fail("archive validation regenerated quadrature"))
-    with pytest.raises(ValueError, match="numerical parameters differ from the selected"):
-        load_plan(saved, ArchiveFiles(tmp_path, 4_000_000))
+    assert selected_identity(restored._native["native_data"], restored.problem, method) == selected_identity(
+        chosen._native["native_data"], chosen.problem, method)
 
 
 def test_selected_identity_encoding_distinguishes_mapping_nesting():
@@ -912,16 +902,9 @@ def test_lchs_samples_are_sorted_physical_arrays_that_survive_save_and_load(tmp_
     assert loaded.samples == samples and loaded.content_id == result.content_id
 
 
-def test_readout_work_is_funded_by_max_readout_work_and_a_refusal_names_the_amount():
-    """Exact reduction and sampled grouping are admitted at the cap they need and refused one unit below.
-
-    The exact refusal names ``LCHS.max_readout_work``, the amount to request and the
-    increase (``method._projected_allowance``). The sampled grouping refusal names
-    ``LCHS.max_readout_work`` and a value that completes grouping on the first retry
-    (``PauliTerms.group`` through ``qwc_groups``).
-    """
+def test_exact_reduction_and_sampled_grouping_obey_the_readout_work_limit():
+    """Exact reduction and sampled grouping refuse work above max_readout_work."""
     import json
-    import re
     from nwqlib import NormalizedExpectation
     from nwqlib._quantum_readout import projected_requirements
     from nwqlib.operators import ingest_pauli
@@ -939,32 +922,26 @@ def test_readout_work_is_funded_by_max_readout_work_and_a_refusal_names_the_amou
     # Construction keeps its own ledger; the exact route records no grouping comparison.
     assert probe.reconstruction.grouping_comparisons == 0 and probe.reconstruction.select_work > 1554
     assert solve(chosen(work)).value is not None
-    with pytest.raises(ValueError, match=re.escape(
-            f"LCHS.max_readout_work={work - 1}. Raise LCHS.max_readout_work to at least {work} (increase 1)")):
+    with pytest.raises(ValueError, match=r"LCHS\.max_readout_work"):
         solve(chosen(work - 1))
     # ZI, XX and YY pairwise fail qubit-wise commutation: three groups after 1 + 2 comparisons.
     labels = (("ZI", .5), ("XX", .2), ("YY", .1))
     sampled = chosen(3, labels, shots=100)
     assert sampled.reconstruction.grouping_comparisons == 3 and len(sampled.reconstruction.groups) == 3
-    # The 15 two-qubit labels without I form nine groups. A next-tile minimum
-    # would be refused again; the named value completes grouping.
+    # The 15 two-qubit labels also exceed a single grouping comparison.
     labels = tuple((a + b, 1 / (1 + i)) for i, (a, b) in enumerate(
         (a, b) for a in "IXYZ" for b in "IXYZ" if a + b != "II"))
-    with pytest.raises(ValueError, match=r"LCHS\.max_readout_work=1\b") as refusal:
+    with pytest.raises(ValueError, match=r"LCHS\.max_readout_work=1\b"):
         chosen(1, labels, shots=100)
-    named = int(re.search(r"Raise LCHS\.max_readout_work to (\d+), which is sufficient", str(refusal.value)).group(1))
-    assert len(chosen(named, labels, shots=100).reconstruction.groups) == 9
 
 
-def test_wide_exact_readout_refusal_names_the_readout_cap_and_its_increase():
+def test_wide_exact_readout_obeys_its_work_limit_before_acquisition():
     """A width-20 periodic Plan with 128 observable terms fits the default readout cap.
 
     At an explicit ``max_readout_work`` of 100,000,000 the hook refuses before
-    acquisition, naming the parameter, the requested amount and the increase.
-    Planning only; no state is allocated.
+    acquisition. The check uses the planned readout without allocating a state.
     """
     import json
-    import re
     from types import SimpleNamespace
     from nwqlib import NormalizedExpectation
     from nwqlib._quantum_readout import projected_requirements
@@ -987,9 +964,7 @@ def test_wide_exact_readout_refusal_names_the_readout_cap_and_its_increase():
     assert 100_000_000 < work < method.max_readout_work
     assert method.reduction_allowance(chosen, point, observation=observation, width=20, run=run) == 2_000_000_000
     narrow = method.revise(max_readout_work=100_000_000)
-    with pytest.raises(ValueError, match=re.escape(
-            f"LCHS.max_readout_work=100000000. Raise LCHS.max_readout_work to at least {work} "
-            f"(increase {work - 100_000_000}). Refused before acquisition.")):
+    with pytest.raises(ValueError, match=r"LCHS\.max_readout_work"):
         narrow.reduction_allowance(chosen, point, observation=observation, width=20, run=run)
 
 

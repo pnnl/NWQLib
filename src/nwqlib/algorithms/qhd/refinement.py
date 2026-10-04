@@ -55,9 +55,6 @@ from ._outer import (
     run_counts,
 )
 from ._durable import (
-    FORMATS,
-    RECORD,
-    RESUME,
     Directory,
     Frontier,
     closed_trace,
@@ -2116,10 +2113,7 @@ def load_box_refinement(path):
     checks, the SymPy objects come back through a reader that resolves SymPy classes
     only, and the rebuilt problem must have the hash of the stored problem record and of
     the refinement record. Each level Result is loaded with `load_result`, which
-    validates it with its own Plan and archive. No backend is needed. A saved-refinement
-    directory of `refine_box(..., directory=...)` is refused with the name of
-    `resume_box_refinement`, which continues it, and a saved augmented-Lagrangian result
-    with the name of `load_augmented_lagrangian`.
+    validates it with its own Plan and archive. No backend is needed.
 
     Args:
         path (str | Path): The directory that `BoxRefinementResult.save` wrote.
@@ -2133,28 +2127,7 @@ def load_box_refinement(path):
     from .archive import _SymbolicReader
 
     files = ArchiveFiles(Path(path), None)
-    try:
-        saved = files.read_json(ARCHIVE_RECORD)
-    except FileNotFoundError as error:
-        if files.file(RECORD).is_file():
-            stored = files.read_json(RECORD).get("format")
-            kind = next((name for name, fmt in FORMATS.items() if fmt == stored), None)
-            if kind is None:
-                raise FileNotFoundError(f"{path} is a durable run directory of format {stored!r} containing {RECORD}, "
-                                        f"not a saved box refinement containing {ARCHIVE_RECORD}") from error
-            layer = {"refinement": "box-refinement", "constrained": "augmented-Lagrangian"}[kind]
-            raise FileNotFoundError(
-                f"{path} is a durable {layer} directory containing {RECORD}, not a saved box refinement containing "
-                f"{ARCHIVE_RECORD}. Use {RESUME[kind]}({str(path)!r}, backend=...) to continue it, then call save "
-                "on its returned result to create a saved archive. An interrupted inner Run may be unable to finish "
-                "from its recorded work"
-            ) from error
-        if files.file("constrained.json").is_file():
-            raise FileNotFoundError(
-                f"{path} is a saved augmented-Lagrangian result containing constrained.json, not a saved box "
-                f"refinement containing {ARCHIVE_RECORD}. Open it with load_augmented_lagrangian({str(path)!r})"
-            ) from error
-        raise
+    saved = files.read_json(ARCHIVE_RECORD)
     if saved.get("format") != ARCHIVE_FORMAT:
         raise ValueError(f"unsupported box-refinement archive format {saved.get('format')!r}, expected "
                          f"{ARCHIVE_FORMAT!r}")

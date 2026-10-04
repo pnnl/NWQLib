@@ -1202,10 +1202,6 @@ class Lanczos(Method):
         from nwqlib._validation import finite_real
         from nwqlib.evidence.error_model import exact_readout_sampling
 
-        unknown = set(settings) - {"overlap_cutoff", "overlap_cutoff_policy",
-                                   "overlap_noise_multiplier", "overlap_failure_probability"}
-        if unknown:
-            raise ValueError(f"unsupported Lanczos analysis settings: {sorted(unknown)}")
         cutoff = settings.get("overlap_cutoff", self.overlap_cutoff)
         policy = settings.get("overlap_cutoff_policy", self.overlap_cutoff_policy)
         multiplier = finite_real(settings.get("overlap_noise_multiplier", self.overlap_noise_multiplier),
@@ -1216,8 +1212,7 @@ class Lanczos(Method):
                 or multiplier <= 0 or not 0 < delta < 1):
             raise ValueError("invalid Lanczos overlap cutoff policy, multiplier or failure probability")
         if cutoff is not None and (
-            isinstance(cutoff, bool)
-            or not isinstance(cutoff, (int, float))
+            not isinstance(cutoff, (int, float))
             or not 0 < cutoff < float("inf")
         ):
             raise ValueError("overlap_cutoff must be finite and positive")

@@ -457,8 +457,6 @@ def test_existing_mps_analysis_metrics_reuse_order_and_before_svd_cost(monkeypat
         decompose_state_to_mps(np.ones(8), max_svd_work=1)
     with pytest.raises(ValueError, match="max_bytes"):
         truncated.to_statevector(max_bytes=1)
-    with pytest.raises(TypeError, match="existing MPSDecomposition"):
-        analyze_mps_state_compression(state)
 
 
 def test_selected_mps_reuse_binds_actual_normalized_input(monkeypatch):

@@ -1,8 +1,6 @@
 """Independent Chebyshev, sensitivity and physical-spectrum relations."""
 
 from fractions import Fraction
-import json
-from pathlib import Path
 
 import numpy as np
 import pytest
@@ -44,22 +42,19 @@ def test_signed_centered_pencil_from_independent_moments():
     )
 
 
-def test_committed_analytical_fixture_enters_current_reconstruction():
+def test_analytical_readout_moments_reconstruct_sector_pencil():
     from nwqlib.algorithms.lanczos.readout import decode_histogram
     from nwqlib.problems.inputs import ingest_occupation
 
-    # Consume the committed input and moments, without regenerating the fixture
-    # or presenting analytical probabilities as executed measurement shots.
-    path = Path(__file__).resolve().parents[1] / "docs/contract-specimen/specimen.json"
-    payloads = {row["id"]: row["payload"] for row in json.loads(path.read_text())["records"]}
-    request = payloads["request"]
-    h = request["hamiltonian"]
-    n = request["system_qubits"]
+    # H = X0 + Z0 + Z1 + Z2 + Z3 on |1110> stays in basis indices
+    # (14, 15), where H = [[-2, 1], [1, -4]]. Direct pair recurrence
+    # gives raw moments (1, -2, 5, -16), hence the Chebyshev moments
+    # (1, -2/5, -3/5, 86/125) for H/5.
+    labels = ("IIIX", "IIIZ", "IIZI", "IZII", "ZIII")
     problem = Eigenproblem(
-        A=ingest_pauli(zip(h["labels"], h["coefficients"], strict=True), num_qubits=n)
+        A=ingest_pauli(((label, 1) for label in labels), num_qubits=4)
     )
-    occupied = request["reference"]["x_system_qubits"]
-    state = ingest_occupation(tuple(int(q in occupied) for q in range(n)), num_qubits=n)
+    state = ingest_occupation((0, 1, 1, 1), num_qubits=4)
     plan = Lanczos(initial_state=state, krylov_dimension=2).plan(
         problem,
         output=problem.default_output(),
@@ -78,15 +73,14 @@ def test_committed_analytical_fixture_enters_current_reconstruction():
         {112: 49, 120: 1, 113: 162, 121: 8, 114: 2, 122: 8, 115: 2, 123: 8, 116: 2, 124: 8},
     )
     statistics = {}
-    for setting, histogram, contribution in zip(
-        rec.settings, weights, payloads["observations"]["contributions"], strict=True
+    expected_moments = (-2 / 5, -3 / 5, 86 / 125)
+    for degree, (setting, histogram, expected) in enumerate(
+        zip(rec.settings, weights, expected_moments, strict=True), start=1
     ):
         marginal = {bits: weight / sum(histogram.values()) for bits, weight in histogram.items()}
         stats = decode_histogram(plan._native["readout"], setting, marginal, counts=False)
-        assert setting.degree == contribution["degree"]
-        assert stats.mean == pytest.approx(
-            float(Fraction(contribution["expectation"])), rel=0, abs=2e-15
-        )
+        assert setting.degree == degree
+        assert stats.mean == pytest.approx(expected, rel=0, abs=2e-15)
         assert stats.shots is None
         statistics[setting.degree] = stats
     result = numerical.reconstruct(rec, statistics, cutoff=None, sampled=False)

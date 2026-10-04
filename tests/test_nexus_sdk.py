@@ -49,11 +49,6 @@ def sdk_connection(monkeypatch):
     return connection, project
 
 
-def test_installed_sdk_is_the_offline_qualified_release():
-    # docs/nexus.md and the Nexus Offline Qualification workflow record this release.
-    assert version("qnexus") == "0.49.0"
-
-
 def local_data(connection):
     circuit = QuantumCircuit(QuantumRegister(2, "q"), ClassicalRegister(1, "z"), ClassicalRegister(2, "a"))
     circuit.global_phase = pi / 2

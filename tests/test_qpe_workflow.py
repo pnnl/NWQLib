@@ -307,14 +307,11 @@ def test_numerical_domain_rejects_invalid_observations():
         )
 
 
-def test_config_keeps_integers_and_finite_domains():
+def test_config_preserves_numpy_integers_and_numerical_domains():
     assert QCELS(num_times=np.int64(3)).num_times == 3
     assert SPE(fourier_degree=np.int64(2), overlap_lower_bound=.5).fourier_degree == 2
     assert RFE(num_frequencies=np.int64(3)).num_frequencies == 3
     assert RWPE(max_steps=np.int64(0)).max_steps == 0
-    for bad in (True, 1.2, 0):
-        with pytest.raises(ValueError):
-            QCELS(num_times=bad)
     for bad in (float("nan"), float("inf"), -1.0):
         with pytest.raises(ValueError):
             QCELS(pauli_pruning_rtol=bad)

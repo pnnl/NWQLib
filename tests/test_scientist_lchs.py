@@ -290,20 +290,6 @@ def test_dense_select_branches_match_exact_controlled_exponentials(num_qubits, t
         assert np.abs(actual - expected).max() <= 1e-11, (branch, nodes[branch])
 
 
-def test_default_grid_preparation_uses_selected_small_branches(monkeypatch):
-    from nwqlib import plan, prepare
-    from nwqlib.algorithms import LCHS
-    from qiskit.circuit.library import UnitaryGate
-    problem = LinearDynamics(A=[[.4,.15],[.05,.25]],initial_state=[1,0],time=.1)
-    chosen = plan(problem,method=LCHS(approximation_tolerance=.01))
-    assert chosen.reconstruction.physical_branches == 204
-    assert chosen.reconstruction.selected_select == 'branch_controlled'
-    assert sum(register.width for register in chosen.construction.program.registers) == 9
-    monkeypatch.setattr(UnitaryGate,'control',lambda *a,**kw: pytest.fail('full controlled-matrix validation'))
-    prepared = prepare(chosen)
-    assert prepared.circuits and all(circuit.num_qubits==9 for circuit in prepared.circuits)
-
-
 @pytest.mark.parametrize('source',[None,[0,0,0],[.1j,-.2,.3]])
 def test_zero_qsp_generator_is_actual_identity_with_source_and_archive(source,tmp_path,monkeypatch):
     from nwqlib import plan, solve, load_result
@@ -332,9 +318,6 @@ def test_invalid_method_and_source_preparation_reject_before_selection(monkeypat
     from nwqlib.algorithms import LCHS
     from nwqlib.algorithms.lchs import selection
     monkeypatch.setattr(selection,'select_dense',lambda *a: pytest.fail('invalid input consumed numerical selection'))
-    for value in (True,np.bool_(False),1.,'1'):
-        with pytest.raises((TypeError,ValueError),match='trotter_order'):
-            LCHS(trotter_order=value,hamiltonian_evolution_backend='trotter')
     # Both product-formula backends take Lie order 1. The other backends apply
     # no product formula, so an order other than 2 is rejected there.
     for backend in ('dense_exact','qsp_block_encoding'):

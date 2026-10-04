@@ -87,7 +87,7 @@ def test_periodic_classical_model_matches_circulant_eigendecomposition(d, k):
     ``dt (K + V)`` equal the exact ones. The kernel's state therefore lies
     within the first-order 2-norm budget delta of its ``expm_multiply`` calls
     of the oracle, up to a global phase (``_validation.expm_multiply_state_error``
-    with the per-call norms of ``method._host_generator_norms``), which is
+    with the per-call norms of ``method._generator_norms``), which is
     at most about 1e-12 here. The 30-digit oracle adds about 1e-29. Without
     the wrap link the phase-aligned distance is about 0.5, and with the
     endpoint-inclusive spacing 0.06 to 0.28.
@@ -108,7 +108,10 @@ def test_periodic_classical_model_matches_circulant_eigendecomposition(d, k):
                  for indices in itertools.product(range(k), repeat=d)]
     hamiltonian = _kronecker_sum([_circulant(k, h) for _, h in grids]) + np.diag(potential)
     # The uniform start vector errs by 2u (initial_state.restricted_state_error).
-    delta = expm_multiply_state_error(owner._host_generator_norms(selected), start=2.0)
+    r = selected.reconstruction
+    norms = owner._generator_norms(method.theory_flavor, method, owner._grid(selected),
+                                   r.support_values, r.steps, r.step_weights)
+    delta = expm_multiply_state_error(norms, start=2.0)
     with mpmath.workdps(30):
         # The dyadic float entries convert to mpmath exactly.
         energies, vectors = mpmath.eigsy(mpmath.matrix(hamiltonian.tolist()))
@@ -139,7 +142,7 @@ def test_periodic_kinetic_ground_state_is_the_uniform_zero_energy_mode(d):
     objective with gamma = 0 leaves the kinetic term alone, so the evolved
     state stays at the start within the kernel's budget delta
     (``_validation.expm_multiply_state_error`` with the per-call norms of
-    ``method._host_generator_norms``) after its global phase is removed.
+    ``method._generator_norms``) after its global phase is removed.
     """
     from nwqlib.algorithms.qhd import KineticGroundState, UniformState
     from nwqlib.algorithms.qhd.initial_state import restricted_state, restricted_state_error
@@ -161,7 +164,10 @@ def test_periodic_kinetic_ground_state_is_the_uniform_zero_energy_mode(d):
     result = solve(selected)
     state = result.data.artifact(result.artifact).array
     overlap = np.vdot(start, state)
-    delta = expm_multiply_state_error(owner._host_generator_norms(selected), start=2.0)
+    r = selected.reconstruction
+    norms = owner._generator_norms(method.theory_flavor, method, owner._grid(selected),
+                                   r.support_values, r.steps, r.step_weights)
+    delta = expm_multiply_state_error(norms, start=2.0)
     assert np.linalg.norm(state * (np.conj(overlap) / abs(overlap)) - start) <= delta
 
 

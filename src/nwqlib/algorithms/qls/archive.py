@@ -259,12 +259,6 @@ def load(saved, files):
     if plan.execution == "classical":
         if quantum:
             raise ValueError("saved classical QLS archive carries quantum inputs")
-        # A classical Plan holds original factors exactly when planning
-        # acquired them, as its recorded spectral method says, so a loaded
-        # evaluation never makes an unrecorded or skips a recorded factorization.
-        acquired = rec.spectral_method in _FACTOR_ARRAYS
-        if acquired != (factors is not None) or acquired and factors.method != rec.spectral_method:
-            raise ValueError("saved QLS factors differ from the recorded spectral selection")
         plan._bind(blocks=(_bind_host(plan),), svd=factors)
     else:
         rhs = files.read_state(saved["rhs"]) if quantum else None

@@ -111,7 +111,7 @@ python -m nwqlib report my-result
 
 The JSON output holds the saved selection, scientific fields, observations, preparation records and trace, plus a `metadata_validation` entry that states what was checked:
 
-- Checked: the common record schemas and content hashes, the Plan's content hash, and the links of the Result to its observations and of the attempts to their forecast.
+- Checked: the common record schemas and content hashes, the Result's association with its observations, and the Plan's content hash when the Method supplies a canonical Plan description.
 - Not checked: the Method's own Result schema, content hash and scientific relation, which need the Result loaded in Python with `nwqlib.load_result(path, method=...)`, and the integrity of binary data, because `report` reads no arrays or circuits. Data that is missing or changed is not detected.
 
 A malformed known record or a changed Plan description is rejected. Method names in the file are read as text and never imported. `report` does not plan, analyze, execute, contact a provider or modify the saved folder. The limits of the JSON reader are in [report reader limits](development/execution.md#report-reader-limits).

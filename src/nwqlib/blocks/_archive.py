@@ -14,17 +14,6 @@ _CONSTRUCTORS = dict(preparation=native._preparation_circuit, primitives=native.
     select=native._select_circuit, readout=native._readout_circuit, reflection=native._reflection_circuit)
 
 
-def validate_preparation_binding(record, state, constructor):
-    """Join a saved known PREP to its actual input without inspecting amplitudes."""
-    semantics = record.semantics
-    expected = (native._primitive_circuit if record.implementation.name == "preparation.hzh"
-                else native._preparation_circuit)
-    if (constructor is not expected or semantics.kind != "preparation" or semantics.preparation != state.preparation
-            or semantics.input != state.reference or semantics.basis != state.basis
-            or sum(port.width for port in record.signature.quantum) != (state.basis.dimension - 1).bit_length()):
-        raise ValueError("saved selected preparation differs from its actual input/specification/ports")
-
-
 def write_blocks(blocks, files):
     """Return the saved form of a Method's selected blocks, for its `save_archive` hook.
 
@@ -128,8 +117,8 @@ def read_blocks(data, records, files):
 
     A saved kind selects one constructor from a fixed table of built-in block
     kinds, so loading never imports or calls code named in the archive. A
-    preparation is checked against its reloaded state input before it is bound,
-    and a transformed block is bound again to its restored base. A signed Pauli
+    preparation is bound to its restored state input, and a transformed block
+    is bound to its restored base. A signed Pauli
     SELECT or readout derives its coefficients from the restored operator with
     the expression selection uses, so alpha, the coefficients and the PREP
     amplitudes equal those before saving, and a SELECT and its readout share one
@@ -146,8 +135,7 @@ def read_blocks(data, records, files):
         blocks (tuple[SelectedBlock, ...]): The restored blocks, in the saved order.
 
     Raises:
-        ValueError: If the saved format is not the current block format, or a
-            saved preparation does not match its input.
+        ValueError: If the saved format is not the current block format.
     """
     import json
 
@@ -165,7 +153,6 @@ def read_blocks(data, records, files):
             constructor = _CONSTRUCTORS["primitives" if kind == "preparation_primitives" else kind]
             if kind in ("preparation", "preparation_primitives"):
                 payload = files.read_state(payload)
-                validate_preparation_binding(record, payload, constructor)
             elif kind in ("select", "readout"):
                 key = json.dumps(payload, sort_keys=True)
                 if key not in pauli:

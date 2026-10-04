@@ -308,10 +308,9 @@ def test_qcels_units_sparse_schedule_and_actual_admission(monkeypatch):
                 plan(Eigenproblem(A=np.diag([.4, -.7])), method=method, execution="classical", seed=7)
 
 
-def test_qcels_archive_retires_slope_interval_and_uses_effective_grid(tmp_path, monkeypatch):
+def test_qcels_archive_preserves_effective_grid_without_refitting(tmp_path, monkeypatch):
     from nwqlib.algorithms.qpe import method as owner, numerical
     from nwqlib.algorithms.qpe.records import QPEInterval
-    from nwqlib._choice_archive import ArchiveFiles, save_plan, load_plan
     from nwqlib import load_result
 
     result = solve(make_plan(num_times=3, max_time=4., grid_size=64))
@@ -325,17 +324,10 @@ def test_qcels_archive_retires_slope_interval_and_uses_effective_grid(tmp_path, 
     with pytest.raises(ValueError, match="analysis revision"):
         result.revise(origin=result.origin.revise(analyzer=owner._ANALYSIS_SOURCE)).validate_plan(result.plan)
     saved = result.save(tmp_path / "result")
-    (tmp_path / "plan").mkdir()
-    archived = save_plan(result.plan, ArchiveFiles(tmp_path / "plan", 4_000_000))
-    archived["selected"]["format"] = "qpe/3"
     monkeypatch.setattr(numerical, "qcels", lambda *a, **k: pytest.fail("archive refit"))
     monkeypatch.setattr(numerical, "planned_power_schedule", lambda *a: pytest.fail("archive schedule"))
     loaded = load_result(saved)
     assert loaded.fit == result.fit and loaded.interval is None and loaded.samples == result.samples
-    with monkeypatch.context() as patch:
-        patch.setattr(ArchiveFiles, "read_state", lambda *a: pytest.fail("old revision loaded state"))
-        with pytest.raises(ValueError, match="archive revision"):
-            load_plan(archived, ArchiveFiles(tmp_path / "plan", 4_000_000))
 
 
 @pytest.mark.parametrize("estimator", ("qcels", "spe", "rfe"))

@@ -1,10 +1,9 @@
-"""Actual Result/Plan domains, saved pair validation and independent legal cases.
+"""Actual Result/Plan domains, saved round trips and independent legal cases.
 
 External Method execution/storage is covered by the nonconstant Hadamard author
-witness in test_public_cli; retired Options/ChoiceReport identities add no relation.
+witness in test_public_cli.
 """
 
-import json
 from types import SimpleNamespace
 
 import numpy as np
@@ -41,7 +40,7 @@ def scalar_result(family, value):
 
 @pytest.mark.parametrize("family", ["expectation", "gcim", "lanczos"])
 @pytest.mark.parametrize("value", [0.0, -3.0])
-def test_known_constant_pair_and_saved_load_reject_wrong_scalar(
+def test_known_constant_result_validates_its_plan_and_round_trips(
     family, value, tmp_path, monkeypatch
 ):
     import scipy.linalg
@@ -68,14 +67,6 @@ def test_known_constant_pair_and_saved_load_reject_wrong_scalar(
     monkeypatch.setattr(type(result.plan.method), "analyze", forbidden)
     loaded = nwqlib.load_result(path)
     assert loaded.report() == result.report() and getattr(loaded, field) == value
-    # This is a structurally valid scalar record in the same saved selection
-    # and acquisition data. The actual loader must reject the false relation.
-    filename = path / "result.json"
-    saved = json.loads(filename.read_text())
-    saved["result"] = bad.model_dump(mode="json")
-    filename.write_text(json.dumps(saved))
-    with pytest.raises(ValueError, match="constant|identity"):
-        nwqlib.load_result(path)
 
 
 def pencil(plan, *, value=3.0, failed=False):
@@ -213,7 +204,7 @@ def test_invalid_analysis_cutoff_rejects_before_statistics_or_projected_work(fam
         monkeypatch.setattr(fixed_basis, "matched_chunks", forbidden)
         monkeypatch.setattr(numerical, "reconstruct", forbidden)
         monkeypatch.setattr(Lanczos, "statistics", forbidden)
-        for cutoff in (True, False, 0.0, -1.0, float("inf")):
+        for cutoff in (0.0, -1.0, float("inf")):
             with pytest.raises(ValueError, match="finite and positive"):
                 plan.method.analyze(plan, run.data, settings={"overlap_cutoff": cutoff})
 

@@ -186,116 +186,6 @@ def _data_limit_clause(run, unit=""):
             f"{_limit_remedy('max_data_bytes')}")
 
 
-def _record_delta_bound(records):
-    """Complete JSON envelope Q_J of finite new rows, without encoding payloads.
-
-    ``Run._write`` names a data limit from it when the admission of new rows
-    stops. C is the stored JSON minus replaced rows plus arrays, payloads,
-    external bytes and pending reservations other than the released attempts,
-    and Q_J is this envelope plus added payload bytes plus new output
-    reservations. For fixed counted storage and fixed new records, ``C + Q_J``
-    is sufficient for this transition's envelope. When a retry changes
-    serialized limits or first records an amendment, the refusal evaluates the
-    corresponding envelope at the suggested cap. The envelope bounds encoded
-    bytes; its 32-byte float allowance is not an exact file length. The traversal is
-    linear in the new metadata and prices FrozenArray payloads from their
-    shapes; it prices each row in the stored form of ``_row_value``, which
-    omits a chunk's duplicated readout declaration. It raises
-    ``JSONBytesExceeded`` when the envelope exceeds the native size ceiling.
-    """
-    from nwqlib._run_journal import _json_bound, _row_value
-
-    return sum(_json_bound(_row_value(kind, value), sys.maxsize) for kind, _, value in records)
-
-
-def _decimal_retry_limit(total, *, priced_at, occurrences, minimum):
-    """Solve N >= total + occurrences*(digits(N)-digits(priced_at)).
-
-    The callers supply minimum >= priced_at; the returned N is the least
-    sufficient integer at or above minimum for this envelope.
-    """
-    fixed = total - occurrences * len(str(priced_at))
-    candidate = max(minimum, total)
-    while True:
-        required = fixed + occurrences * len(str(candidate))
-        if required <= candidate:
-            return candidate
-        candidate = required
-
-
-def _open_run_data_retry_limit(run, transition_total):
-    """Fund a data-cap amendment, then a fixed ordinary transition, on this state."""
-    state, previous = run._state, run.limits
-    probe = previous.max_data_bytes + 1
-    names = ExecutionLimits.model_fields.keys() - {"parent_id", "schema_version"}
-    fields = {name: getattr(previous, name) for name in names}
-    fields["max_data_bytes"] = probe
-    proposed = ExecutionLimits(**fields)
-    stored = (state["data_bytes"] + state["array_bytes"]
-              + state["payload_bytes"] + state["external_bytes"])
-    pending = sum(state["pending_output"].values())
-    # A nonzero microsecond gives the maximum width of datetime.now(UTC).
-    amendment = LimitAmendment(
-        sequence=len(state["limit_amendments"]) + 1,
-        recorded_at=datetime(2000, 1, 1, 0, 0, 0, 1, tzinfo=timezone.utc),
-        old=previous, new=proposed,
-        circuit_preparations=state["preparations"] - state["host_preparations"],
-        circuit_attempts=len(state["events"]) - state["host_invocations"],
-        raw_shots=state["shots"], stored_data_bytes=stored,
-        pending_output_bytes=pending, synthesis_work=state["synthesis_work"],
-    )
-    amendment_rows = (("limits", "current", proposed),
-                      ("limit_amendment", str(amendment.sequence), amendment))
-    credit = state["data_sizes"].get(("limits", "current"), 0)
-    total = max(stored + pending, transition_total) - credit + _record_delta_bound(amendment_rows)
-    return _decimal_retry_limit(total, priced_at=probe, occurrences=2, minimum=probe)
-
-
-def _data_retry_diagnostic(run, records, *, data_limit, counted, requested):
-    """Return a sufficient limit, its transition scope, and the matching remedy."""
-    total = counted + requested
-    if any((kind, key) == ("header", "run") for kind, key, _ in records):
-        # A durable creation also saved this cap in run.json, in external_bytes.
-        occurrences = 1 + int(run.directory is not None)
-        needed = _decimal_retry_limit(total, priced_at=data_limit,
-                                      occurrences=occurrences, minimum=data_limit)
-        return (needed, "this Run-initialization transition's envelope",
-                f"Retry creation with limits=ExecutionLimits(max_data_bytes={needed}), "
-                "preserving the other limits; use a new directory for a durable Run.")
-
-    amendments = [value for kind, _, value in records if kind == "limit_amendment"]
-    if amendments:
-        # Only new changes with the proposed cap; old remains a recorded fact.
-        occurrences = sum((kind, key) == ("limits", "current") or kind == "limit_amendment"
-                          for kind, key, _ in records)
-        total += sum(len(value.recorded_at.replace(microsecond=1).isoformat())
-                     - len(value.recorded_at.isoformat()) for value in amendments)
-        needed = _decimal_retry_limit(total, priced_at=data_limit,
-                                      occurrences=occurrences, minimum=data_limit)
-        return (needed, "this limit-amendment transition's envelope",
-                f"Retry run.extend_limits(max_data_bytes={needed}) with the same other "
-                "requested cap increases and no intervening Run changes.")
-
-    # Fixed rows have zero changing cap occurrences. Extending a live Run adds
-    # two separate rows, which must fit before the original transition is retried.
-    if run._state["publication_batch"] is not None:
-        # _flush_publications temporarily counts the batch's new arrays before
-        # _write; a refusal rolls them back and can trigger acquisition recovery.
-        return (total, "this fixed transition's envelope at the counted state shown",
-                "An open-Run amendment and any recovery writes are separate transitions. "
-                "Use a larger limits=ExecutionLimits(max_data_bytes=...) for a new Run, "
-                "or run.extend_limits(max_data_bytes=...) on a recoverable open Run; "
-                "recheck the required capacity if recovery changes its records.")
-    needed = _open_run_data_retry_limit(run, total)
-    return (needed, "a max_data_bytes-only amendment followed by this fixed transition's envelope",
-            f"With the existing records unchanged, {total} bytes covers this transition alone. "
-            f"If you still hold an open Run, use run.extend_limits(max_data_bytes={needed}) and retry "
-            "the transition without other intervening Run changes. A recovery-write refusal "
-            "inside load_run returns no Run to amend, and load_run has no limits override. "
-            "For a new solve, prepare or Run, pass a larger "
-            "limits=ExecutionLimits(max_data_bytes=...). Its earlier transitions are checked separately.")
-
-
 def _cumulative_limit_error(name, limit, noun, used, requested, *, owner="this Run's"):
     """Return the error that refuses ``requested`` more units of ``noun`` when ``used`` count against ``name``.
 
@@ -308,8 +198,7 @@ def _cumulative_limit_error(name, limit, noun, used, requested, *, owner="this R
     For ``max_data_bytes`` the cap reserves nothing and the complete
     requirement is not known at this point, so the message suggests
     ``max(used + requested, 2 * limit, 100_000_000)`` and names the default
-    ``DEFAULT_MAX_BYTES``. The exact transition diagnostics of ``Run._write``
-    are separate.
+    ``DEFAULT_MAX_BYTES``.
     """
     if name == "max_data_bytes":
         suggested = max(used + requested, 2 * limit, 100_000_000)
@@ -441,8 +330,6 @@ class Run:
                     else ("target_for", "admit_batch", "launch", "refresh", "restore_native"))
         if backend is not None and not all(callable(getattr(backend, name, None)) for name in required):
             raise TypeError("backend must provide selected preparation and submission")
-        if progress not in (None, False) and not callable(progress):
-            raise TypeError("progress must be None, False or a callable")
         identity = str(uuid4())
         self._initialize(plan, backend, limits, identity, progress, forecast, allocation)
         # Remote-capable backends need a durable frontier even without an explicit
@@ -662,24 +549,10 @@ class Run:
         try:
             encoded = encode_records(records, max(0, available))
         except JSONBytesExceeded as error:
-            # The admission can stop during its bound traversal, so the
-            # exception carries no byte total; complete the envelope Q_J of the
-            # new rows to name a sufficient limit for the transition or the
-            # amendment and transition that the message names.
-            try:
-                requested = _record_delta_bound(records) + payload_added + reserve_output
-                needed, scope, remedy = _data_retry_diagnostic(
-                    self, records, data_limit=data_limit, counted=counted, requested=requested)
-            except JSONBytesExceeded:
-                raise ValueError(f"{owner} max_data_bytes={data_limit} cannot admit this transition: "
-                                 f"{counted} bytes counted, {data_limit - counted} available, and no "
-                                 "representable complete record envelope was established for the new "
-                                 f"records. {_limit_remedy('max_data_bytes')}") from error
-            raise ValueError(
-                f"{owner} max_data_bytes={data_limit} cannot admit this transition: "
-                f"{counted} bytes counted, {requested} requested by the serialized-data envelope, "
-                f"{data_limit - counted} available; {needed} is sufficient for {scope}. "
-                f"{remedy} Later writes can need more.") from error
+            minimum = payload_added + reserve_output + max(0, available) + 1
+            raise _cumulative_limit_error(
+                "max_data_bytes", data_limit, "serialized-data admission bytes (lower bound)", counted, minimum,
+                owner=owner) from error
         sizes = {(kind, key): size for (kind, key, _), size in zip(encoded.rows, encoded.sizes, strict=True)}
         added = sum(sizes.values()) - replaced
         requested = sum(sizes.values()) + payload_added + reserve_output
@@ -910,23 +783,21 @@ class Run:
             ValueError: If no limit is named, a name is not a limit, or a
                 value is not an integer at least the current one.
         """
-        # The new ``limits`` row and one ``LimitAmendment`` row commit
-        # together. ``_restore`` checks that the amendment chain leads from the
-        # header's initial caps to the current ones.
+        # The new ``limits`` row and one ``LimitAmendment`` row commit together.
         with self._lock:
             self._ensure_open()
             allowed = {name for name in ExecutionLimits.model_fields if name not in {"parent_id", "schema_version"}}
-            if not changes or changes.keys() - allowed:
+            if not changes:
                 raise ValueError("extend_limits requires named execution limits")
-            if any(type(value) is not int or value < getattr(self.limits, name) for name, value in changes.items()):
-                raise ValueError("extend_limits can only preserve or increase positive execution limits")
-            # A no-op amendment must not consume history or change content identity.
             previous = self.limits
-            if all(value == getattr(previous, name) for name, value in changes.items()):
-                return self
             fields = {name: getattr(previous, name) for name in allowed}
             fields.update(changes)
             limits = ExecutionLimits(**fields)
+            if any(type(value) is not int or value < getattr(previous, name) for name, value in changes.items()):
+                raise ValueError("extend_limits can only preserve or increase positive execution limits")
+            # A no-op amendment must not consume history or change content identity.
+            if all(value == getattr(previous, name) for name, value in changes.items()):
+                return self
             state = self._state
             amendment = LimitAmendment(sequence=len(state["limit_amendments"]) + 1,
                 recorded_at=datetime.now(timezone.utc), old=previous, new=limits,
@@ -1962,9 +1833,8 @@ class Run:
         configuration = None if backend is None else backend.model_dump(mode="json")
         if configuration != header["backend"]:
             raise ValueError("saved run requires its original backend configuration")
-        from nwqlib._run_archive import load_provenance, validate_provenance
+        from nwqlib._run_archive import load_provenance
         forecast, allocation = load_provenance(header)
-        validate_provenance(plan, forecast, allocation)
         result = object.__new__(cls)
         initial_limits = ExecutionLimits.model_validate(header["limits"])
         result._initialize(plan, backend, initial_limits, header["run_id"], progress, forecast, allocation)
@@ -1986,23 +1856,16 @@ class Run:
         """Restore the current limits and their amendment chain before larger rows are read.
 
         The current ``max_data_bytes`` becomes the journal's allowance for the
-        rows read after this step. The chain must lead from the header's
-        initial limits to the current ones (``extend_limits``).
+        rows read after this step. The saved amendments populate the Run's
+        limit history.
         """
         state = self._state
         limit_rows = list(journal.rows("limits"))
         if limit_rows:
-            if len(limit_rows) != 1 or limit_rows[0][0] != "current":
-                raise ValueError("saved run requires one current execution-limit record")
             state["limits"] = ExecutionLimits.model_validate(limit_rows[0][1])
             journal.max_bytes = self.limits.max_data_bytes
-        for key, fields, _ in journal.rows("limit_amendment"):
-            amendment = LimitAmendment.model_validate(fields)
-            if key != str(amendment.sequence):
-                raise ValueError("saved limit amendment key differs from its sequence")
-            state["limit_amendments"].append(amendment)
-        from nwqlib.execution import _validate_limit_amendments
-        _validate_limit_amendments(self.limit_amendments, current=self.limits, initial=state["initial_limits"])
+        for _, fields, _ in journal.rows("limit_amendment"):
+            state["limit_amendments"].append(LimitAmendment.model_validate(fields))
 
     def _restore_rng(self, journal):
         """Restore the saved RNG position, so later draws continue the original streams."""
@@ -2066,18 +1929,10 @@ class Run:
         headers = list(journal.rows("checkpoint"))
         saved = {key: fields for key, fields, _ in journal.rows("checkpoint_field")}
         if headers:
-            key, header, _ = headers[0]
-            if (len(headers) != 1 or key != "current" or type(header) is not dict
-                    or set(header) != {"sequence", "fields"} or type(header["sequence"]) is not int
-                    or header["sequence"] < 1 or type(header["fields"]) is not list
-                    or any(type(name) is not str for name in header["fields"])
-                    or len(set(header["fields"])) != len(header["fields"]) or set(header["fields"]) != set(saved)):
-                raise ValueError("saved checkpoint fields differ from their header")
+            _, header, _ = headers[0]
             state["checkpoint_sequence"] = header["sequence"]
             state["checkpoint_fields"] = {name: encode(saved[name], self.limits.max_data_bytes)
                                           for name in header["fields"]}
-        elif saved:
-            raise ValueError("saved checkpoint fields have no header")
 
     def _restore_submissions(self, journal):
         """Restore submissions and attempts, returning the uncertain revisions not yet written.
@@ -2149,8 +2004,6 @@ class Run:
             event = ConsumptionEvent.model_validate(fields)
             if key != event.attempt or event.prepared_id not in state["prepared_artifacts"]:
                 raise ValueError("saved attempt has no original preparation receipt")
-            if event.assessment_id != self._assessment_id(state["prepared_artifacts"][event.prepared_id]):
-                raise ValueError("saved attempt differs from its original forecast association")
             submission = state["submissions"].get(event.submission)
             if event.status == "reserved" and (event.execution == "host_kernel" or submission is None
                     or submission.status in {"uncertain", "failed", "cancelled"}):
@@ -2170,10 +2023,8 @@ class Run:
         attempt (commit 6 of the module docstring), so reopening indexes it
         without repeating those checks. Each row is still validated as an
         ``ObservationChunk`` (its layout and associations, and for counts the
-        count domain), a probability chunk's arrays are not read, each row
-        must be keyed by its chunk's identity and a single-endpoint attempt
-        may have only one observation. Collection is a separate
-        ordinal (commit 7), so the order in which the Method consumed
+        count domain), and a probability chunk's arrays are not read.
+        Collection is a separate ordinal (commit 7), so the order in which the Method consumed
         observations survives independently of completion order, and
         uncollected receipts stay resumable. A submission stays pending while
         an item lacks an observation and its results are not consumed.
@@ -2198,15 +2049,8 @@ class Run:
             # A probability chunk reads its arrays through the Run's store on
             # first use; nothing is hydrated here.
             chunk = ObservationChunk.model_validate(dict(fields, observation=observation))._attach_store(self.artifacts)
-            # Each row is keyed by its chunk's identity (_finish_attempt), and
-            # a single-endpoint attempt publishes one chunk.
-            if key != chunk.content_id:
-                raise ValueError(f"saved observation row {key!r} is not keyed by its chunk identity {chunk.content_id!r}")
             state["receipts"][chunk.acquisition_key] = chunk
             if chunk.point is None:
-                if chunk.attempt in state["by_attempt"]:
-                    raise ValueError(f"saved observation row {key!r} is a second observation of attempt "
-                                     f"{chunk.attempt!r}")
                 state["by_attempt"][chunk.attempt] = chunk
             else:
                 by_attempt_lists.setdefault(chunk.attempt, []).append(chunk)
@@ -2217,8 +2061,6 @@ class Run:
         # schedule order, with each receipt's point order indexed once.
         point_order = {}
         for attempt, chunks in by_attempt_lists.items():
-            if attempt in state["by_attempt"]:
-                raise ValueError(f"saved point observations of attempt {attempt!r} join a single-endpoint observation")
             receipt = state["prepared_artifacts"][chunks[0].prepared_id]
             if receipt.content_id not in point_order:
                 point_order[receipt.content_id] = {point.id: slot for slot, point in
@@ -2227,23 +2069,9 @@ class Run:
             ordered = [None] * len(order)
             for chunk in chunks:
                 slot = order[chunk.point]
-                if ordered[slot] is not None:
-                    raise ValueError("duplicate point in one trajectory acquisition")
                 ordered[slot] = chunk
-            if any(chunk is None for chunk in ordered):
-                raise ValueError("completed trajectory is missing a declared point")
             ordered = tuple(ordered)
-            # The completed event binds this ordered collection (one hash per attempt).
-            index = state["attempt_indices"].get(attempt)
-            if index is None or state["events"][index].observation_id != ObservationView(chunks=ordered).content_id:
-                raise ValueError("saved trajectory point chunks differ from their completed event")
             state["by_attempt"][attempt] = ordered
-        # A completed acquisition published its observation with its event
-        # (commit 6), so a completed event without it is refused, a
-        # trajectory whose point rows are all missing included.
-        for event in state["events"]:
-            if event.status == "completed" and event.observation_id is not None and event.attempt not in state["by_attempt"]:
-                raise ValueError("a completed acquisition is missing its saved observation")
         for key, in journal.connection.execute(
                 "SELECT key FROM records WHERE kind='chunk' AND collected>0 ORDER BY collected"):
             chunk = collected_chunks[key]
@@ -3139,15 +2967,9 @@ def _admit_readout(observation, *, width, classical_width, run, header=None):
     declaration = _json_bound(observation, limit)
     remaining = limit - declaration - run.limits.max_completion_metadata_bytes
     if remaining < 0:
-        needed = declaration + run.limits.max_completion_metadata_bytes
-        raise ValueError(
-            f"the readout declaration envelope ({declaration} bytes) and the completion metadata allowance "
-            f"(max_completion_metadata_bytes={run.limits.max_completion_metadata_bytes}) exceed this "
-            f"Run's max_data_bytes={limit} before native preparation. "
-            f"max_data_bytes={needed} is sufficient for this declaration-and-allowance check only. "
-            f"Use limits=ExecutionLimits(max_data_bytes={needed}) in solve, prepare or Run, or "
-            f"run.extend_limits(max_data_bytes={needed}) on an open Run. "
-            "The amendment, readout payload and cumulative stored-data checks can require more.")
+        raise _cumulative_limit_error(
+            "max_data_bytes", limit, "readout declaration and completion metadata bytes", declaration,
+            run.limits.max_completion_metadata_bytes)
 
     def clause(stride):
         return _data_limit_clause(run, f" less the readout declaration and completion metadata, at {stride} bytes "

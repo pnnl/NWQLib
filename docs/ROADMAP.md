@@ -4,7 +4,7 @@
 
 ## Current capabilities
 
-Every method follows one workflow: a Problem and a Method give a [Plan](glossary.md#plan), from which NWQLib estimates resources, runs the circuits as a [Run](glossary.md#run) and attaches the Result, and saved data is loaded only on request. The [analytical test fixture](contract-specimen/README.md) supplies fixed analytical test values for that workflow and its accounting. It does not establish general method or backend support.
+Every method follows one workflow. A Problem and a Method give a [Plan](glossary.md#plan), from which NWQLib estimates resources, runs the circuits as a [Run](glossary.md#run) and attaches the Result, and saved data is loaded only on request.
 
 | Area | What it does | What has been checked |
 | --- | --- | --- |

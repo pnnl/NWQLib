@@ -135,7 +135,7 @@ Public circuit builders build the circuit the Plan fixed. Resource estimation is
 
 The package root loads its public names lazily, on first access, through PEP 562. The public API is what each module's `__all__` and the [API reference](api/index.md) list. Importing metadata must not load the full scientific stack or any vendor SDK. A native subpackage that the caller imports explicitly may load the SDK it requires.
 
-`tests/test_shared_contracts.py` checks lazy loading and the rejection of unknown names, and `tests/test_foundation_imports.py` checks the currently declared public names. When a public name changes on purpose, these tests change with it.
+`tests/test_shared_contracts.py` checks lazy loading, and `tests/test_foundation_imports.py` checks the currently declared public names. When a public name changes on purpose, these tests change with it.
 
 ### API stability {#api-stability}
 
@@ -295,8 +295,6 @@ Use layered tests:
 - Scientific validation tests: compare algorithm output with classical references on small, named datasets.
 - Cross-implementation equivalence tests: when a subroutine offers more than one implementation, build the same instance through each and check statevector equivalence or the documented trade-offs (see [Choosing among subroutine implementations](#subroutine-implementation-selection)).
 - Regression tests: keep small JSON or NPZ expected outputs only when their origin is documented.
-
-The [analytical test fixture](contract-specimen/README.md) supplies fixed analytical and accounting reference values for the Problem, Method, Plan and Result workflow. It is not a general planner and does not show that any backend works.
 
 <a id="suite-runtime-discipline"></a><a id="platform-dependent-quantities-in-tests"></a><a id="policy-changes-and-their-enforcement-tests"></a>Test size, where external-data validation runs, platform-dependent quantities and keeping a policy in step with its enforcement are covered in [Test runtime and platform variance](MAINTENANCE.md#test-runtime-and-platform-variance).
 

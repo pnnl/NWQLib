@@ -40,13 +40,24 @@ def campaign_plan(
 
 
 @pytest.mark.parametrize("method", ["qcels", "spe", "rfe"])
-def test_qpe_shot_calibration_five_original_seeds(method):
-    """Five original seed cases; this is not an interval-coverage study."""
+def test_qpe_counts_resolve_an_independent_eigenvalue(method):
+    """Each sampled public estimator resolves H|1> = -0.5|1> at its grid and sampling scale."""
     tau = 0.9 * pi / ((3 if method == "spe" else 1) * 0.5)
-    for seed in range(5):
-        theory = solve(campaign_plan(method, seed=seed))
-        shot = solve(campaign_plan(method, seed=seed, execution="quantum"))
-        assert abs(shot.value - theory.value) <= 4 / (tau * sqrt(4096))
+    selected = campaign_plan(method, seed=0, execution="quantum")
+    # QCELS refines minima bracketed by two neighboring cells of [-pi,pi).
+    # SPE takes the first crossing on [-pi/2,pi/2), and RFE returns the
+    # nearest Fourier cell on this single-mode seeded schedule.
+    if method == "qcels":
+        grid_window = 4*pi/(tau*selected.method.grid_size)
+    elif method == "spe":
+        grid_window = pi/(tau*selected.method.grid_size)
+    else:
+        grid_window = pi/(tau*selected.method.num_frequencies)
+    # This fixed sampling allowance is a regression window for the fixture,
+    # not an estimator confidence interval or a coverage guarantee.
+    sampling_window = 4/(tau*sqrt(4096))
+    result = solve(selected)
+    assert abs(result.value + .5) <= grid_window + sampling_window
 
 
 def test_existing_host_resolution_recipes():

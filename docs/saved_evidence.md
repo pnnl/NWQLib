@@ -55,7 +55,7 @@ print(sorted(metadata))
 ['data', 'format', 'metadata_validation', 'result', 'selection']
 ```
 
-Both `read_report` and `load_result` reject an invalid current-format file, a saved record whose recomputed content hash differs, and a Result that does not match its observations or its forecast, before loading Method code or binary payloads. The dictionary that `read_report` returns lists these checks under `metadata_validation`.
+Both `read_report` and `load_result` check the current format, common record schemas and content hashes, and the Result's association with its observations before loading Method code or binary payloads. They also check the canonical `Plan` identity when the Method supplies a canonical Plan description. The dictionary that `read_report` returns lists these checks under `metadata_validation`.
 
 ## Saved folders are read-only
 
@@ -66,8 +66,8 @@ Treat a saved Result or Run folder as read-only. These checks run on saved data:
 | The format version, and the content hash of the `Plan` and of every record saved with its hash | Every load |
 | The header of every backend input array and every saved Result array against its declaration (shape, encoding, byte count and contiguity). The check reads no values. A mismatch is rejected, so a mismatched file is never read as data of the wrong shape | Every load |
 | Backend state and operator headers against their representation, dimensions and encoding. Real, complex, compact and sparse storage is kept without normalization, densification or re-ingestion | Every load |
-| The Method's archive hook. For example, the LCHS hook compares the recomputed content hashes of its saved `LCHSData` parameters and PREP tensors with the records the `Plan` chose, and it uses the periodic Strang payload as saved ([LCHS guide](algorithms/lchs.md#explicit-checks-and-saved-results)) | Every load |
-| The Result against its Method's `validate_plan`, the preparation records against the construction, and the Result against its observations | Every load |
+| The Method's archive hook reconstructs its selected inputs and saved computation data. For example, LCHS restores its selected `LCHSData` parameters, PREP tensors and periodic Strang payload ([LCHS guide](algorithms/lchs.md#explicit-checks-and-saved-results)) | Every load |
+| The Result against its Method's `validate_plan` and its observations | Every load |
 | A counts observation requests at most `2**63 - 1` shots, the int64 maximum of the weights that `ObservationChunk.histogram()` returns, and each of its counts and their exact total are at most its requested shots | When the observation is created and when it is loaded |
 | The joins of observations to their preparation records and attempts, including the unit bound of exact probabilities | When an observation is created and before a Result is saved. Loading does not repeat them |
 | QHD's observed masses against the roundoff window of their executions (`validate_analysis_masses`) | When QHD analyzes them, not when a Result is loaded |
@@ -77,7 +77,6 @@ Loading does not detect:
 
 - Changed array values, sparse indices or digests of arrays and backend inputs. Values are not read and digests are not recomputed.
 - Edits to other saved data, such as the values of backend input arrays and of Result arrays, QPY circuit files, Method caches such as QPE spectra or ADAPT vectors, other saved construction data of the Methods, and the rows of `run.sqlite`. An edited value there can change a later solve, analysis, verification or continuation while the `Plan`'s content hash stays the same.
-- An edit made together with a recomputed hash. ADAPT's saved compiler rows carry a content hash of the accepted generator, route and blocks, checked when the `Plan` archive is loaded and when verification or continuation adopts a Result's or Run's rows. It is a consistency digest rather than an authentication, as are the content hashes of the records.
 
 The folder is local execution data, not an authenticated scientific record. A missing trajectory point makes its dependent quantity incomplete, and loading and analysis never replay the shared prefix to supply it. Validity checks do not replay inference or produce missing numerical evidence. To change an input or a scientific setting, build a new Problem or Method and a new `Plan`.
 

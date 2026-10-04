@@ -78,10 +78,6 @@ def test_populated_concrete_plan_conformance_and_revision_identity():
         fields["schema_version"] = 0
         with pytest.raises(ValueError):
             owner.model_validate(fields)
-        fields = value.model_dump(mode="json")
-        fields["declaration"] = "an undeclared field must not be dropped"
-        with pytest.raises(ValueError, match="undeclared"):
-            owner.model_validate(fields)
 
 
 def test_conformance_witness_detects_mutable_hidden_and_lossy_values():
@@ -217,13 +213,13 @@ def test_admitted_records_are_embedded_by_reference_without_repeating_admission(
     class Labelled(Holder):
         note: str = ""
 
-    with pytest.raises(ValueError, match="undeclared record fields for Holder: 'note'"):
+    with pytest.raises(ValueError):
         Holder.model_validate(Labelled(program=program))
 
     class Parent(Record):
         child: Holder
 
-    with pytest.raises(ValueError, match="undeclared record fields for Holder: 'note'"):
+    with pytest.raises(ValueError):
         Parent(child=Labelled(program=program))
 
     class Plain(Holder):

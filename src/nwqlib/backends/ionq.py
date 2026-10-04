@@ -73,11 +73,11 @@ def ionq_decode_bytes(outcomes, qubits, width):
     remap_counts, NumPy's unique implementation, dtype widths or lifetimes
     change. The helper does constant work and allocates no arrays.
     """
-    if type(outcomes) is not int or outcomes <= 0:
+    if outcomes <= 0:
         raise ValueError("outcomes must be a positive integer")
-    if type(qubits) is not int or not 0 <= qubits <= 64:
+    if not 0 <= qubits <= 64:
         raise ValueError("qubits must be an integer between 0 and 64")
-    if type(width) is not int or not 0 <= width <= 64:
+    if not 0 <= width <= 64:
         raise ValueError("width must be an integer between 0 and 64")
     distinct = min(outcomes, 1 << min(qubits, width))
     return 57 * outcomes + 8 * distinct

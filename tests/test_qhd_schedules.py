@@ -212,7 +212,9 @@ def test_integrated_rule_is_exact_when_the_hamiltonians_commute(schedule, steps)
             # neighbors per axis and no potential spread, is A_k within 64U, which covers the small assembly
             # charge 2 Q_k (method._schrodinger_step_bounds).
             dt = total_time / steps
-            norms = [norm for norm, _rows in owner._host_generator_norms(result.plan)]
+            r = result.plan.reconstruction
+            norms = [norm for norm, _rows in owner._generator_norms(
+                method.theory_flavor, method, owner._grid(result.plan), r.support_values, r.steps, r.step_weights)]
             for k, norm in enumerate(norms):
                 part = _integral(a, k * dt, (k + 1) * dt, scale)
                 assert abs(norm - part) <= 64 * U * part
@@ -328,19 +330,12 @@ def test_integrated_product_applies_the_whole_step_integrals(schedule, order):
         assert {"floating_point", "product_formula", "rotation_pruning"} <= set(sources)
 
 
-def test_a_refused_potential_integral_names_a_remedy_that_plans():
-    """An integrated cubic potential integral above the binary64 range names a shorter total_time, which plans.
-
-    ``b(t) = 2 t**3`` makes the one step's potential integral ``T**4/2``,
-    about 8e412 at T = 2e103, while its kinetic integral stays near 2.4. The
-    refusal names that integral and, because b is nondecreasing, a shorter
-    total_time (``schedules._potential_remedy``). Following it to T = 1e70,
-    whose integral 5e279 and average 5e209 are normal, plans.
-    """
+def test_potential_integral_requires_a_finite_value():
+    """The integrated cubic potential T**4/2 must be finite before a Plan can use it."""
     x = sp.Symbol("x")
     problem = Optimization(objective=sp.Integer(0), variables=(x,), bounds=((0.0, 1.0),))
     method = QHD(num_grid_points=4, num_steps=1, total_time=2e103, schedule=CubicSchedule(s=1.0),
                  coefficient_rule="integrated", initial_state=UniformState(), theory_flavor="split_step")
-    with pytest.raises(ValueError, match="potential integral over step 0 .*Choose a shorter total_time"):
+    with pytest.raises(ValueError, match="potential integral over step 0"):
         plan(problem, method=method, execution="classical", seed=7)
     assert plan(problem, method=method.revise(total_time=1e70), execution="classical", seed=7)

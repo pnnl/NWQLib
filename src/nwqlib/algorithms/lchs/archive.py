@@ -212,18 +212,12 @@ def load(saved,files):
     coefficient plan, as at planning. A source Plan binds None there, because
     its execution does not use that homogeneous plan.
 
-    Loading checks the format and the base index of each inverse or controlled
-    copy. It recomputes selected_identity of LCHSData and compares it with the
-    SELECT record or the host kernel input. It also recomputes
-    preparation_identity of each saved PREP tensor payload and compares it with
-    the PREP record, and the construction limits saved in that payload must
-    equal the Method's. The periodic Strang payload is used as saved. Loading never reselects a grid,
-    fits phases or solves an eigensystem.
+    Loading checks the format and restores each inverse or controlled copy
+    from its saved base index. The periodic Strang payload is used as saved.
+    Loading never reselects a grid, fits phases or solves an eigensystem.
     """
     if saved.get('format')!='lchs/9':
-        raise ValueError(f"unsupported LCHS archive format {saved.get('format')!r}. "
-                         "This NWQLib reads only 'lchs/9'. Open it with the NWQLib release that "
-                         "wrote it, or plan and run the problem again.")
+        raise ValueError(f"unsupported LCHS archive format {saved.get('format')!r}")
     method = LCHS.model_validate(saved['method'])
     plan = files.read_plan(saved['plan'],problem=files.read_problem(saved['problem']),method=method,
         output=files.read_output(saved['output']),reconstruction=LCHSReconstruction.model_validate(saved['plan']['reconstruction']))
@@ -238,19 +232,12 @@ def load(saved,files):
             input=plan.problem.initial_state,parity=None)
         for record,item in zip(plan.construction.selections,saved['selected'],strict=True):
             if 'base' in item:
-                if type(item['base']) is not int or not 0<=item['base']<len(blocks):
-                    raise ValueError('saved inverse/control needs its preceding selected base')
                 block = SelectedBlock.bind(record,base=blocks[item['base']])
             else:
                 key = item['constructor']
                 module,function = _CONSTRUCTORS[key]
                 if key=='tensor_prep':
                     payload = data.read(item['payload'])
-                    from .quantum import preparation_identity, target_identity
-                    if preparation_identity(target_identity(payload[0]),*payload[1:3])!=record.coefficient_selection_id:
-                        raise ValueError('saved PREP tensor, cores or layer settings differ from their selected identity')
-                    if payload[3:]!=(method.max_bytes,method.max_svd_work):
-                        raise ValueError('saved PREP construction limits differ from the Method')
                 else:
                     payload = payloads[key]
                 block = SelectedBlock.bind(record,payload=payload,constructor=getattr(import_module(module),function))
@@ -259,16 +246,4 @@ def load(saved,files):
         from .host import bind_host
         host_data = None if plan.reconstruction.mode in ('initial','zero') else selected
         blocks = [bind_host(plan,host_data)]
-    if type(selected).__name__=='LCHSData':
-        from .parameters import selected_identity
-        identity = selected_identity(selected,plan.problem,method)
-        if plan.construction.selections:
-            records = [block.record for block in blocks if block._constructor is not None
-                and block.record.signature.target.name=='lchs.select']
-            if len(records)!=1 or records[0].coefficient_selection_id!=identity:
-                raise ValueError('saved LCHS numerical parameters differ from the selected SELECT')
-        else:
-            inputs = plan.construction.kernels[0].inputs
-            if not any(ref.identity==identity and ref.representation=='selected_lchs_parameters' for ref in inputs):
-                raise ValueError('saved LCHS numerical parameters differ from the selected host kernel')
     return plan._bind(blocks=tuple(blocks),**native)

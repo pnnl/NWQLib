@@ -422,12 +422,6 @@ def test_level_file_save_and_load_are_admitted_against_the_level_max_bytes(tmp_p
     again = refinement._LevelTables.load(target, box, qhd=QHD(max_bytes=limit), specs=specs, held_bytes=0)
     assert [t.content_id for t in again.tables] == [t.content_id for t in stored.tables]
     assert (again.offset, again.evaluations) == (stored.offset, stored.evaluations)
-    path = target.parent / "tables.json"
-    older = {**json.loads(path.read_text()), "format": "qhd.refinement_level_tables/2"}
-    path.write_text(json.dumps(older))
-    with pytest.raises(ValueError, match=r"format 'qhd\.refinement_level_tables/2' .* reads only "
-                                         r"'qhd\.refinement_level_tables/3'"):
-        refinement._LevelTables.load(target, box, qhd=QHD(), specs=specs, held_bytes=0)
     # J_v3 = 77 + T(specs) + D(evaluations) + R(offset) on the d = 2 fixture of three tables and
     # 24 evaluations, with a null or -5/2 offset (refinement._level_json_bound).
     fixture = (((0,), 4), ((1,), 4), ((0, 1), 16))
@@ -436,13 +430,7 @@ def test_level_file_save_and_load_are_admitted_against_the_level_max_bytes(tmp_p
 
 
 def test_resume_refuses_another_backend_another_layer_and_a_second_controller(tmp_path, monkeypatch):
-    """Resume raises before planning, preparing or committing for three caller errors.
-
-    A backend other than the one the directory stores would give the new Runs another population, a directory
-    of the other layer needs the other resume function, and a second process continuing the same directory
-    at the same time would rewrite the outer record after the first. The run is interrupted while round 0
-    plans, so no Run exists whose own check could refuse the backend.
-    """
+    """Resume checks the backend, controller layer and exclusive lock before new work."""
     with patch("nwqlib.scientist._plan_with_streams", side_effect=KeyboardInterrupt("stopped while round 0 plans")):
         with pytest.raises(KeyboardInterrupt):
             _solve(execution="quantum", shots=64, directory=tmp_path / "a")
@@ -457,31 +445,8 @@ def test_resume_refuses_another_backend_another_layer_and_a_second_controller(tm
         resume_augmented_lagrangian(tmp_path / "a", backend=AerBackend.from_noise_model(_noise_model()),
                                     progress=False)
     assert (tmp_path / "a" / "controller.json").read_bytes() == record and not (tmp_path / "a" / "iterations").exists()
-    with pytest.raises(FileNotFoundError, match="controller.json.*constrained.json.*resume_augmented_lagrangian") as caught:
-        load_augmented_lagrangian(tmp_path / "a")
-    assert "save on a returned result" in str(caught.value)
-    assert isinstance(caught.value.__cause__, FileNotFoundError)
-    with pytest.raises(FileNotFoundError) as missing:
-        load_augmented_lagrangian(tmp_path / "missing")
-    assert "durable run directory" not in str(missing.value)
     with pytest.raises(ValueError, match="continue it with resume_box_refinement"):
         resume_augmented_lagrangian(tmp_path / "refined", backend=None)
-    # Each loader names the function that continues a controller directory, and the augmented-Lagrangian
-    # loader also names the standalone loader for the result that resume returns.
-    from nwqlib.algorithms.qhd import load_box_refinement
-
-    with pytest.raises(FileNotFoundError, match="durable box-refinement directory.*resume_box_refinement.*"
-                                               "load_box_refinement"):
-        load_augmented_lagrangian(tmp_path / "refined")
-    with pytest.raises(FileNotFoundError, match="durable box-refinement directory containing controller.json, "
-                                               "not a saved box refinement.*resume_box_refinement") as caught:
-        load_box_refinement(tmp_path / "refined")
-    assert "call save on its returned result" in str(caught.value)
-    with pytest.raises(FileNotFoundError, match="durable augmented-Lagrangian directory.*resume_augmented_lagrangian"):
-        load_box_refinement(tmp_path / "a")
-    with pytest.raises(FileNotFoundError) as missing:
-        load_box_refinement(tmp_path / "missing")
-    assert "durable" not in str(missing.value)
     from nwqlib.algorithms.qhd._durable import Directory
 
     with Directory.open(tmp_path / "a", "constrained"), pytest.raises(BlockingIOError):

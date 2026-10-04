@@ -2929,14 +2929,12 @@ class ExpectationMethod(Method):
         """Dispatch reconstruction from the acquired readout kind while preserving its
         statistical assumptions.
         """
-        if settings.keys() - {"inference"}:
-            raise ValueError("unsupported Expectation analysis setting")
         inference = settings.get("inference", self.inference)
         if not isinstance(inference, BinaryInferenceOptions):
             raise TypeError("inference must be BinaryInferenceOptions")
         if self.mitigation is not None and inference.method == "beta":
             raise ValueError("binary mitigation has no Beta posterior model")
-        if settings and not plan.reconstruction.settings:
+        if "inference" in settings and not plan.reconstruction.settings:
             raise ValueError("binary inference requires existing measured counts")
         if (
             type(plan) is not Plan
@@ -3028,12 +3026,11 @@ class ExpectationMethod(Method):
 
         A classical Plan recomputes the observable's binary exponent from the
         stored operator and requires it to equal the saved one before binding
-        the host kernel. A quantum Plan checks every stored preparation
-        payload against its selected block record and rebinds the blocks.
+        the host kernel. A quantum Plan rebinds the selected blocks to their
+        stored preparation payloads.
         Raises ValueError for another format or a changed exponent.
         """
         from nwqlib.blocks.selection import _preparation_circuit, _primitive_circuit
-        from nwqlib.blocks._archive import validate_preparation_binding
 
         if saved.get("format") != "expectation/5":
             raise ValueError(
@@ -3064,11 +3061,6 @@ class ExpectationMethod(Method):
                               operator_exponent=exponent)
         inputs = {name: files.read_state(value) for name, value in saved["inputs"].items()}
         constructors = dict(preparation=_preparation_circuit, primitives=_primitive_circuit)
-        for record, name, constructor in zip(
-            plan.construction.selections, saved["payloads"], saved["constructors"], strict=True
-        ):
-            if name is not None:
-                validate_preparation_binding(record, inputs[name], constructors[constructor])
         blocks = tuple(
             SelectedBlock.bind(
                 record,

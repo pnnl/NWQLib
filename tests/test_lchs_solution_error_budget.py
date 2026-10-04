@@ -247,8 +247,6 @@ def test_stage_bound_suppression_and_invalid_inputs() -> None:
     with pytest.raises(ValueError, match="selected path"):
         _circuit(unusable_stages={"qsp_synthesis"})
     for bounds in (_classical, _circuit):
-        with pytest.raises(TypeError, match="LCHSApplicationRecord"):
-            bounds(applications=({"weight": 1.0},))
         for stages in ([], ["unregistered_stage"]):
             with pytest.raises(ValueError, match="registered unbudgeted_error_stages"):
                 bounds(raw_record={**INCOMPLETE_PROFILE, "unbudgeted_error_stages": stages})

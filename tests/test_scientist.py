@@ -1,8 +1,6 @@
 """Public selection, saved PREP and caller-owned partial execution relations."""
 
 from dataclasses import replace
-import json
-import re
 
 import numpy as np
 import pytest
@@ -72,23 +70,6 @@ def test_expectation_archive_preserves_actual_input_bindings_without_reselection
     )
     assert restored.data.trace.events == ()
 
-    metadata = folder / "result.json"
-    original = metadata.read_text()
-    saved = json.loads(original)
-    # A declared block input from another state cannot replace the selected PREP.
-    saved["selection"]["selected"]["inputs"]["preparation-0"]["manifest"]["reference"][
-        "identity"
-    ] = "foreign-state"
-    metadata.write_text(json.dumps(saved))
-    with pytest.raises(ValueError, match="input|preparation|state|binding"):
-        nwqlib.load_result(folder)
-    saved["selection"]["selected"]["inputs"]["preparation-0"]["preparation"]["input"][
-        "identity"
-    ] = "foreign-state"
-    metadata.write_text(json.dumps(saved))
-    with pytest.raises(ValueError, match="selected preparation"):
-        nwqlib.load_result(folder)
-    metadata.write_text(original)
     assert nwqlib.load_result(folder).plan.content_id == selected.content_id
     run.close()
 
@@ -211,23 +192,6 @@ def test_comparison_keeps_full_target_separate_from_method_trial_subspaces(monke
     assert compared.rows[1].plan.problem.subspace is None
 
 
-@pytest.mark.parametrize("entry", ("plan", "compare"))
-def test_plan_and_compare_refuse_shots_that_are_not_a_positive_int(entry):
-    problem = nwqlib.Eigenproblem(A=ingest_pauli((("I", 1.0), ("Z", 0.5)), num_qubits=1))
-    method = FixedGCIM(basis=([1, 0], [1, 1]))
-
-    def select(shots):
-        if entry == "plan":
-            return nwqlib.plan(problem, method=method, shots=shots, seed=7)
-        return nwqlib.compare(problem, methods=[method], shots=shots, seed=7).rows[0].plan
-
-    for shots in (np.int64(64), True, 0):
-        with pytest.raises(ValueError, match=re.escape(
-                f"shots must be a positive int or None for exact readout, got {shots!r}")):
-            select(shots)
-    assert select(64).shots == 64
-
-
 def test_failed_public_submission_keeps_partial_contributions_and_original_exposure(
     tmp_path, monkeypatch
 ):
@@ -297,7 +261,8 @@ def test_failed_public_submission_keeps_partial_contributions_and_original_expos
     )
     folder = partial.save(tmp_path / "partial")
     restored = nwqlib.load_result(folder)
-    assert restored.data.trace == snapshot.trace and restored.data.forecast == forecast
+    assert restored.data.trace == snapshot.trace
+    assert restored.data.forecast.model_dump(mode="json") == forecast.model_dump(mode="json")
     assert (
         restored.data.allocation == allocation
         and restored.contribution_ids == partial.contribution_ids

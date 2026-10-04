@@ -28,19 +28,14 @@ from .solution_error_budget import psd_recovery_exponent, psd_recovery_scale
 def target_identity(target):
     """Return the SHA-256 identity of the normalized PREP tensor, its dtype, shape and C-order bytes.
 
-    It is the one pass over the vector at each lifecycle stage: planning
-    binds it as the PREP input and derives preparation_identity from it, and
-    archive loading recomputes it once for the same comparison.
+    Planning binds it as the PREP input and derives preparation_identity
+    from it.
     """
     return _digest("mps.normalized.C-order", (len(target),), (target,))
 
 
 def preparation_identity(identity,decomposition,layers):
-    """Bind the tensor's identity (target_identity), chosen cores and layered synthesis settings.
-
-    Archive loading recomputes this digest and rejects a PREP payload whose
-    tensor, cores or layer count differ from the selected record.
-    """
+    """Bind the tensor's identity (target_identity), chosen cores and layered synthesis settings."""
     settings = None if decomposition is None else (
         decomposition.num_qubits,decomposition.original_dimension,decomposition.bond_dimensions,
         decomposition.max_bond_dim,decomposition.threshold,decomposition.discarded_weight,

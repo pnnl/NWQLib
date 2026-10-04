@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-from dataclasses import fields
 from pathlib import Path
 
 import numpy as np
@@ -12,7 +11,7 @@ from qiskit import QuantumCircuit
 from qiskit.circuit.library import PauliEvolutionGate, UnitaryGate
 from qiskit.quantum_info import Operator, SparseObservable, SparsePauliOp
 
-from nwqlib.subroutines.block_encoding import BlockEncoding, block_encoding_top_left
+from nwqlib.subroutines.block_encoding import block_encoding_top_left
 
 
 def lchs_quadrature_options() -> dict[str, object]:
@@ -56,27 +55,6 @@ def _encoded_block(circuit: QuantumCircuit, num_ancillas: int) -> np.ndarray:
     """Return the all-zero-ancilla block encoded by ``circuit``."""
 
     return block_encoding_top_left(Operator(circuit).data, num_ancillas=num_ancillas)
-
-
-_BLOCK_ENCODING_METADATA_MIRRORS = frozenset(
-    {
-        f"block_encoding_{field.name}"
-        for field in fields(BlockEncoding)
-        if field.name not in {"circuit", "metadata"}
-    }
-    | {
-        # Historical spellings that do not follow the field-name prefix.
-        "block_encoding_ancillas",
-        "block_encoding_error",
-        "resolved_block_encoding_implementation",
-    }
-)
-
-
-def assert_no_block_encoding_metadata_mirrors(record) -> None:
-    """Pin top-level BlockEncoding fields as the only structural owners."""
-
-    assert _BLOCK_ENCODING_METADATA_MIRRORS.isdisjoint(record.metadata)
 
 
 REPO_ROOT = Path(__file__).resolve().parents[1]

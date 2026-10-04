@@ -20,7 +20,6 @@ Program built here.
 from dataclasses import dataclass
 from math import sqrt
 import numpy as np
-from pydantic import ValidationError
 from nwqlib.blocks.encoding import construct_block_encoding
 from nwqlib.blocks.records import (
     BlockSemantics,
@@ -34,14 +33,12 @@ from nwqlib.core.planning import Plan, Experiment, ObservationPoint, Observation
 from nwqlib.core.records import Float64, InputRef, Source
 from nwqlib.evidence import Evidence
 from nwqlib.ir import (
-    AdmissionLimits,
     Allocate,
     Argument,
     Binding,
     BlockCall,
     BlockSignature,
     ClassicalValue,
-    CoherentRegion,
     Constant,
     Definition,
     ExprRef,
@@ -51,16 +48,13 @@ from nwqlib.ir import (
     MetadataRef,
     Parameter,
     PortMap,
-    Program,
     QuantumPort,
     Register,
     Release,
-    Repeat,
     Sequence,
     Setting,
 )
-from nwqlib.ir.expressions import walk_kept
-from nwqlib.ir.validation import AdmissionStepsExceeded, _Admission, admission_refusal, limit_exceeded, steps_exceeded
+from nwqlib.ir.validation import admitted_program
 from nwqlib.operators.access import _check_bytes
 from nwqlib.problems.inputs import PhysicalScale, compose_recovery
 from nwqlib.problems.records import (
@@ -663,221 +657,6 @@ def _counts_program_bytes(rec):
     return 1024 * (len(pairs) + len(layouts) + sum(map(len, layouts)))
 
 
-def _admitted_program(method, **fields):
-    """Build the QLS Program under ``method.max_admission_steps``, or a Program to measure.
-
-    Program construction runs the shared IR admission check
-    (``ir/validation.py``) with ``AdmissionLimits(max_steps=...)`` set to
-    ``max_admission_steps``. When the Program exceeds that ceiling, the same
-    fields are admitted again with the larger of that value and ``max_work``
-    as the ceiling. That Program is used only to measure the complete
-    requirement (``_check_admission``), which then refuses naming it. When
-    this second construction is refused too, the refusal says that the
-    requirement exceeds that larger ceiling, a lower bound.
-    """
-    limit = method.max_admission_steps
-    try:
-        return Program(**fields, limits=AdmissionLimits(max_steps=limit))
-    except ValidationError as error:
-        exceeded = limit_exceeded(error)
-        if exceeded is None:
-            raise
-        if not isinstance(exceeded, AdmissionStepsExceeded):
-            raise admission_refusal("QLS.max_admission_steps", exceeded, subject="the QLS Program") from error
-        refusal = error
-    ceiling = max(limit, method.max_work)
-    if ceiling > limit:
-        try:
-            return Program(**fields, limits=AdmissionLimits(max_steps=ceiling))
-        except ValidationError as error:
-            if steps_exceeded(error) is None:
-                raise
-    raise ValueError(
-        f"the QLS Program exceeds max_admission_steps={limit}, and its Program validation alone needs "
-        f"more than {ceiling} units, the most this refusal measures (max_work); that is a lower bound. "
-        "Raise max_admission_steps only for a deliberately large Program"
-    ) from refusal
-
-
-def _lowering_admission_work(admission, program):
-    """Charge ``admission`` with the admission counters of native lowering, without native construction.
-
-    ``admission`` has run ``admitted()`` on ``program``. The walk mirrors the
-    counters of ``blocks/lowering.py`` (``_lower_qiskit``) and nothing else:
-    the root binding map, the first selected setting's bindings of a root
-    MeasurementBatch, the binding context, one width reading per register
-    and classical bit value, each reachable Repeat count, and two units per
-    argument of each reachable BlockCall. Definition IDs are memoized as the
-    lowering count walker memoizes them, and a zero-count Repeat body is not
-    reached. It imports no SDK. Its law is ``W_lower`` of ``_check_admission``.
-    """
-    binding = admission.binding_map(program.bindings)
-    root = admission.nodes[program.root]
-    if isinstance(root, MeasurementBatch):
-        binding.update(admission.binding_map(root.settings[0].bindings))
-    context = admission.expressions(binding)
-    for register in program.registers:
-        admission.integer(register.width, context, "register width")
-    for register in program.classical:
-        if register.dtype == "bits":
-            admission.integer(register.width, context, "classical width")
-    visited = set()
-
-    def visit(name):
-        if name in visited:
-            return
-        visited.add(name)
-        node = admission.nodes[name]
-        if isinstance(node, Sequence):
-            for child in node.children:
-                visit(child)
-        elif isinstance(node, (Repeat, CoherentRegion, MeasurementBatch)):
-            count = admission.integer(node.count, context, "Repeat") if isinstance(node, Repeat) else 1
-            if count:
-                visit(node.body)
-        elif isinstance(node, BlockCall):
-            admission.tick(2 * len(node.arguments))
-
-    visit(program.root)
-
-
-def _selected_requirement(template, construction, experiments, cap):
-    """Return ``(R, complete)`` for the selected Programs of ``experiments``, as ``_check_admission`` states.
-
-    Each experiment's Program is selected as ``Plan._selected_program``
-    selects it (``select_experiment`` with the template's identity as parent
-    for a batch experiment, the template itself otherwise). Each count runs on
-    its own admission object whose ``step_limit`` is ``cap``. When a count
-    exceeds ``cap`` the result is the largest count reached and ``complete``
-    is False, a lower bound.
-    """
-    from nwqlib._prepared_execution import _admitted_readout, _selected_body_issues
-    from nwqlib.ir.selection import select_experiment
-
-    requirement, complete, setup = _kept_slots(template), True, None
-    requirement = max(requirement, _readiness_work(template))
-    for experiment in experiments:
-        if experiment.batch is None:
-            selected = construction
-        else:
-            if setup is None:
-                setup = _Admission(template)
-                setup.setup()
-            program = select_experiment(setup, experiment.batch, experiment.setting_index, {}, bindings=(),
-                                        parent_id=template.content_id)
-            signatures = {signature.name for signature in program.signatures}
-            selected = SelectedConstruction(
-                parent_id=construction.content_id, program=program,
-                selections=tuple(item for item in construction.selections if item.signature.name in signatures))
-        program = selected.program
-        requirement = max(requirement, _kept_slots(program), _readiness_work(program))
-        for lowering in (False, True):
-            admission = _Admission(program)
-            admission.admitted().require_ready()
-            admission.step_limit = cap
-            try:
-                if lowering:
-                    _lowering_admission_work(admission, program)
-                else:
-                    qwidths, _, _, observation = _admitted_readout(admission, experiment, selected)
-                    if observation.kind == "trajectory":
-                        _selected_body_issues(selected, admission, observation, dict(qwidths))
-            except ValueError:
-                if admission.steps <= cap:
-                    raise
-                complete = False
-            requirement = max(requirement, admission.steps)
-    return requirement, complete
-
-
-def _kept_slots(program):
-    """Count the kept field slots of ``program`` (S of ``_check_admission``) with one ``walk_kept`` traversal."""
-    slots = 0
-
-    def count(amount):
-        nonlocal slots
-        slots += amount
-
-    for _ in walk_kept(program, count):
-        pass
-    return slots
-
-
-def _readiness_work(program):
-    """Return the stored admission work of ``program`` (A of ``_check_admission``)."""
-    readiness = program.check_readiness()
-    return readiness.expression_evaluations + readiness.lifecycle_steps
-
-
-def _check_admission(method, construction, experiments):
-    """Refuse at planning unless ``max_admission_steps`` admits validation, preparation and lowering.
-
-    Statement. The requirement ``max(kept_slots, readiness_work)`` admits
-    only Program construction. A later ``_Admission.admitted()`` starts its
-    counter at the stored readiness total. Width evaluation, additional
-    binding contexts and reachable lowering arguments are then charged on
-    top. Preparation and lowering create separate admission objects, so take
-    their maximum, not their sum. Let S be the kept field slots and A the
-    stored readiness work. For the selected Program, preparation pays::
-
-        W_prepare = A + 4b_root + N_qreg + N_bitreg
-                    + I_batch(4b_root+1) + E_newcontexts + T_body,
-
-    where ``binding_map`` charges 3 per binding, ``expressions`` charges one
-    per binding plus one per newly evaluated expression, ``integer`` charges
-    one per width/count, and ``T_body`` is any selected-trajectory structural
-    inspection work on that same object. For a plain nontrajectory readout
-    ``T_body=0``. A root context already cached by ``admitted()`` has no new
-    expression pass. Lowering pays::
-
-        W_lower = A + 3b_root + 3b_setting + b_merged + E_newcontexts
-                  + N_qreg + N_bitreg + N_reachable_Repeat
-                  + 2 sum_reachable_BlockCall len(arguments).
-
-    The count walker memoizes definition IDs, so repeated dynamic execution
-    does not multiply these admission ticks. Zero-count Repeat bodies are not
-    reached. A root ``MeasurementBatch`` contributes its first selected
-    setting's bindings. Every additional native view lowering starts its own
-    object and belongs in the maximum. ``max_operations`` and synthesis work
-    remain separate limits. The complete admitting ceiling is::
-
-        R = max(S, A, W_prepare, W_lower, W_each_additional_view).
-
-    The law is determined from the selected Program and bindings, without
-    constructing a native circuit. At the QLS guide's exact 2-by-2 fixture, S=913, A=914 and W_lower=940, so 939 admits
-    Program construction but not lowering. The 940 value belongs to that
-    selected exact fixture; other outputs and selected Programs need their
-    own application of the law.
-
-    Implementation. The counts are measured, not evaluated from the
-    formula: ``_admitted_readout`` and ``_selected_body_issues`` are the
-    calls preparation makes, and ``_lowering_admission_work`` mirrors the
-    lowering counters. QLS readouts declare no views, so no view term
-    arises. The measurement runs on each selected Program, not only on the
-    template, and also when the template is admitted, because a ceiling
-    between A and R admits construction and refuses preparation or lowering.
-    Each count is capped by the larger of ``max_admission_steps`` and
-    ``max_work``; a count stopped there is reported as a lower bound, not as
-    a sufficient value, and always refuses.
-    """
-    limit = method.max_admission_steps
-    cap = max(limit, method.max_work)
-    requirement, complete = _selected_requirement(construction.program, construction, experiments, cap)
-    if requirement <= limit and complete:
-        return
-    if not complete:
-        raise ValueError(
-            f"the selected QLS construction needs more than max_admission_steps={limit} through Program "
-            f"validation, preparation and lowering: the measurement stopped at {cap} (the larger of that value and max_work) "
-            f"after {requirement} units, a lower bound. Raise max_admission_steps only for a deliberately "
-            "large Program")
-    raise ValueError(
-        f"The selected QLS construction needs `max_admission_steps` of at least {requirement} through "
-        f"Program validation, preparation and lowering. Set `QLS(max_admission_steps={requirement})` or "
-        "revise that Method field. This changes the metadata-work allowance, not the selected quantum "
-        "operations.")
-
-
 def _program(method, problem, output, shots, rec, base, preparation, terms=None):
     """Emit the one shared actual composition, including every valued projector.
 
@@ -1327,8 +1106,8 @@ def _program(method, problem, output, shots, rec, base, preparation, terms=None)
         )
         for i in range(rec.width)
     )
-    program = _admitted_program(
-        method,
+    program = admitted_program(
+        "QLS.max_admission_steps", method.max_admission_steps,
         root=root,
         definitions=tuple(Definition(id=name, node=node) for name, node in definitions.items()),
         expressions=tuple(Expression(id=name, value=value) for name, value in expressions.items()),
@@ -1442,12 +1221,9 @@ def plan_quantum(
         "QLS selected body metadata",
     )
     base = BaseEncoding(encoding, problem.A, encoded_operator, svd, method.max_bytes, method.max_work)
-    # Program construction in _admitted_program runs the shared IR admission
-    # check; _check_admission adds the preparation and lowering counts.
     construction, experiments, blocks = _program(
         method, problem, output, shots, rec, base, preparation, terms=rows
     )
-    _check_admission(method, construction, experiments)
     plan = Plan(
         problem=problem,
         method=method,

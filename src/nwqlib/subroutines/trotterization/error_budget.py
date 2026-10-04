@@ -1171,7 +1171,7 @@ def _dense_bound_coefficient_from_terms(
 
 def _validate_limit(value, name, *, minimum):
     """Return ``value`` as an int of at least ``minimum``, else raise ValueError."""
-    if isinstance(value, bool) or not isinstance(value, (int, np.integer)) or value < minimum:
+    if not isinstance(value, (int, np.integer)) or value < minimum:
         kind = "positive" if minimum == 1 else "nonnegative"
         raise ValueError(f"{name} must be a {kind} integer; got {value!r}")
     return int(value)
@@ -1214,30 +1214,10 @@ def _bound_coefficient_evaluation(
 
     The pair stage is admitted before label conversion. The requested
     expression is admitted again using the actual pair count before nested
-    tests or contraction. A refusal identifies the failed stage and reports
-    a sufficient complete envelope for the requested order and variant. Its
-    block-one byte value is a checked candidate, rather than a minimum over
-    all block sizes. A byte-fit failure is reported only when no checked
+    tests or contraction. A refusal identifies the failed stage, its work
+    and the applicable limits. A byte-fit failure occurs when no checked
     candidate fits the current byte allowance. No triple table or
     coefficient is created on refusal.
-
-    The complete envelope is computed before any work. With w = ceil(q/64),
-    ``P = p(p-1)/2``, ``J = p(p-1)(2p-1)/6`` and ``L0 = 16p(q+1)+pq``, the
-    complete sufficient work before label conversion is
-    ``R_1 = L0 + (w+1)P`` at order one, ``R_relaxed = L0 + wP + p + 2P``
-    for relaxed_prefix and ``R_exact2 = L0 + w(P+J) + P + J`` for the
-    order-two exact census. The pair-stage charge is R_1, whatever
-    order-two expression was requested. The complete order-two bounds
-    substitute E = P, N = F = J for exact_census and E = P, N = F = 0 for
-    relaxed_prefix; the actual post-pair requirements cannot exceed them
-    because E <= P, N <= J and F <= N. The label-conversion held bytes are
-    ``held + 128p(q+1) + 65536``. The complete work remedy is printed
-    whenever the complete conservative work exceeds ``max_work``, qualified
-    as sufficient rather than necessary, even when the refused stage failed
-    only on bytes. Raising work alone does not admit an independently
-    insufficient byte allowance, shape capacity, nonfinite coefficient or
-    non-Hermitian term; the intp shape capacity is a separate refusal that
-    no resource cap cures.
 
     The block search first selects the largest fitting candidate from
     choose_census_block. If that block exceeds 65536 and the byte envelope
@@ -1253,20 +1233,11 @@ def _bound_coefficient_evaluation(
     max_bytes = _validate_limit(max_bytes, "max_bytes", minimum=1)
     held = _validate_limit(held, "held", minimum=0)
     p, q = int(hamiltonian.size), int(hamiltonian.num_qubits)
-    P, J = census_sizes(p)
+    P, _ = census_sizes(p)
     label_bytes = 128*p*(q+1) + 65536
     linear = 16*p*(q+1) + p*q
     census_held = held + label_bytes
     capacity = np.iinfo(np.intp).max
-    complete_F = J if order == 2 and variant == "exact_census" else 0
-    complete_work = linear + census_work(
-        p, q, order=order, variant=variant, pairs=P,
-        nested=complete_F, triples=complete_F,
-    )
-    complete_bytes = census_bytes(
-        p, q, P, complete_F, 1, order=order, variant=variant,
-        held=census_held,
-    )
 
     def admit(E, N, chosen_order, chosen_variant, stage):
         exact2 = chosen_order == 2 and chosen_variant == "exact_census"
@@ -1288,17 +1259,11 @@ def _bound_coefficient_evaluation(
             message = (
                 f"Pauli census {stage} stage needs work={work}, "
                 f"max_work={max_work}, max_bytes={max_bytes}. "
-                f"The complete requested order-{order} {variant} envelope needs "
-                f"max_work={complete_work} and has the sufficient checked "
-                f"block-one byte candidate {complete_bytes}."
+                "Increase the binding limit or reduce the Pauli term population."
             )
-            if complete_work > max_work:
-                message += f" Raise max_work to at least {complete_work}."
             if fit is None:
                 message += (
-                    " No checked block fits the current byte allowance. "
-                    f"Raise max_bytes to at least {complete_bytes} to fund the "
-                    "complete conservative byte envelope."
+                    " No checked block fits the current byte allowance."
                 )
             if order == 2 and variant == "exact_census":
                 message += ' bound_variant="relaxed_prefix" selects the pair-only order-two bound.'

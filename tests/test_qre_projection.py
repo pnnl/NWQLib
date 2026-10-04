@@ -139,7 +139,6 @@ def test_missing_readout_and_residual_gates_refuse_before_model(compilation, mon
     for options in (
         {},
         {"measurement_count": -1},
-        {"measurement_count": True},
         {"measurement_count": 1, "max_error": 0},
         {"measurement_count": 100001},
     ):

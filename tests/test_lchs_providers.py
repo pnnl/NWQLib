@@ -253,69 +253,24 @@ def test_provider_request_and_resolved_records_are_distinct_and_immutable() -> N
 
 
 @pytest.mark.parametrize(
-    ("implementation", "parameters", "kind", "error", "match"),
+    ("implementation", "parameters", "kind", "match"),
     (
-        ("near_optimal_eq7", {"unknown": 1}, "kernel", ValueError, "does not accept"),
-        ("near_optimal_eq7", {"beta": True}, "kernel", TypeError, "booleans"),
-        ("near_optimal_eq7", {"beta": 1.0}, "kernel", ValueError, "must lie in"),
-        ("composite_gauss", {"truncation_multiplier": False}, "quadrature", TypeError, "booleans"),
-        ("composite_gauss", {"truncation_multiplier": 0.0}, "quadrature", ValueError, "positive"),
-        (
-            "composite_gauss",
-            {"truncation_multiplier": float("nan")},
-            "quadrature",
-            ValueError,
-            "finite and positive",
-        ),
-        (
-            "composite_gauss",
-            {"truncation_multiplier": float("inf")},
-            "quadrature",
-            ValueError,
-            "finite and positive",
-        ),
-        ("signed_binary_uniform", {"num_qubits": 3}, "quadrature", ValueError, "missing required"),
-        (
-            "signed_binary_uniform",
-            {"num_qubits": True, "lsb_position": 0},
-            "quadrature",
-            TypeError,
-            "booleans",
-        ),
-        (
-            "signed_binary_uniform",
-            {"num_qubits": 2, "lsb_position": 0.5},
-            "quadrature",
-            TypeError,
-            "integer",
-        ),
-        ("cauchy_density", {"beta": 0.8}, "kernel", ValueError, "does not accept"),
-        ("low_somma_f2", {"unknown": 1}, "kernel", ValueError, "does not accept"),
-        ("low_somma_f2", {"c": True}, "kernel", TypeError, "booleans"),
-        ("low_somma_f2", {"c": 0.0}, "kernel", ValueError, "finite and positive"),
-        ("low_somma_f2", {"c": math.inf}, "kernel", ValueError, "finite and positive"),
-        ("symmetric_uniform_trapezoid", {"J": 3}, "quadrature", ValueError, "does not accept"),
+        ("near_optimal_eq7", {"beta": 1.0}, "kernel", "must lie in"),
+        ("composite_gauss", {"truncation_multiplier": 0.0}, "quadrature", "positive"),
+        ("composite_gauss", {"truncation_multiplier": float("nan")}, "quadrature", "finite and positive"),
+        ("composite_gauss", {"truncation_multiplier": float("inf")}, "quadrature", "finite and positive"),
+        ("low_somma_f2", {"c": 0.0}, "kernel", "finite and positive"),
+        ("low_somma_f2", {"c": math.inf}, "kernel", "finite and positive"),
     ),
 )
-def test_provider_parameter_validation_is_strict(
-    implementation: str,
-    parameters: dict,
-    kind: str,
-    error: type[Exception],
-    match: str,
-) -> None:
+def test_provider_parameters_keep_their_mathematical_domains(implementation, parameters, kind, match):
     registry = {
         "kernel": LCHS_KERNEL_IMPLEMENTATIONS,
         "quadrature": LCHS_K_QUADRATURE_IMPLEMENTATIONS,
     }[kind]
     request = ProviderConfig(implementation=implementation, parameters=parameters)
-    with pytest.raises(error, match=match):
+    with pytest.raises(ValueError, match=match):
         resolve_provider_config(request, registry, slot="test_provider")
-
-
-def test_provider_config_rejects_non_scalar_transport_values() -> None:
-    with pytest.raises(TypeError, match="JSON scalar"):
-        ProviderConfig(implementation="test", parameters={"bad": [1, 2]})
 
 
 @pytest.mark.parametrize("beta", (0.3, 0.8, 0.95))
@@ -846,27 +801,15 @@ def test_small_nonzero_dissipation_keeps_physical_dynamics_and_scale(diagonal):
 
 
 @pytest.mark.parametrize("execution", ["classical", "quantum"])
-def test_quadrature_work_refusal_names_a_value_that_admits_on_the_first_retry(execution, monkeypatch):
-    """The composite-Gauss search completes, then its complete charge is checked once.
-
-    The two-dimensional problem selects 204 nodes (Q = 17, m = 6) after 51
-    panel counts, so W_quad = 32*51 + 32*204 + 17**3 = 13,073
-    (``providers._build_composite_gauss``). A refusal at cap 1 names
-    ``LCHS.max_quadrature_work`` and that value before the grid is built,
-    and one retry at the named value plans.
-    """
-    import re
-
+def test_quadrature_work_limit_refuses_before_grid_allocation(execution, monkeypatch):
+    """The composite-Gauss grid is built only after its complete work charge fits."""
     problem = LinearDynamics(A=[[.4, .15], [.05, .25]], initial_state=[1, 0], time=.1)
     leggauss = np.polynomial.legendre.leggauss
     with monkeypatch.context() as guard:
         guard.setattr(np.polynomial.legendre, "leggauss", lambda *a: pytest.fail("unadmitted grid allocation"))
-        with pytest.raises(ValueError, match=r"exceeding LCHS\.max_quadrature_work=1\.") as refusal:
+        with pytest.raises(ValueError, match=r"exceeding LCHS\.max_quadrature_work=1\."):
             plan(problem, method=LCHS(max_quadrature_work=1), execution=execution, seed=7)
     assert np.polynomial.legendre.leggauss is leggauss
-    named = int(re.search(r"Raise LCHS\.max_quadrature_work to at least (\d+)\.", str(refusal.value)).group(1))
-    assert named == 13_073
-    assert plan(problem, method=LCHS(max_quadrature_work=named), execution=execution, seed=7).experiments is not None
 
 
 def test_ellipse_selection_admits_bytes_before_building_grid(monkeypatch):

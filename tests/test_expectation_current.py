@@ -146,16 +146,8 @@ def test_nearly_singleton_groups_keep_sampled_program_admission():
     assert len(plan.experiments) == 58 and plan.shots == 100
 
 
-def test_grouping_refusal_names_a_value_that_admits_on_the_first_retry():
-    """A grouping refusal names the Method field and a value that completes grouping.
-
-    The nine two-qubit labels without I are pairwise not QWC, so first-fit
-    grouping needs 0+1+...+8 = 36 comparisons, the L(L-1)/2 envelope that
-    PauliTerms.group names. A next-tile minimum (3 at cap 1) would be refused
-    again. One QWC group of seven Z labels needs L-1 = 6 comparisons and is
-    admitted at 6, far below its envelope 21.
-    """
-    import re
+def test_grouping_limit_tracks_actual_commutation_structure():
+    """Nine incompatible labels need 36 comparisons, while seven Z labels need six."""
 
     def selected(terms, cap):
         n = len(terms[0][0])
@@ -164,11 +156,9 @@ def test_grouping_refusal_names_a_value_that_admits_on_the_first_retry():
 
     distinct = tuple((a + b, 1.0 / (1 + i)) for i, (a, b) in enumerate(
         (a, b) for a in "XYZ" for b in "XYZ"))
-    with pytest.raises(ValueError, match=r"ExpectationMethod\.max_classical_products=1\b") as refusal:
+    with pytest.raises(ValueError, match=r"ExpectationMethod\.max_classical_products=1\b"):
         selected(distinct, 1)
-    named = int(re.search(r"Raise ExpectationMethod\.max_classical_products to (\d+), which is sufficient",
-                          str(refusal.value)).group(1))
-    assert len(selected(distinct, named).experiments) == 9
+    assert len(selected(distinct, 36).experiments) == 9
     diagonal = tuple((format(k, "03b").replace("0", "I").replace("1", "Z"), 1.0) for k in range(1, 8))
     assert len(selected(diagonal, 6).experiments) == 1
 

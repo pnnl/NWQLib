@@ -195,7 +195,7 @@ def test_branch_controlled_phase_law_prices_only_nonzero_physical_branches(
 
 
 def test_qsp_control_projection_counts_single_qubit_and_global_phase_gates():
-    from nwqlib.algorithms.lchs.compiled_selection import _controlled_gate_census_cx
+    from nwqlib.algorithms.lchs.compiled_selection import _census_cx, _controlled_kind_cx
     from qiskit import QuantumCircuit, transpile
     from nwqlib.subroutines.qiskit_compat import controlled
 
@@ -210,27 +210,27 @@ def test_qsp_control_projection_counts_single_qubit_and_global_phase_gates():
     actual = int(transpile(query, **TRANSPILE_OPTIONS).count_ops()["cx"])
     census = {"rotation": 2, "cx": 2, "h_or_x": 1}
     # This elementary circuit has two Toffolis, two CRY gates and one CX after control.
-    assert _controlled_gate_census_cx(census, 1) == actual
+    assert _census_cx(census, _controlled_kind_cx(1)) == actual
     phase = QuantumCircuit(1)
     phase.global_phase = 0.23
     controlled_phase = QuantumCircuit(3)
     controlled_phase.append(controlled(phase.to_gate(), 2), range(3))
     actual_phase = int(transpile(controlled_phase, **TRANSPILE_OPTIONS).count_ops()["cx"])
-    assert _controlled_gate_census_cx({"global_phase": 1}, 2) == actual_phase
+    assert _controlled_kind_cx(2)["global_phase"] == actual_phase
 
 
-# Width and builder of each gate that a census kind stands for, in Qiskit's
-# add_control basis. None builds a circuit that holds only a global phase.
+# Width, builder and applicable dense-synthesis price of each census gate.
+# A None builder gives a circuit that holds only a global phase.
 _CENSUS_KIND_GATES = {
-    "cx": ((2, lambda circuit: circuit.cx(0, 1)),),
-    "h_or_x": ((1, lambda circuit: circuit.x(0)), (1, lambda circuit: circuit.y(0)),
-               (1, lambda circuit: circuit.z(0)), (1, lambda circuit: circuit.h(0))),
-    "rotation": ((1, lambda circuit: circuit.ry(.37, 0)), (1, lambda circuit: circuit.rz(.37, 0)),
-                 (1, lambda circuit: circuit.rx(.37, 0))),
-    "phase": ((1, lambda circuit: circuit.p(.37, 0)), (1, lambda circuit: circuit.s(0)),
-              (1, lambda circuit: circuit.t(0))),
-    "u": ((1, lambda circuit: circuit.u(.3, .7, -1.1, 0)),),
-    "global_phase": ((1, None),),
+    "cx": ((2, lambda circuit: circuit.cx(0, 1), "cx"),),
+    "h_or_x": ((1, lambda circuit: circuit.x(0), None), (1, lambda circuit: circuit.y(0), None),
+               (1, lambda circuit: circuit.z(0), None), (1, lambda circuit: circuit.h(0), "h")),
+    "rotation": ((1, lambda circuit: circuit.ry(.37, 0), None), (1, lambda circuit: circuit.rz(.37, 0), "rz"),
+                 (1, lambda circuit: circuit.rx(.37, 0), None)),
+    "phase": ((1, lambda circuit: circuit.p(.37, 0), None), (1, lambda circuit: circuit.s(0), None),
+              (1, lambda circuit: circuit.t(0), None)),
+    "u": ((1, lambda circuit: circuit.u(.3, .7, -1.1, 0), "u"),),
+    "global_phase": ((1, None, "global_phase"),),
 }
 # Census kind of each gate name in Qiskit's add_control basis.
 _KIND_OF_GATE = {"cx": "cx", "x": "h_or_x", "y": "h_or_x", "z": "h_or_x", "h": "h_or_x", "ry": "rotation",
@@ -277,20 +277,35 @@ def test_controlled_census_prices_bound_qiskit_for_every_kind(controls):
     for Y factors, is priced as a phase. Idle qubits, clean or already used,
     may serve as ancillas and must not raise a count.
     """
-    from nwqlib.algorithms.lchs.compiled_selection import _controlled_gate_census_cx
+    from math import pi
+    from nwqlib.algorithms.lchs.compiled_selection import _controlled_kind_cx
+    from nwqlib.algorithms.lchs.native import _controlled_gate_cx
     from nwqlib.subroutines.qiskit_compat import controlled
-    gates = {**_CENSUS_KIND_GATES, "phase": (*_CENSUS_KIND_GATES["phase"], (1, lambda circuit: circuit.sx(0)))}
+    gates = {**_CENSUS_KIND_GATES, "phase": (*_CENSUS_KIND_GATES["phase"], (1, lambda circuit: circuit.sx(0), None))}
+    prices = _controlled_kind_cx(controls)
+    dense_prices = _controlled_gate_cx(controls)
+    contexts = ((0, False), (1, False), (1, True), (3, False), (3, True))
     for kind, members in gates.items():
-        price = _controlled_gate_census_cx({kind: 1}, controls)
+        price = prices[kind]
         free = []
-        for width, build in members:
-            for idle, used in ((0, False), (1, False), (1, True), (3, False), (3, True)):
+        for width, build, dense_kind in members:
+            for idle, used in contexts:
                 gate = controlled(_one_gate_circuit(width, build, idle).to_gate(), controls, ctrl_state=0)
                 cx = _lowered_cx(gate, used=used)
                 assert cx <= price, (kind, idle, used, cx, price)
+                if dense_kind is not None:
+                    assert cx <= dense_prices[dense_kind], (dense_kind, idle, used)
+                    if idle == 0:
+                        assert cx == dense_prices[dense_kind], dense_kind
                 if idle == 0:
                     free.append(cx)
         assert max(free) == price, kind
+    # Qiskit's special U branches must also fit the generic U price.
+    for angles in ((0., 0., .9), (.4, 0., 0.), (.4, -pi/2, pi/2)):
+        for idle, used in contexts:
+            circuit = _one_gate_circuit(1, lambda c: c.u(*angles, 0), idle)
+            gate = controlled(circuit.to_gate(), controls, ctrl_state=0)
+            assert _lowered_cx(gate, used=used) <= dense_prices["u"], (angles, idle, used)
 
 
 def test_twice_controlled_kind_costs_match_qiskit():
@@ -306,7 +321,7 @@ def test_twice_controlled_kind_costs_match_qiskit():
     price = _twice_controlled_kind_cx()
     for kind, members in _CENSUS_KIND_GATES.items():
         built = []
-        for width, build in members:
+        for width, build, _dense_kind in members:
             inner = controlled(_one_gate_circuit(width, build).to_gate(), 1)
             middle = QuantumCircuit(inner.num_qubits)
             middle.append(inner, middle.qubits)
@@ -499,9 +514,6 @@ def test_explicit_samples_reuse_archived_selection_and_preserve_scope(backend,tm
     monkeypatch.setattr(np.linalg,'eigvalsh',forbidden)
     loaded=load_plan(saved,files)
     assert loaded._native['native_data'].method is loaded.method
-    previous={**saved,'selected':{**saved['selected'],'format':'lchs/2'}}
-    with pytest.raises(ValueError,match='unsupported LCHS archive format'):
-        load_plan(previous,files)
     values=sample_resources(loaded,max_qubits=10)
     settings={setting.name for setting in loaded.reconstruction.settings}
     assert set(values['weighted_totals'])==settings
@@ -712,45 +724,6 @@ def test_dense_synthesis_census_bounds_every_emitted_gate_kind():
     # The generic Haar case reaches the RZ and H bounds, which have no A.2 saving.
     counts=dense_unitary_circuit(unitary_group.rvs(16,random_state=rng)).count_ops()
     assert (counts['rz'],counts['h'])==(dense_synthesis_gate_census(4)['rz'],dense_synthesis_gate_census(4)['h'])
-
-
-@pytest.mark.parametrize('a',range(1,9))
-def test_controlled_gate_costs_match_qiskit_and_bound_every_context(a):
-    """Each per-gate cost of the dense SELECT law is Qiskit's ancilla-free count.
-
-    Idle system qubits, clean or already used, may serve as ancillas and
-    must not raise a count above it. The special U cases of Qiskit's
-    add_control must not exceed the generic U cost that the law charges.
-    """
-    from math import pi
-    from qiskit import QuantumCircuit, transpile
-    from nwqlib.algorithms.lchs.native import _controlled_gate_cx
-    from nwqlib.subroutines.qiskit_compat import controlled
-    cost=_controlled_gate_cx(a)
-    gates={'cx':(2,lambda qc: qc.cx(0,1)),'h':(1,lambda qc: qc.h(0)),'rz':(1,lambda qc: qc.rz(.37,0)),
-           'u':(1,lambda qc: qc.u(.3,.7,-1.1,0)),'global_phase':(1,lambda qc: None),
-           'u_phase':(1,lambda qc: qc.u(0.,0.,.9,0)),'u_ry':(1,lambda qc: qc.u(.4,0.,0.,0)),
-           'u_rx':(1,lambda qc: qc.u(.4,-pi/2,pi/2,0))}
-
-    def lowered(name,idle,used):
-        width,build=gates[name]
-        base=QuantumCircuit(width+idle,global_phase=.8 if name=='global_phase' else 0.)
-        build(base)
-        gate=controlled(base.to_gate(),a,ctrl_state=0)
-        circuit=QuantumCircuit(gate.num_qubits)
-        if used:
-            for qubit in circuit.qubits:
-                circuit.u(.1,.2,.3,qubit)
-        circuit.append(gate,circuit.qubits)
-        return transpile(circuit,**TRANSPILE_OPTIONS).count_ops().get('cx',0)
-
-    for name in gates:
-        charged=cost[name.split('_')[0] if name.startswith('u_') else name]
-        free=lowered(name,0,False)
-        if not name.startswith('u_'):
-            assert free==charged
-        assert free<=charged
-        assert all(lowered(name,idle,used)<=charged for idle in (1,3) for used in (False,True))
 
 
 @pytest.mark.parametrize(('q','a','source','route'),[(2,2,False,'auto'),(3,1,True,'auto'),(1,2,False,'auto'),

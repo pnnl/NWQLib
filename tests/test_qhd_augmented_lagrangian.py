@@ -13,7 +13,6 @@ analytic KKT point, evaluated in exact rational arithmetic from the recorded rou
 
 from fractions import Fraction
 import itertools
-import json
 from math import fsum, sqrt
 from unittest.mock import patch
 
@@ -686,11 +685,6 @@ def test_saved_run_reloads_without_planning_evaluating_or_acquiring(tmp_path):
     assert [inner.content_id for inner in loaded.results] == [inner.content_id for inner in result.results]
     assert loaded.report()["record"] == result.report()["record"]
     assert constrained_grid_minimum(loaded) == constrained_grid_minimum(result)
-    # An archive of another format is refused, and the message names the format it holds.
-    record = path / "constrained.json"
-    record.write_text(json.dumps({**json.loads(record.read_text()), "format": "qhd.constrained/2"}))
-    with pytest.raises(ValueError, match="'qhd.constrained/2'"):
-        load_augmented_lagrangian(path)
 
 
 # The combination problem: f = (x - 11/16)**2 + (y - 7/16)**2 subject to h = 4 (x + y - 1/8) = 0 on
@@ -1814,9 +1808,9 @@ def test_mode_choices_copy_their_readout_status_and_other_choices_copy_none(tmp_
     best_observed takes the candidate, and mode_or_mean takes the level's mean -1/4, below the
     representative in objective, so neither copies a status while every level keeps its own. A record
     whose copy differs from its Result is refused without re-execution, and the copies survive the
-    archive, which the standalone loader refuses with the name of the layer's loader.
+    archive.
     """
-    from nwqlib.algorithms.qhd import ConstrainedQHDResult, load_box_refinement
+    from nwqlib.algorithms.qhd import ConstrainedQHDResult
 
     tie = np.array([1.0, 1.0, 0.0], dtype=complex) / np.sqrt(2)
     first = np.array([1.0, 0.0, 0.0], dtype=complex)
@@ -1866,8 +1860,6 @@ def test_mode_choices_copy_their_readout_status_and_other_choices_copy_none(tmp_
     loaded = load_augmented_lagrangian(path)
     assert loaded.iterations[0].evaluation.mode_status == "unresolved"
     assert [level.mode_status for level in loaded.iterations[0].refinement.levels] == ["unresolved", "resolved"]
-    with pytest.raises(FileNotFoundError, match="saved augmented-Lagrangian result.*load_augmented_lagrangian"):
-        load_box_refinement(path)
 
 
 def test_a_slack_round_copies_the_joint_status_whose_projection_is_not_the_marginal_mode(monkeypatch):

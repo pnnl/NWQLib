@@ -205,22 +205,13 @@ class Directory:
     def open(cls, path, kind):
         """Hold the controller lock of an existing directory and read its outer record.
 
-        A directory of the other layer is refused with the name of its resume function, and a saved result
-        archive with the name of its loader.
+        The stored format identifies the controller's layer.
         """
         from nwqlib._choice_archive import ArchiveFiles
 
         path = Path(path)
         if not (path / RECORD).is_file():
-            # A saved result archive of either layer is opened by its loader, never resumed.
-            for name, loader in (("refinement.json", "load_box_refinement"),
-                                 ("constrained.json", "load_augmented_lagrangian")):
-                if (path / name).is_file():
-                    raise FileNotFoundError(f"{path} is a saved result archive containing {name}, not a durable run "
-                                            f"directory of {RESUME[kind]}. Open it with {loader}({str(path)!r})")
-            raise FileNotFoundError(f"{path} holds no {RECORD}, so it is not a durable run directory of "
-                                    f"{RESUME[kind]}. A directory whose first commit was interrupted holds no "
-                                    "round yet and can be removed")
+            raise FileNotFoundError(path / RECORD)
         with _controller(path):
             saved = ArchiveFiles(path, None).read_json(RECORD)
             if saved.get("format") != FORMATS[kind]:

@@ -2,7 +2,6 @@
 
 from dataclasses import replace
 from fractions import Fraction
-import json
 import math
 import numpy as np
 import pytest
@@ -102,14 +101,6 @@ def test_original_complex_three_coordinate_models_and_archive(tmp_path, monkeypa
     loaded = nwqlib.load_result(tmp_path / "result")
     assert loaded.plan.content_id == plan.content_id and loaded.content_id == result.content_id
     np.testing.assert_array_equal(loaded.value, result.value)
-    # Saved original factors must be those the recorded spectral selection acquired.
-    saved = tmp_path / "result" / "result.json"
-    content = json.loads(saved.read_text())
-    if content["selection"]["selected"]["factors"] is not None:
-        content["selection"]["selected"]["factors"] = None
-        saved.write_text(json.dumps(content))
-        with pytest.raises(ValueError, match="recorded spectral selection"):
-            nwqlib.load_result(tmp_path / "result")
 
 
 def test_original_svd_scale_no_second_padded_decomposition(monkeypatch):
@@ -621,10 +612,8 @@ def test_polynomial_degree_work_and_bytes_are_admitted_before_each_candidate(mon
 
 def test_invalid_scale_or_singular_original_rejects():
     for fields in (
-        dict(alpha=True),
         dict(kappa=0.0),
         dict(epsilon_inv=np.inf),
-        dict(max_degree=2.5),
     ):
         with pytest.raises(ValueError):
             QLS(**fields)
@@ -774,7 +763,6 @@ def test_binary_recovery_products_validate_operands_and_preserve_components():
         ((1.0, 0.0),),
         ((1.0, float("inf")),),
         (0.0,),
-        (True,),
         (PhysicalScale(mantissa=0.0, exponent=0),),
     ):
         with pytest.raises(ValueError):

@@ -453,7 +453,7 @@ def test_split_step_budget_covers_the_formation_of_large_phase_angles(case):
         method = QHD(num_grid_points=8, boundary="periodic", kinetic_model="spectral", num_steps=3,
                      total_time=1.0, schedule=ShiftedCubicSchedule(s=1e-150), coefficient_rule="integrated",
                      initial_state=GaussianState(center=(0.2,), widths=(0.3,)), theory_flavor="split_step")
-        with pytest.raises(ValueError, match="mass window of the classical QHD split_step kernel is inf"):
+        with pytest.raises(ValueError, match="mass window.*split_step"):
             plan(problem, method=method, execution="classical", seed=7)
         return
     if case == "kinetic":

@@ -8,20 +8,7 @@ from nwqlib.problems.records import Optimization
 from .method import QHD, _execute_theory
 from .records import QHDReconstruction, validate_selection
 
-# The one QHD archive format this version writes and reads. It changes with
-# the stored Method or reconstruction fields, with the admission contract
-# that a saved Plan was planned under, and with the fields of QHDAnalysis.
-# A saved Result or Run folder keeps its QHDAnalysis beside the Plan and
-# loads the Plan through this hook before it reads that record, so this
-# format is what refuses a folder whose QHDAnalysis has other fields.
-# Plans of qhd/5 and later passed the binary64 range admission of planning
-# (validation._normal_range) and record their lower-range omissions under a
-# named policy (records.QHDRangeOmissions). The phase and angle entries of
-# the error ledger rest on both (circuit_errors), and loading does not
-# replan, so a qhd/4 Plan could carry out-of-range arithmetic that those
-# entries would not charge. Earlier formats are rejected rather than
-# converted, because NWQLib owes no compatibility with the development
-# schemas that preceded release 1.0 (docs/FRAMEWORK.md, "API stability").
+# Layout of the Method, reconstruction and QHDAnalysis saved together.
 FORMAT = "qhd/7"
 
 

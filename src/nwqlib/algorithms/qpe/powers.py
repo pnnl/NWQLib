@@ -300,18 +300,6 @@ def _census(labels, coefficients, width, config, *, reservation=(0, 0)):
     and every checked contraction block. No later common-step work gate
     can refuse an admitted candidate. Step-count and error checks remain.
 
-    A refusal reports the kept nonidentity term count p and one sufficient
-    combined work/byte limit for this admission. It names reducing p, for
-    example with an explicit ``pauli_pruning_rtol`` whose dropped mass
-    enters the controlled-evolution error budget, as the main way to reduce
-    the p(p-1)/2 pair scan and its storage. On the exact trajectory, raising
-    those limits admits a census and its exact stage, subject to the
-    independent input, step-count and error requirements. Sampled and RWPE
-    Plans admit their exact recheck separately at the entry of
-    _independent_powers.
-    The remedy names only limits below the selected candidate's sufficient
-    combined allowance. Limits already meeting that allowance can stay unchanged.
-
     Returns:
         (evaluation, block, work), with work counting the census only.
     """
@@ -329,31 +317,14 @@ def _census(labels, coefficients, width, config, *, reservation=(0, 0)):
                     and max(size, reserved_bytes) <= config.max_bytes):
                 config._admit(work + reserved_work, max(size, reserved_bytes))
                 return variant, envelope
-        byte_feasible = [item for item in candidates
-                         if item[1][2] is not None
-                         and max(item[1][1], reserved_bytes) <= config.max_bytes]
-        variant, (work, size, _) = min(byte_feasible or candidates, key=lambda item: item[1][0])
-        need_work, need_bytes = work + reserved_work, max(size, reserved_bytes)
-        remedies = []
-        if need_work > config.max_work:
-            remedies.append(f"max_work to at least {need_work}")
-        if need_bytes > config.max_bytes:
-            remedies.append(f"max_bytes to at least {need_bytes}")
         header = ("QPE census and common-step admission" if reservation != (0, 0)
                   else "QPE census admission")
         raise ValueError(
-            f"{header}: variant={variant}, p={count}, census_work={work}, "
-            f"reserved_common_work={reserved_work}, requested_work={need_work}, "
-            f"requested_bytes={need_bytes}, max_work={config.max_work}, "
-            f"max_bytes={config.max_bytes}. The selected Pauli census does not fit the "
-            "planning limits for p kept nonidentity terms. Its current algorithm still "
-            "scans p(p−1)/2 pairs. Reducing the kept term count is the main way to reduce "
-            "this work and pair storage. An explicit `pauli_pruning_rtol` can remove small "
-            "terms, and the Plan includes their dropped coefficient mass in the "
-            "controlled-evolution error budget. A larger pruning tolerance can exhaust that "
-            "budget. The reported byte candidate is sufficient for the selected block choice "
-            "and is not a minimum over every possible block size. "
-            "Raise the Method's " + " and ".join(remedies)
+            f"{header}: p={count}, reserved_common_work={reserved_work}, "
+            f"max_work={config.max_work}, max_bytes={config.max_bytes}. "
+            "No census variant fits the planning limits. Increase max_work or max_bytes, "
+            "or reduce the kept Pauli term count. Explicit pauli_pruning_rtol contributes "
+            "its dropped coefficient mass to the controlled-evolution error budget."
         )
 
     total_pairs, nested_envelope = census_sizes(count)

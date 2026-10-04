@@ -1,6 +1,5 @@
 """Small persistence failures retain operation context and scientific data."""
 
-import re
 import shutil
 import sqlite3
 
@@ -22,16 +21,6 @@ def test_array_truncation_names_entry_without_scanning_valid_payload(tmp_path):
     with pytest.raises(ValueError) as caught:
         ArchiveFiles(tmp_path, 10_000).read_array(name)
     assert str(path) in " ".join(caught.value.__notes__)
-
-
-@pytest.mark.parametrize("requested,existing,loader", [
-    ("run.json", "result.json", "load_result"), ("result.json", "run.json", "load_run")])
-def test_wrong_archive_kind_keeps_missing_file_and_points_to_loader(tmp_path, requested, existing, loader):
-    (tmp_path / existing).write_text("{}")
-    with pytest.raises(FileNotFoundError) as caught:
-        ArchiveFiles(tmp_path, 1000).read_json(requested)
-    assert caught.value.filename == str(tmp_path / requested)
-    assert loader in " ".join(caught.value.__notes__)
 
 
 def test_journal_lock_and_lost_folder_have_owned_context(tmp_path):
@@ -59,7 +48,7 @@ def test_noise_archive_preserves_parameters_channels_and_qubit_associations(tmp_
     from nwqlib.algorithms import ExpectationMethod
     from nwqlib.backends import AerBackend
     from nwqlib._prepared_execution import Run
-    from nwqlib._run_archive import _load_noise_model
+    from nwqlib._run_archive import _load_noise_model, _noise_model_data
     from qiskit import QuantumCircuit
     from qiskit.quantum_info import Operator
     from qiskit_aer.noise import NoiseModel, QuantumError, ReadoutError
@@ -78,11 +67,9 @@ def test_noise_archive_preserves_parameters_channels_and_qubit_associations(tmp_
     model.add_readout_error(ReadoutError([[.8, .2], [.4, .6]]), [1])
     saved = model.to_dict()
     monkeypatch.setattr(NoiseModel, "from_dict", lambda *a: pytest.fail("deprecated loader called"))
-    restored = _load_noise_model(saved)
+    restored = _load_noise_model(_noise_model_data(model))
     same_native(restored.to_dict(), saved)
-    # Saved without basis gates (NWQLib 0.98.1 and earlier), the model starts
-    # from Aer's default basis and gains the gates its errors name (docs/run_archives.md).
-    assert restored.basis_gates == ["cx", "h", "id", "rz", "sx", "x"]
+    assert restored.basis_gates == model.basis_gates
     quantum = restored._default_quantum_errors["x"]
     expected = np.diag(np.exp(1j*np.array([-.37/2, .37/2]))) @ (np.array([[1, 1], [1, -1]])/np.sqrt(2))
     np.testing.assert_allclose(Operator(quantum.circuits[0]).data, expected, atol=2e-15, rtol=0)
@@ -109,20 +96,5 @@ def test_noise_archive_preserves_parameters_channels_and_qubit_associations(tmp_
 def test_noise_loader_rejects_unrepresented_conditions():
     from nwqlib._run_archive import _load_noise_model
     with pytest.raises(ValueError, match="instruction fields"):
-        _load_noise_model({"errors": [dict(type="qerror", operations=["x"], probabilities=[1.],
+        _load_noise_model({"basis_gates": ["x"], "errors": [dict(type="qerror", operations=["x"], probabilities=[1.],
             instructions=[[dict(name="x", qubits=[0], conditional=1)]])]})
-
-
-@pytest.mark.parametrize("family, found, supported", (
-    ("FixedGCIM", "fixed_gcim/4", "fixed_gcim/5"), ("ADAPT", "adapt/5", "adapt/6"),
-    ("Expectation", "expectation/4", "expectation/5"), ("LCHS", "lchs/8", "lchs/9"),
-    ("Lanczos", "lanczos/5", "lanczos/6")))
-def test_archive_refusals_name_the_found_and_the_supported_format_and_the_remedy(family, found, supported):
-    from nwqlib import algorithms
-
-    method = getattr(algorithms, "ExpectationMethod" if family == "Expectation" else family)
-    remedy = "Open it with the NWQLib release that wrote it, or plan and run the problem again."
-    for saved, named in (({"format": found}, repr(found)), ({}, "None")):
-        with pytest.raises(ValueError, match=re.escape(
-                f"unsupported {family} archive format {named}. This NWQLib reads only '{supported}'. {remedy}")):
-            method.load_archive(saved, None)

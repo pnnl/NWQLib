@@ -641,8 +641,8 @@ def test_decode_refuses_below_the_array_bound_before_the_state_array(monkeypatch
     assert result.raw_output["counts"][0].tolist() == list(range(16))
 
 
-@pytest.mark.parametrize("outcomes,qubits,width", [(0, 1, 1), (-1, 1, 1), (True, 1, 1), (1, -1, 1), (1, 65, 1),
-                                                  (1, True, 1), (1, 1, -1), (1, 1, 65), (1, 1, 1.0)])
+@pytest.mark.parametrize("outcomes,qubits,width", [(0, 1, 1), (-1, 1, 1), (1, -1, 1), (1, 65, 1),
+                                                  (1, 1, -1), (1, 1, 65)])
 def test_decode_byte_bound_refuses_arguments_outside_its_domain(outcomes, qubits, width):
     from nwqlib.backends.ionq import ionq_decode_bytes
 

@@ -38,6 +38,8 @@ from typing import Any, Callable, Mapping
 
 import numpy as np
 
+from operator import index as integer_index
+
 from nwqlib._validation import finite_real, integer
 from nwqlib.operators.access import DEFAULT_INPUT_BYTES, _check_bytes
 from nwqlib.algorithms.lchs.provider_config import (
@@ -100,32 +102,6 @@ def _detached_plain(value: Any) -> Any:
         return {key: _detached_plain(item) for key, item in value.items()}
     if isinstance(value, Sequence) and not isinstance(value, (str, bytes, bytearray)):
         return [_detached_plain(item) for item in value]
-    return value
-
-
-def _reject_unknown_parameters(
-    supplied: Mapping[str, ProviderParameter],
-    *,
-    accepted: frozenset[str],
-    provider_name: str,
-) -> None:
-    unknown = sorted(set(supplied) - accepted)
-    if unknown:
-        raise ValueError(
-            f"provider {provider_name!r} does not accept parameter(s): "
-            + ", ".join(repr(name) for name in unknown)
-        )
-
-
-def _require_real_number(value: ProviderParameter, *, label: str) -> float:
-    if isinstance(value, bool) or not isinstance(value, (int, float)):
-        raise TypeError(f"{label} must be a real number; booleans are not accepted")
-    return float(value)
-
-
-def _require_integer(value: ProviderParameter, *, label: str) -> int:
-    if isinstance(value, bool) or not isinstance(value, int):
-        raise TypeError(f"{label} must be an integer; booleans are not accepted")
     return value
 
 
@@ -650,8 +626,7 @@ def _check_quadrature_work(required, max_quadrature_work, subject):
     """Check one complete quadrature work count against ``LCHS.max_quadrature_work``.
 
     ``required`` is the complete charge of the selected rule, known before
-    its node arrays are built, so a refusal names a value that admits this
-    phase on the first retry.
+    its node arrays are built. A refusal reports this charge and the limit.
     """
     if type(max_quadrature_work) is not int or max_quadrature_work < 1:
         raise ValueError("max_quadrature_work must be a positive integer")
@@ -759,15 +734,7 @@ def _resolve_eq7(
     quadrature bounds are evaluated at the selected beta before choosing the
     grid.
     """
-    _reject_unknown_parameters(
-        supplied,
-        accepted=frozenset({"beta"}),
-        provider_name="near_optimal_eq7",
-    )
-    beta = _require_real_number(
-        supplied.get("beta", 0.75),
-        label="near_optimal_eq7 parameter 'beta'",
-    )
+    beta = float(supplied.get("beta", 0.75))
     if not 0.0 < beta < 1.0:
         raise ValueError("near_optimal_eq7 parameter 'beta' must lie in (0, 1)")
     return {"beta": beta}
@@ -776,12 +743,7 @@ def _resolve_eq7(
 def _resolve_no_parameters(
     supplied: Mapping[str, ProviderParameter],
 ) -> Mapping[str, ProviderParameter]:
-    """Accept no parameters. The Cauchy kernel has no free constant."""
-    _reject_unknown_parameters(
-        supplied,
-        accepted=frozenset(),
-        provider_name="cauchy_density",
-    )
+    """Return the empty configuration of a rule with no free parameters."""
     return {}
 
 
@@ -795,15 +757,7 @@ def _resolve_low_somma_f2(
     grows with c, and _admit_coefficient_rounding refuses a table whose
     binary64 finite sum cannot resolve the construction tolerance.
     """
-    _reject_unknown_parameters(
-        supplied,
-        accepted=frozenset({"c"}),
-        provider_name="low_somma_f2",
-    )
-    c_value = _require_real_number(
-        supplied.get("c", 1.0),
-        label="low_somma_f2 parameter 'c'",
-    )
+    c_value = float(supplied.get("c", 1.0))
     if not np.isfinite(c_value) or c_value <= 0.0:
         raise ValueError("low_somma_f2 parameter 'c' must be finite and positive")
     return {"c": c_value}
@@ -901,15 +855,7 @@ def _resolve_composite_gauss(
     bound decreases in K, so any factor at least one keeps the tail within its
     allowance. A factor below one could break that allowance and is rejected.
     """
-    _reject_unknown_parameters(
-        supplied,
-        accepted=frozenset({"truncation_multiplier"}),
-        provider_name="composite_gauss",
-    )
-    multiplier = _require_real_number(
-        supplied.get("truncation_multiplier", 1.0),
-        label="composite_gauss parameter 'truncation_multiplier'",
-    )
+    multiplier = float(supplied.get("truncation_multiplier", 1.0))
     if not np.isfinite(multiplier) or multiplier < 1.0:
         raise ValueError(
             "composite_gauss parameter 'truncation_multiplier' must be finite and positive (at least one)"
@@ -928,40 +874,9 @@ def _resolve_signed_binary(
     or quadrature bound, so there is no tolerance from which to derive
     default values.
     """
-    _reject_unknown_parameters(
-        supplied,
-        accepted=frozenset({"num_qubits", "lsb_position"}),
-        provider_name="signed_binary_uniform",
-    )
-    missing = sorted({"num_qubits", "lsb_position"} - set(supplied))
-    if missing:
-        raise ValueError(
-            "signed_binary_uniform is missing required parameter(s): "
-            + ", ".join(repr(name) for name in missing)
-        )
-    num_qubits = _require_integer(
-        supplied["num_qubits"],
-        label="signed_binary_uniform parameter 'num_qubits'",
-    )
-    lsb_position = _require_integer(
-        supplied["lsb_position"],
-        label="signed_binary_uniform parameter 'lsb_position'",
-    )
-    if num_qubits < 1:
-        raise ValueError("signed_binary_uniform parameter 'num_qubits' must be positive")
+    num_qubits = integer(supplied["num_qubits"], "num_qubits", 1)
+    lsb_position = integer_index(supplied["lsb_position"])
     return {"lsb_position": lsb_position, "num_qubits": num_qubits}
-
-
-def _resolve_symmetric_uniform_trapezoid(
-    supplied: Mapping[str, ProviderParameter],
-) -> Mapping[str, ProviderParameter]:
-    """Accept no parameters. The pair profile derives R, h and J from epsilon."""
-    _reject_unknown_parameters(
-        supplied,
-        accepted=frozenset(),
-        provider_name="symmetric_uniform_trapezoid",
-    )
-    return {}
 
 
 def _build_composite_gauss(
@@ -1170,7 +1085,7 @@ LCHS_K_QUADRATURE_IMPLEMENTATIONS: dict[str, LCHSQuadratureProvider] = {
     "symmetric_uniform_trapezoid": LCHSQuadratureProvider(
         name="symmetric_uniform_trapezoid",
         formula_id="low_somma_symmetric_uniform_trapezoid_v1",
-        resolve_parameters=_resolve_symmetric_uniform_trapezoid,
+        resolve_parameters=_resolve_no_parameters,
         build_nodes_and_weights=_build_symmetric_uniform_trapezoid,
     ),
 }

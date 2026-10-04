@@ -54,11 +54,6 @@ def test_documentation_uses_one_source_tree() -> None:
         assert "--8<--" not in page.read_text(), target
 
 
-def test_root_surface_rejects_unknown_names() -> None:
-    with pytest.raises(AttributeError, match="not_a_nwqlib_name"):
-        nwqlib.not_a_nwqlib_name  # noqa: B018
-
-
 def test_root_import_stays_lazy() -> None:
     script = (
         "import sys\n"

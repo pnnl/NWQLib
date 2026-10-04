@@ -319,10 +319,7 @@ def _load_noise_model(data):
 
     The model starts from the saved basis gates (``_noise_model_data``). Adding
     an error also adds its gate to the basis, as it did when the original
-    model received that error, so the rebuilt basis equals the saved one. A
-    model saved without ``basis_gates``, as NWQLib 0.98.1 and earlier saved
-    it, starts from Aer's default basis and then gains the gates its errors
-    name, so it can differ from the original model's basis.
+    model received that error, so the rebuilt basis equals the saved one.
     Gate constructors consume the saved parameters; converting just a gate name
     to a fixed unitary would discard parameterized rotations. No new channel or
     full-system matrix is constructed beyond QuantumError's own admission.
@@ -333,9 +330,9 @@ def _load_noise_model(data):
     from qiskit_aer.noise import NoiseModel, QuantumError, ReadoutError
 
     standards = get_standard_gate_name_mapping()
-    if not isinstance(data, dict) or set(data) - {"basis_gates"} != {"errors"}:
+    if not isinstance(data, dict) or set(data) != {"basis_gates", "errors"}:
         raise ValueError("unsupported saved Aer noise-model fields")
-    model = NoiseModel(basis_gates=data.get("basis_gates"))
+    model = NoiseModel(basis_gates=data["basis_gates"])
     for saved in data["errors"]:
         kind = saved["type"]
         if kind == "qerror":
@@ -960,11 +957,8 @@ def load(path, *, backend, method=None, progress=None):
     opened without a file-byte allowance, because every file in it was charged
     when it was written. The small ``run.json`` must be at most one MiB. After
     loading, each file write is charged to the Run's stored-data total
-    (``_bind_capacity``). ``progress`` is the reopened Run's progress callback,
-    checked here as a new Run checks it, before the folder is read.
+    (``_bind_capacity``). ``progress`` is the reopened Run's progress callback.
     """
-    if progress not in (None, False) and not callable(progress):
-        raise TypeError("progress must be None, False or a callable")
     from nwqlib._choice_archive import load_plan
     from nwqlib._run_journal import RUN_FORMAT, unsupported_run_format
     from nwqlib._prepared_execution import Run

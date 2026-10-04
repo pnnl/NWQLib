@@ -167,14 +167,6 @@ def test_planned_encoding_archive_keeps_constructor_phases_and_frames(
     assert loaded._native["encoding"].record == selected._native["encoding"].record
     # The saved Pauli table decodes to the selected labels and coefficients.
     assert loaded._native["encoding"]._payload.decomposition == selected._native["encoding"]._payload.decomposition
-    previous = {**saved, "selected": {**saved["selected"], "format": "qls/5"}}
-    with pytest.raises(ValueError, match="unsupported QLS archive"):
-        load_plan(previous, ArchiveFiles(tmp_path, 4_000_000))
-    # A saved readout that its phases and queries do not produce is refused.
-    altered = json.loads(json.dumps(saved))
-    altered["selected"]["plan"]["reconstruction"]["settings"][0]["name"] = "setting_other"
-    with pytest.raises(ValueError, match="saved QLS body differs"):
-        load_plan(altered, ArchiveFiles(tmp_path, 4_000_000))
     assert loaded.reconstruction.phase_solution == selected.reconstruction.phase_solution
     result = nwqlib.solve(loaded)
     expected = np.linalg.solve(A, [1.0, 1j])
@@ -730,16 +722,9 @@ def test_saved_quantum_result_loads_with_its_identity(tmp_path, output, shots, s
     assert nwqlib.load_result(tmp_path / "result").content_id == result.content_id
 
 
-def test_grouping_refusal_names_a_qls_max_work_that_admits_on_the_first_retry():
-    """A sampled QLS grouping refusal names ``QLS.max_work`` and a value that completes grouping.
-
-    The 4,095 six-qubit labels without I need 1,326,779 first-fit comparisons
-    in 729 groups, more than the inverse polynomial fit needs, so a cap of
-    146,000 admits the fit and refuses the grouping. The refusal names the
-    L(L-1)/2 envelope of PauliTerms.group, and one retry at that value plans.
-    """
+def test_sampled_readout_grouping_obeys_qls_max_work():
+    """A sampled QLS readout refuses grouping above its Method work limit."""
     import itertools
-    import re
     from nwqlib.operators import ingest_pauli
 
     n = 6
@@ -751,10 +736,8 @@ def test_grouping_refusal_names_a_qls_max_work_that_admits_on_the_first_retry():
                       b=np.linspace(1.0, 0.1, 1 << n), kappa=2.0, max_work=cap, shots=10,
                       output=NormalizedExpectation(observable=observable))
 
-    with pytest.raises(ValueError, match=r"Pauli grouping exceeds QLS\.max_work=146000\b") as refusal:
+    with pytest.raises(ValueError, match=r"Pauli grouping exceeds QLS\.max_work=146000\b"):
         selected(146_000)
-    named = int(re.search(r"Raise QLS\.max_work to (\d+), which is sufficient", str(refusal.value)).group(1))
-    assert len(selected(named).experiments) == 729
 
 
 def _reference_slice(selected):
@@ -1405,26 +1388,6 @@ def test_changed_rhs_payload_cannot_reuse_selected_preparation_record():
         validate_selection(selected)
     selected._native['preparation']=prep
     validate_selection(selected)
-
-
-def test_admission_refusal_names_a_value_that_admits_preparation_and_lowering():
-    # The planning refusal names R = max(S, A, W_prepare, W_lower) of the
-    # selected Programs (quantum._check_admission). On the exact route of the
-    # guide's 2-by-2 system, a ceiling between A and R admits Program
-    # construction but not lowering, so R must be measured at planning: the
-    # named value prepares on the first retry, one less refuses at planning.
-    import re
-    from nwqlib import plan, prepare
-    problem = LinearSystem(A=[[1.1, .1], [.1, .9]], b=[1, .25])
-    pattern = r"QLS\(max_admission_steps=(\d+)\)"
-    with pytest.raises(ValueError, match=pattern) as caught:
-        plan(problem, method=QLS(max_admission_steps=1), seed=7)
-    required = int(re.search(pattern, str(caught.value)).group(1))
-    with pytest.raises(ValueError, match=f"of at least {required} through"):
-        plan(problem, method=QLS(max_admission_steps=required - 1), seed=7)
-    prepared = prepare(plan(problem, method=QLS(max_admission_steps=required), seed=7), progress=False)
-    with prepared.run as run:
-        assert run._state["preparations"] == 1
 
 
 def test_multi_controlled_x_cx_law_reads_the_stored_synthesis_counts():

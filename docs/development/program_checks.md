@@ -124,7 +124,7 @@ Material collection work is charged (counted against `max_steps`) before buildin
 - the kept field slots of the Program, and
 - the admission work of one check of that Program (its expression evaluations and lifecycle steps).
 
-For QLS the second count covers the admission work through Program validation, preparation and native lowering. QLS planning measures the largest of these requirements for the selected Programs and refuses at planning when it exceeds the field. The resource estimate of a Program may use up to 24 times the field's value. The default is ten times the shared `AdmissionLimits` default of 100,000. For QLS the reason given is that the admission work of a sampled Program grows with the number of its distinct measured registers.
+Program validation, preparation and native lowering each apply the work ceiling to their own check. Passing one stage does not establish that a later stage fits. The resource estimate of a Program may use up to 24 times the field's value. The default is ten times the shared `AdmissionLimits` default of 100,000. In sampled QLS Programs, checking work grows with the number of distinct measured registers.
 
 A larger Program is refused with a ValueError that names the field, the refused stage and its count. Preparation, restoring a saved Run and loading saved evidence check the Program again and name the same field when they refuse.
 
@@ -132,10 +132,8 @@ A larger Program is refused with a ValueError that names the field, the refused 
 | --- | --- | --- |
 | Kept field slots (`"stored field inventory"`) | The complete count | Raising the field to the count passes the slot count |
 | Admission work (`"admission work"`) | The count reached when the check stopped, a lower bound. The complete count was not measured | Raise the field to at least the count. That value is not promised to pass |
-| QLS planning, complete measurement | A value that passes Program validation, preparation and lowering | The message gives `QLS(max_admission_steps=<count>)` |
-| QLS planning, measurement stopped at the larger of `max_admission_steps` and `max_work` | A lower bound | Raise the field only for a deliberately large Program |
 
-In every case except the complete QLS measurement, later admission, preparation and lowering can need more than the count. Raising `max_admission_steps` changes the planning-work allowance and does not change the selected quantum operations, or, for QLS, the selected polynomial. Pass the new value when you configure the Method, for example `ExpectationMethod(max_admission_steps=2_000_000)`. The shared `max_definitions` limit has no Method field, and a refusal against it asks for a smaller construction.
+Later admission, preparation and lowering can need more than the reported count. Raising `max_admission_steps` changes the planning-work allowance and does not change the selected quantum operations, or, for QLS, the selected polynomial. Pass the new value when you configure the Method, for example `ExpectationMethod(max_admission_steps=2_000_000)`. The shared `max_definitions` limit has no Method field, and a refusal against it asks for a smaller construction.
 
 ## Declared quantum and classical lifecycle
 

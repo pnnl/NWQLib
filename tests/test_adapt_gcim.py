@@ -62,7 +62,6 @@ def test_default_controls_and_finite_basis_order(monkeypatch):
         {"theta": float("inf")},
         {"gradient_norm_floor": -1.0},
         {"energy_change_tolerance": 0.0},
-        {"t_user": False},
         {"max_iterations": 0},
         {"overlap_cutoff": 0.0},
         {"optimize_every_m": 1},

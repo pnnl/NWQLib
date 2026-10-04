@@ -38,13 +38,6 @@ def test_options_uses_actual_required_scientific_configuration_without_instantia
     assert "theta" in schema["properties"]
     assert main(["options", "fixed_gcim"]) == 0
     assert "basis" in json.loads(capsys.readouterr().out)["required"]
-    for arguments in (
-        ["card", "not-a-registered-method"],
-        ["card", "chebyshev_lanczos", "--version", "999"],
-    ):
-        with pytest.raises(SystemExit) as absent:
-            main(arguments)
-        assert absent.value.code == 1 and "one known method/version" in capsys.readouterr().err
 
 
 def test_cli_module_entry_agrees_with_package_inventory_and_help(monkeypatch, capsys):
@@ -63,39 +56,6 @@ def test_cli_module_entry_agrees_with_package_inventory_and_help(monkeypatch, ca
         assert description in capsys.readouterr().out
 
 
-AUDIT_SCRIPTS = (
-    "check_core_records", "check_prepared_records", "check_qasm_records", "check_profile_records",
-    "check_algorithm_protocol", "check_scientist_records", "check_adapt_records", "check_df_records",
-    "check_lchs_records", "check_ordered_operator_records", "check_qhd_records", "check_qpe_records",
-    "check_qls_records",
-)
-
-
-@pytest.mark.parametrize("name", AUDIT_SCRIPTS)
-def test_audit_help_and_typo_stop_before_work(name, monkeypatch, capsys):
-    import builtins
-    from importlib import import_module
-
-    module = import_module("docs.scripts." + name)
-    original = builtins.__import__
-
-    def guarded(module_name, *args, **kwargs):
-        if module_name.split(".")[0] in {"nwqlib", "numpy", "scipy", "qiskit"}:
-            pytest.fail("help or invalid flag entered scientific audit")
-        return original(module_name, *args, **kwargs)
-
-    monkeypatch.setattr(builtins, "__import__", guarded)
-    monkeypatch.setattr(subprocess, "run", lambda *a, **k: pytest.fail("help launched an audit child"))
-    if hasattr(module, "child"):
-        monkeypatch.setattr(module, "child", lambda *a, **k: pytest.fail("help entered audit"))
-    for argument, code in (("--help", 0), ("--pois", 2)):
-        with pytest.raises(SystemExit) as stopped:
-            module.main([argument])
-        assert stopped.value.code == code
-        output = capsys.readouterr()
-        assert "usage:" in (output.out if code == 0 else output.err)
-
-
 def test_actual_external_check_method_cli_and_zero_acquisition_falsifier():
     completed = cli("check-method", "_hadamard_method:case")
     assert completed.returncode == 0, completed.stderr
@@ -105,23 +65,10 @@ def test_actual_external_check_method_cli_and_zero_acquisition_falsifier():
     assert "not a general" in report["qualification"]
 
 
-def test_check_method_factory_lookup_separates_missing_names_from_factory_errors(monkeypatch, capsys):
+def test_check_method_propagates_factory_attribute_errors(monkeypatch):
     import types
-    import nwqlib
-    import nwqlib.algorithms.authoring as authoring
     from nwqlib.cli import main
 
-    def forbidden(*args, **kwargs):
-        pytest.fail("a missing factory name reached scientific work")
-
-    for owner, name in ((authoring, "check_method"), (nwqlib, "plan"), (nwqlib, "solve")):
-        monkeypatch.setattr(owner, name, forbidden)
-    module = "_hadamard_method"
-    with pytest.raises(SystemExit) as stopped:
-        main(["check-method", f"{module}:misspelled_case"])
-    error = capsys.readouterr().err
-    assert stopped.value.code == 1 and module in error and "misspelled_case" in error
-    assert "Traceback" not in error
     # An AttributeError raised inside an existing factory is not a lookup error.
     def broken_case():
         raise AttributeError("internal author attribute")

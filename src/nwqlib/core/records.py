@@ -7,7 +7,6 @@ import binascii
 import hashlib
 import json
 import math
-from itertools import islice
 from collections.abc import Mapping
 from typing import Annotated, Literal, Self
 
@@ -325,7 +324,7 @@ class Record(BaseModel):
 
         Pydantic calls this hook when it builds a validator, including for a
         Record nested in another field, so every construction and load path
-        checks unknown keys and a supplied ``content_id``. The schema's
+        checks a supplied ``content_id`` after model validation. The schema's
         ``ref`` moves to the wrapper, so a recursive reference also reaches
         the check. A bare reference, or a schema already wrapped for this
         class, is returned unchanged, so the check runs once.
@@ -359,17 +358,6 @@ class Record(BaseModel):
         supplied = None
         if isinstance(value, Mapping):
             value = dict(value)
-            unknown = value.keys() - cls.model_fields.keys() - {"content_id"}
-            if unknown:
-                # Keys explain admission; arbitrary supplied values are never
-                # coerced or represented to format this error.
-                keys = sorted(repr(key[:80]) if type(key) is str else f"<{type(key).__name__} key>"
-                              for key in islice(unknown, 8))
-                fields = list(islice(cls.model_fields, 16))
-                raise ValueError(f"undeclared record fields for {cls.__name__}: {', '.join(keys)}"
-                                 + (f" ({len(unknown)-8} more)" if len(unknown)>8 else "")
-                                 + f"; declared fields: {', '.join(fields)}"
-                                 + (f" ({len(cls.model_fields)-16} more)" if len(cls.model_fields)>16 else ""))
         if isinstance(value, dict) and "schema_version" in value:
             if type(value["schema_version"]) is not int:
                 raise ValueError("schema_version must be an integer")

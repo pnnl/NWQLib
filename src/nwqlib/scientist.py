@@ -159,8 +159,8 @@ class Comparison:
 
 
 def _check_shots(shots):
-    """Refuse shots that are not a positive Python int or None, naming the value and its type."""
-    if shots is not None and (type(shots) is not int or shots < 1):
+    """Require a positive count for a sampled readout."""
+    if shots is not None and shots < 1:
         raise ValueError(f"shots must be a positive int or None for exact readout, got {shots!r}")
 
 
@@ -204,7 +204,7 @@ def plan(
     Raises:
         TypeError: If `method` is not a Method.
         ValueError: If `execution` is neither `"quantum"` nor `"classical"`,
-            if `shots` is not a positive integer or `None`, if `seed` is
+            if a supplied `shots` count is below 1, if `seed` is
             negative or not an integer, or if `output` has a unit whose
             symbol differs from the one the Problem or the output kind
             defines.

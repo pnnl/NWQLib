@@ -455,12 +455,6 @@ def _census_cx(census: Mapping[str, int], kind_cx: Mapping[str, int]) -> int:
     return total
 
 
-def _controlled_gate_census_cx(census: Mapping[str, int], controls: int) -> int:
-    """CX of the gates of ``census`` after Qiskit adds ``controls`` controls to them at once."""
-
-    return _census_cx(census, _controlled_kind_cx(controls))
-
-
 def _controlled_direct_preparation_cx(num_qubits: int, controls: int) -> int:
     """CX of the direct preparation of a complex n-qubit state after Qiskit adds ``controls`` controls.
 

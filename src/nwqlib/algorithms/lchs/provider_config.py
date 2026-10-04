@@ -14,19 +14,8 @@ ProviderParameter: TypeAlias = str | int | float | bool | None
 
 def _immutable_parameter_map(
     parameters: Mapping[str, ProviderParameter],
-    *,
-    owner: str,
 ) -> Mapping[str, ProviderParameter]:
-    if not isinstance(parameters, Mapping):
-        raise TypeError(f"{owner}.parameters must be a mapping of JSON scalars")
-    normalized: dict[str, ProviderParameter] = {}
-    for key, value in sorted(parameters.items()):
-        if not isinstance(key, str):
-            raise TypeError(f"{owner}.parameters keys must be strings")
-        if value is not None and not isinstance(value, (str, int, float, bool)):
-            raise TypeError(f"{owner}.parameters[{key!r}] must be a JSON scalar or None")
-        normalized[key] = value
-    return MappingProxyType(normalized)
+    return MappingProxyType(dict(sorted(parameters.items())))
 
 
 @dataclass(frozen=True, kw_only=True)
@@ -60,7 +49,7 @@ class ProviderConfig(FieldSerializedRecord):
         object.__setattr__(
             self,
             "parameters",
-            _immutable_parameter_map(self.parameters, owner="ProviderConfig"),
+            _immutable_parameter_map(self.parameters),
         )
 
 
@@ -91,8 +80,5 @@ class ResolvedProviderConfig(FieldSerializedRecord):
         object.__setattr__(
             self,
             "parameters",
-            _immutable_parameter_map(
-                self.parameters,
-                owner="ResolvedProviderConfig",
-            ),
+            _immutable_parameter_map(self.parameters),
         )

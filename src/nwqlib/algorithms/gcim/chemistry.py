@@ -214,9 +214,6 @@ def build_gcim_chemistry_problem(
     """
 
     methods = tuple(str(method).lower() for method in reference_methods)
-    unsupported = sorted(set(methods) - {"mp2", "ccsd", "casci"})
-    if unsupported:
-        raise ValueError(f"unsupported chemistry reference_methods: {unsupported}")
     if "casci" in methods and active_space is None:
         raise ValueError("CASCI reference method requires active_space")
     if spin != 0:

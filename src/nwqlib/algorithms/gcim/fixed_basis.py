@@ -1922,26 +1922,17 @@ class FixedGCIM(Method):
                      "GCIM Pauli term table")
         input_terms = _packed_to_pauli_arrays(table.x, table.z, table.coefficients.real, q)
         nonidentity = len(input_terms.coefficients.array) - int((~input_terms.labels.array.any(axis=1)).any())
-        # Before grouping, the projected solve S_b and the grouped-analysis
-        # floor A(1) are known necessary requirements, and
-        # R = max(S_b, L(L-1)/2, A(L)) funds grouping, the solve and one
-        # planned sampled analysis (sampled_analysis_work). A refusal here
-        # names R. A later grouping refusal names L(L-1)/2, and a later
-        # grouped-analysis refusal names A(G), which completes these three
-        # work gates: at most two retries.
+        # The projected solve and the one-group analysis floor are known
+        # requirements before the actual grouping and setting construction.
         solve_need = _projected_solve_work(b)
         if shots and nonidentity:
             analysis_floor = sampled_analysis_work(b, q, nonidentity, 1, shots)
-            analysis_envelope = sampled_analysis_work(b, q, nonidentity, nonidentity, shots)
-            retry_need = max(solve_need, nonidentity * (nonidentity - 1) // 2, analysis_envelope)
             if max(solve_need, analysis_floor) > self.max_analysis_work:
                 raise ValueError(
                     f"FixedGCIM known analysis requirements need at least "
                     f"{max(solve_need, analysis_floor)} work units, exceeding "
-                    f"max_analysis_work={self.max_analysis_work}. Raise "
-                    f"FixedGCIM.max_analysis_work to {retry_need}, which is sufficient for "
-                    "grouping, the projected solve and one planned sampled analysis. "
-                    "Byte and acquisition limits are checked separately."
+                    f"max_analysis_work={self.max_analysis_work}. "
+                    "Increase FixedGCIM.max_analysis_work or reduce the basis or operator."
                 )
         # A sampled Plan records its QWC partition before settings expansion;
         # the scalar-identity shortcut acquires no pencil and needs no groups.
@@ -2246,12 +2237,9 @@ class FixedGCIM(Method):
 
     def analyze(self, plan, data, *, settings):
         """Reconstruct the acquired Hermitian pencil and solve its usable overlap subspace."""
-        if set(settings) - {"overlap_cutoff"}:
-            raise ValueError("only overlap_cutoff is a GCIM analysis setting")
         cutoff = settings.get("overlap_cutoff", self.overlap_cutoff)
         if (
-            isinstance(cutoff, bool)
-            or not isinstance(cutoff, (int, float))
+            not isinstance(cutoff, (int, float))
             or not 0 < cutoff < float("inf")
         ):
             raise ValueError("overlap_cutoff must be finite and positive")

@@ -332,18 +332,9 @@ class PauliTerms:
         Grouping admits each candidate tile before evaluating it.
         ``comparison_count`` counts all candidates in evaluated tiles. For L
         input terms it is at most L(L-1)/2. The next tile is admitted only if
-        ``C_so_far + charge <= max_comparisons``, so the next-tile minimum
-        ``C_so_far + charge`` is necessary to continue, while ``L(L-1)/2`` is
-        sufficient for complete grouping. A refusal names the actual grouping
-        work, the next charge and the next-tile minimum, then reports
-        ``L(L-1)/2`` as the value sufficient for this phase. Grouping can
-        succeed below that envelope when its actual comparisons fit. Changing
-        only the comparison cap leaves the byte-selected tile, traversal
-        order and resulting partition unchanged, so retrying at ``L(L-1)/2``
-        completes grouping when the other limits are unchanged. The
-        triangular quantity is printed on refusal only; it is neither
-        reserved in advance nor a reason to continue past the cap. Later
-        phases using the same option are admitted separately. General
+        ``C_so_far + charge <= max_comparisons``. A refusal names the work
+        already counted, the next charge and the limit. Later phases using
+        the same option are admitted separately. General
         commuting grouping charges actual member-pair tests and can reach the
         quadratic count even with one group; its evaluated members form a
         disjoint partition of the preceding terms, so its total is also at
@@ -392,9 +383,7 @@ class PauliTerms:
                 raise ValueError(
                     f"Pauli grouping exceeds {limit_name}={max_comparisons}: "
                     f"grouping used={comparisons}, next charge={charge}. "
-                    f"The next tile needs {limit_name} of at least {total}. "
-                    f"Raise {limit_name} to {m * (m - 1) // 2}, which is sufficient "
-                    "for complete grouping. Later phases using this limit can need more.")
+                    f"Increase {limit_name} or reduce the term population.")
             comparisons += charge
 
         admit(0)

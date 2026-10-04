@@ -226,9 +226,8 @@ def _compiler_identity(generator, kind, active_modes, blocks):
     The digest covers the compact sorted-key JSON of the generator snapshot
     (``adapt_archive._write_generator``), the route kind and the active
     modes, then for each occupation block its indices, dtype and shape and
-    its C-order bytes. A saved compiler row carries this identity, so a row
-    restored at a pool index whose admitted generator differs, or whose
-    route or blocks were changed after saving, gives another digest.
+    its C-order bytes. The compiler row stores this identity with its
+    selected route and blocks.
     """
     import hashlib
     import json
@@ -269,31 +268,11 @@ class CompilerPlans:
         self.restore(saved)
 
     def restore(self, saved):
-        """Adopt saved entries for the admitted generators at their pool indices, after checking each one.
-
-        An entry is refused when its identity is not the one its route and
-        blocks give with the admitted generator at its pool index, or when
-        the map already holds a different plan for that index, so two saved
-        copies of one plan cannot disagree silently. Every entry is checked
-        before any is adopted, so a refusal leaves the map unchanged. Built
-        entries stay.
-        """
-        adopted = {}
+        """Restore saved compiler plans at their pool indices, keeping entries already built."""
         for index, kind, modes, blocks, identity in saved:
-            if (
-                type(index) is not int
-                or not 0 <= index < len(self._pool)
-                or identity != _compiler_identity(self._pool[index], kind, modes, blocks)
-            ):
-                raise ValueError(f"saved compiler row for pool index {index} does not match its generator")
-            held = self.identity(index) if index in self._built else adopted.get(index, (identity,))[0]
-            if identity != held:
-                raise ValueError(f"saved compiler rows for pool index {index} disagree")
             if index not in self._built:
-                adopted[index] = (identity, kind, tuple(modes), tuple(blocks))
-        for index, (identity, kind, modes, blocks) in adopted.items():
-            self._built[index] = _GeneratorCircuitPlan(kind, self._pool[index], modes, blocks)
-            self._identities[index] = identity
+                self._built[index] = _GeneratorCircuitPlan(kind, self._pool[index], tuple(modes), tuple(blocks))
+                self._identities[index] = identity
 
     def identity(self, index):
         """Return ``_compiler_identity`` of the built plan at ``index``, computed once."""

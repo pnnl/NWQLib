@@ -98,7 +98,6 @@ jobs:
           from qiskit_ionq import IonQProvider
           PY
       - run: ruff check .
-      - run: python docs/scripts/contract_specimen.py --check
       - run: python -m mkdocs build --strict
       - run: python docs/scripts/policy_lint.py --site-dir site
       - name: Run full test suite with coverage

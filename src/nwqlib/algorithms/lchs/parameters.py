@@ -120,9 +120,7 @@ def selected_identity(data, problem, method):
     The SHA-256 covers the Problem and Method identities and every selected
     array, record and scalar in LCHSData, with dtype, shape and exact binary64
     bytes, encoded by ``_feed_selected_value``. The SELECT record or host
-    kernel stores this identity, and archive loading recomputes it, so a saved
-    payload that differs in any selected number or in its nesting is rejected
-    instead of silently executed.
+    kernel stores this identity to name the selected numerical recipe.
     """
     if data.method != method:
         raise ValueError("selected LCHS data belongs to another Method")

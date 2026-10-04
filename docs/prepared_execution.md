@@ -85,7 +85,7 @@ These limits control represented work. They are not provider billing, process me
 
 ### Raise a limit during a run
 
-`run.extend_limits(max_total_shots=128)` sets a new cumulative cap of 128. It does not add 128 shots, reset usage or change scientific settings. Each actual increase appends one `LimitAmendment` record to `run.limit_amendments`, with the old and new limits, a timestamp and the counters immediately before the change. Equal values change nothing. The new cap and its record are saved together, and a failed limit check or write saves neither. Recording an increase uses stored data, so later writes can need a larger `max_data_bytes`. When an error message suggests a `max_data_bytes` value, that value covers the transition or gate the message names. A Result keeps the limits and history it captured, so increasing the Run's limits later does not alter an earlier Result. [Execution accounting](development/execution.md#execution-accounting) lists the recorded counters.
+`run.extend_limits(max_total_shots=128)` sets a new cumulative cap of 128. It does not add 128 shots, reset usage or change scientific settings. Each actual increase appends one `LimitAmendment` record to `run.limit_amendments`, with the old and new limits, a timestamp and the counters immediately before the change. Equal values change nothing. The new cap and its record are saved together, and a failed limit check or write saves neither. Recording an increase uses stored data, so later writes can need a larger `max_data_bytes`. A Result keeps the limits and history it captured, so increasing the Run's limits later does not alter an earlier Result. [Execution accounting](development/execution.md#execution-accounting) lists the recorded counters.
 
 ## Cancel, close and handle failures
 
@@ -129,7 +129,7 @@ For a long open Run with a folder, `run.release_native()` releases fully collect
 
 ## Forecasts and allocations
 
-When supplied, `run.forecast` and `run.allocation` keep the `PlanEstimate` and `Allocation` chosen for the Run. The same immutable values appear in `run.data` and the Result's data and survive save and reopen. The Run checks their association with its original `Plan` and their sources. Before each new submission or host invocation, it records the matching point assessment in `event.assessment_id`. A future adaptive point without a forecast keeps `None`. Neither continuation nor opening a saved Result reevaluates models, changes shots or configures a backend from an Allocation.
+When supplied, `run.forecast` and `run.allocation` keep the `PlanEstimate` and `Allocation` chosen for the Run. The same immutable values appear in `run.data` and the Result's data and survive save and reopen. When created, the Run checks their association with its original `Plan` and their sources. Before each new submission or host invocation, it records the matching point assessment in `event.assessment_id`. A future adaptive point without a forecast keeps `None`. Neither continuation nor opening a saved Result reevaluates models, changes shots or configures a backend from an Allocation.
 
 ## Progress display
 

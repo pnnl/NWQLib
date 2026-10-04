@@ -72,7 +72,7 @@ def test_sparse_product_forwards_order_to_the_actual_suzuki_action():
 
 
 @pytest.mark.parametrize("synthesis, order", [("suzuki_trotter", 3), ("suzuki_trotter", 0),
-    ("suzuki_trotter", 2.5), ("suzuki_trotter", True), ("lie_trotter", 2)])
+    ("lie_trotter", 2)])
 def test_sparse_product_order_rejects_before_consuming_terms(synthesis, order):
     from nwqlib.subroutines.hamiltonian_evolution.sparse_pauli_product import build_sparse_pauli_product_circuit
 

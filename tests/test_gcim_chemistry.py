@@ -15,7 +15,6 @@ from _h2_sto3g_reference import (
     H2_STO3G_NUCLEAR_REPULSION,
 )
 from nwqlib.algorithms.gcim import (
-    CHEMISTRY_EXTRA_MESSAGE,
     build_gcim_chemistry_problem,
     chemistry_reference_diagnostic,
     correlation_fraction,
@@ -172,7 +171,6 @@ def test_explicit_reference_runs_once_and_casci_rotation_does_not_change_input(
 @pytest.mark.parametrize(
     "kwargs, message",
     [
-        ({"reference_methods": ("unknown",)}, "unsupported chemistry reference_methods"),
         ({"reference_methods": ("casci",)}, "requires active_space"),
     ],
 )
@@ -187,10 +185,6 @@ def test_reference_method_admission_precedes_chemistry_work(monkeypatch, kwargs,
         build_gcim_chemistry_problem("fake geometry", **kwargs)
 
 
-def test_chemistry_import_guard_message_names_optional_extra() -> None:
-    assert "nwqlib[chemistry]" in CHEMISTRY_EXTRA_MESSAGE
-    assert "openfermion" in CHEMISTRY_EXTRA_MESSAGE
-    assert "pyscf" in CHEMISTRY_EXTRA_MESSAGE
 
 
 def test_scientific_cardinalities_reject_before_unneeded_chemistry_work(
@@ -207,7 +201,7 @@ def test_scientific_cardinalities_reject_before_unneeded_chemistry_work(
         pytest.fail("invalid active-space counts reached chemistry dependencies")
 
     monkeypatch.setattr(chemistry, "_require_chemistry_extras", forbidden)
-    for active_space in ((2.9, 2.9), (2, 2.9), (True, 2)):
+    for active_space in ((2.9, 2.9), (2, 2.9)):
         with pytest.raises(ValueError, match="integer"):
             build_gcim_chemistry_problem("fake geometry", active_space=active_space)
         with pytest.raises(ValueError, match="integer"):

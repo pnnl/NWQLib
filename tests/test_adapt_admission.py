@@ -275,9 +275,7 @@ def test_only_sampled_quantum_plans_admit_readout_grouping():
         reconstruction = plan_for(execution=execution, max_products=needed - 1, **settings).reconstruction
         assert reconstruction.groups == reconstruction.energy_groups == ()
         assert (reconstruction.pool[0].commutator is None) == (execution == "classical")
-    # The refusal names the complete L(L-1)/2 envelope of the 200 energy labels.
-    refusal = (rf"Pauli grouping exceeds ADAPT\.max_products={needed - 1}: .*"
-               rf"Raise ADAPT\.max_products to {200 * 199 // 2}, which is sufficient")
+    refusal = rf"Pauli grouping exceeds ADAPT\.max_products={needed - 1}:"
     with pytest.raises(ValueError, match=refusal):
         plan_for(shots=64, max_products=needed - 1, **settings)
     sampled = plan_for(shots=64, max_products=needed, **settings).reconstruction

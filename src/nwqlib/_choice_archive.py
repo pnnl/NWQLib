@@ -286,19 +286,10 @@ class ArchiveFiles:
         is read (``read_path``). The standard parser is recursive, so its
         recursion limit bounds container nesting, and a deeper file raises
         ``ValueError`` instead of ``RecursionError``.
-        Duplicate keys and nonfinite numbers reject. A missing ``run.json`` or
-        ``result.json`` next to the other file adds a note naming the right
-        loader.
+        Duplicate keys and nonfinite numbers reject.
         """
-        try:
-            with self.read_path(name).open(encoding="utf-8") as stream:
-                text = stream.read()
-        except FileNotFoundError as error:
-            other = {"run.json": "result.json", "result.json": "run.json"}.get(name)
-            if other is not None and self.file(other).is_file():
-                loader = "load_result" if other == "result.json" else "load_run"
-                error.add_note(f"This is a {other[:-5]} archive; use nwqlib.{loader}({str(self.path)!r}).")
-            raise
+        with self.read_path(name).open(encoding="utf-8") as stream:
+            text = stream.read()
         try:
             return json.loads(text, object_pairs_hook=_json_pairs,
                               parse_float=_json_finite, parse_constant=_json_finite)
@@ -840,10 +831,8 @@ def save_plan(plan, files):
 def load_plan(data, files, *, method=None):
     """Restore the selected Plan through the Method's hook, without planning again.
 
-    The restored Plan must have the saved content identity. Some hooks, such
-    as the LCHS one, also compare their saved construction data with the
-    selected records. Other saved construction files are trusted not to have
-    been edited (docs/saved_evidence.md, "Saved folders are read-only").
+    The restored Plan must have the saved content identity. The Method's
+    hook restores its selected construction data from the saved files.
     """
     from nwqlib.core.planning import Plan
     cls = method_class(data["method"], method)

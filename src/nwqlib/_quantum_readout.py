@@ -964,9 +964,8 @@ def qwc_groups(terms, num_qubits, *, max_comparisons, max_bytes, limit_name="max
     in first-fit order, its accumulated basis (qubit zero rightmost) and the
     actual evaluated comparison count. ``limit_name`` is forwarded to
     ``PauliTerms.group``, which admits each candidate tile against
-    ``comparisons + charge <= max_comparisons`` and on refusal names
-    ``limit_name`` and the value ``L*(L-1)//2`` sufficient for grouping L
-    labels. With no grouped label no comparison is needed, so only the cap
+    ``comparisons + charge <= max_comparisons`` and names the caller's limit
+    on refusal. With no grouped label no comparison is needed, so only the cap
     is validated and zero comparisons are returned.
     """
     labels = tuple(dict.fromkeys(label for label, value in terms

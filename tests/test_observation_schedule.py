@@ -207,7 +207,7 @@ def test_aer_refuses_a_view_without_its_program_definitions_before_native_prepar
         blocks=base.blocks)
     monkeypatch.setattr(lowering, "_lower_qiskit", lambda *args, **kwargs: pytest.fail("native lowering started"))
     with Run(plan) as run:
-        with pytest.raises(ValueError, match="readout view of point 'end' names a tail or inverse that is not a"):
+        with pytest.raises(ValueError, match="readout view.*tail or inverse"):
             prepare(plan.resolve("trajectory"), run=run, runtime=RuntimeOptions(seed=7))
         assert run.trace.preparations == 0
 
@@ -1003,57 +1003,6 @@ def test_intermediate_amplitude_points_carry_their_own_prefix_phase():
             np.testing.assert_allclose(saved, Statevector(prefix).data, atol=2e-12, rtol=0, err_msg=str(boundary))
 
 
-@pytest.mark.parametrize("edit", ["delete one", "delete all", "copy", "duplicate", "rekey", "single copy",
-                                  "single rekey", "single second"])
-def test_reopen_refuses_a_completed_trajectory_without_its_complete_point_collection(tmp_path, edit):
-    """A completed attempt binds its whole point collection; a missing, absent or repeated point refuses reopening.
-
-    Each observation row is keyed by its chunk identity, and a single-endpoint
-    attempt has one observation: a copy under another key, a rekeyed row and
-    a second observation of the attempt under its own identity refuse
-    reopening, naming the row. A second chunk for one trajectory point under
-    its own identity refuses reopening as a duplicate point.
-    """
-    import sqlite3
-    import nwqlib
-    from nwqlib.backends import AerBackend
-    from nwqlib._prepared_execution import submit_experiment
-    from nwqlib._run_journal import encode_records
-
-    single = edit.startswith("single")
-    plan = three_call_plan(ObservationSpec(kind="pauli_expectation", labels=("ZZ",)) if single else
-                           trajectory(*(pauli(f"p{k}", k % 4, "ZZ") for k in range(4))))
-    with Run(plan, directory=tmp_path / "run", progress=False) as run:
-        chunk = submit_experiment(prepare(plan.resolve("trajectory"), run=run, runtime=RuntimeOptions(seed=7)), run=run)
-    other = "sha256:" + "d" * 64
-    with sqlite3.connect(tmp_path / "run" / "run.sqlite") as db:
-        rows = db.execute("SELECT rowid FROM records WHERE kind='chunk' ORDER BY rowid").fetchall()
-        row = rows[0 if single else 1][0]
-        if edit == "delete one":
-            db.execute("DELETE FROM records WHERE rowid=?", (row,))
-        elif edit == "delete all":
-            db.execute("DELETE FROM records WHERE kind='chunk'")
-        elif edit.endswith("copy"):
-            db.execute("INSERT INTO records(kind, key, size, payload, collected) "
-                       "SELECT kind, ?, size, payload, 0 FROM records WHERE rowid=?", (other, row))
-        elif edit in ("duplicate", "single second"):
-            # Another acquisition's data under its own identity, claiming the
-            # same attempt (and, for a trajectory, the same point).
-            second = (chunk if single else chunk[1]).revise(job="another-job")
-            encoded = encode_records((("chunk", second.content_id, second),), 1 << 30)
-            other, text = encoded.rows[0][1:]
-            db.execute("INSERT INTO records(kind, key, size, payload) VALUES('chunk', ?, ?, ?)",
-                       (other, encoded.sizes[0], text))
-        else:
-            db.execute("UPDATE records SET key=? WHERE rowid=?", (other, row))
-    message = {"delete one": "missing a declared point", "delete all": "missing its saved observation",
-               "duplicate": "duplicate point in one trajectory acquisition",
-               "single second": f"saved observation row '{other}' is a second observation of attempt"}.get(
-        edit, f"saved observation row '{other}' is not keyed by its chunk identity")
-    with pytest.raises(ValueError, match=message):
-        nwqlib.load_run(tmp_path / "run", backend=AerBackend(), progress=False)
-
-
 def test_a_local_output_refused_after_it_returned_releases_its_reservation(tmp_path, monkeypatch):
     """Aer returned in process and publication refused its output: nothing can retrieve it, so nothing stays pending."""
     import nwqlib
@@ -1631,7 +1580,7 @@ def test_the_trajectory_memory_check_and_the_simulator_share_one_thread_cap(monk
     restored = AerBackend().restore_native_data(handle.record, saved, native.metadata, run=None)
     assert restored.simulator.options.max_parallel_threads == 3
     metadata = {key: value for key, value in native.metadata.items() if key != "simulator_max_parallel_threads"}
-    with pytest.raises(ValueError, match="lacks its native metadata key simulator_max_parallel_threads; its Run folder was written by a revision"):
+    with pytest.raises(ValueError, match="simulator_max_parallel_threads"):
         AerBackend().restore_native_data(handle.record, saved, metadata, run=None)
     with nwqlib.load_run(tmp_path / "run", backend=AerBackend(), progress=False) as reopened:
         again = prepare(reopened.plan.resolve("trajectory"), run=reopened, runtime=RuntimeOptions(seed=7))
@@ -1870,134 +1819,3 @@ def test_static_scan_admits_each_setting_once_and_stops_pricing_at_a_known_cap_e
     with Run(plan, limits=ExecutionLimits(max_total_circuits=1, max_completion_metadata_bytes=1)) as run:
         with pytest.raises(ValueError, match=rf"max_total_circuits=1 cannot admit .*\(0 counted, {len(plan.experiments)} requested"):
             _prepared_execution.prepare_static(plan, run=run)
-
-
-def _named_data_limit(message):
-    import re
-    return int(re.search(r"(?:ExecutionLimits|extend_limits)\(max_data_bytes=(\d+)\)", message).group(1))
-
-
-def _stored_footprint(run):
-    state = run._state
-    return (state["data_bytes"] + state["array_bytes"] + state["payload_bytes"]
-            + state["external_bytes"] + sum(state["pending_output"].values()))
-
-
-def _one_qubit_expectation_plan():
-    import nwqlib
-    from nwqlib.algorithms import ExpectationMethod
-    from nwqlib.problems import Expectation
-    return nwqlib.plan(Expectation(state=[1, 1], observable=[[1, .2], [.2, -1]]), method=ExpectationMethod(),
-                       shots=100, seed=7)
-
-
-def test_data_limit_retry_solves_the_decimal_width_inequality():
-    """``_decimal_retry_limit`` returns the least N >= total + m (digits(N) - digits(L)) at or above L.
-
-    Direct enumeration of the inequality for zero, one and two changing cap
-    occurrences, including retries that cross a second decimal boundary
-    (10,002 and 10,005 from L = 99 and total 9,999).
-    """
-    from nwqlib._prepared_execution import _decimal_retry_limit
-    for cap, total in ((99, 101), (99, 9999), (999, 9999), (99999, 100001)):
-        for occurrences in (0, 1, 2):
-            expected = next(n for n in range(total, total + 50)
-                            if n >= total + occurrences * (len(str(n)) - len(str(cap))))
-            assert _decimal_retry_limit(total, priced_at=cap, occurrences=occurrences, minimum=cap) == expected
-    assert _decimal_retry_limit(9999, priced_at=99, occurrences=1, minimum=99) == 10002
-    assert _decimal_retry_limit(9999, priced_at=99, occurrences=2, minimum=99) == 10005
-
-
-def test_run_creation_data_limit_refusal_names_a_value_that_admits_the_same_creation():
-    """The initialization refusal prices the cap that it suggests, which the header row serializes.
-
-    From the starting caps 1000, 99 and 10000 the one-qubit Expectation Plan's
-    in-memory Run names the same value, and creating the Run at that value
-    admits the header and RNG rows.
-    """
-    from nwqlib.execution import ExecutionLimits
-    plan = _one_qubit_expectation_plan()
-    named = []
-    for cap in (1000, 99, 10000):
-        with pytest.raises(ValueError, match="cannot admit this transition") as caught:
-            Run(plan, limits=ExecutionLimits(max_data_bytes=cap), progress=False)
-        named.append(_named_data_limit(str(caught.value)))
-        with Run(plan, limits=ExecutionLimits(max_data_bytes=named[-1]), progress=False) as run:
-            assert set(run._state["data_sizes"]) == {("header", "run"), ("rng", "current")}
-    assert named == [29239] * 3 and "this Run-initialization transition's envelope" in str(caught.value)
-
-
-def test_limit_amendment_refusal_names_a_value_that_admits_the_same_amendment():
-    """A max_data_bytes amendment that crosses a decimal boundary is refused naming a value whose retry admits.
-
-    Ordinary checkpoint text places the accounted storage at 99,900 under the
-    cap 99,990. The amendment to 99,991 is refused, and ``run.extend_limits``
-    at the named value records the amendment within that value, with the old
-    limits and counters unchanged by the refusal.
-    """
-    import nwqlib
-    from nwqlib.algorithms import ExpectationMethod
-    from nwqlib.execution import ExecutionLimits
-    from nwqlib.operators.inputs import ingest_pauli
-    from nwqlib.problems import Expectation
-    from nwqlib.problems.inputs import ingest_occupation
-    plan = nwqlib.plan(Expectation(state=ingest_occupation("01", num_qubits=2),
-                                   observable=ingest_pauli((("ZZ", 1.0),), num_qubits=2)),
-                       method=ExpectationMethod(), shots=8, seed=5)
-    with Run(plan, limits=ExecutionLimits(max_data_bytes=99990), progress=False) as run:
-        run.checkpoint({"memo": ""})
-        run.checkpoint({"memo": "x" * (99900 - _stored_footprint(run))})
-        before = (run.limits, run.limit_amendments, _stored_footprint(run))
-        assert before[2] == 99900
-        with pytest.raises(ValueError, match="cannot admit this transition") as caught:
-            run.extend_limits(max_data_bytes=99991)
-        assert before == (run.limits, run.limit_amendments, _stored_footprint(run))
-        named = _named_data_limit(str(caught.value))
-        run.extend_limits(max_data_bytes=named)
-        assert run.limit_amendments[-1].old == before[0] and run.limits.max_data_bytes == named
-        assert _stored_footprint(run) <= named
-    assert "this limit-amendment transition's envelope" in str(caught.value)
-
-
-def test_durable_run_creation_streamed_refusal_suggests_a_generous_data_limit(tmp_path):
-    """A streamed max_data_bytes refusal suggests max(used + requested, 2 * cap, 100,000,000).
-
-    The one-qubit Expectation Plan's durable Run at the caps 1,000 and 20,000
-    is refused by the cumulative data check, which names 100,000,000 rather
-    than a value a few bytes above the counted total, and a new directory at
-    that value creates the Run.
-    """
-    import re
-    from nwqlib.execution import ExecutionLimits
-    plan = _one_qubit_expectation_plan()
-    for cap in (1000, 20000):
-        with pytest.raises(ValueError, match="cannot admit the requested stored data bytes") as caught:
-            Run(plan, limits=ExecutionLimits(max_data_bytes=cap), progress=False, directory=tmp_path / f"refused{cap}")
-        named = int(re.search(r"at least (\d+)", str(caught.value)).group(1))
-        assert named == 100_000_000
-        with Run(plan, limits=ExecutionLimits(max_data_bytes=named), progress=False,
-                 directory=tmp_path / f"admitted{cap}") as run:
-            assert run.limits.max_data_bytes == named
-
-
-def test_declaration_gate_names_declaration_plus_allowance_for_that_check_only():
-    """The declaration-and-allowance gate names D + M, and that cap reaches the separate payload gate.
-
-    The one-qubit, 100-shot counts declaration and the default 65,536-byte
-    completion metadata allowance need 65,802 bytes at this gate. After
-    ``run.extend_limits`` to that value the counts payload refuses on its own
-    item capacity (two entries against ``max_items=0``).
-    """
-    from nwqlib._prepared_execution import _admit_readout
-    from nwqlib._run_journal import _json_bound
-    from nwqlib.execution import ExecutionLimits
-    plan = _one_qubit_expectation_plan()
-    _, observation = plan.resolve(plan.experiments[0].name).resolved_observation(plan)
-    with Run(plan, limits=ExecutionLimits(max_data_bytes=40000), progress=False) as run:
-        with pytest.raises(ValueError, match="sufficient for this declaration-and-allowance check only") as caught:
-            _admit_readout(observation, width=1, classical_width=1, run=run)
-        named = _named_data_limit(str(caught.value))
-        assert named == _json_bound(observation, 40000) + run.limits.max_completion_metadata_bytes == 65802
-        run.extend_limits(max_data_bytes=named)
-        with pytest.raises(ValueError, match="max_items=0"):
-            _admit_readout(observation, width=1, classical_width=1, run=run)

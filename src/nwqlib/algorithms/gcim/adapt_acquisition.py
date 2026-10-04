@@ -2469,8 +2469,6 @@ def analyze_adapt(plan, data, *, settings):
     """
     from .adapt import METHOD
 
-    if set(settings) - {"overlap_cutoff"}:
-        raise ValueError("only overlap_cutoff is a post-hoc ADAPT analysis setting")
     chunks = tuple(_matched_query_chunks(plan, data))
     import json
 
@@ -2484,7 +2482,7 @@ def analyze_adapt(plan, data, *, settings):
         raise ValueError("overlap_cutoff must be positive and finite")
     # A new overlap cutoff reuses the basis that produced the saved value.
     # Later selected-but-unprojected coordinates must not replace that basis.
-    if settings and raw is not None:
+    if "overlap_cutoff" in settings and raw is not None:
         context = AdaptContext(observations=_observation_index(chunks))
         selected = tuple(zip(state["value_selected"], state["value_theta"], strict=True))
         receipts = {receipt.content_id: receipt for receipt in data.receipts}

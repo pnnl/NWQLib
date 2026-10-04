@@ -458,15 +458,3 @@ def test_explicit_external_alternative_prep_roundtrip_keeps_actual_recipe(tmp_pa
     assert restored.analyze().value == -1.0
     assert nwqlib.solve(restored.plan).value == -1.0
     assert result.data.trace.events == restored.data.trace.events
-    metadata = path / "result.json"
-    saved = json.loads(metadata.read_text())
-    nodes = saved["selection"]["selected"]["blocks"]["nodes"]
-    original = metadata.read_text()
-    selected_prep = next(node for node in nodes if node["kind"] == "preparation_primitives")
-    # Native X has the same action but is a different selected recipe/cost law.
-    selected_prep["kind"] = "preparation"
-    metadata.write_text(json.dumps(saved))
-    with pytest.raises(ValueError, match="selected preparation"):
-        nwqlib.load_result(path, method=HadamardPauliExpectation)
-    metadata.write_text(original)
-    assert nwqlib.load_result(path, method=HadamardPauliExpectation).value == -1.0

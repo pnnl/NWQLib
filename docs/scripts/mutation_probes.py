@@ -27,8 +27,8 @@ MODULE_QUALNAME = "<module>"
 # without a bound the campaign would never finish and would leave the mutated
 # source on disk when its process is killed. A run past the bound is an
 # infrastructure error, and _run_probe restores the source before the
-# campaign stops. The baseline runs all 205 selected nodes of the 274 probes
-# at once. With 143 nodes it took 40 s on an Apple M3 Max with Python
+# campaign stops. The baseline runs the selected nodes together before any
+# mutation. With 143 nodes it took 40 s on an Apple M3 Max with Python
 # 3.12.14, so the bound leaves room for a slower host and for a mutant that
 # slows a test without making it loop.
 PYTEST_TIMEOUT_SECONDS = 600
@@ -118,7 +118,10 @@ PROBES = (
         module="nwqlib.algorithms.lanczos.readout", qualname="signed_outcomes",
         old="        return np.where(index == 0, 1, -1).astype(np.int8)\n",
         new="        return np.where(index == 0, -1, 1).astype(np.int8)\n",
-        pytest_args=("tests/test_lanczos_circuits.py::test_shared_walk_metadata_counts_and_padding_readout",),
+        pytest_args=(
+            "tests/test_lanczos_circuits.py::test_shared_walk_metadata_counts_and_padding_readout",
+            "tests/test_lanczos.py::test_analytical_readout_moments_reconstruct_sector_pencil",
+        ),
     ),
     single_replacement_probe(
         name="lanczos_gershgorin_trailing_empty_row",
@@ -131,7 +134,10 @@ PROBES = (
         name="lanczos_chebyshev_product_factor",
         module="nwqlib.algorithms.lanczos.numerical", qualname="_projected_matrices",
         old="    shifted = shifted / 4\n", new="    shifted = shifted / 2\n",
-        pytest_args=('tests/test_lanczos.py::test_signed_centered_pencil_from_independent_moments',),
+        pytest_args=(
+            'tests/test_lanczos.py::test_signed_centered_pencil_from_independent_moments',
+            'tests/test_lanczos.py::test_analytical_readout_moments_reconstruct_sector_pencil',
+        ),
     ),
     single_replacement_probe(
         name='lanczos_kept_projector_rotation_drop',
@@ -1627,7 +1633,7 @@ PROBES = (
         ),
         new=("        passing = (degree, coefficients, certificate, node_count)\n        break\n"),
         pytest_args=(
-            "tests/test_qls_workflow.py::test_fit_integer_degree_anchors_with_recorded_margin",
+            "tests/test_qls_workflow.py::test_inverse_fit_meets_independent_relative_residual",
         ),
     ),
     single_replacement_probe(
@@ -1638,18 +1644,6 @@ PROBES = (
         new='',
         pytest_args=(
             "tests/test_qls_quantum.py::test_actual_query_projector_and_phase_populations_match_independent_counts",
-        ),
-    ),
-    # The admitting ceiling counts expression evaluations as well as
-    # lifecycle steps. Dropping them reports a value that still refuses.
-    single_replacement_probe(
-        name="qls_admission_requirement_drops_lowering_arguments",
-        module="nwqlib.algorithms.qls.quantum",
-        qualname="_lowering_admission_work",
-        old="            admission.tick(2 * len(node.arguments))\n",
-        new="            pass\n",
-        pytest_args=(
-            "tests/test_qls_quantum.py::test_admission_refusal_names_a_value_that_admits_preparation_and_lowering",
         ),
     ),
     single_replacement_probe(

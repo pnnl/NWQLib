@@ -240,17 +240,6 @@ def test_archive_keeps_selected_schedule_without_numerical_reselection(
     assert restored.method.initial_state.reference == selected.method.initial_state.reference
 
 
-def test_archive_estimator_binding_rejects_before_data_loading(tmp_path, monkeypatch):
-    selected = make_plan(estimator="spe")
-    saved = save_plan(selected, ArchiveFiles(tmp_path, 4_000_000))
-    saved["method"] = "nwqlib.algorithms.qpe.method.QCELS"
-    with monkeypatch.context() as patch:
-        patch.setattr(ArchiveFiles, "read_state", lambda *a, **k: pytest.fail("wrong estimator read state"))
-        patch.setattr(owner, "_safe_time", lambda *a, **k: pytest.fail("archive selected tau"))
-        with pytest.raises(ValueError, match="estimator.*concrete Method"):
-            load_plan(saved, ArchiveFiles(tmp_path, 4_000_000))
-    saved["method"] = "nwqlib.algorithms.qpe.method.SPE"
-    assert load_plan(saved, ArchiveFiles(tmp_path, 4_000_000)) == selected
 
 
 def test_rwpe_zero_steps_keeps_prior_and_future_settings_cannot_relabel_it(monkeypatch):

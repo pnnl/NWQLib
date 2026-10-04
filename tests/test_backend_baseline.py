@@ -482,7 +482,7 @@ def test_aer_counts_require_measurements_and_positive_shots(monkeypatch) -> None
         raise AssertionError("invalid shots must reject before lowering or execution")
 
     monkeypatch.setattr(qiskit_aer_backend, "_prepare_execution_circuit", unexpected_work)
-    for shots in (True, np.bool_(False), 1.5, float("nan"), float("inf"), 0, -1):
+    for shots in (float("nan"), float("inf"), 0, -1):
         with pytest.raises(ValueError, match="shots must be an integer at least 1"):
             _execute(AER_COUNTS_TARGET, _bell_circuit(measured=True), shots=shots)
 

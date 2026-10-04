@@ -104,41 +104,6 @@ def _construction_law(q, a, steps):
         construction_logical_bytes=payload, construction_work=work)
 
 
-def _largest_admitted_steps(q, a, steps, max_work, max_bytes):
-    """Return r*, the largest step count in [1, steps - 1] whose construction charges fit, or None.
-
-    For fixed q and a, every count of ``_construction_law`` (shifts, QFT
-    phases and swaps, rotations, H gates, slots, items and the controlled-CX
-    allowance) is affine in the step count r with nonnegative coefficients.
-    The payload 192p + 64*slots + 16q is a multiple of eight, so its integer
-    division by eight adds no discontinuity. Work W(r) and bytes Y(r) are
-    therefore nondecreasing in r, the counts that fit both limits form an
-    interval [1, r*], and a binary search over r finds r* with about
-    log2(steps) evaluations of the law. None means that even one step
-    exceeds a limit, or that ``steps`` is 1.
-
-    ``select_periodic_parameters`` turns r* into its step remedies. A fixed
-    count r <= r* is admitted. In automatic mode the selected count is the
-    least r >= 1 with B/r**2 <= eps, so a tolerance eps' selects at most r*
-    steps exactly when eps' >= B/r*^2. The least binary64 such value is
-    ``_upward_float(B/r*^2)``, and none exists when that is infinite. Since
-    r* < steps <= max_trotter_steps, the step cap admits the new count.
-    """
-    def fits(r):
-        counts = _construction_law(q, a, r)
-        return counts["construction_work"] <= max_work and counts["construction_logical_bytes"] <= max_bytes
-
-    if steps <= 1 or not fits(1):
-        return None
-    # Invariant: fits(low) holds, and every count above high does not fit or is not below steps.
-    low, high = 1, steps - 1
-    while low < high:
-        middle = (low + high + 1) // 2
-        if fits(middle):
-            low = middle
-        else:
-            high = middle - 1
-    return low
 
 
 def _magnitude_up(value):
@@ -201,8 +166,7 @@ def select_periodic_parameters(operator, *, elapsed, method):
     n = ceil(B/eps) (r = 1 when B = 0). B depends only on the selected grid,
     T and the stencil, so r is chosen after the grid and before the
     construction limits (max_trotter_steps, then the construction law's
-    max_bytes and max_select_work) are applied. A construction refusal takes
-    its step remedies from ``_largest_admitted_steps``.
+    max_bytes and max_select_work) are applied.
 
     Evaluation. B is an exact rational: T, the diffusion and potential
     coefficients and the nodes k_j are binary64 values read exactly, Lambda_j
@@ -245,48 +209,19 @@ def select_periodic_parameters(operator, *, elapsed, method):
         # Smallest r >= 1 with B/r**2 <= tolerance.
         steps = _smallest_step_count(exact,method.trotter_synthesis_tolerance,2)
         if steps > method.max_trotter_steps:
-            remedy = f"Set max_trotter_steps to at least {steps}"
-            relaxed = _upward_float(exact / method.max_trotter_steps**2)
-            if isfinite(relaxed):
-                remedy += (
-                    f", or increase trotter_synthesis_tolerance to at least {relaxed!r} "
-                    "to allow more synthesis error"
-                )
             raise ValueError(
                 f"periodic Strang synthesis needs {steps} steps for "
                 f"trotter_synthesis_tolerance={method.trotter_synthesis_tolerance!r}, "
-                f"above max_trotter_steps={method.max_trotter_steps}. {remedy}"
+                f"above max_trotter_steps={method.max_trotter_steps}"
             )
     counts = _construction_law(q,a,steps)
     required_work = counts["construction_work"]
     required_bytes = counts["construction_logical_bytes"]
     if required_work > method.max_select_work or required_bytes > method.max_bytes:
-        remedies = []
-        if required_work > method.max_select_work:
-            remedies.append(f"set max_select_work to at least {required_work}")
-        if required_bytes > method.max_bytes:
-            remedies.append(f"set max_bytes to at least {required_bytes}")
-        admitted = _largest_admitted_steps(q, a, steps, method.max_select_work, method.max_bytes)
-        if admitted is not None:
-            if method.trotter_steps is None:
-                # The least binary64 tolerance at least B/r*^2 selects at most r* steps.
-                relaxed = _upward_float(exact / admitted**2)
-                if isfinite(relaxed):
-                    remedies.append(
-                        f"increase trotter_synthesis_tolerance to at least {relaxed!r} to select at most "
-                        f"{admitted} steps and fit both construction limits, if the resulting Strang error "
-                        "bound is acceptable"
-                    )
-            else:
-                remedies.append(
-                    f"use a positive integer trotter_steps <= {admitted} to fit both construction limits, "
-                    "if the resulting Strang error bound is acceptable"
-                )
         raise ValueError(
             f"periodic Strang construction for q={q}, address_qubits={a}, steps={steps} "
             f"requires {required_work} work units and {required_bytes} bytes, "
-            f"with max_select_work={method.max_select_work} and max_bytes={method.max_bytes}. "
-            + ". ".join(remedies)
+            f"with max_select_work={method.max_select_work} and max_bytes={method.max_bytes}"
         )
     amplitudes = plan.prep_amplitudes(max_bytes=method.max_bytes)
     angles = tuple(-elapsed/steps*k*parameters.diffusion for k in plan.nodes)

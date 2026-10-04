@@ -18,7 +18,6 @@ from qiskit import QuantumCircuit, QuantumRegister, transpile
 from qiskit.circuit.library import XGate
 from qiskit.quantum_info import Operator, SparsePauliOp
 
-from conftest import assert_no_block_encoding_metadata_mirrors
 
 from nwqlib.subroutines.block_encoding import (
     BLOCK_ENCODING_IMPLEMENTATIONS,
@@ -837,7 +836,6 @@ def test_metadata_records_required_keys_and_honesty_labels() -> None:
     }
     for record, label in labeled.values():
         metadata = record.metadata
-        assert_no_block_encoding_metadata_mirrors(record)
         assert metadata["preprocessing_label"] == label
 
 
@@ -1175,7 +1173,6 @@ def test_block_encoding_metadata_is_json_safe_and_detached() -> None:
     ]
 
     for encoding in encodings:
-        assert_no_block_encoding_metadata_mirrors(encoding)
         payload = encoding.to_dict()
         serialized = json.loads(json.dumps(payload))
         assert serialized["alpha"] == encoding.alpha

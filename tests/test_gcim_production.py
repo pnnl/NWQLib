@@ -1014,11 +1014,10 @@ def test_grouped_analysis_is_admitted_before_setting_construction(monkeypatch):
     assert work == 17088
     with monkeypatch.context() as guarded:
         guarded.setattr(fixed_basis, "_sampled_construction", unexpected_construction)
-        # Below the floor A(1) the refusal comes before grouping and names the
-        # envelope A(L) = 9*(16*(32*6 + 8*6) + 6*4) + 6*4 + 720 = 35520.
-        for cap, remedy in ((5000, "to 35520, which is sufficient for grouping"), (work - 1, rf"to at least {work}\b")):
-            with pytest.raises(ValueError, match=rf"max_analysis_work={cap}\. Raise FixedGCIM\.max_analysis_work "
-                                                 + remedy):
+        # Both the one-group floor and the actual grouped work reject
+        # before any sampled setting is constructed.
+        for cap in (5000, work - 1):
+            with pytest.raises(ValueError, match=rf"max_analysis_work={cap}\b"):
                 select(cap)
     selected = select(work)
     assert len(selected.experiments) == 18
@@ -1049,40 +1048,25 @@ def test_grouped_analysis_is_admitted_before_setting_construction(monkeypatch):
     assert len(select_wide(size).experiments) == 8
 
 
-def test_analysis_work_refusals_name_values_that_admit_within_two_retries():
-    """Sampled FixedGCIM names the largest requirement known before grouping.
-
-    Grouping, the projected solve and grouped analysis are separate ceilings
-    under max_analysis_work, so their common requirement is their maximum
-    R = max(L(L-1)/2, S_b, A(L)) (fixed_basis.sampled_analysis_work). The
-    solve S_b = 32b**2 + 16b**3 and the analysis floor A(1) are known before
-    grouping, and a refusal of them names R. Following the named values
-    plans after at most two refusals; a refusal naming only the next stage
-    (11, 720, then 11,052 on this fixture) would need three.
-    """
-    import re
+def test_analysis_work_limits_cover_sampled_and_classical_plans(monkeypatch):
+    """The known solve/analysis floor refuses before grouping, with a legal larger plan."""
     import nwqlib
+    from nwqlib.algorithms.gcim import fixed_basis
     from nwqlib.operators import ingest_pauli
 
     A = [[1, .2, 0, .1], [.2, -1, .3, 0], [0, .3, .5, .2], [.1, 0, .2, -.4]]
     basis = ([1, 0, 0, 0], [0, 1, 1j, 0], [1, 1, 1, 1])
-    cap, named = 10, []
-    while len(named) < 3:
-        try:
-            selected = nwqlib.plan(nwqlib.Eigenproblem(A=A), method=FixedGCIM(basis=basis, max_analysis_work=cap),
-                                   shots=16, seed=1)
-            break
-        except ValueError as error:
-            found = re.search(r"Raise FixedGCIM\.max_analysis_work to (?:(\d+), which is sufficient|at least (\d+))",
-                              str(error))
-            cap = int(found.group(1) or found.group(2))
-            named.append(cap)
-    assert len(named) <= 2 and named[0] >= 32 * 3**2 + 16 * 3**3 and len(selected.experiments) > 0
+    problem = nwqlib.Eigenproblem(A=A)
+    with monkeypatch.context() as guarded:
+        guarded.setattr(fixed_basis, "sampled_groups", lambda *a, **k: pytest.fail("grouped before work admission"))
+        with pytest.raises(ValueError, match=r"max_analysis_work=10\b"):
+            nwqlib.plan(problem, method=FixedGCIM(basis=basis, max_analysis_work=10), shots=16, seed=1)
+    selected = nwqlib.plan(problem, method=FixedGCIM(basis=basis), shots=16, seed=1)
+    assert selected.experiments
     # Without shots nothing is grouped and the solve is the known requirement.
     problem = nwqlib.Eigenproblem(A=ingest_pauli((("Z", 1.0),), num_qubits=1))
     method = FixedGCIM(basis=([1, 0], [0, 1], [1, 1]), max_analysis_work=100)
-    with pytest.raises(ValueError, match=r"projected solve needs 720 work units for basis size 3, exceeding "
-                                         r"max_analysis_work=100\. Raise FixedGCIM\.max_analysis_work to at least 720 or reduce"):
+    with pytest.raises(ValueError, match=r"max_analysis_work=100\b"):
         nwqlib.plan(problem, method=method, execution="classical", seed=1)
 
 

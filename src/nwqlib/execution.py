@@ -1652,9 +1652,9 @@ class LimitAmendment(Record):
         return self
 
 
-def _validate_limit_amendments(amendments, *, current, initial=None):
+def _validate_limit_amendments(amendments, *, current):
     """Validate an ordered cap chain without reading or reproducing execution."""
-    previous = initial
+    previous = None
     counts = (0, 0, 0, 0)
     for sequence, amendment in enumerate(amendments, 1):
         if amendment.sequence != sequence or previous is not None and amendment.old != previous:

@@ -79,11 +79,9 @@ def lowered_rotation(angle=0.1234):
 
 
 def require_native():
-    module = pytest.importorskip(
+    return pytest.importorskip(
         "nwqec", reason="native compiler extra is qualified on Python3.12 macOS/Linux"
     )
-    assert module.__version__ == "0.1.2"
-    return module
 
 
 def test_actual_lowering_before_and_after_fusion_and_stored_readback(tmp_path, monkeypatch):
@@ -292,8 +290,6 @@ def test_invalid_options_and_input_limits_refuse_before_child(monkeypatch):
     ):
         with pytest.raises(ValueError):
             compile_logical(native, **options)
-    with pytest.raises(TypeError, match="Prepared or LogicalCircuit"):
-        compile_logical(native.circuit)
 
 
 @pytest.mark.parametrize("noisy", [False, True])

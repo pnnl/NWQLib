@@ -327,8 +327,6 @@ def analyze_mps_state_compression(decomposition, *, reference=None,
         analysis (MPSCompressionAnalysis): The estimates, and the measured
             comparison when a reference was given.
     """
-    if not isinstance(decomposition, MPSDecomposition):
-        raise TypeError("analysis requires an existing MPSDecomposition")
     d = decomposition.discarded_weight
     # Proof of Oseledets (2011), doi:10.1137/090752286, Theorem 2.2 (p. 2299):
     # a truncated SVD

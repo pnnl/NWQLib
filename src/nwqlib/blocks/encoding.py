@@ -131,7 +131,7 @@ def _native_family_census(encoding):
             return (),None
         for key in keys:
             value=source[key]
-            if not isinstance(value, (int, np.integer)) or isinstance(value, (bool, np.bool_)):
+            if not isinstance(value, (int, np.integer)):
                 raise ValueError(f"{key} requires an ordinary integer scalar")
             counts[key]=integer(value,key,0)
     try:
