@@ -18,7 +18,7 @@ from nwqlib._limits import DEFAULT_MAX_BYTES
 from pathlib import Path
 import shutil
 
-from nwqlib._choice_archive import ArchiveFiles, load_plan, save_plan
+from nwqlib._choice_archive import ArchiveFiles, load_plan, save_plan, unsupported_archive_format
 from nwqlib.core.analysis import Result, RunData
 from nwqlib.execution import ExecutionTrace, ObservationView, PreparedArtifact
 
@@ -185,10 +185,7 @@ def read_report(path):
     files = ArchiveFiles(Path(path), None)
     saved = files.read_json("result.json")
     if saved.get("format") != RESULT_FORMAT:
-        raise ValueError(
-            f"unsupported saved Result format {saved.get('format')!r}, expected {RESULT_FORMAT!r}. "
-            "Open it with the NWQLib release that wrote it, or plan and run the problem again."
-        )
+        raise unsupported_archive_format("saved Result", saved.get("format"), RESULT_FORMAT)
     return saved
 
 

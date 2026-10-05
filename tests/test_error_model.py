@@ -2,6 +2,7 @@
 
 import re
 from fractions import Fraction
+from unittest.mock import ANY
 
 import pytest
 
@@ -58,6 +59,9 @@ def test_new_criterion_keeps_original_context_and_component_scope():
     assert total.status == "INCONCLUSIVE" and total.remaining == ("physical",)
     tighter = original.assess(Accuracy(absolute_tolerance=.125, component="sampling"), context=CONTEXT)
     assert tighter.status == "INCONCLUSIVE" and tighter.context == sampling.context == CONTEXT
+    # A filled subject cache keeps equality, and an operand of another type gets its own comparison.
+    assert CONTEXT.subjects and CONTEXT.model_copy() == CONTEXT == ANY
+    assert CONTEXT.__eq__(object()) is NotImplemented
     assert tighter.accuracy != sampling.accuracy
     assert original.terms[0].fact.fact.value is None
     # Zero residual of the excited eigenpair diag(0,1), v=(0,1), E=1 does not

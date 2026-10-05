@@ -418,6 +418,20 @@ class Record(BaseModel):
             return self.revise(**update)
         return type(self).model_validate({name: getattr(self, name) for name in type(self).model_fields})
 
+
+def _declared_fields_equal(record, other):
+    """Compare two records of one exact type by their declared fields only.
+
+    A record class whose private attributes cache derived values assigns this
+    function as its ``__eq__``, so a cache filled on one of two equal records
+    keeps them equal. For an operand of another type it returns
+    ``NotImplemented``, so Python can try the other operand's comparison.
+    """
+    if type(other) is not type(record):
+        return NotImplemented
+    return all(getattr(record, name) == getattr(other, name) for name in type(record).model_fields)
+
+
 class Unit(Record):
     """A unit label with its dimension. NWQLib converts no units and does no unit algebra.
 

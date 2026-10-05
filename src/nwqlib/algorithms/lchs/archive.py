@@ -11,12 +11,16 @@ from types import MappingProxyType
 
 import numpy as np
 
+from nwqlib._choice_archive import unsupported_archive_format
 from nwqlib.core.records import FrozenArray
 
 from nwqlib.operators.inputs import OperatorInput
 from nwqlib.problems.inputs import StateInput
 from .method import LCHS
 from .primary_records import LCHSReconstruction
+
+# Layout of the saved LCHS manifest: Method, Plan, Problem, output, native data and selected blocks.
+FORMAT = "lchs/9"
 
 
 _RECORD_MODULES = {name: "nwqlib." + module for module, names in (
@@ -193,7 +197,7 @@ def save(method,plan,files):
                     selected.append(dict(constructor=key,payload=data.write(block._payload)))
                 else:
                     selected.append(dict(constructor=key))
-    saved = dict(format='lchs/9',plan=plan.to_record(),problem=files.write_problem(plan.problem),
+    saved = dict(format=FORMAT,plan=plan.to_record(),problem=files.write_problem(plan.problem),
         output=files.write_output(plan.output),method=method.model_dump(mode='json',exclude_computed_fields=True))
     # Written after the problem, so an input array shared with the native
     # payload keeps its problem file name.
@@ -216,11 +220,8 @@ def load(saved,files):
     from its saved base index. The periodic Strang payload is used as saved.
     Loading never reselects a grid, fits phases or solves an eigensystem.
     """
-    if saved.get('format')!='lchs/9':
-        raise ValueError(
-            f"unsupported LCHS archive format {saved.get('format')!r}, expected 'lchs/9'. "
-            "Open it with the NWQLib release that wrote it, or plan and run the problem again."
-        )
+    if saved.get('format')!=FORMAT:
+        raise unsupported_archive_format("LCHS archive", saved.get('format'), FORMAT)
     method = LCHS.model_validate(saved['method'])
     plan = files.read_plan(saved['plan'],problem=files.read_problem(saved['problem']),method=method,
         output=files.read_output(saved['output']),reconstruction=LCHSReconstruction.model_validate(saved['plan']['reconstruction']))

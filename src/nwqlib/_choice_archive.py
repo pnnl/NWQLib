@@ -35,6 +35,18 @@ from pathlib import Path
 CACHE_FILE_PREFIX = ".nwqlib-cache-"
 
 
+def unsupported_archive_format(name, found, expected):
+    """Return the refusal for a saved folder written in another archive format.
+
+    No loader converts another format, so the message names the folder's
+    format and the only one this NWQLib reads, and says how to proceed.
+    """
+    return ValueError(
+        f"unsupported {name} format {found!r}. This NWQLib reads only {expected!r}. "
+        "Open it with the NWQLib release that wrote it, or plan and run the problem again."
+    )
+
+
 def _json_scalar(value):
     """Write a NumPy scalar as its Python value, and refuse any other non-JSON object."""
     import numpy as np

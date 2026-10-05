@@ -1,5 +1,6 @@
 """Actual ADAPT input, compiler and cache snapshots; loading never replans."""
 
+from nwqlib._choice_archive import unsupported_archive_format
 from nwqlib.blocks.selection import SelectedBlock
 from nwqlib.operators.access import _check_bytes
 from nwqlib.operators.inputs import OperatorInput
@@ -160,11 +161,7 @@ def load(saved, files):
     from .adapt import ADAPT, CompilerPlans
 
     if saved.get("format") != "adapt/6":
-        raise ValueError(
-            f"unsupported ADAPT archive format {saved.get('format')!r}. "
-            "This NWQLib reads only 'adapt/6'. Open it with the NWQLib release that "
-            "wrote it, or plan and run the problem again."
-        )
+        raise unsupported_archive_format("ADAPT archive", saved.get("format"), "adapt/6")
     fields = dict(saved["method"])
     original = saved["original_pool"]
     fields["pool"] = (

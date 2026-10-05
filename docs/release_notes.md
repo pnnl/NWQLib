@@ -2,7 +2,7 @@
 
 ## Unreleased
 
-- Resource forecasts compare by their declared fields, so saving and loading a `PlanEstimate` preserves equality regardless of cached lookups.
+- Resource forecasts compare by their declared fields, so saving and loading a `PlanEstimate` preserves equality regardless of cached lookups. `PlanEstimate` and `AssessmentContext` also allow the other object's equality comparison when its type differs.
 - QHD archives preserve unevaluated SymPy `Sum` expressions through Result loading and refinement or augmented-Lagrangian continuation.
 
 ## v1.0.1.post1 (2026-10-04)

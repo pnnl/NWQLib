@@ -14,6 +14,7 @@ from pydantic import Field, PrivateAttr, StrictBool, model_validator
 
 from nwqlib.core.records import (
     ContentID, Float64, Nonnegative, Rational, Real, Record, Scope, Source, Stage, Text, Unit,
+    _declared_fields_equal,
 )
 from nwqlib.ir.expressions import Binding, number
 from nwqlib.operators.access import Count
@@ -161,11 +162,9 @@ class AssessmentContext(Record):
                 *self.contribution_ids, self.result_id) if x is not None)
         return self._subject_index
 
-    def __eq__(self, other):
-        # Compare declared fields only, so the lazily cached subject index
-        # never makes two equal contexts compare unequal.
-        return type(self) is type(other) and all(
-            getattr(self, name) == getattr(other, name) for name in type(self).model_fields)
+    # Compare declared fields only, so the lazily cached subject index
+    # never makes two equal contexts compare unequal.
+    __eq__ = _declared_fields_equal
 
 
 def compatible_point(bindings, context):

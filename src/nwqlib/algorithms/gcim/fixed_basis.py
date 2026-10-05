@@ -2492,14 +2492,11 @@ class FixedGCIM(Method):
         rules change. A classical plan rebinds its host kernel to the restored
         states, with no new operator action at load time.
         """
+        from nwqlib._choice_archive import unsupported_archive_format
         from nwqlib.blocks._archive import read_blocks
 
         if saved.get("format") != "fixed_gcim/5":
-            raise ValueError(
-                f"unsupported FixedGCIM archive format {saved.get('format')!r}. "
-                "This NWQLib reads only 'fixed_gcim/5'. Open it with the NWQLib release that "
-                "wrote it, or plan and run the problem again."
-            )
+            raise unsupported_archive_format("FixedGCIM archive", saved.get("format"), "fixed_gcim/5")
         fields = dict(saved["method"])
         fields["basis"] = tuple(files.read_state(s) for s in saved["basis"])
         method = cls(**fields)

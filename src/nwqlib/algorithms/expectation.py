@@ -3030,14 +3030,11 @@ class ExpectationMethod(Method):
         stored preparation payloads.
         Raises ValueError for another format or a changed exponent.
         """
+        from nwqlib._choice_archive import unsupported_archive_format
         from nwqlib.blocks.selection import _preparation_circuit, _primitive_circuit
 
         if saved.get("format") != "expectation/5":
-            raise ValueError(
-                f"unsupported Expectation archive format {saved.get('format')!r}. "
-                "This NWQLib reads only 'expectation/5'. Open it with the NWQLib release that "
-                "wrote it, or plan and run the problem again."
-            )
+            raise unsupported_archive_format("Expectation archive", saved.get("format"), "expectation/5")
         method = cls.model_validate(saved["method"])
         plan = files.read_plan(
             saved["plan"],

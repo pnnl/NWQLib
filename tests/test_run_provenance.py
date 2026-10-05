@@ -1,5 +1,7 @@
 """Original resource forecasts survive actual attempts and saved continuations."""
 
+from unittest.mock import ANY
+
 import pytest
 
 import nwqlib
@@ -53,6 +55,7 @@ def test_original_forecast_and_allocation_survive_actual_submission_and_reopen(
     InjectedBackend.status = "completed"
     with nwqlib.load_run(path, backend=InjectedBackend(), method=CountsMethod) as restored:
         assert restored.forecast == forecast
+        assert restored.forecast.model_dump(mode="json") == forecast.model_dump(mode="json")
         assert restored.allocation == allocation
         assert restored.rng.snapshot() == rng
         result = restored.wait(timeout=1, poll_interval=0)
@@ -67,6 +70,9 @@ def test_original_forecast_and_allocation_survive_actual_submission_and_reopen(
         **{name: getattr(forecast, name) for name in type(forecast).model_fields},
         "unpredicted": ("another forecast",),
     })
+    assert saved.data.forecast.model_dump(mode="json") == forecast.model_dump(mode="json")
+    # An operand of another type gets its own comparison.
+    assert saved.data.forecast == ANY and forecast.__eq__(object()) is NotImplemented
     assert saved.data.allocation == allocation
     assert saved.data.forecast.assessments[0].predictions[0].seconds.value == 5.5
     assert saved.analyze().data is saved.data

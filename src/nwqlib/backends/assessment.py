@@ -47,6 +47,7 @@ from nwqlib.core.records import (
     Source,
     Text,
     Unit,
+    _declared_fields_equal,
 )
 from nwqlib.evidence.records import Evidence, Fact
 from nwqlib.evidence.error_model import (
@@ -1991,10 +1992,8 @@ class PlanEstimate(Record):
     _plan_validated: bool = PrivateAttr(default=False)
     _observations: dict = PrivateAttr(default_factory=dict)
 
-    def __eq__(self, other):
-        # Cached lookups and validation state do not change the forecast.
-        return type(self) is type(other) and all(
-            getattr(self, name) == getattr(other, name) for name in type(self).model_fields)
+    # Cached lookups and validation state do not change the forecast.
+    __eq__ = _declared_fields_equal
 
     @model_validator(mode="after")
     def _sources(self):

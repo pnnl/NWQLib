@@ -1,5 +1,6 @@
 """Save the actual selected walk, never replan or regenerate acquisitions."""
 
+from nwqlib._choice_archive import unsupported_archive_format
 from nwqlib.blocks._archive import read_blocks, write_blocks
 from .records import LanczosReconstruction
 
@@ -46,11 +47,7 @@ def load(saved, files):
     from .method import Lanczos, _plan_readout
 
     if saved.get("format") != "lanczos/6":
-        raise ValueError(
-            f"unsupported Lanczos archive format {saved.get('format')!r}. "
-            "This NWQLib reads only 'lanczos/6'. Open it with the NWQLib release that "
-            "wrote it, or plan and run the problem again."
-        )
+        raise unsupported_archive_format("Lanczos archive", saved.get("format"), "lanczos/6")
     fields = dict(saved["method"])
     fields["initial_state"] = (
         None if saved["initial"] is None else files.read_state(saved["initial"])
