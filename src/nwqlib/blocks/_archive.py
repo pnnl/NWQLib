@@ -1,7 +1,7 @@
-"""Saved data for the existing preparation, Pauli and transformed blocks.
+"""Saved data for the built-in preparation, Pauli and transformed blocks.
 
-The saved graph carries its layout format ``BLOCKS_FORMAT``; ``read_blocks``
-rejects any other layout.
+The saved graph carries its layout format ``BLOCKS_FORMAT``, and
+``read_blocks`` rejects any other layout.
 """
 
 from . import selection as native
@@ -14,11 +14,35 @@ _CONSTRUCTORS = dict(preparation=native._preparation_circuit, primitives=native.
     select=native._select_circuit, readout=native._readout_circuit, reflection=native._reflection_circuit)
 
 
+# For m terms on q qubits, P = 2**a >= m padded amplitudes, a address
+# qubits and w = ceil(q/64), the packed operator holds
+# B_op = 16mw + 16m bytes of numerical data. The shared amplitude file
+# adds 8P bytes, so B_archive,data = 16mw + 16m + 8P. The four fixed-dtype
+# rank-one or rank-two arrays also have NPY headers of at most 256 bytes
+# each, and the graph and manifest require their actual JSON bytes.
+#
+# The NumPy 2.5.2 NPY writer (numpy/lib/_format_impl.py::write_array)
+# writes a contiguous array with at most one data chunk of
+# min(array.nbytes, 2**24) bytes. A noncontiguous array can need a second
+# such buffer. Let B_held,other bound the other live numerical arrays,
+# excluding this operator, its 8m-byte selected coefficients and its
+# 8P-byte amplitudes. Let H_archive bound the graph serialization and
+# writer bookkeeping for the actual graph and writer. Given those two
+# caller-dependent bounds, contiguous packed and amplitude arrays have
+# the write-phase byte envelope
+#
+# B_held,other + B_op + 8m + 8P + min(max(8mw, 16m, 8P), 2**24) + H_archive.
+#
+# This expression gives no fixed whole-archive memory limit without
+# values for B_held,other and H_archive. Compare it with the selection
+# peak under the same accounting, counting shared operator bytes once.
 def write_blocks(blocks, files):
     """Return the saved form of a Method's selected blocks, for its `save_archive` hook.
 
-    Call it in `save_archive(plan, files)` with the archive object `files` that
-    the hook receives, and store the returned dict with the saved Plan. Each
+    Import it from `nwqlib.blocks._archive`, a supported module for Method
+    authors despite its leading underscore. Call it in
+    `save_archive(plan, files)` with the archive object `files` that the hook
+    receives, and store the returned dict with the saved Plan. Each
     block is written once, base blocks before the blocks that transform them.
     Only the built-in preparation, Pauli SELECT and readout, reflection and
     transformed blocks can be saved. A signed Pauli SELECT or readout saves its
@@ -28,31 +52,7 @@ def write_blocks(blocks, files):
 
     The selection limit of
     [`select_signed_pauli`][nwqlib.blocks.selection.select_signed_pauli] does not
-    bound the whole archive or the live packed operator. For m terms on q qubits,
-    `P = 2**a >= m` padded amplitudes and `w = ceil(q/64)`, the packed operator
-    holds `B_op = 16mw + 16m` bytes of numerical data and the one shared
-    amplitude file adds `8P`, so
-
-    ```text
-    B_archive,data = 16mw + 16m + 8P,
-    ```
-
-    plus four NPY headers, at most 256 bytes each for these fixed-dtype
-    rank-one and rank-two arrays, and the graph and manifest JSON. The NumPy NPY
-    writer
-    ([v2.5.2](https://github.com/numpy/numpy/blob/v2.5.2/numpy/lib/_format_impl.py))
-    writes a contiguous array with at most one data chunk of
-    `min(array.nbytes, 2**24)` bytes, and an array that must be copied because
-    it is not contiguous needs a second such buffer. With contiguous packed and
-    amplitude arrays, the numerical peak while writing is
-
-    ```text
-    B_held,other + B_op + 8m + 8P + min(max(8mw, 16m, 8P), 2**24) + H_archive,
-    ```
-
-    where `H_archive`, the graph serialization and writer bookkeeping, is not
-    fixed for an arbitrary block graph. The peak of a save is the larger of this
-    and the selection peak, counting shared operator bytes once. A transport that
+    bound the whole archive or the live packed operator. A transport that
     buffers a whole archive needs its own allowance. This function takes no byte
     limit, and the archive's byte limits apply to each file it writes.
 
@@ -115,7 +115,9 @@ def write_blocks(blocks, files):
 def read_blocks(data, records, files):
     """Restore the blocks saved by `write_blocks`, for a Method's `load_archive` hook.
 
-    A saved kind selects one constructor from a fixed table of built-in block
+    Import it from `nwqlib.blocks._archive`, a supported module for Method
+    authors despite its leading underscore. A saved kind selects one
+    constructor from a fixed table of built-in block
     kinds, so loading never imports or calls code named in the archive. A
     preparation is bound to its restored state input, and a transformed block
     is bound to its restored base. A signed Pauli

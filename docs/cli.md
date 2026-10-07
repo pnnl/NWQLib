@@ -76,7 +76,7 @@ python -m nwqlib check-method MODULE:case
 `MODULE` is your importable module, and `case` is a function in it that returns a `MethodCase`. The `MethodCase` holds your Method, a Problem for the check and three functions. `evaluate` runs the Method, `accepts` tests the Result against an independently known answer, and `invalid_result` makes a wrong Result for the same Plan. `check-method` then checks the following, as [Add a method](algorithm_protocol.md#author-cases-and-their-limits) defines:
 
 1. The Result that `evaluate` returns satisfies `accepts`, the Method's error model matches its Plan, and the Method names the Result type it returns.
-2. The wrong Result from `invalid_result` is rejected by the Method's own check of the Plan and Result, both in memory and when written into a saved Result.
+2. The wrong Result from `invalid_result` is rejected by the Method's own check of the Plan and Result.
 3. The correct Result saves, reloads unchanged and still satisfies `accepts`.
 
 The [reference Hadamard Method](https://github.com/pnnl/NWQLib/blob/main/tests/_hadamard_method.py) supplies a complete `case`. It runs one two-qubit circuit, checks that the Y expectation of `|+i>` is 1, and saves and reloads the Result. On it, `check-method` prints `"status": "CONFORMANT"` with the scope of the check.

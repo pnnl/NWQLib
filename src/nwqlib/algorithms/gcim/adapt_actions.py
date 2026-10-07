@@ -21,7 +21,7 @@ group metadata, the three L-row preprocessing passes, the attempted grouped
 action and a full possible ordered retry. Supplying ``out`` does not remove
 the output slot. The empty-table allowance is conservatively 2d work. Every
 Pauli action owner calls ``pauli_action_requirements(d, L, min(L, d),
-complex_input=True)``; no ``d*L`` substitution is made, no successful grouped
+complex_input=True)``. No ``d*L`` substitution is made, no successful grouped
 path is inferred from a finite answer and the retry allowance is not
 subtracted.
 
@@ -185,15 +185,9 @@ def restored_record_allowance(inputs, rec):
     reconstruction's fixed JSON shell.
     """
     from nwqlib.operators.inputs import _pauli_identity_bytes
-    from .adapt_inputs import _reconstruction_fixed_json
+    from .adapt_inputs import _generator_record_bytes, _reconstruction_fixed_json
 
-    fixed = 3 * sum(
-        2048
-        + 128 * len(g.fermion_terms)
-        + 16 * sum(len(ops) for _, ops in g.fermion_terms)
-        + 16 * (len(g.spatial_indices) + len(g.spin_orbital_indices or ()))
-        for g in inputs.pool
-    )
+    fixed = _generator_record_bytes(inputs.pool)
     rows = sum(len(g.pauli_terms) for g in inputs.pool) + len(rec.terms)
     omitted = {"schema_version", "parent_id", "pool", "terms", "groups", "energy_groups"}
     fields = {key: getattr(rec, key) for key in type(rec).model_fields if key not in omitted}

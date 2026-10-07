@@ -1,17 +1,17 @@
 """Qiskit circuit builders for compact Pauli-evolution blocks.
 
-A block with generator G = sum_j c_j P_j and ``time_step`` dt approximates
-exp(-i*dt*G) by Qiskit's PauliEvolutionGate with the selected Lie-Trotter or
+A block with generator ``G = sum_j c_j P_j`` and ``time_step`` dt approximates
+``exp(-i*dt*G)`` by Qiskit's PauliEvolutionGate with the selected Lie-Trotter or
 Suzuki synthesis, applied in term order. The result is exact when the terms
 commute. Two block kinds have exact special forms. A
-``number_projector`` block applies exp(-i*angle*(prod_q n_q - I/2**s)) on
-its support of s qubits, with n_q = (I - Z_q)/2. A ``kinetic`` block made of
+``number_projector`` block applies ``exp(-i*angle*(prod_q n_q - I/2**s))`` on
+its support of s qubits, with ``n_q = (I - Z_q)/2``. A ``kinetic`` block made of
 an XX and a YY term with equal real coefficient c on the same pair applies
-exp(-i*dt*c*(XX + YY)) as one XXPlusYYGate, which is exact because XX and YY
-commute. The CX laws below mirror Qiskit's multi-controlled phase synthesis
-and NWQLib's diagonal synthesis for the pinned Qiskit version. They have no
-paper source and are checked against transpiled circuits by the QHD routing
-tests.
+``exp(-i*dt*c*(XX + YY))`` as one XXPlusYYGate, which is exact because XX and
+YY commute. The number-projector MCPhase count follows Qiskit's synthesis for
+the pinned Qiskit version and has no paper source, and the diagonal count is
+Theorem 7 of Shende, Bullock and Markov, quant-ph/0406176v5. Both are checked
+against transpiled circuits in NWQLib's tests.
 """
 
 from __future__ import annotations
@@ -38,14 +38,14 @@ PauliEvolutionSynthesis = Literal["lie_trotter", "suzuki_trotter"]
 
 
 def _dirty_mcx_cx(num_controls: int) -> int:
-    """Return the CX count of one multi-controlled X with ``num_controls`` controls.
+    """Return the exact CX count of the specified Qiskit 2.5.2 decomposition.
 
-    This is Qiskit's ``synth_mcx_n_dirty_i15``, which the MCRZ synthesis
-    uses. For one, two and three controls it builds dedicated circuits,
-    counted here as 1, 6 and 14 CX. For four or more controls its docstring
-    gives at most ``8 k - 6`` CX with ``k - 2`` dirty ancillas. The QHD
-    routing tests check the resulting MCPhase counts against transpiled
-    circuits.
+    With ``k = num_controls >= 1``, MCRZ uses
+    ``synth_mcx_n_dirty_i15`` with ``relative_phase=False`` and
+    ``action_only=False``. Its dedicated circuits for one, two and three
+    controls have 1, 6 and 14 CX. For k >= 4 this construction has exactly
+    ``8 k - 6`` CX and uses ``k - 2`` dirty ancillas. These are counts of
+    the decomposition before circuit optimization.
     """
 
     if num_controls == 1:
@@ -88,9 +88,10 @@ def structured_number_projector_provider(support_size: int) -> dict[str, Any]:
     Shende, Bullock and Markov, quant-ph/0406176v5 (p. 10), whose
     multiplexed Rz with k select bits costs ``2**k`` CX by the count after
     their Theorem 8 (p. 11). The other provider is Qiskit's MCPhase, whose
-    CX count follows the gate's definition in the pinned Qiskit version. The cheaper one is
-    selected, and a tie selects MCPhase. The diagonal is cheaper for s = 4
-    to 7 (14 against 20 CX at s = 4), and MCPhase is cheaper again from
+    CX count follows the gate's definition in the pinned Qiskit version.
+    The cheaper one is selected. For support size s = 1, 2 or 3, the
+    counts tie and the tie selects MCPhase. The diagonal is cheaper for
+    s = 4 to 7 (14 against 20 CX at s = 4), and MCPhase is cheaper from
     s = 8 (220 against 254 CX), because its count grows quadratically in s
     while the diagonal's grows as ``2**s``. QHD omits exact-zero projector
     blocks before routing and resource pricing. The diagonal provider emits
@@ -106,29 +107,15 @@ def structured_number_projector_provider(support_size: int) -> dict[str, Any]:
     return {"provider": "mcphase", "cx": mcphase_cx}
 
 
-def resolve_number_projector_lowering(support_size: int) -> dict[str, Any]:
-    """Return the structured projector lowering and its circuit-free CX price.
-
-    ``costs[selected]`` is the exact CX count of the provider that
-    ``append_number_projector_phase`` realizes for a nonzero angle.
-    """
-
-    provider = structured_number_projector_provider(support_size)
-    return {
-        "selected": "structured",
-        "costs": {"structured": provider["cx"]},
-        "structured_provider": provider,
-    }
-
-
-# Fixed capacity for each caller-owned wrapped-phase cache. Reuse depends on
-# call order. Eviction permits repeated array-shaped wraps while bounding the
-# scalar cache independently of the number of compilation steps and angles.
-# Registered in docs/ENGINEERING_CONSTANTS.md.
+# Fixed capacity of each caller's wrapped-phase cache. Reuse depends on call order.
+# Eviction bounds the cache independently of the number of compilation steps and angles,
+# and an evicted angle is computed again on its next use. Registered in
+# docs/ENGINEERING_CONSTANTS.md. Revisit when measured wrap cost warrants a different
+# storage allowance.
 WRAPPED_PHASE_CACHE_ENTRIES = 64
 
 
-def wrapped_projector_phase(angle: float, support_size: int, cache: dict | None = None) -> float:
+def wrapped_projector_phase(angle: float, support_size: int, cache: dict) -> float:
     """Return the absolute wrapped phase of a projector on support_size qubits.
 
     With s=support_size, the calculation uses the same 2**s phase array and
@@ -138,12 +125,13 @@ def wrapped_projector_phase(angle: float, support_size: int, cache: dict | None 
     bit. Range selection accepts an exactly zero wrapped phase and requires
     a nonzero phase to remain normal after its power-of-two scaling.
 
-    Potential compilation and each rotation-census call own separate
-    caches. Within either owner, an equal (float(angle).hex(), int(s)) key
-    reuses its cached scalar while that entry is present. The two owners
-    use the same wrapped value but do not share cache entries.
+    The QHD potential compiler (``algorithms/qhd/potential.py``) and each
+    rotation-count call of ``algorithms/qhd/resources.py`` hold separate
+    caches. Within either cache, an equal (float(angle).hex(), int(s)) key
+    reuses the cached scalar while that entry is present. The two callers
+    compute the same wrapped value but do not share entries.
 
-    cache, when supplied, is the caller's dictionary. For a cache initialized
+    cache is the caller's dictionary. For a cache initialized
     empty and populated only by this helper, at most
     WRAPPED_PHASE_CACHE_ENTRIES entries remain after a call. A miss computes
     the original array-shaped wrap, inserts one Python float and its key,
@@ -155,30 +143,30 @@ def wrapped_projector_phase(angle: float, support_size: int, cache: dict | None 
     peak is 40*2**s bytes, consisting of the real phase array and simultaneous
     complex input and output of exp. wrapped_phase_workspace_bytes adds the
     qualified fixed allowance for the bounded cache, insertion overlap and
-    NumPy bookkeeping. Potential compilation admits this as a successive phase
-    and clears its cache after step compilation. The one-hot rotation census
-    admits its own cache and miss beside its source records, accumulating
-    population and caller-held buffers through the QHD one-hot resource count.
+    NumPy bookkeeping. The potential compiler counts this workspace as one of
+    its successive phases (``algorithms/qhd/method.py``) and clears its cache
+    after compiling a step. The one-hot rotation count
+    (``algorithms/qhd/resources.py``) counts its own cache and one miss
+    together with its source records and the buffers its caller holds.
     """
     import numpy as np
 
     key = (float(angle).hex(), int(support_size))
-    if cache is not None and key in cache:
+    if key in cache:
         return cache[key]
     phases = np.zeros(2**support_size)
     phases[-1] = -float(angle)
     wrapped = abs(float(np.angle(np.exp(1.0j * phases))[-1]))
-    if cache is not None:
-        cache[key] = wrapped
-        if len(cache) > WRAPPED_PHASE_CACHE_ENTRIES:
-            del cache[next(iter(cache))]
+    cache[key] = wrapped
+    if len(cache) > WRAPPED_PHASE_CACHE_ENTRIES:
+        del cache[next(iter(cache))]
     return wrapped
 
 
 def wrapped_phase_workspace_bytes(entries):
-    """Price one scalar cache and one array-shaped miss, for a reached owner.
+    """Return the bytes of one wrapped-phase cache and one cache miss for one caller.
 
-    entries is the largest 2**s used by that owner, or zero when no wrap is
+    entries is the largest 2**s used by that caller, or zero when no wrap is
     reached. A miss keeps one float64 array and two complex128 arrays at
     its numerical peak, 40*entries bytes. The 65536-byte engineering
     allowance covers the bounded dictionary, at most 65 scalar entries
@@ -206,11 +194,20 @@ def append_number_projector_phase(
     """Append ``exp(-i angle (prod n_q - I/2**s))`` exactly.
 
     The explicit global phase ``angle / 2**s`` removes the identity component
-    ``I/2**s`` of the projector's Pauli expansion.  The compiler separately
-    records the omitted physical identity contribution.
-    For the structured diagonal provider, an exact-zero angle emits no gate,
-    and QHD omits zero-angle blocks before calling this builder or pricing
-    them.
+    ``I/2**s`` of the projector's Pauli expansion. The QHD circuit compiler
+    records the omitted physical identity contribution separately. When the
+    phase-diagonal synthesis is used, an exact-zero angle emits no gate, and
+    QHD omits zero-angle blocks before calling this function or counting
+    their cost.
+
+    Args:
+        circuit (QuantumCircuit): Circuit to append to, in place.
+        support (Sequence[int]): The `s` qubits `q` of the projector product
+            ``prod_q n_q``, with ``n_q = (I - Z_q)/2``.
+        angle (float): Phase angle in radians.
+
+    Raises:
+        ValueError: If `support` is empty.
     """
 
     qubits = tuple(int(qubit) for qubit in support)
@@ -297,7 +294,7 @@ def apply_pauli_rotation(
     Args:
         circuit (QuantumCircuit): Circuit to append to, in place.
         pauli_label (str): Compact label of `P`, such as `"x0z2"`.
-        angle (float): Rotation angle.
+        angle (float): Rotation angle in radians.
         control (int | None): Default `None`. Index of a control qubit that
             is not in the support of `P`.
 
@@ -502,6 +499,5 @@ __all__ = [
     "apply_pauli_rotation",
     "build_pauli_evolution_circuit",
     "make_evolution_synthesis",
-    "resolve_number_projector_lowering",
     "structured_number_projector_provider",
 ]

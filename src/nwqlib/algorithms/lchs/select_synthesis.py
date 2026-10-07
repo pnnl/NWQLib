@@ -31,42 +31,43 @@ class LCHSProductFormulaSelectPlan:
 
     Attributes:
         pauli_labels: Ordered distinct nonidentity Pauli labels needed by the branch
-            generators; label characters follow Qiskit's high-to-low qubit convention.
+            generators. Label characters follow Qiskit's high-to-low qubit convention.
         occurrence_schedule: Ordered Pauli occurrences within one product-formula step,
             including repeated labels in a symmetric second-order formula.
         occurrence_angle_tables: Read-only float64 ``FrozenArray`` of shape
             (B*W, padded_node_count): block-major rows, one per scheduled occurrence
             in each of the B compressed repetition blocks of W occurrences. Each row
-            holds the rotation angles in radians of every address; completed or
+            holds the rotation angles in radians of every address. Completed or
             inactive branches have zero angles. Consumers read its ``array``. The
             selected identity digests the array as one byte block.
         occurrence_block_repetitions: Number of consecutive formula steps sharing each
-            block of angle tables. Emission expands these counts; planning keeps them compact.
+            block of angle tables. Emission expands these counts. Planning keeps them compact.
         branch_step_counts: Actual per-address product-formula step counts, including
             zero for inactive/padding branches and node-dependent budgeted selections.
-        max_step_count: Maximum of the stored branch step counts, or zero if all are inactive.
-        identity_phases: Per-address scalar phases in radians from the retained identity
-            Hamiltonian term, -elapsed_time*identity_coefficient; zero on padding.
+        identity_phases: Per-address scalar phases in radians from the kept identity
+            Hamiltonian term, -elapsed_time*identity_coefficient, and zero on padding.
         coefficient_phases: Per-address arguments of the complex LCU coefficients,
             carried in SELECT separately from identity evolution phases.
         physical_node_count: Number of branches mapped to mathematical nodes, excluding
-            padding; different source-time branches can map to the same k-node index.
+            padding. Different source-time branches can map to the same k-node index.
         padded_node_count: Power-of-two address-table size, including identity padding.
         branch_to_node: Mathematical k-node index for each address, or None for identity
             padding. This mapping preserves branch order rather than sorting by k.
-        pruning_decisions: Per-address Pauli labels omitted by coefficient pruning;
-            padding has an empty tuple.
+        pruning_decisions: Per-address Pauli labels omitted by coefficient pruning.
+            Padding has an empty tuple.
         pruned_l1_mass: Per-address finite upper bound on the summed moduli of the
             omitted Pauli coefficients (error_budget.upper_dropped_mass), before
-            multiplication by elapsed time; not a complete product-formula error bound.
+            multiplication by elapsed time. It is not a complete product-formula error bound.
         formula_order: Selected Lie-Trotter order 1 or symmetric Suzuki order 2.
-        repetitions: Total repetitions represented by occurrence_block_repetitions;
-            equals max_step_count in the generated compact schedule.
+        repetitions: Largest ``branch_step_counts`` entry in the generated
+            compact schedule. This value equals the sum of the
+            ``occurrence_block_repetitions`` multiplicities and is zero when
+            every ``branch_step_counts`` entry is zero.
         structure_certificate: Optional affine-address structural relation used to admit
-            structured SELECT; None means no such relation is attached. It does not
+            structured SELECT. None means no such relation is attached. It does not
             certify total dynamical accuracy.
         structured_generator_payload: Optional affine occurrence tables consumed by
-            structured lowering; None selects no structured payload.
+            structured lowering. None selects no structured payload.
     """
 
     pauli_labels: tuple[str, ...]
@@ -74,7 +75,6 @@ class LCHSProductFormulaSelectPlan:
     occurrence_angle_tables: FrozenArray
     occurrence_block_repetitions: tuple[int, ...]
     branch_step_counts: tuple[int, ...]
-    max_step_count: int
     identity_phases: tuple[float, ...]
     coefficient_phases: tuple[float, ...]
     physical_node_count: int
@@ -193,7 +193,7 @@ def _product_formula_branch_phase_count(plan: LCHSProductFormulaSelectPlan) -> i
     """Count physical phases after the circuit's ordered global-phase assignments.
 
     The branch builder assigns the identity phase before LCU adds the coefficient
-    phase. Qiskit normalizes each assignment modulo 2*pi; combining them first
+    phase. Qiskit normalizes each assignment modulo 2*pi. Combining them first
     can erase a small coefficient added after an identity phase of a full turn.
     """
 

@@ -4,7 +4,7 @@ Bibliographic references and equation locations for NWQLib's algorithms, subrout
 
 ## Where each source is used
 
-Each page below gives the paper, equation or section behind the implemented steps. The algorithm guides and the block-encoding, LCU, state-preparation and Pauli-decomposition pages also name the code owner of each step and state where NWQLib departs from the paper.
+Each page below gives the paper, equation or section behind the implemented steps. The algorithm guides and the block-encoding, LCU, state-preparation and Pauli-decomposition pages also name the code that computes each step and state where NWQLib departs from the paper.
 
 | Topic | Source map |
 | --- | --- |
@@ -16,12 +16,12 @@ Each page below gives the paper, equation or section behind the implemented step
 | GCiM and ADAPT-GCiM | [GCiM guide](algorithms/gcim.md#source-and-code-map), [Fermionic pools](api/subroutines/fermionic_pool.md#compact-generator-circuits) |
 | QHD, its augmented-Lagrangian layer and box refinement | [QHD guide](algorithms/qhd.md#source-map) |
 | Block encodings, LCU, state preparation, Pauli decomposition and Pauli evolution | [Block encoding](api/subroutines/block_encoding.md#source-map), [LCU](api/subroutines/lcu.md#source-map), [State preparation](api/subroutines/state_preparation.md#source-map), [Pauli decomposition](api/subroutines/pauli_decomposition.md#source-map), [Hamiltonian evolution](api/subroutines/hamiltonian_evolution.md#source-map) |
-| Selected blocks, CX laws and fault-tolerant resource models | [Compose blocks](blocks.md#source-map), [Exact dense synthesis](development/dense_synthesis.md#source-map), [Estimate resources](resources.md#source-map), [Estimate fault-tolerant resources](fault-tolerant-resources.md#models-and-sources) |
-| Bounds, resource laws and error budgets, with the proof or source of each | [Mathematics](mathematics.md) |
+| Selected blocks, CX formulas and fault-tolerant resource models | [Compose blocks](blocks.md#source-map), [Exact dense synthesis](development/dense_synthesis.md#source-map), [Estimate resources](resources.md#source-map), [Estimate fault-tolerant resources](fault-tolerant-resources.md#models-and-sources) |
+| Bounds, resource formulas and error budgets, with the proof or source of each | [Mathematics](mathematics.md) |
 | Operator conventions: Pauli order, Jordan–Wigner images, double factorization | [Inputs](inputs.md#conventions-and-derivations) |
 | Scientific example notebooks | [Examples](examples.md#scientific-notebooks) and [Scientific examples](#scientific-examples) below |
 
-The lifecycle, record, execution and backend contracts have no paper source. [Design rationale](development/design_rationale.md) indexes the failure each one prevents and the page that defines it.
+The rules for saving, loading, running and backends come from NWQLib's design and have no paper source. [Design rationale](development/design_rationale.md) indexes the failure each one prevents and the page that defines it.
 
 ## Expectation and sampling
 
@@ -31,11 +31,11 @@ The lifecycle, record, execution and backend contracts have no paper source. [De
     - Theorem 2, Eq. (2.6), p. 16: both bounds directly for every t > 0, with b_i - a_i = 1 or 2.
     - Eq. (1.4), p. 13: the lower tail, which doubles the bound for a two-sided deviation.
     - The Expectation shot selection and binary intervals cite Theorem 1, and the Lanczos Gram sampling bound cites Theorem 2.
-    - The count screen that admits a stall-split valley in QHD box refinement applies Theorem 1 with both tails and a union bound over cells and levels.
+    - The count screen that accepts a stall-split valley in QHD box refinement applies Theorem 1 with both tails and a union bound over cells and levels.
     - Eqs. (4.11) and (4.16), p. 22, in the proof of Theorem 2: the exponential bound behind that count screen. The paper notes that this proof also gives a direct derivation of Eq. (2.3).
     - The Hoeffding branch of QHD's selected region coverage ([Proposition 49](mathematics.md#r49)) applies Theorem 1 and Eqs. (1.4), (2.3) with a union bound over contiguous index intervals and levels, using half the total failure budget.
     - NWQLib's binary inference uses the bounded-variable convention X in [-1,1]. Weighted Pauli sums apply the triangle inequality and a union bound over the predeclared setting family.
-    - Sampling-model premises and binary64 evaluation remain explicit, as described in the [expectation guide](algorithms/expectation.md).
+    - Sampling-model assumptions and binary64 evaluation remain explicit, as described in the [expectation guide](algorithms/expectation.md).
 
  - Clopper, C. J., & Pearson, E. S. (1934). *The Use of Confidence or Fiducial Limits Illustrated in the Case of the Binomial*. Biometrika 26(4), 404–413. [DOI](https://doi.org/10.1093/biomet/26.4.404).
     - QHD's selected region coverage uses one-sided binomial-test inversion, with a union bound over all candidate joint boxes and levels. It receives the other half of the failure budget in [Proposition 49](mathematics.md#r49).
@@ -156,14 +156,14 @@ Sources listed in other sections:
     - Eq. (C.4): NWQLib's cubic schedule.
     - Eq. (E.3) and Algorithm 1: first-order product-formula evolution.
     - Eqs. (F.7) and (F.9): the finite-difference stencil and grid potential.
-    - Eq. (C.3), p. 32: the first-order pseudo-spectral step with the left-endpoint weights of Eq. (C.2), p. 31. NWQLib's split-step flavor applies its symmetric (Strang) form (doi:10.1137/0705041), with which Wu et al., Sec. VI, p. 7, simulate their benchmarks.
+    - Eq. (C.3), p. 32: the first-order pseudo-spectral step with the left-endpoint weights of Eq. (C.2), p. 31. NWQLib's split-step variant applies its symmetric (Strang) form (doi:10.1137/0705041), with which Wu et al., Sec. VI, p. 7, simulate their benchmarks.
     - Algorithm 1, p. 44: meshes the box with the endpoint-exclusive grid of Eq. (E.1), p. 43, which NWQLib's periodic grid uses. Its step 3 names the uniform and a Gaussian state as possible starts.
     - Eq. (F.15), p. 47: the diagonal potential of d variables.
     - Eq. (F.36): the tensor-product Hamming encoding, which NWQLib does not use.
  - Kushnir, S., Leng, J., Peng, Y., Fan, L., & Wu, X. (2025). QHDOPT: A Software for Nonlinear Optimization with Quantum Hamiltonian Descent. INFORMS Journal on Computing, 37(1), 107–124. [10.1287/ijoc.2024.0587](https://doi.org/10.1287/ijoc.2024.0587) [arXiv 2409.03121v1](https://arxiv.org/abs/2409.03121v1)
     - QHDOPT, arXiv:2409.03121v1, Sec. 2.1: NWQLib's default quadratic schedule, given as an example. The paper reports that schedules of this form work well for many test problems.
  - Wu, Z., Li, M., Zheng, M., Wang, M., Liu, J., Stein, S., Li, A., Chen, Y., & Liu, C. (2026). Benchmarking and Resource Analysis for Augmented-Lagrangian Quantum Hamiltonian Descent. [arXiv 2605.12066v1](https://arxiv.org/abs/2605.12066v1)
-    - Selected region coverage for adaptive box refinement ([arXiv:2605.12066](https://arxiv.org/abs/2605.12066)) uses Hoeffding and one-sided Clopper–Pearson bounds, with the sampling assumptions and full derivation in [Proposition 49](mathematics.md#r49).
+    - Sec. V, Eqs. (12)–(14), gives the adaptive box-refinement procedure. NWQLib derives its simultaneous selected-region coverage bound from Hoeffding and one-sided Clopper–Pearson in [Proposition 49](mathematics.md#r49).
     - Eq. (15) of arXiv:2605.12066v1, Sec. VI, p. 7: the shifted cubic schedule.
     - arXiv:2605.12066v1, Section IV.A, Eqs. (9)–(10): the one-hot occupation-operator encoding that NWQLib's potential follows.
     - Sec. III.B, Eqs. (6)–(8): the equality terms and multiplier update of the augmented-Lagrangian layer, whose inequality term comes from Rockafellar (below).
@@ -179,7 +179,7 @@ Sources listed in other sections:
     - Sec. IV E, Eqs. (89)–(91): the quadratic low-momentum kinetic phase with an unsigned momentum index. NWQLib uses the signed index.
     - The paper links no code and makes additional information available from the corresponding author on request. The QHD guide and docstrings name files of the code of either paper (this one or Wu et al.) only to state which settings it ran.
  - Strang, G. (1968). On the construction and comparison of difference schemes. SIAM Journal on Numerical Analysis, 5(3), 506–517. [10.1137/0705041](https://doi.org/10.1137/0705041)
-    - The symmetric splitting of the split-step flavor.
+    - The symmetric splitting of the split-step variant.
  - Coppersmith, D. (2002). An approximate Fourier transform useful in quantum factoring. IBM Research Report RC 19642 (1994). [arXiv quant-ph/0201067v1](https://arxiv.org/abs/quant-ph/0201067v1)
     - arXiv:quant-ph/0201067v1: the approximate quantum Fourier transform that the binary kinetic factor can select.
  - Rockafellar, R. T. (1973). A dual approach to solving nonlinear programming problems by unconstrained optimization. Mathematical Programming, 5, 354–373. [10.1007/BF01580138](https://doi.org/10.1007/BF01580138)
@@ -198,20 +198,20 @@ Sources listed in other sections:
  - Ross, N. J., & Selinger, P. (2016). Optimal ancilla-free Clifford+T approximation of z-rotations. Quantum Information and Computation, 16(11–12), 901–953. [arXiv 1403.2975v3](https://arxiv.org/abs/1403.2975v3)
     - arXiv:1403.2975v3: the leading term `3 log2(1/eps)` of the typical T count of one z-rotation, which the T estimate of a QHD circuit uses.
  - Al-Mohy, A. H., & Higham, N. J. (2011). Computing the action of the matrix exponential, with an application to exponential integrators. SIAM Journal on Scientific Computing, 33(2), 488–511. [10.1137/100788860](https://doi.org/10.1137/100788860)
-    - Algorithm 3.2 (doi:10.1137/100788860): SciPy's `expm_multiply`, which computes the matrix-exponential action in the classical QHD kernel.
-    - Eqs. (3.5)–(3.15), Table 3.1, Lemma 4.1 and Eq. (4.7): the error analysis that supports the derived host mass window of the kernel.
+    - Algorithm 3.2 (doi:10.1137/100788860): SciPy's `expm_multiply`, which computes the matrix-exponential action in the classical QHD evolution.
+    - Eqs. (3.5)–(3.15), Table 3.1, Lemma 4.1 and Eq. (4.7): the error analysis that supports the derived [mass window](glossary.md#mass-window) of that evolution.
  - Neumaier, A. (1974). Rundungsfehleranalyse einiger Verfahren zur Summation endlicher Summen. Zeitschrift für Angewandte Mathematik und Mechanik, 54(1), 39–51. [10.1002/zamm.19740540106](https://doi.org/10.1002/zamm.19740540106).
-    - The compensated summation that the QHD compiler uses for its phase ledger and that Python uses in its float `sum` since 3.12.
+    - The compensated summation that the QHD compiler uses for its running phase total and that Python uses in its float `sum` since 3.12.
  - Ogita, T., Rump, S. M., & Oishi, S. (2005). Accurate sum and dot product. SIAM Journal on Scientific Computing, 26(6), 1955–1988. [10.1137/030601818](https://doi.org/10.1137/030601818).
     - Algorithm 4.1, the cascaded summation: the recurrences of Neumaier's compensated summation.
-    - Proposition 4.5: the error bound of the equivalent Algorithm 4.4. This gives the error bounds of the QHD phase ledger and of the kinetic coefficient's `sum` that the kept-state phase allowance of the QHD circuit routes uses.
+    - Proposition 4.5: the error bound of the equivalent Algorithm 4.4. This gives the error bounds of the QHD running phase total and of the kinetic coefficient's `sum` that the kept-state phase allowance of the QHD circuit routes uses.
  - Higham, N. J. (1993). The accuracy of floating point summation. SIAM Journal on Scientific Computing, 14(4), 783–799. [10.1137/0914050](https://doi.org/10.1137/0914050).
     - Sec. 3, Eq. (3.6), p. 788: the rounding bound that the QHD binary angle formation applies to the butterfly sums of the Walsh–Hadamard transform.
 
 ## Quantum Linear Solver (QLS)
 
  - Childs, A. M., Kothari, R., & Somma, R. D. (2017). Quantum algorithm for systems of linear equations with exponentially improved dependence on precision. SIAM Journal on Computing, 46(6), 1920-1950. [arXiv 1511.02306v2](https://arxiv.org/abs/1511.02306v2)
-    - arXiv:1511.02306v2, Lemmas 17–19: inverse-polynomial approximation bounds from which the degree law d = O(κ log(κ/ε)) follows.
+    - arXiv:1511.02306v2, Lemmas 17–19: inverse-polynomial approximation bounds from which the degree formula d = O(κ log(κ/ε)) follows.
  - Sünderhauf, Nemeth, Walayat, Patterson, and Berntson (2025). Matrix inversion polynomials for the quantum singular value transformation. [arXiv 2507.15537v1](https://arxiv.org/abs/2507.15537v1)
     - arXiv:2507.15537v1, Theorem 1, with Python code in Appendix B: the optimal odd polynomial in closed form.
     - Sec. III, Eq. (26): the grid density.
@@ -229,11 +229,11 @@ Sources listed in other sections:
     - Related background.
  - Costa, P. C. S., An, D., Sanders, Y. R., Su, Y., Babbush, R., & Berry, D. W. (2022). Optimal scaling quantum linear systems solver via discrete adiabatic theorem. PRX Quantum, 3, 040303. [arXiv 2111.08152v1](https://arxiv.org/abs/2111.08152v1)
     - Related background.
- - Gilyén, A., Su, Y., Low, G. H., & Wiebe, N. (2019). Quantum singular value transformation and beyond. STOC 2019. [arXiv 1806.01838v1](https://arxiv.org/abs/1806.01838v1)
+ - Gilyén et al. (2019, arXiv:1806.01838v1), listed under Block encoding and quantum signal processing.
 
 ## Quantum Phase Estimation (QPE)
 
-The [QPE guide](algorithms/qpe.md#implementation-map) gives the exact versions, code owners and the RWPE feedback-sign derivation.
+The [QPE guide](algorithms/qpe.md#implementation-map) gives the exact versions, the code that computes each step and the RWPE feedback-sign derivation.
 
  - Ding, Z., & Lin, L. (2023). Even Shorter Quantum Circuit for Phase Estimation on Early Fault-Tolerant Quantum Computers with Applications to Ground-State Energy Estimation. PRX Quantum, 4(2), 020331. [10.1103/PRXQuantum.4.020331](https://doi.org/10.1103/PRXQuantum.4.020331) [arXiv 2211.11973v2](https://arxiv.org/abs/2211.11973v2)
     - arXiv:2211.11973v2, Eq. (2): the quantum complex exponential least-squares (QCELS) objective.
@@ -281,7 +281,7 @@ Equation and figure numbers follow the listed arXiv versions. The exact synthesi
     - Appendix A, optimization A.2: the diagonal moved between two-qubit blocks.
     - Theorem 12: a controlled unitary is block diagonal in each control qubit, and this theorem demultiplexes it at the top.
  - Shende, V. V., & Markov, I. L. (2009). On the CNOT-cost of TOFFOLI gates. Quantum Information and Computation, 9, 461–486. [arXiv 0803.2316v1](https://arxiv.org/abs/0803.2316v1)
-    - arXiv:0803.2316v1, Fig. 1 and Theorem 1: reproduce the textbook six-CX Toffoli circuit of Nielsen and Chuang that the controlled CX laws use, and prove that no circuit of CX and one-qubit gates implements the Toffoli with fewer.
+    - arXiv:0803.2316v1, Fig. 1 and Theorem 1: reproduce the textbook six-CX Toffoli circuit of Nielsen and Chuang that the controlled CX formulas use, and prove that no circuit of CX and one-qubit gates implements the Toffoli with fewer.
  - Nielsen, M. A., & Chuang, I. L. (2000). Quantum computation and quantum information. Cambridge University Press. ISBN 978-0-521-63503-5.
     - The textbook source of the six-CX Toffoli circuit, cited here through its reproduction by Shende and Markov.
  - Bergholm, V., Vartiainen, J. J., Möttönen, M., & Salomaa, M. M. (2005). Quantum circuits with uniformly controlled one-qubit gates. Physical Review A, 71, 052330. [quant-ph/0410066v2](https://arxiv.org/abs/quant-ph/0410066v2)
@@ -352,7 +352,7 @@ Sources listed in other sections:
 
 ## Testing
 
-The metamorphic relations of the [Maintenance page](MAINTENANCE.md#metamorphic-relations-and-their-premises) follow the testing approach of MorphQ, which checks Qiskit by transforming quantum programs in ways whose effect on the output is known. NWQLib's relations and their acceptance limits come from its own contracts.
+The metamorphic relations of the [Maintenance page](MAINTENANCE.md#metamorphic-relations-and-their-premises) follow the testing approach of MorphQ, which checks Qiskit by transforming quantum programs in ways whose effect on the output is known. NWQLib's relations and their acceptance limits come from its own design rules.
 
  - Paltenghi, M., & Pradel, M. (2023). MorphQ: Metamorphic Testing of the Qiskit Quantum Computing Platform. 2023 IEEE/ACM 45th International Conference on Software Engineering (ICSE), 2413–2424. [10.1109/ICSE48619.2023.00202](https://doi.org/10.1109/ICSE48619.2023.00202) [arXiv 2206.01111v2](https://arxiv.org/abs/2206.01111v2)
 

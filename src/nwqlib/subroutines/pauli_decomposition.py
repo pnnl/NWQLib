@@ -80,7 +80,7 @@ class PauliDecomposition:
     Args:
         terms: Nonzero Pauli terms defining the represented operator after any pruning.
         input_dimension: Original matrix dimension.
-        operator_dimension: Dimension actually decomposed; it exceeds input_dimension
+        operator_dimension: Dimension that was decomposed. It exceeds `input_dimension`
             exactly when the input was zero-padded to a power-of-two dimension.
         num_qubits: Number of qubits represented by the Pauli labels.
         atol: Resolved absolute coefficient cutoff after combining atol and rtol.
@@ -189,11 +189,12 @@ def decompose_matrix_to_pauli(
 ) -> PauliDecomposition:
     """Write a square matrix as a sum of Pauli strings, `A = sum_P c_P P` with `c_P = 2**-n Tr(P A)`.
 
-    This helper prepares matrix inputs for LCHS and later circuit-building
-    paths. Matrix dimensions must be powers of two unless explicit zero
-    padding is requested. NWQLib's I/X/Y/Z block transform computes the
-    coefficients with overflow-safe componentwise averages at each level and
-    omits only computed exact-zero coefficients before the cutoff below. It
+    LCHS uses this function for the Pauli terms of its compiled SELECT and
+    its product-formula steps. Matrix dimensions must be powers of two
+    unless explicit zero padding is requested. NWQLib's I/X/Y/Z block
+    transform computes the coefficients with overflow-safe componentwise
+    averages at each level and omits only computed exact-zero coefficients
+    before the cutoff below. It
     avoids the tiny-magnitude loss of Qiskit's zero-tolerance decomposition.
     For dimension D and width q,
     the arithmetic is `O(q D**2)` with `O(D**2)` array workspace. No matrix

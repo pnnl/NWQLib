@@ -45,7 +45,8 @@ from nwqlib.subroutines.state_preparation import build_mps_circuit_state_prepara
 from nwqlib.subroutines.state_preparation.direct import (
     _build_normalized_state_preparation,
 )
-from nwqlib.subroutines.lcu.registry import lcu_preparation_implementation_metadata
+from nwqlib.subroutines._registry_utils import implementation_metadata
+from nwqlib.subroutines.lcu.registry import LCU_PREPARATION_IMPLEMENTATIONS
 from nwqlib.subroutines.lcu.data import _lcu_prep_stage_requirements, lcu_coefficient_intake
 
 
@@ -101,7 +102,10 @@ def _admit_lcu(data, *, max_bytes, max_work, dense=False):
 
 
 def _as_unitary_array(unitary: Any, *, dimension: int) -> np.ndarray:
-    """Return a square matrix with the expected dimension."""
+    """Return ``unitary`` as a complex128 matrix after checking its shape and finiteness.
+
+    Qiskit's ``UnitaryGate`` checks unitarity later.
+    """
 
     matrix = np.asarray(unitary, dtype=complex)
     if matrix.shape != (dimension, dimension):
@@ -177,7 +181,7 @@ class LCUCircuit:
     """A PREP-SELECT-PREP^dagger circuit with its coefficient data and PREP error.
 
     [`build_lcu_circuit`][nwqlib.subroutines.lcu.core.build_lcu_circuit]
-    returns it. The circuit is `circuit`, and `alpha` is
+    returns it. Its `circuit` field holds the result, and `alpha` is
     `data.coefficient_l1_norm`. The fields below are read-only.
 
     Attributes:
@@ -198,8 +202,11 @@ class LCUCircuit:
             for direct PREP, which makes no algorithmic approximation, and
             for a single term, which needs no PREP circuit. None for MPS
             PREP of two or more terms, whose circuit error this construction
-            does not evaluate. It has the same phase convention as coherent
-            PREP, inverse PREP and controlled use.
+            does not evaluate. The comparison uses the phases of the
+            prepared vector and ``data.prep_amplitudes`` directly, without
+            minimizing over a global phase. Coherent PREP and its inverse
+            use the circuit's phase, which becomes a relative phase between
+            the control branches when PREP is controlled.
     """
 
     circuit: QuantumCircuit
@@ -291,7 +298,6 @@ def prepare_lcu_gate_data(
         num_system_qubits=num_system_qubits,
         system_dimension=int(dimension),
     )
-    _admit_lcu(data, max_bytes=max_bytes, max_work=max_work)
     return data
 
 
@@ -442,7 +448,9 @@ def _build_lcu_preparation_artifact(
             },
             preparation_l2_error=0.0,
         )
-    implementation = lcu_preparation_implementation_metadata(preparation_backend)
+    implementation = implementation_metadata(
+        LCU_PREPARATION_IMPLEMENTATIONS, preparation_backend, slot="LCU PREP"
+    )
     control = QuantumRegister(data.num_control_qubits, data.register_order[0])
     circuit = QuantumCircuit(control, name="lcu_prepare")
     prep_amplitudes = np.asarray(data.prep_amplitudes, dtype=complex)
@@ -554,13 +562,12 @@ def build_lcu_select(data: LCUData, *, max_bytes: int = DEFAULT_MAX_BYTES,
     every branch is unitary to rounding. A branch that passes Qiskit's
     constructor check (`numpy.allclose` of `U^dagger U` with the identity,
     atol 1e-8 and rtol 1e-5) with a larger defect is realized as its unitary
-    polar factor, which differs from it by the order of that defect. For
-    `U = expm(-i t G)` with random Hermitian G, t from 1e-10 to 10, one to
-    three system qubits and one to three controls, the largest entry error
-    was 4e-14, also after lowering to U and CX. A branch on
-    `m = log2(P D)` qubits takes at most `(25/96) 4**m - 2**m + 4/3` CX
-    for m >= 3, the largest count that Qiskit's own synthesis of the same
-    controlled matrices reached in tests.
+    polar factor, which differs from it by the order of that defect.
+    A branch on ``m = log2(P D)`` qubits, where ``P`` is the number of
+    padded addresses and ``D`` is the system dimension, takes at most
+    ``(25/96) 4**m - 2**m + 4/3`` CX for ``m >= 3``. This is the bound
+    derived from NWQLib's synthesis recursion in
+    [Controlled dense unitaries](../../development/dense_synthesis.md#controlled-dense-unitaries).
 
     Args:
         data (LCUData): Output of `prepare_lcu_data`, which holds the dense
@@ -578,8 +585,11 @@ def build_lcu_select(data: LCUData, *, max_bytes: int = DEFAULT_MAX_BYTES,
             control register stores `j`.
 
     Raises:
-        ValueError: If the dense unitary tuple is empty or does not cover the
-            supplied term count. Extra padding branches act as identity.
+        ValueError: If the dense unitary tuple is empty, as in data from
+            `prepare_lcu_gate_data`, or does not cover the supplied term
+            count, or if the arrays or the branch syntheses would exceed
+            `max_bytes` or `max_work`. Extra padding branches act as
+            identity.
     """
 
     unitary_count = len(data.phase_adjusted_unitaries)
@@ -652,7 +662,7 @@ def _assemble_prepared_lcu(
     select_qubits: list[Any],
     preparation_backend: str,
 ) -> LCUCircuit:
-    """Compose one private PREP/SELECT/PREP-dagger LCU shell."""
+    """Compose PREP, SELECT and PREP^dagger into ``circuit`` and return the ``LCUCircuit`` with the PREP metadata."""
 
     circuit.compose(preparation.circuit, qubits=preparation_qubits, inplace=True)
     circuit.compose(select, qubits=select_qubits, inplace=True)

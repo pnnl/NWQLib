@@ -936,7 +936,7 @@ def test_spin_squared_action_zero_mode_without_native_action(monkeypatch):
 
 
 def test_ladder_adapter_checks_known_storage_before_consumption():
-    from nwqlib.subroutines.fermionic_pool import _ladder_expansion_to_pauli
+    from nwqlib.subroutines.fermionic_pool import _ladder_expansion_terms
 
     visits = []
 
@@ -945,8 +945,8 @@ def test_ladder_adapter_checks_known_storage_before_consumption():
         yield 2j, ()
 
     with pytest.raises((ValueError, TypeError)):
-        _ladder_expansion_to_pauli(rows(), 1, mapping="jw", max_bytes=1)
+        _ladder_expansion_terms(rows(), 1, mapping="jw", max_bytes=1)
     assert visits == []
-    mapped = _ladder_expansion_to_pauli(rows(), 1, mapping="jw", max_bytes=4096)
-    assert mapped.to_list() == [("I", 2j)]
+    mapped = _ladder_expansion_terms(rows(), 1, mapping="jw", max_bytes=4096)
+    assert mapped == (("I", 2j),)
     assert visits == [1]

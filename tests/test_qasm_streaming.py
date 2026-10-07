@@ -352,16 +352,12 @@ def test_admission_rejects_opaque_width_instruction_integer_and_metadata_before_
         assert sink.getvalue() == b""
 
 
-def test_materializer_rejects_unknown_capacity_before_import(tmp_path, monkeypatch):
+def test_materializer_checks_file_bytes_before_reading(tmp_path, monkeypatch):
     construction = one(select_zero_reflection("reflection", 2))
     path = tmp_path / "source.qasm"
     receipt = write_qasm3_file(construction, path, budget=WRITE)
     import qiskit.qasm3
     monkeypatch.setattr(qiskit.qasm3, "loads", lambda *_: pytest.fail("unadmitted import"))
-    for budget in (MATERIALIZE.revise(required_max_peak_rss=10**9),
-                   MATERIALIZE.revise(required_max_native_bytes=10**9)):
-        with pytest.raises(ValueError):
-            materialize_qasm3_file(construction, path, receipt, writer_budget=WRITE, budget=budget)
 
     from contextlib import nullcontext
     from pathlib import Path

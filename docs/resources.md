@@ -2,7 +2,7 @@
 
 `nwqlib.estimate` counts the qubits, gates, shots and memory of a planned quantum algorithm before any circuit is built. Each count carries a label that says whether it is exact, an upper bound, an estimate, conditional on a stated assumption, or unavailable.
 
-Use it to size a problem before running it. [Check device fit and run time](profiles.md) compares these counts with a machine, [Estimate fault-tolerant resources](fault-tolerant-resources.md) gives T counts and physical qubits of small compiled circuits, and the notebook [`examples/resource_estimation_at_scale.ipynb`](https://github.com/pnnl/NWQLib/blob/main/examples/resource_estimation_at_scale.ipynb) plans QLS, LCHS, QPE and GCiM at 100 system qubits.
+Use it to size a problem before running it. [Check device fit and run time](profiles.md) compares these counts with a machine, [Estimate fault-tolerant resources](fault-tolerant-resources.md) gives T counts and physical qubits of small compiled circuits, and the notebook [`examples/resource_estimation_at_scale.ipynb`](https://github.com/pnnl/NWQLib/blob/main/examples/resource_estimation_at_scale.ipynb) plans QLS, LCHS, QPE and GCiM at 100 system qubits. [Defaults that change your results](ENGINEERING_CONSTANTS.md#defaults-that-change-your-results) lists the defaults that decide the size, accuracy or stopping point of a computation.
 
 ## Count qubits, CX gates and shots {#count-qubits-cx-gates-and-shots}
 
@@ -94,7 +94,7 @@ For exact arithmetic, read `fact.value`, a `Rational` (`numerator`, `denominator
 Labels arise in these common cases:
 
 - A branch contributes the larger of its alternatives, so the count becomes an upper bound. NWQLib infers no branch probability and no expected number of rounds.
-- An adaptive method's per-round cost stays unavailable unless an explicit `resource_envelope` asserts a uniform bound per round over the history. The work and workspace of its decision rule stay separate missing costs.
+- An adaptive method's per-round cost stays unavailable unless an explicit `resource_envelope` of its adaptive loop (`nwqlib.ir.AdaptiveLoop`) asserts a uniform bound per round over the history. The work and workspace of its decision rule stay separate missing costs.
 - `expected_operations` needs a probability model and stays unavailable without one.
 - In a batch with a parameter range, a cost that changes along the range stays unavailable, and a cost that does not change is multiplied by the number of points. NWQLib does not enumerate the range.
 
@@ -121,7 +121,7 @@ A one-qubit phase is classified by its stored angle. An angle of 0, ±pi/2, ±pi
 
 ## Count shots, settings and exact evaluations {#count-shots-settings-and-exact-evaluations}
 
-Methods measure through measurement batches (`nwqlib.ir.MeasurementBatch`). A batch runs its body, the circuit it repeats, under one or more settings. A setting is one experiment point with a label and parameter values, such as one measurement basis. Settings are independent experiments, and the batch's `repetitions` sets how many times each one runs. A terminal batch measures its settings. Its readout kind (`observation_kind`) is `counts` for sampled shots, `pauli_expectation`, `probabilities` or `trajectory` for exact statistics, `estimated_observable` for a provider's estimate, whose shots stay unavailable, or `None` when unknown. An outer batch repeats the batches inside it. Repetitions multiply the work of the batch body, and unknown repetitions leave the work unknown.
+Methods measure through measurement batches (`nwqlib.ir.MeasurementBatch`). A batch runs its body, the circuit it repeats, under one or more settings. A setting is one experiment point with a label and parameter values, such as one measurement basis. Settings are independent experiments, and the batch's `repetitions` sets how many times each one runs. A terminal batch measures its settings. Its readout kind (`observation_kind`) is `counts` for sampled shots, `pauli_expectation` or `probabilities` for exact statistics, `trajectory` for one exact evaluation of the body read at its observation points, `estimated_observable` for a provider's estimate, whose shots stay unavailable, or `None` when unknown. An outer batch repeats the batches inside it. Repetitions multiply the work of the batch body, and unknown repetitions leave the work unknown.
 
 | Count | What it counts |
 | --- | --- |
@@ -132,7 +132,7 @@ Methods measure through measurement batches (`nwqlib.ir.MeasurementBatch`). A ba
 | `root_setting_declarations` | Settings declared by a `Program` whose root is a measurement batch. Absent for other roots. |
 | `root_repetitions` | Repetitions of that root batch's body, before the readout counts of the batches inside it. |
 
-A QHD plan with native execution uses one measurement setting named `qhd`. A counts measurement with `S` repetitions counts `S` shots, one setting and zero exact evaluations. An exact probability or amplitude readout counts zero shots, one setting and one exact evaluation. A kept-amplitude readout takes its size from the amplitude declaration of the experiment.
+A QHD plan with `execution="quantum"` uses one measurement setting named `qhd`. A counts measurement with `S` repetitions counts `S` shots, one setting and zero exact evaluations. An exact probability or amplitude readout counts zero shots, one setting and one exact evaluation. A kept-amplitude readout takes its size from the amplitude declaration of the experiment.
 
 For example, an outer batch with one setting repeats, three times, an inner batch with two settings of two shots each. The estimate reports 12 shots, 6 setting visits, 2 distinct settings, 1 root setting declaration and 3 root repetitions. Steps in sequence and `Repeat` pass these readout counts on to the enclosing `Program`. With exact readout and one repetition per inner setting instead, it reports 0 shots and 6 exact evaluations. Unknown values propagate as follows:
 
@@ -143,13 +143,13 @@ For example, an outer batch with one setting repeats, three times, an inner batc
 - Distinct settings across a parameter range of an outer batch stay unknown, and no range is enumerated.
 - An unresolved control or repetition can make `unique_settings` an upper bound.
 
-These are the declared readout counts. They are not simulator trajectories, hardware-independent state-evolution counts or accuracy guarantees. A plan with no measurement batch, such as the default QLS or LCHS plan that reads exact amplitudes, reports zero shots, settings and exact evaluations because it declares no terminal measurement, not because running it is free. Building the circuit makes one body per batch, so `counts` with four repetitions is one body submitted with four shots, not four bodies submitted four times each. A `Repeat` step still repeats operations inside that body. Execution checks the measurement requirements and does not take unknown counts as one.
+These are the declared readout counts. They are not simulator trajectories, hardware-independent state-evolution counts or accuracy guarantees. A plan with no measurement batch, such as the default QLS or LCHS plan that reads exact amplitudes, reports zero shots, settings and exact evaluations because it declares no terminal measurement, not because running it is free. Building the circuit makes one body per batch, so `counts` with four repetitions is one body submitted with four shots, not four bodies submitted four times each. A `Repeat` step still repeats operations inside that body. Execution checks the measurement requirements and does not substitute 1 for an unknown count.
 
 A gate count or depth of a circuit describes one prepared circuit, while the estimate multiplies gate counts by the repetitions. Depths over several repetitions or settings are summed as if every circuit ran after the previous one, which gives an upper bound on the serial workload. It is not the depth of one circuit and does not claim that the independent jobs depend on each other. An exact evaluation has zero sampled shots and does not fix how many repetitions hardware would need, so a hardware cost that needs that number can stay unknown with a reason.
 
 ## Count memory and resident data {#count-memory-and-resident-data}
 
-The `memory` count at a location is the peak of declared bytes there. A block's declared workspace lasts for each of its calls. Calls in parallel add their workspace at a location, and calls in sequence reuse it. `ResourceContext(resident=...)` declares input, analysis, I/O, materialization or stored payloads that stay live for the whole workload, and they add to every peak. The estimate allocates none of these bytes.
+The `memory` count at a location is the peak of declared bytes there. A block's declared workspace lasts for each of its calls. Calls in parallel add their workspace at a location, and calls in sequence reuse it. `ResourceContext(resident=...)` declares `Workspace` entries that stay in memory for the whole workload, each with a `purpose` such as `"input"`, `"analysis"`, `"io"`, `"materialization"` or `"stored"`, and they add to every peak. The estimate allocates none of these bytes.
 
 Missing block or classical workspace leaves `memory` unavailable. When some declared workspace is known, `known_memory` gives the known part, and `input_bytes`, `analysis_bytes`, `io_bytes`, `materialization_bytes` and `stored_bytes` give the known parts by purpose.
 
@@ -194,7 +194,7 @@ prepared.run.close()
 
 The prepared circuit has 4 qubits and depth 48 (Qiskit 2.5.2, Aer 0.17.2). Its 24 `cx` entries leave out the CX gates inside the 5 `unitary` gates, because inspection counts each top-level operation once under its own name. The copy transpiled with Qiskit 2.5.2 to the basis `cx, rz, sx, x` at optimization level 1 with seed 7 has depth 75 and 34 CX, compared with the estimate of 39 CX per circuit.
 
-Inspection reads the existing circuit and names it by its content hash. It submits nothing, simulates nothing and does not copy the circuit to count it. It needs an open Run and a prepared quantum circuit, so a host kernel cannot be inspected. The result is a plain dictionary:
+Inspection reads the existing circuit and names it by its content hash. It submits nothing, simulates nothing and does not copy the circuit to count it. It needs an open Run and a prepared quantum circuit, so a classical computation step of the Plan cannot be inspected. The result is a plain dictionary:
 
 - `operations` maps each top-level operation name to its count. Measurements, resets, barriers, simulator saves, `Clifford` objects and user-defined gates are listed under their own names. A composite gate or control-flow operation counts once, and its definition or body is not expanded, so `cx` counts only top-level entries with that name.
 - `total_operations`, `num_qubits`, `num_clbits` and `depth` describe the same circuit. `depth` is Qiskit's default circuit depth, which skips directives such as barriers and simulator saves.

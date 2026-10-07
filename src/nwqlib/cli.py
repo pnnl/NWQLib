@@ -126,7 +126,3 @@ def main(argv=None):
     except (ValueError, TypeError, LookupError, OSError, ImportError) as error:
         parser.exit(1, f"{error}\n")
     return 0
-
-
-if __name__ == "__main__":
-    raise SystemExit(main())

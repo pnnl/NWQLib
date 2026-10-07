@@ -56,7 +56,7 @@ class PauliEvolutionBlock:
         angle: Default `None`. Angle of a `"number_projector"`
             block.
         metadata: Default empty. Additional construction
-            information. It does not describe a second circuit.
+            information.
     """
 
     terms: tuple[PauliEvolutionTerm, ...]

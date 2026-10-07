@@ -1,6 +1,6 @@
 """Shared projected Hermitian eigensolve and finite-shot pencil diagnostics.
 
-These operations act only on projected matrices; they do not construct basis
+These operations act only on projected matrices. They do not construct basis
 states, evaluate operators, or certify physical accuracy of sampled estimates.
 FixedGCIM, ADAPT and Lanczos all reduce their acquired (H, S) pairs here, so
 the admission rules, rank cutoff and reported diagnostics mean the same thing
@@ -18,9 +18,11 @@ import numpy as np
 from nwqlib._numerics import stable_vector_norm
 
 
-# Numerical-null resolution for projected overlaps. This is a rank
-# selection policy, not an input-error bound. Revisit it with the precision
-# policy (docs/ENGINEERING_CONSTANTS.md).
+# Absolute cutoff on the eigenvalues of the projected overlap S. With this
+# default, the solve discards each direction whose overlap eigenvalue is at most 1e-12 as
+# numerically null and keeps the others, so the value decides the kept rank.
+# It is not an input-error bound. The value is untuned, with no recorded
+# derivation (docs/ENGINEERING_CONSTANTS.md).
 DEFAULT_OVERLAP_EIGENVALUE_CUTOFF = 1.0e-12
 
 
@@ -217,8 +219,8 @@ def _solve_projected_pencil(
     This is the discretized Hill-Wheeler eigenproblem ``H f = E S f`` of
     Zheng et al., Phys. Rev. Research 5, 023200 (2023), Eq. (13), with the
     matrix elements of Eqs. (14)-(15) (numbering of arXiv:2212.09205v1). For
-    Lanczos it is the Krylov pencil of Kirby, Motta and Mezzacapo, arXiv
-    2208.00567v4, Eq. (10), p. 4.
+    Lanczos it is the Krylov pencil of Kirby, Motta and Mezzacapo,
+    arXiv:2208.00567v4, Eq. (10), p. 4.
     Solves ``H c = E S c`` by canonical (Lowdin) orthogonalization:
     diagonalize ``S = V diag(s) V^dagger``, discard directions with
     ``s <= overlap_eigenvalue_cutoff``, form ``X = V_kept diag(s_kept^-1/2)``,
@@ -231,10 +233,12 @@ def _solve_projected_pencil(
     the overlap eigenvalues strictly above the threshold, as here. Their
     Theorem 2.7 (p. 14) analyzes its stability under noise in H and S. Zheng et al.
     (2024), arXiv:2312.07691v3, Appendix F, Eqs. (F1)-(F3), apply the same
-    positive-eigenvalue truncation to GCIM pencils. The absolute cutoff is a
-    rank policy (``DEFAULT_OVERLAP_EIGENVALUE_CUTOFF``). The theorem's
-    accuracy statements need a threshold tied to the noise level, which this
-    function does not choose.
+    positive-eigenvalue truncation to GCIM pencils. The absolute cutoff
+    discards each direction whose overlap eigenvalue is at most the caller's
+    ``overlap_eigenvalue_cutoff`` (default
+    ``DEFAULT_OVERLAP_EIGENVALUE_CUTOFF``, 1e-12), which decides the kept
+    rank. The theorem's accuracy statements need a threshold tied to the
+    noise level, which this function does not choose.
 
     A deterministic Gram matrix is positive semidefinite, so a negative
     eigenvalue beyond roundoff means the input is not a Gram matrix and the

@@ -13,12 +13,11 @@ QLS and LCHS read the counts without importing Qiskit.
 # routing. Open controls add only one-qubit X gates, so every control state
 # has the same count. Qiskit's default multi-controlled X synthesis gives
 # these counts. They coincide with ``synth_mcx_noaux_v24`` for k <= 5 and
-# with ``synth_mcx_noaux_hp24`` (Huang and Palsberg, PLDI 2024) for the larger
-# k that were compared. Neither synthesis has a published closed-form CX
-# count, so the table stores the values. QLS prices its projector flips and
-# its Q_b' and A_t predicates with the table, and the LCHS SELECT laws price
-# the QSP reflections and the multi-controlled X gates that Qiskit adds when
-# it controls a branch. The table covers 64 controls, well beyond the
+# with ``synth_mcx_noaux_hp24`` (Huang and Palsberg, PLDI 2024,
+# doi:10.1145/3656436) for the larger k that were compared. QLS prices its
+# projector flips and its Q_b' and A_t predicates with the table, and the
+# LCHS SELECT laws price the QSP reflections and the multi-controlled X gates
+# that Qiskit adds when it controls a branch. The table covers 64 controls, well beyond the
 # predicates of the 20 to 25 qubit systems in the library's scope. A gate
 # with more controls has an unknown CX count, not an extrapolated one.
 # tests/test_mcx_counts.py recomputes every entry with the installed Qiskit.

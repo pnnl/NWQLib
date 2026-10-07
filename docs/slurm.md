@@ -4,6 +4,8 @@
 
 ## Submit a job {#common-detached-execution}
 
+You need a runner built for the profile's backend/method pair, as [Build the runner](nwqsim.md#building-a-selected-nwq-sim-runner) describes, on the shared path that the profile names, and `nwqlib[qiskit]` on the host that prepares the run.
+
 Construct one backend with the site profile and explicit limits. This example is a template and is not run here, because it needs a Slurm site and a built runner:
 
 ```python

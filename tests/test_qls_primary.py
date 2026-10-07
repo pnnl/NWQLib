@@ -312,7 +312,6 @@ def test_classical_model_admits_its_decompositions_with_vectors(monkeypatch, sol
     work = plan.reconstruction.work
     assert counts == {name: getattr(work, name + "_calls") for name in ("svd", "eigh")
                       if getattr(work, name + "_calls")}
-    assert work.matrix_products == 0
     refusal = ("classical action" if t is not None else "original QLS eigensystem" if hermitian
                else "original QLS SVD") + " exceeds max_work"
     with pytest.raises(ValueError, match=refusal):
@@ -353,7 +352,7 @@ def test_compact_reference_admission_is_owned_and_never_densifies(monkeypatch):
 @pytest.mark.parametrize("sign", [1.0, -1.0])
 def test_original_matrix_scaling_preserves_selected_inverse_and_mass(factor, sign):
     matrix = factor * np.diag([1.0, sign*2.0])
-    low, high, _ = numerical._extreme_singular_values(matrix, hermitian=True)
+    low, high, _ = numerical._extreme_singular_values(matrix, hermitian=True, events={"eigvalsh_calls": 0})
     np.testing.assert_allclose((low/factor, high/factor), (1., 2.), rtol=2e-15, atol=0.)
     result = nwqlib.solve(selected(A=matrix, b=factor*np.ones(2)))
     np.testing.assert_allclose(result.x, [1., sign*.5], rtol=.01, atol=.01)

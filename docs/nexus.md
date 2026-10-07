@@ -8,7 +8,7 @@ from nwqlib.backends.nexus import NexusBackend
 backend = NexusBackend(
     project="YOUR-EXISTING-PROJECT-UUID",
     device="H2-1",
-    target_region="us",    # execution region, always explicit
+    target_region="us",    # execution region, "us" (the default) or "sg"
     credential_name=None,  # optional name of a Nexus-linked credential
     optimization_level=1,
     max_cost_hqc=100.0,    # per submitted program, in Hardware Quantum Credits
@@ -16,18 +16,29 @@ backend = NexusBackend(
 )
 ```
 
-Construction imports no provider SDK and does not log in. `max_cost_hqc` is a cap per program, [not a total](#cost-cap-and-timeouts).
+Construction imports no provider SDK and does not log in. `max_cost_hqc` is a cap per program, [not a total](#cost-cap-and-timeouts). Without it, the default `None` sets no cap.
 
 ## Install {#costs-timeout-and-qualification}
 
-The `nexus` extra describes the normal installation with dependency resolution. The qualified environment instead keeps pandas 3.0.5, which conflicts with the `pandas>=2,<3` requirement that qnexus 0.49.0 declares. To install that environment:
+The `nexus` extra, `pip install "nwqlib[nexus]"`, gives the normal installation with dependency resolution. The qualified environment instead keeps pandas 3.0.5, which conflicts with the `pandas>=2,<3` requirement that qnexus 0.49.0 declares. To install that environment:
 
-1. Install the remaining public qnexus requirements and `selene-core==0.3.2` with normal dependency resolution, and check the proposed changes against the environment.
+1. Install NWQLib with Qiskit, the remaining public qnexus requirements and `selene-core==0.3.2` with normal dependency resolution. Run the command first with `--dry-run` to check the proposed changes against the environment:
+
+    ```bash
+    python -m pip install "nwqlib[qiskit]" \
+        'click>=8.1,<9' 'colorama>=0.4,<1' 'httpx>=0,<1' 'hugr==0.18.6' \
+        'nest-asyncio2>=1.6,<2' 'pandas==3.0.5' 'pydantic-settings>=2,<3' \
+        'pydantic>=2.4,<3' 'pyjwt>=2.10.1,<3' 'pytket==2.18.1' \
+        'quantinuum-schemas==7.8.2' 'rich>=13.6,<14' 'websockets>11,<16' \
+        'pytket-qiskit==0.78.0' 'selene-core==0.3.2'
+    ```
+
 2. Only after those dependencies are present, install qnexus alone without dependencies: `python -m pip install --no-deps qnexus==0.49.0`.
+3. Run `python -m pip check`. It must report exactly one conflict, `qnexus 0.49.0 has requirement pandas<3,>=2, but you have pandas 3.0.5.`
 
 Do not apply `--no-deps` to the whole NWQLib extra or its other packages. The published qnexus wheel imports `selene_core.trace` without declaring that dependency, which is why step 1 installs selene-core explicitly. This exception does not make `pip check` succeed, and it must not downgrade pandas or patch the SDK automatically.
 
-The checked environment has qnexus 0.49.0, pytket 2.18.1, pytket-qiskit 0.78.0, quantinuum-schemas 7.8.2, hugr 0.18.6, selene-core 0.3.2 and pandas 3.0.5, with the existing numerical and Qiskit packages unchanged. `pip check` reports the pandas conflict and no other. No pandas 3 runtime failure was observed in the offline checks, and there is no private SDK patch or compatibility shim. A separate offline CI job installs exactly this combination and fails on any additional dependency conflict ([Maintenance](MAINTENANCE.md)). The first use in a run warns about the offline qualification, this metadata conflict and the [HTTP wait without a timeout](#cost-cap-and-timeouts), and the warning is shown again after the run is reopened.
+The checked environment has qnexus 0.49.0, pytket 2.18.1, pytket-qiskit 0.78.0, quantinuum-schemas 7.8.2, hugr 0.18.6, selene-core 0.3.2 and pandas 3.0.5, with the existing numerical and Qiskit packages unchanged. `pip check` reports the pandas conflict and no other. No pandas 3 runtime failure was observed in the offline checks, and there is no private SDK patch or compatibility shim. A separate offline CI job installs exactly this combination with these steps, from a source checkout with `-e ".[dev,aer]"` in place of `"nwqlib[qiskit]"` and `docs/ENVIRONMENT_LOCK.txt` as a constraint, and fails on any additional dependency conflict ([Maintenance](MAINTENANCE.md)). The first use in a run warns about the offline qualification, this metadata conflict and the [HTTP wait without a timeout](#cost-cap-and-timeouts). A run reopened after it has saved its state does not repeat the warning.
 
 ## Log in and choose a project
 

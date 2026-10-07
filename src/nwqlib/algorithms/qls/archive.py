@@ -53,7 +53,7 @@ def _save_decomposition(source, files, original):
                   num_qubits=source.num_qubits, atol=source.atol)
     x, z = _label_masks(tuple(term.label for term in source.terms), source.num_qubits)
     coefficients = np.array([term.coefficient for term in source.terms], dtype=np.complex128)
-    if original is not None and "pauli_terms" in original.manifest.access:
+    if "pauli_terms" in original.manifest.access:
         table = original.pauli_terms()
         if (source.atol == 0.0 and table.num_qubits == source.num_qubits and x.shape == table.x.shape
                 and np.array_equal(x, table.x) and np.array_equal(z, table.z)
@@ -78,9 +78,8 @@ def _load_decomposition(data, files, original):
     return PauliDecomposition(**values)
 
 
-def _save_encoding(block, files, original=None):
-    """Store the selected encoding in its own native, banded, Pauli or dense-plan
-    representation.
+def _save_encoding(block, files, original):
+    """Store the selected encoding in its own native, banded, Pauli or dense-plan representation.
 
     A Pauli decomposition is stored by ``_save_decomposition``, by reference
     to ``original`` when it is that operator's term table.
@@ -171,17 +170,11 @@ def _save_factors(factors, files):
 
 
 def _load_factors(data, files):
-    """Rebind saved original factors without a new decomposition.
-
-    An unknown kind or an array list that differs from the kind's arrays
-    refuses the archive.
-    """
+    """Rebind saved original factors without a new decomposition."""
     from nwqlib.core.records import InputRef
 
     if data is None:
         return None
-    if data.get("kind") not in _FACTOR_ARRAYS or len(data.get("arrays", ())) != len(_FACTOR_ARRAYS[data["kind"]][1]):
-        raise ValueError("saved QLS factors differ from a known original factorization")
     owner = _FACTOR_ARRAYS[data["kind"]][0]
     return owner(InputRef.model_validate(data["source"]), *(files.read_array(name) for name in data["arrays"]))
 
@@ -193,7 +186,7 @@ def save(method, plan, files):
     original SVD frames and RHS preparation record once. A classical Plan
     reads the original ``A`` and ``b`` only, so it writes the original
     factors that its inverse or linear norm model reuses, and the encoding
-    payload only when the Method itself carries a supplied encoding; the
+    payload only when the Method itself carries a supplied encoding. The
     selected encoding's alpha, family, ancilla count and error bound travel
     in the reconstruction. The phase table travels inside the Plan's
     reconstruction. Nothing is recomputed to fill the archive.
@@ -201,7 +194,7 @@ def save(method, plan, files):
     validate_selection(plan)
     native = plan._native
     data = dict(
-        format="qls/6",
+        format="qls/7",
         plan=plan.to_record(),
         problem=files.write_problem(plan.problem),
         output=files.write_output(plan.output),
@@ -229,7 +222,7 @@ def load(saved, files):
     """
     from .quantum import BaseEncoding, _program
 
-    if saved["format"] != "qls/6":
+    if saved["format"] != "qls/7":
         raise ValueError("unsupported QLS archive")
     problem = files.read_problem(saved["problem"])
     quantum = "encoded_operator" in saved

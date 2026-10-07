@@ -1,6 +1,6 @@
 # QSP and QSVT {#qsp-and-qsvt-api}
 
-Compute symmetric quantum signal processing (QSP) phase factors for a real Chebyshev target, and build QSVT circuits that apply the polynomial to a block-encoded matrix: a real Chebyshev transform, the Hamiltonian evolution `exp(-i t A)`, the `1/x` polynomial of QLS and Dalzell's kernel reflection. The [conventions](../../conventions.md#block-encoding-and-qsp-conventions) define the normalization and phase signs used here. Import the functions from `nwqlib.subroutines.qsp`, or from the submodule (`phases`, `evolution`, `inverse`, `shortcut`) named in each entry's path.
+Compute symmetric quantum signal processing (QSP) phase factors for a real Chebyshev target, and build QSVT circuits that apply the polynomial to a block-encoded matrix: a real Chebyshev transform, the Hamiltonian evolution `exp(-i t A)`, the `1/x` polynomial of QLS and Dalzell's kernel reflection. The [conventions](../../conventions.md#block-encoding-and-qsp-conventions) define the normalization and phase signs used here. Import the functions and records from `nwqlib.subroutines.qsp`. Five entries import only from their submodule: `chebyshev_norming_sup_bound` from `nwqlib.subroutines.qsp.phases`, `QSPPreparedEvolution`, `prepare_qsp_evolution` and `qsp_evolution_error_terms` from `nwqlib.subroutines.qsp.evolution`, and `plan_kernel_reflection` from `nwqlib.subroutines.qsp.shortcut`.
 
 ```python
 import numpy as np
@@ -37,7 +37,7 @@ print(np.round(block.real, 6))
 
 ## Hamiltonian evolution and circuit construction
 
-`build_qsvt_circuit` and `build_real_chebyshev_encoding` apply given Wx phases to a block encoding. `build_qsp_evolution_encoding` builds a block encoding of `exp(-i t A)` from one of a Hermitian `A`. Without Qiskit, `jacobi_anger_expansion` computes its polynomial, with the degree and the Bessel search bounded and the analytic infinite-tail term kept, and `prepare_qsp_evolution` solves its phases within one evaluation limit. `qsp_evolution_error_terms` gives its error terms without a circuit. The [assumptions and limits](#assumptions-and-limits-of-the-evolution-builders) below apply to the evolution builders.
+`build_qsvt_circuit` and `build_real_chebyshev_encoding` apply given Wx phases to a block encoding. `build_qsp_evolution_encoding` builds a block encoding of `exp(-i t A)` from one of a Hermitian `A`. Without Qiskit, `jacobi_anger_expansion` computes its polynomial with degree at most `max_degree` and evaluates Bessel functions only through order `max_degree + 200`. Its reported tail bound includes an analytic bound on the infinite suffix beyond the selected finite sum. If that positive analytic term underflows, the tail bound is `None`. `prepare_qsp_evolution` solves its phases within one evaluation limit. `qsp_evolution_error_terms` gives its error terms without a circuit. The [assumptions and limits](#assumptions-and-limits-of-the-evolution-builders) below apply to the evolution builders.
 
 ::: nwqlib.subroutines.qsp.evolution
     options:
@@ -65,7 +65,7 @@ print(np.round(block.real, 6))
 
 Hermitian assumption of `build_qsp_evolution_encoding`:
 
-- It requires Hermitian target and encoded generators. These two assumptions support the QSVT polynomial calculus and the perturbation bound of [GSLW, arXiv:1806.01838v1, Lemma 61, p. 53](https://arxiv.org/pdf/1806.01838v1).
+- It requires Hermitian target and encoded generators. These two assumptions support the QSVT polynomial calculus and the perturbation bound of [Gilyén, Su, Low and Wiebe (GSLW), arXiv:1806.01838v1, Lemma 61, p. 53](https://arxiv.org/pdf/1806.01838v1).
 - The check reads existing construction metadata. Real Pauli coefficients and conjugate-paired periodic shifts establish the assumption from their stored terms.
 - For an external encoding with missing evidence, the default assumes that the caller has checked both operators, issues a warning and records `hermitian_premise="caller_assumption"`. The numerical error bound is then conditional on that assumption. `require_hermitian_evidence=True` instead requires both metadata entries. An explicit non-Hermitian entry is rejected in either mode.
 - The check does not expand a circuit or apply an operator. A dense complex128 matrix needs `16 * 4**n` bytes, which is 16 TiB at 20 system qubits and 16 PiB at 25, before ancillas or temporary arrays, so an optional numerical check of an external operator belongs to the caller's representation and resource budget. A declaration for the target alone does not establish that an approximate encoded block is Hermitian.
@@ -87,7 +87,7 @@ Missing error bounds:
 
 The evolution steps follow Gilyén, Su, Low and Wiebe, arXiv:1806.01838v1. The [QLS source map](../../algorithms/qls.md#sources-and-code-map) collects the phase-convention, phase-solving, inverse-polynomial and kernel-reflection rows. The Newton step of the phase solver is derived in the docstring of `phases._damped_newton`, and the engineering constants record the solver sweeps of the [evolution targets](../../ENGINEERING_CONSTANTS.md#qsp-phase-solver-and-evolution-synthesis) and the [QLS targets](../../ENGINEERING_CONSTANTS.md#qls-1x-fit-and-phase-pipeline).
 
-| Step | Location in arXiv:1806.01838v1 | Code |
+| Step | Location in GSLW | Code |
 | --- | --- | --- |
 | Jacobi-Anger expansion of `cos(tau x)` and `sin(tau x)`, parity tails | Lemma 57, Eqs. (53)-(54) | `jacobi_anger_expansion` |
 | Bessel remainder beyond the analysis terminal | NWQLib power-series bound. Eq. (55) is the sharper real-argument form. | `jacobi_anger_expansion` |

@@ -1,8 +1,14 @@
 # QHD constrained problems and box refinement
 
-Reference for the augmented-Lagrangian layer, which solves a `ConstrainedOptimization` by a sequence of QHD solves, and for box refinement, which repeats QHD on shrinking boxes, alone or inside each augmented-Lagrangian round. Import every name on this page from `nwqlib.algorithms.qhd`, for example `from nwqlib.algorithms.qhd import solve_augmented_lagrangian, refine_box`.
+Solve a `ConstrainedOptimization` with the augmented-Lagrangian layer, which runs a sequence of QHD solves, or use box refinement, which repeats QHD on shrinking boxes, alone on an unconstrained problem or inside each augmented-Lagrangian round. Import every name on this page from `nwqlib.algorithms.qhd`, for example `from nwqlib.algorithms.qhd import solve_augmented_lagrangian, refine_box`.
 
-The guide's section on [constrained problems](../../algorithms/qhd.md#constrained-problems) gives the effective objective, the multiplier and penalty updates and the stopping test with their sources, Wu et al., arXiv:2605.12066v1, Eqs. (6)–(8), Rockafellar, doi:10.1007/BF01580138, and Birgin and Martínez, doi:10.1137/1.9781611973365, Algorithm 4.1 and Eqs. (4.7)–(4.9) and (10.6)–(10.8). Its [slack-variable subsection](../../algorithms/qhd.md#slack-variables-for-inequality-constraints) explains `inequality_form`, the augmented inner problem, projected readout and the cap and error scope. The guide's section on [box refinement](../../algorithms/qhd.md#box-refinement) explains how each level keeps its marginal intervals and forms the next box, what the search model solves and why its gain has no universal value, when the optional stall split applies and what it gives up, and the order of the stops. The [QHD](qhd.md) page documents the `QHD` configuration that every round and level uses. `solve_augmented_lagrangian` and `refine_box` each have a complete example below.
+The QHD guide explains the methods behind these entries:
+
+- [Constrained problems](../../algorithms/qhd.md#constrained-problems): the effective objective, the multiplier and penalty updates and the stopping test, with their sources, Wu et al., arXiv:2605.12066v1, Eqs. (6)–(8), Rockafellar, doi:10.1007/BF01580138, and Birgin and Martínez, doi:10.1137/1.9781611973365, Algorithm 4.1 and Eqs. (4.7)–(4.9) and (10.6)–(10.8).
+- [Slack variables for inequality constraints](../../algorithms/qhd.md#slack-variables-for-inequality-constraints): `inequality_form`, the augmented inner problem, projected readout and the cap and error scope.
+- [Box refinement](../../algorithms/qhd.md#box-refinement): how each level keeps its marginal intervals and forms the next box, what the search model solves and why its gain has no universal value, when the optional stall split applies and what it gives up, and the order of the stops.
+
+The [QHD](qhd.md) page documents the `QHD` configuration that every round and level uses. `solve_augmented_lagrangian` and `refine_box` each have a complete example below.
 
 | Task | Entry |
 | --- | --- |
@@ -55,6 +61,7 @@ With counts and refinement, `print(result)` and `result.report()` include mass l
 ::: nwqlib.algorithms.qhd.constrained.ConstrainedQHDResult
     options:
       heading_level: 3
+      show_signature: false
 
 ::: nwqlib.algorithms.qhd.constrained_records.AugmentedLagrangianRecord
     options:
@@ -135,7 +142,7 @@ With counts and refinement, `print(result)` and `result.report()` include mass l
 ## Limits
 
 - Neither layer is a global optimizer. Their points are points of finite grids, except an off-grid mean under `mode_or_mean`, and no stopping status is a statement about the continuous problem.
-- A stopping status does not assess optimality. `feasible_complementary` is not convergence in Algencan's sense, because projected stationarity is not a stopping condition.
+- A stopping status does not assess optimality. `feasible_complementary` is not convergence in the sense of Algencan, the solver of Birgin and Martínez (doi:10.1137/1.9781611973365), because projected stationarity is not a stopping condition.
 - Finite-grid multipliers are dual iterates of the grid problem, not the continuous KKT multipliers, and the reported multipliers belong to the last round, not to the best point.
 - Neither the joint mass bound of a refinement level nor a small box certifies that the global minimizer lies in the box.
 - `constrained_grid_minimum` covers the preprocessed box's grid only and refuses a run with box refinement. Its gap is an evaluated-value diagnostic, not a bound for the mathematical objective.

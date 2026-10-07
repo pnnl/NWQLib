@@ -121,9 +121,9 @@ def propagate_physical_error(output, components, *, radius, observable_norm=None
     inequality gives delta*(2*r + delta) for NormSquared,
     w*delta*(2*r + delta) for QuadraticForm, 2*delta/r for a unit StateVector
     and 4*w*delta/r for NormalizedExpectation. For the last two the code
-    requires r > delta, which keeps the exact vector nonzero. These relations
-    are NWQLib's. Any missing, negative or nonfinite component yields None,
-    never a partial sum.
+    requires r > delta, which keeps the exact vector nonzero. NWQLib derives
+    these relations (see Derivation below). Any missing, negative or
+    nonfinite component yields None, never a partial sum.
 
     Derivation. Let x be the exact vector and y the computed one, with
     ||x - y|| <= delta and ||y|| = r, so ||x|| <= r + delta. Then
@@ -180,6 +180,7 @@ _STAGE_ORDER = (
 )
 
 # Registered under ``psd_tolerance`` in docs/ENGINEERING_CONSTANTS.md.
+# _numerical_psd_decision explains the value.
 DEFAULT_PSD_TOLERANCE = 1.0e-12
 
 
@@ -222,10 +223,11 @@ def _numerical_psd_decision(
     rounding it absorbs. A backward-stable Hermitian eigensolver returns the
     eigenvalues of L + E with ||E||_2 <= p(n)*u*||L||_2, so each computed
     eigenvalue lies within that amount of an exact one (LAPACK Users' Guide,
-    3rd ed., Sec. 4.7). The default 1e-12 covers p(n) up to about 9000. The
-    decision is then independent of the time unit, because replacing A by
-    r*A and T by T/r, for r > 0, scales lambda_min, the window and the shift
-    by r. An admitted unshifted violation lets ||exp(-A*T)||_2 reach at most
+    3rd ed., doi:10.1137/1.9780898719604, Sec. 4.7). The default 1e-12
+    covers p(n) up to about 9000. The decision is then independent of the
+    time unit, because replacing A by r*A and T by T/r, for r > 0, scales
+    lambda_min, the window and the shift by r. An admitted unshifted violation
+    lets ||exp(-A*T)||_2 reach at most
     exp(window*T) = exp(psd_tolerance*||L||_2*T), since ||exp(-A*T)|| <=
     ||exp(-L*T)|| (ACL arXiv:2312.03916v2, Lemma 21, Eq. (162)). An
     absolute term in the window would have units of inverse time, and for
@@ -390,9 +392,11 @@ def _weighted_raw_stage(
 ) -> float:
     """Return sum_a w_a*r_a*e for one operator-level kernel bound e.
 
-    The same e serves every application because the k-grid was selected for
-    the full time T, and its tail and quadrature bounds also hold for each
-    shorter elapsed time (see inhomogeneous_theory._kernel_context).
+    The grid is selected for the full time T. The tail bounds do not depend
+    on time, and the quadrature conditions (the ATAP ISBN 978-1-61197-239-9
+    ellipse bound and the Low-Somma arXiv:2508.19238v2 step condition) only
+    relax as T*||L|| decreases, so the same grid keeps its recorded bounds
+    for every shorter Duhamel elapsed time T-s.
     """
     value = _stage_scalar(name, raw_value)
     terms = [
@@ -488,7 +492,7 @@ def application_stage_bounds(raw_record, *, applications, backend, psd_premise_s
     synthesis bound s_a. A failed PSD or application premise suppresses every
     stage. Otherwise a missing, nonfinite, unusable, underflowed or unbudgeted
     stage suppresses only its own value. Each stage maps to (value, None) or
-    (None, reason); the stages are not summed into a total bound.
+    (None, reason). The stages are not summed into a total bound.
     """
     manifest = _stage_manifest(backend=backend, inhomogeneous=False, circuit=False)
     unusable = set(unusable_stages)
@@ -519,7 +523,7 @@ def application_stage_bounds(raw_record, *, applications, backend, psd_premise_s
 def _solution_stage_value(name, raw_record, *, applications, duhamel_quadrature_error_bound,
                           gamma, delta_lcu, input_preparation_output_error_bound,
                           compensated_recovery_error_bound):
-    """One arithmetic owner for each circuit-path stage value."""
+    """Return the physical L2 bound of one circuit-path stage. Every stage value is computed here."""
     if name in _APPLICATION_RAW_KEYS:
         return _weighted_raw_stage(name, raw_record.get(_APPLICATION_RAW_KEYS[name]), applications)
     if name == "trotter_synthesis":

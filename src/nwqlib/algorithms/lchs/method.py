@@ -22,46 +22,6 @@ from .providers import resolve_lchs_provider_requests
 from .solution_error_budget import DEFAULT_PSD_TOLERANCE
 
 
-def _projected_allowance(method, plan, point, *, observation, width, run,
-                         limit, parameter, planning_work):
-    """Check local bytes and cumulative projected work before native acquisition.
-
-    planning_work is the charge assigned to the selected cap at planning.
-    Completed projected points of other experiments spend that same cap.
-    The current experiment is rechecked without a second charge when a
-    preparation is reused. This matches LCHS's one exact scalar experiment.
-    """
-    def points(readout):
-        return (item for item in readout.positions
-                if item.kind == "reduction" and item.reducer == PROJECTED_MOMENTS)
-
-    requested = 0
-    for item in points(observation):
-        size, work = projected_requirements(json.loads(item.parameters), width)
-        if size > method.max_bytes:
-            raise ValueError(
-                f"LCHS projected reduction needs {size} bytes, max_bytes={method.max_bytes}. "
-                f"Raise LCHS(max_bytes=...) to at least {size} "
-                f"(increase {size - method.max_bytes}). Refused before acquisition.")
-        requested += work
-    spent = 0
-    for chunk in run.observations.chunks:
-        if chunk.point is None or chunk.experiment == point.experiment:
-            continue
-        for item in points(chunk.readout()):
-            parameters = json.loads(item.parameters)
-            old_width = sum(len(parameters[key]) for key in ("coordinates", "success", "conditions"))
-            spent += projected_requirements(parameters, old_width)[1]
-    required = planning_work + spent + requested
-    if required > limit:
-        raise ValueError(
-            f"LCHS projected reduction needs {requested} work units, with {planning_work} "
-            f"planning units and {spent} completed reduction units. {parameter}={limit}. "
-            f"Raise {parameter} to at least {required} (increase {required - limit}). "
-            "Refused before acquisition.")
-    return int(limit - planning_work - spent)
-
-
 class LCHS(Method):
     """LCHS method for the solution of a linear ODE given by `LinearDynamics`.
 
@@ -209,12 +169,16 @@ class LCHS(Method):
         trotter_synthesis_tolerance: Default `None`. Positive tolerance on
             the Strang synthesis bound of a `PeriodicStencil` A, in the same
             unit-input operator norm as `approximation_tolerance`. Planning
-            chooses the smallest step count r with `B/r**2` at most this
-            value, where
-            `B = T**3 sum_j |c_j| (2 |k_j| diffusion + |potential|)**3 / 3`
-            over the nodes k_j and coefficients c_j (Childs et al.,
-            doi:10.1103/PhysRevX.11.011020, Proposition 10, Eq. (121),
-            relaxed by NWQLib). It requires
+            chooses the smallest step count r with ``B/r**2`` at most this
+            value, where T is the elapsed time and
+            ``B = T**3 sum_j |c_j| (2 |k_j| diffusion + |potential|)**3 / 3``
+            over the quadrature nodes ``k_j`` and coefficients ``c_j``. Here
+            diffusion and potential are the corresponding stencil parameters.
+            NWQLib relaxes the nested commutators of Childs et al.
+            (doi:10.1103/PhysRevX.11.011020, Proposition 10, Eq. (121))
+            using ``||[X, Y]|| <= 2 ||X|| ||Y||`` for operators X and Y,
+            then bounds the resulting sum by one third of the cube of
+            the sum of term norms. It requires
             `hamiltonian_evolution_backend="trotter"` and
             `trotter_steps=None`, and other inputs refuse it.
         trotter_order: Default `2`. Order of the product formula of the
@@ -287,24 +251,28 @@ class LCHS(Method):
             of the product-formula backends. The
             [LCHS guide](../../algorithms/lchs.md#native-methods-and-physical-coordinates)
             gives the sizes that fit this default.
-        max_readout_work: Default `2_000_000_000`. Upper limit, inclusive,
-            on the comparisons of grouping sampled Pauli terms and the input
-            visits of exact scalar readout (`shots=None`). Planning checks
-            and records the grouping comparisons. Before the circuits run,
-            each exact readout is checked against what remains, and
-            completed exact readouts count against it.
+        max_readout_work: Default `2_000_000_000`. Positive integer giving an
+            inclusive limit on candidate comparisons when grouping the Pauli
+            terms of sampled observables into qubit-wise commuting measurement
+            settings, and on character or kernel-input visits for exact scalar
+            readout (`shots=None`). Planning checks and records the grouping
+            comparisons. Exact scalar readout is checked against the full limit
+            before acquisition. Its declared live data and workspace must also
+            fit `max_bytes`. A work-limit refusal names `LCHS.max_readout_work`.
         max_qsp_degree: Default `256`. Upper limit on the QSP polynomial
             degree of `"qsp_block_encoding"`.
         max_qsp_evaluations: Default `20_000`. Upper limit on the residual
             evaluations of the QSP phase solver.
-        max_admission_steps: Default `1_000_000`, ten times the shared
-            default. Upper limit on the planning work of checking each
-            `Program` of the Plan (NWQLib's description of a circuit as
-            named steps), counting its stored fields and the structural and
-            lifecycle work of one check. Summing a Program's resource counts
-            may use up to 24 times this value. Raising it changes no quantum
-            operation. See the
-            [planning work limit](../../development/program_checks.md#planning-work-limit).
+        max_admission_steps: Default `1_000_000`. Upper limit on the
+            planning work of checking each `Program` that the method builds
+            (NWQLib's description of a circuit as named steps). It caps the
+            number of stored fields of a Program and the work units of one
+            check of it, and summing a Program's resource counts may use up
+            to 24 times this value. A larger Program is refused with a
+            ValueError that names this field, the refused stage and its
+            count. Raising the limit permits a larger check and changes no
+            quantum operation
+            ([planning work limit](../../development/program_checks.md#planning-work-limit)).
 
     Raises:
         ValueError: If the kernel-quadrature pair is not allowed or a kernel
@@ -404,7 +372,7 @@ class LCHS(Method):
         stored record cannot tell apart, so it stays admitted. ``dense_exact``
         and ``qsp_block_encoding`` also never read trotter_steps. They admit
         a value other than 1, normalize it to 1 before content identity is
-        computed, and retain the supplied value only for ``plan``'s warning.
+        computed, and keep the supplied value only for ``plan``'s warning.
         """
         resolve_lchs_provider_requests(self.lchs_kernel, self.k_quadrature)
         if (self.trotter_steps is None) == (self.trotter_synthesis_tolerance is None):
@@ -442,7 +410,7 @@ class LCHS(Method):
         ``dense_exact`` and ``qsp_block_encoding`` apply no product formula
         and record 0 steps. An ignored trotter_steps is canonicalized to 1
         during Method validation, leaving the selected content identity
-        unchanged. Planning warns using the privately retained supplied value.
+        unchanged. Planning warns with the supplied value, which the Method keeps privately.
         The warning skips frames inside the nwqlib package,
         so it names the caller's line whether the call came through
         ``plan``, ``solve`` or ``compare``. Constructing, copying or loading
@@ -489,11 +457,29 @@ class LCHS(Method):
         return analyze(plan, data)
 
     def reduction_allowance(self, plan, point, *, observation, width, run):
-        """Admit projected bytes and work left under max_readout_work."""
-        return _projected_allowance(self, plan, point, observation=observation,
-            width=width, run=run, limit=self.max_readout_work,
-            parameter="LCHS.max_readout_work",
-            planning_work=plan.reconstruction.grouping_comparisons)
+        """Check the Plan's single exact scalar readout against ``max_bytes`` for its declared live data and workspace, and ``max_readout_work`` for character or kernel-input visits, before acquisition.
+
+        Return the full ``max_readout_work`` allowance for that reduction.
+        """
+        requested = 0
+        for item in observation.positions:
+            if item.kind != "reduction" or item.reducer != PROJECTED_MOMENTS:
+                continue
+            size, work = projected_requirements(json.loads(item.parameters), width)
+            if size > self.max_bytes:
+                raise ValueError(
+                    f"LCHS projected reduction needs {size} bytes, max_bytes={self.max_bytes}. "
+                    f"Raise LCHS(max_bytes=...) to at least {size} "
+                    f"(increase {size - self.max_bytes}). Refused before acquisition.")
+            requested += work
+        limit = self.max_readout_work
+        if requested > limit:
+            raise ValueError(
+                f"LCHS projected reduction needs {requested} work units. "
+                f"LCHS.max_readout_work={limit}. "
+                f"Raise LCHS.max_readout_work to at least {requested} "
+                f"(increase {requested - limit}). Refused before acquisition.")
+        return limit
 
     def save_archive(self, plan, files):
         """Save the Plan's selected numerical data and block bindings (archive.save)."""

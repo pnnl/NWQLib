@@ -27,7 +27,10 @@ def _basis(dimension):
 
 
 def _freeze_array(array):
-    """One immutable snapshot; even setflags cannot make its bytes writable."""
+    """Return an immutable byte copy of the array.
+
+    Even setflags cannot make its bytes writable.
+    """
     return np.frombuffer(array.tobytes(order="C"), dtype=array.dtype).reshape(array.shape)
 
 
@@ -67,7 +70,7 @@ def _manifest(kind, dimension, shape, dtype, payload_bytes, digest, access, chec
 def _array_input(value, *, ndim, max_bytes, extra_bytes_per_item=0):
     """Convert only known numerical containers, after their output-size check.
 
-    Integers and real data become float64; complex data become complex128.
+    Integers and real data become float64, and complex data become complex128.
     No unknown array protocol, object conversion or unsized stream is called.
     The caller adds its known per-entry storage, such as a normalized direction.
     """
@@ -169,7 +172,8 @@ class OperatorInput:
     The methods below read the stored data or apply it classically. Each
     raises `ValueError` when the representation does not provide that
     access, or when the handle was rebuilt by `from_record` and holds
-    metadata only. The fields below are read-only.
+    metadata only. The fields below are read-only. Below, `D` is the
+    operator's dimension, `basis.dimension`.
 
     Attributes:
         manifest: The [`InputManifest`][nwqlib.operators.access.InputManifest]:
@@ -369,14 +373,17 @@ class OperatorInput:
 
         Before it reads the vector, the call checks the bytes of the vector,
         output and work arrays against `max_bytes`, and the number of scalar
-        products against `max_products`. The product count is `D**2` for a
-        dense matrix, `nnz + D` for a sparse one, and for M Pauli terms the
+        products against `max_products`. For operator dimension `D`, sparse
+        stored-entry count `nnz` and `M` stored Pauli terms, the product count is
+        ``D**2`` for a dense matrix, ``nnz + D`` for a sparse one, and the
         grouped-action count on [Input cost
-        controls](../development/input_contracts.md), which includes a
-        possible ordered retry. It is derived from the representation, not
-        measured time. Beyond the stored operator the action keeps O(D)
-        numerical storage, and a Pauli action also bounded coordinate tiles
-        and O(M) grouping metadata.
+        controls](../development/input_contracts.md) for a Pauli operator.
+        That count includes a possible retry of all terms in stored order
+        after grouped arithmetic overflows or produces an invalid result.
+        It is derived from the representation, not measured time. Beyond
+        the stored operator the action keeps `O(D)` numerical storage, and
+        a Pauli action also uses workspace for bounded batches of vector
+        coordinates, called coordinate tiles, and `O(M)` grouping metadata.
 
         Args:
             vector (numpy.ndarray): One-dimensional float64 or complex128
@@ -480,7 +487,10 @@ def _scaled_observable_requirements(operator):
 
 
 def _observable_exponent(operator):
-    """Inspect existing storage; a binary scale does not change coordinates."""
+    """Return the binary exponent of the largest absolute real or imaginary stored entry.
+
+    Scaling by a power of two leaves the coordinates unchanged.
+    """
     from math import frexp
 
     values = (operator.pauli_terms().coefficients if "pauli_terms" in operator.manifest.access
@@ -492,7 +502,7 @@ def _observable_exponent(operator):
 
 
 def _scaled_observable(operator, exponent):
-    """Copy O/2**exponent in its native storage; report lost nonzero entries."""
+    """Return a copy of O/2**exponent in its native storage, or None when the scaling turns a nonzero component into zero."""
     pauli = "pauli_terms" in operator.manifest.access
     original = operator.pauli_terms().coefficients if pauli else operator._data
     scaled = original.copy()
@@ -633,7 +643,7 @@ def _pauli_label_law(num_qubits):
 
 
 def _pauli_label_limit(num_qubits, max_bytes):
-    """Admit width and return the raw limit before any label traversal."""
+    """Check the width metadata bytes and return the largest number of raw terms that ``max_bytes`` admits, before any label is read."""
     _, _, payload_bytes, _ = _pauli_label_law(num_qubits)
     _check_bytes((num_qubits + 8) // 8, max_bytes, "Pauli width metadata")
     return max_bytes // payload_bytes
@@ -759,7 +769,8 @@ def ingest_pauli(terms, *, num_qubits: int, max_bytes=DEFAULT_INPUT_BYTES) -> Op
             `10_000_000_000`).
 
     Returns:
-        operator (OperatorInput): The coalesced Pauli operator.
+        operator (OperatorInput): The Pauli operator, with identical words
+            summed.
 
     Raises:
         ValueError: If a label has another length or character, a
@@ -803,7 +814,8 @@ def ingest_pauli_masks(x, z, coefficients, *, num_qubits: int, max_bytes=DEFAULT
             `10_000_000_000`).
 
     Returns:
-        operator (OperatorInput): The coalesced Pauli operator.
+        operator (OperatorInput): The Pauli operator, with identical words
+            summed.
 
     Raises:
         TypeError: If an argument is not a NumPy array of the stated dtype.
@@ -839,7 +851,8 @@ def ingest_dense(matrix, *, max_bytes=DEFAULT_INPUT_BYTES) -> OperatorInput:
     """Return an OperatorInput holding an immutable copy of a square dense matrix.
 
     Integer and real data become float64 and complex data complex128. The
-    matrix is neither padded nor symmetrized. The call scans the `O(D**2)`
+    matrix is neither padded nor symmetrized. `D` is the matrix dimension.
+    The call scans the `O(D**2)`
     entries once, checking that they are finite and whether the stored
     matrix equals its conjugate transpose exactly. Those checks use `O(D**2)`
     temporary storage and no eigensolver.
@@ -878,7 +891,8 @@ def ingest_sparse(matrix, *, max_bytes=DEFAULT_INPUT_BYTES) -> OperatorInput:
     The matrix must be a `csr_matrix`, `csc_matrix`, `csr_array` or
     `csc_array` in canonical form, with sorted indices and no duplicate
     entries. Canonicalize other storage before the call. The copy keeps the
-    CSR or CSC orientation and index dtype. Checking finiteness and exact
+    CSR or CSC orientation and index dtype. `D` is the matrix dimension.
+    Checking finiteness and exact
     equality with the conjugate transpose costs O(nnz + D) work and O(nnz +
     D) temporary sparse storage. The matrix never becomes dense.
 

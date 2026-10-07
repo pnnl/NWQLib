@@ -48,7 +48,6 @@ def run_auxiliary(operation, request, *, max_bytes, timeout_seconds, files=()):
         archive = ArchiveFiles(directory, max_bytes)
         archive.write_json("request.json", request)
         for name, data in files:
-            # The files share the request's max_bytes allowance.
             with archive.writer(name) as stream:
                 stream.write(data)
         started = time.monotonic()
@@ -118,6 +117,8 @@ def _compile_nwqec(request, directory):
     target = request["target"]
     if request["count_only"]:
         counts = nwqec.get_clifford_t_counts(circuit, keep_ccx=False, **options)
+        if sum(counts.values()) > request["max_operations"]:
+            raise ValueError("compiled output exceeds max_operations")
         qasm, depth, width = None, None, circuit.num_qubits()
     else:
         if target == "clifford_t":
@@ -135,8 +136,6 @@ def _compile_nwqec(request, directory):
         # PBC's width-only depth walker does not establish an execution depth.
         depth = None if target in {"pbc", "pbc_tfuse"} else compiled.depth()
         qasm = compiled.to_qasm()
-    if sum(counts.values()) > request["max_operations"]:
-        raise ValueError("compiled output exceeds max_operations")
     return {
         "version": nwqec.__version__,
         "counts": counts,

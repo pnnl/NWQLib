@@ -118,9 +118,11 @@ class DFConversionReceipt(Record):
             factorized Hamiltonian.
         output: The [`InputManifest`][nwqlib.operators.access.InputManifest]
             of the Hermitian Pauli operator on 2n qubits.
-        construction: Fixed description of the arithmetic, symmetry and
-            mapping: binary64, upper-triangle `B` and `B**2`, unordered-pair
-            Gram matrix, shared Hermitian coefficients, Jordan–Wigner.
+        construction: Fixed text
+            `"binary64; upper-triangle B and B-squared; unordered-pair Gram; shared Hermitian coefficients; JW"`,
+            which describes the arithmetic, symmetry and mapping: binary64,
+            upper-triangle `B` and `B**2`, unordered-pair Gram matrix,
+            shared Hermitian coefficients, Jordan–Wigner.
         conversion_error: Always unknown, because no independently justified
             bound of the binary64 contraction error exists. It is stated for
             the spectral norm of the factorized operator minus the Pauli
@@ -309,7 +311,7 @@ class FactorizedHamiltonian:
         # Cumulative numerical payload: weighted V, reconstructed/mirrored B,
         # B-square and accumulation, pair table and full pair-Gram/symmetry
         # copies, and finite/comparison masks. 16 bytes/entry covers the float
-        # value and its bounded masks; four n² layouts per factor cover both
+        # value and its bounded masks. Four n² layouts per factor cover both
         # contractions and triangular writes. No spin-orbital Q^4 tensor.
         entries = n*k + 4*r*n*n + r*pairs + 2*pairs*pairs*(r > 0) + 4*n*n
         # Work: twice the scalar products of V diag(w) V.T, B @ B and the
@@ -319,7 +321,7 @@ class FactorizedHamiltonian:
         sizes = dict(items=rows + entries + mapping[0], payload_bytes=16*entries + mapping[1],
                      work=rows + numeric_work + mapping[2])
         _check_bytes(sizes["payload_bytes"], max_bytes, "DF contraction and JW conversion")
-        # Matrix multiplication scalar products; vendor CPU/BLAS workspace is
+        # Matrix multiplication scalar products. Vendor CPU/BLAS workspace is
         # unknown. The finite cap is per explicit conversion, never metadata.
         # n*n*k: (V*w) @ V.T over all k columns. r*n**3: B @ B per factor.
         # r*pairs*pairs: the pair Gram pair_values.T @ pair_values.
@@ -360,7 +362,8 @@ def ingest_df(shifted_one_body, factors, *, constant_energy, orbital_basis: Basi
         constant_energy (float): E0 in `energy_unit`, finite.
         orbital_basis (Basis): Basis of the n spatial orbitals.
         energy_unit (Unit): A unit with dimension `"energy"`.
-        source (InputRef): Declaration of where the factors came from.
+        source (InputRef): An [`InputRef`][nwqlib.core.records.InputRef]
+            that declares where the factors came from.
         max_bytes (int): Byte limit. Default 10 GB (decimal,
             `10_000_000_000`).
 
@@ -397,7 +400,7 @@ def ingest_df(shifted_one_body, factors, *, constant_energy, orbital_basis: Basi
         columns.append(vectors.shape[1])
         arrays.extend((vectors, weights))
     size = sum(a.size for a in arrays)
-    # Snapshot bytes + finite/symmetry masks; hashing borrows immutable memory.
+    # Snapshot bytes and the finite and symmetry masks. Hashing borrows immutable memory.
     # 10 bytes per entry: the float64 snapshot and one byte for each mask.
     _check_bytes(10*size, max_bytes, "DF factor snapshot")
     if any(a.dtype.kind not in "iuf" for a in arrays):

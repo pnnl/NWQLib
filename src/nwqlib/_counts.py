@@ -1,4 +1,4 @@
-"""Sampling identities from kept preparation and actual job coordinates.
+"""Sampling identities of count populations, derived from preparation receipts and provider job coordinates.
 
 This records known reuse, not circuit equivalence or statistical independence.
 There is no native traversal, payload hash, numerical work or acquisition here.
@@ -53,7 +53,9 @@ class CountsSources:
         """Return "sha256:" plus the hex digest of the _run_journal JSON encoding of fields."""
         from nwqlib._run_journal import encode
         # Bound the portable scalar JSON plus UTF-8 copy before encoding. The
-        # Run owns cumulative receipt/data storage; this is no native hash.
+        # bound, a third of max_bytes, is an untuned allowance. The Run
+        # accounts for cumulative receipt and data storage. No backend circuit
+        # or payload is hashed here.
         encoded = encode(fields, self.max_bytes // 3)
         return "sha256:" + sha256(encoded.encode("utf-8")).hexdigest()
 
@@ -152,7 +154,7 @@ class CountsSources:
         """Refuse known reused/unknown likelihood data before a caller consumes it.
 
         Re-reading the very same acquisition is legal for pending recovery. It
-        does not authorize a second likelihood update; the controller owns that
+        does not authorize a second likelihood update. The controller owns that
         saved transition. Distinct seeds/acquisitions still need model premises.
         """
         source = self.observation(chunk)

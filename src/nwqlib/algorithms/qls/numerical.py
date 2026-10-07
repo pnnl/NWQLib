@@ -16,12 +16,13 @@ from nwqlib.subroutines.dense_matrices import dalzell_augmented_matrix
 
 # Row-tile length r = min(a, PROJECTOR_ROW_TILE) of the rank-one projector
 # update in projected_augmented_inplace. It bounds the outer-product
-# temporary at 16 r a bytes (B_G in host_planning.selected_work). The value
-# is a storage choice; tiling changes no per-entry arithmetic.
+# temporary at 16 r a bytes (the ``16 r a`` summand of
+# ``augmentation`` in host_planning.selected_work). The value is a storage choice. Tiling changes
+# no per-entry arithmetic.
 PROJECTOR_ROW_TILE = 64
 
 
-def _extreme_singular_values(matrix: np.ndarray, *, hermitian: bool, events=None) -> tuple[float, float, str]:
+def _extreme_singular_values(matrix: np.ndarray, *, hermitian: bool, events) -> tuple[float, float, str]:
     """Return ``(sigma_min, sigma_max, method)`` for square dense input.
 
     The matrix is first scaled by a power of two, which is exact in binary64
@@ -30,26 +31,22 @@ def _extreme_singular_values(matrix: np.ndarray, *, hermitian: bool, events=None
     admitted Hermiticity metadata (``operator.structure == "hermitian"``),
     so no conjugate-transpose copy is formed to test it again.
 
-    When dense Hermitian endpoint selection is needed and no reusable
-    factors are available, compute all eigenvalues of the binary-scaled
-    original matrix with ``eigvalsh`` and take the minimum and maximum
-    absolute values. Admission charges ``4*d**3 + 8*d**2`` work units and
-    ``64*d**2 + 48*d`` known buffer bytes, excluding stored input and native
-    LAPACK workspace. All magnitudes are needed because the smallest
+    For Hermitian input, ``eigvalsh`` computes all eigenvalues of the
+    binary-scaled matrix, and the endpoints are their minimum and maximum
+    absolute values. All magnitudes are needed because the smallest
     singular value of an indefinite matrix is an interior eigenvalue
-    magnitude; squaring A would lose the small eigenvalues and square its
+    magnitude. Squaring A would lose the small eigenvalues and square its
     condition number. Any other matrix uses a singular-values-only SVD.
+    The caller, ``host_planning._spectrum``, admits the work and bytes.
     """
 
     scaled, exponent = binary_scaled_matrix(matrix)
     if hermitian:
-        if events is not None:
-            events["eigvalsh_calls"] += 1
+        events["eigvalsh_calls"] += 1
         magnitudes = np.abs(np.linalg.eigvalsh(scaled))
         low, high, method = np.min(magnitudes), np.max(magnitudes), "eigvalsh"
     else:
-        if events is not None:
-            events["svd_calls"] += 1
+        events["svd_calls"] += 1
         singular_values = np.linalg.svd(scaled, compute_uv=False)
         low, high, method = singular_values[-1], singular_values[0], "svd_validation_bounds"
     return ldexp(float(low), exponent), ldexp(float(high), exponent), method
@@ -58,8 +55,8 @@ def _extreme_singular_values(matrix: np.ndarray, *, hermitian: bool, events=None
 def inverse_polynomial_action(left, values, rhs_direction, *, alpha, coefficients, right_h=None):
     """Return ``(y, ||y||**2)`` for the selected odd inverse polynomial from the original factors.
 
-    Reuse the original spectral factors for the selected inverse polynomial
-    and norm model. For A = U Sigma V† and the dilation [[0,A],[A†,0]], an
+    Apply the selected inverse polynomial through the original spectral
+    factors. For A = U Sigma V† and the dilation [[0,A],[A†,0]], an
     odd polynomial acting on (b,0) gives V P(Sigma) U†b in the lower block.
     Positive dummy coordinates extend the factors analytically and have
     zero RHS weight. Hermitian input uses signed eigenvalues. Shortcut
@@ -71,7 +68,7 @@ def inverse_polynomial_action(left, values, rhs_direction, *, alpha, coefficient
     ``P(H) = [[0, U P(Sigma/alpha) V†], [V P(Sigma/alpha) U†, 0]]``.
     Conjugating by ``diag(U, V)`` gives ``[[0, S], [S, 0]]``, whose even
     powers are diagonal and whose odd powers carry S's odd powers in the
-    off-diagonal blocks; linear combination proves the identity for odd
+    off-diagonal blocks. Linear combination proves the identity for odd
     Chebyshev sums. The input is ``(b_hat, 0)``, so the lower output block
     is ``y = V P(Sigma/alpha) U† b_hat``. Starting from ``(0, b_hat)`` would
     give ``U P(Sigma/alpha) V† b_hat`` in the upper block instead. The full
@@ -79,7 +76,7 @@ def inverse_polynomial_action(left, values, rhs_direction, *, alpha, coefficient
     physical-slice mass both equal ``||y||**2``, and the d-entry branch is
     returned directly. For a Hermitian original, one ``eigh`` supplies
     signed eigenvalues ``lambda`` and eigenvectors ``V``, and the action is
-    ``V P(lambda/alpha) V† b_hat``; ``P(|lambda|)`` would lose the sign of
+    ``V P(lambda/alpha) V† b_hat``. ``P(|lambda|)`` would lose the sign of
     negative eigenvalues. Degenerate values and arbitrary eigenvector
     phases leave these matrix functions unchanged. The basis changes
     conjugate vectors, never the d-by-d factors.
@@ -113,7 +110,7 @@ def linear_model_weights(left, rhs_direction):
     ``left`` is ``U`` of the original SVD, or the eigenvectors ``V`` of a
     Hermitian original, whose weights ``|V† b_hat|**2`` have the same
     magnitudes as those of the signed SVD frame ``U = V diag(sign lambda)``.
-    The direction is normalized by the stable norm owner, and the frame is
+    The direction is normalized with ``stable_vector_norm``, and the frame is
     not conjugated as a matrix.
     """
     normalized = normalized_vector(rhs_direction, stable_vector_norm(rhs_direction))
@@ -135,7 +132,7 @@ def projected_augmented_inplace(augmented, b_prime, tile=PROJECTOR_ROW_TILE):
     normalized again, as ``projector_complement_matrix`` does, so the
     selected projector of the rounded input is preserved. The update is
     applied in row tiles of length ``r = min(a, tile)``, so the
-    outer-product temporary holds ``16 r a`` bytes; tiling changes storage,
+    outer-product temporary holds ``16 r a`` bytes. Tiling changes storage,
     not the per-entry multiply and subtract. Rounding differs from the
     projector-matrix product, so the equivalence is algebraic, not bitwise.
     A zero or nonfinite projector vector rejects.
@@ -248,8 +245,6 @@ def _rhs_direction(rhs):
     A stored vector is used as is. Occupation and product preparations are
     expanded once for the selected classical work.
     """
-    import numpy as np
-
     if rhs.reference.representation == "vector":
         return rhs._direction
     if rhs.preparation.implementation == "qiskit.occupation":

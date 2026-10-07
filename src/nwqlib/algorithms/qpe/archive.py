@@ -14,7 +14,7 @@ def save(method, plan, files):
     the selected polar base for a unitary, which the archive stores once) and a
     product-formula step must use the reconstruction's Pauli terms, so the
     archive holds one copy of each operator. The format label names this payload layout
-    (``qpe/<estimator>/7``), and load rejects any
+    (``qpe/<estimator>/8``), and load rejects any
     other label instead of converting it.
     """
     data = plan._native["input"]
@@ -42,7 +42,7 @@ def save(method, plan, files):
                 raise ValueError("QPE archive needs its actual built-in constructors")
             payloads.append(item)
     return dict(
-        format=f"qpe/{method.estimator}/7",
+        format=f"qpe/{method.estimator}/8",
         estimator=method.estimator,
         plan=plan.to_record(),
         problem=files.write_problem(plan.problem),
@@ -61,7 +61,7 @@ def save(method, plan, files):
 
 def load(method_type, saved, files):
     """Bind the saved QPE inputs and known constructors without rebuilding powers."""
-    if saved["format"] != f"qpe/{method_type.estimator}/7":
+    if saved["format"] != f"qpe/{method_type.estimator}/8":
         raise ValueError("unsupported QPE archive format")
     fields = dict(saved["method"])
     fields["initial_state"] = (

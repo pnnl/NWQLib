@@ -82,7 +82,7 @@ def _state(plan, run):
 
 
 def _prepare(plan, run, state):
-    """Prepare or reopen one exact stage/setting with its checkpointed allocation and seed.
+    """Prepare or reopen the pending stage and setting with its checkpointed allocation and seed.
 
     The pending point and seed are checkpointed before preparation, so a
     restart finds the same attempt or preparation instead of drawing a new
@@ -184,8 +184,7 @@ def recover_sensitivity_analysis(plan, *, run):
 
 
 def execute_sensitivity(plan, *, run):
-    """Acquire pilot moments, freeze the remaining allocation and analyze the completed main
-    stage.
+    """Acquire pilot moments, freeze the remaining allocation and analyze the completed main stage.
 
     Each stage submits one setting at a time in experiment order. After the
     last pilot setting, _sensitivity_weights and _apply_pilot_floor fix the
@@ -219,8 +218,6 @@ def execute_sensitivity(plan, *, run):
                     weights, evidence = _sensitivity_weights(
                         plan.reconstruction,
                         rows,
-                        plan.reconstruction.center,
-                        plan.reconstruction.alpha,
                         plan.method,
                     )
                     # Spend only the remaining budget after the pilot, with the pilot-derived

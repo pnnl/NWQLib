@@ -164,7 +164,10 @@ def append_uniformly_controlled_ry(
     controls: Sequence[Qubit],
     angles: Sequence[float],
 ) -> Gate:
-    """Append a padded native RY multiplexor without angle pruning."""
+    """Append a padded Gray-code RY multiplexor.
+
+    Every CX is kept, and only exact-zero transformed rotations are omitted.
+    """
 
     controls = _validated_qubits(circuit, target, controls)
     padded = pad_angle_table(angles, control_qubits=len(controls))
@@ -179,7 +182,10 @@ def append_uniformly_controlled_rz(
     controls: Sequence[Qubit],
     angles: Sequence[float],
 ) -> Gate:
-    """Append a padded native RZ multiplexor without angle pruning."""
+    """Append a padded Gray-code RZ multiplexor.
+
+    Every CX is kept, and only exact-zero transformed rotations are omitted.
+    """
 
     controls = _validated_qubits(circuit, target, controls)
     padded = pad_angle_table(angles, control_qubits=len(controls))
@@ -233,8 +239,9 @@ def gray_code_rotation_schedule(angles: Sequence[float]) -> tuple[tuple[float, i
     the controls. ``_rotation_multiplexor`` gives the angle formula and the
     control rule. The last entry closes the cycle on the top control, and
     ``c_i`` is None when the table has no controls. The quantum Shannon
-    decomposition of ``_dense_synthesis`` omits that closing CX where its
-    optimization A.1 absorbs it into a neighbouring block.
+    decomposition of ``_dense_synthesis`` omits that closing CX where the
+    merge of Krol and Al-Ars, arXiv:2403.13692v2, Sec. 5.2, moves it into the
+    middle block as a CZ.
     """
     values = gray_code_rotation_angles(angles)
     return tuple(zip(values.tolist(), gray_code_controls(len(values))))
@@ -352,13 +359,10 @@ def local_pauli_dependencies(x: np.ndarray, z: np.ndarray, system_bit: int) -> t
         iff exists k with k_b = 0 and U_k != U_(k xor 2**b),
 
     whose right side is the support predicate of
-    ``project_unitary_table_dependencies``; the ordered support agrees. A
-    control bit is required exactly when two identity-padded Pauli letter
-    codes differing only in that address bit are unequal. This is the same
-    support as entrywise projection of their canonical local Pauli matrices.
-    Coefficient phases stay in their separate diagonal; the equivalence does
-    not cover a local table that incorporates them. One term has no address
-    bits, identical nonidentity letters can acquire dependencies through
+    ``project_unitary_table_dependencies``, and the ordered support agrees.
+    Coefficient phases stay in their separate diagonal, and the equivalence
+    does not cover a local table that incorporates them. One term has no
+    address bits, identical nonidentity letters can acquire dependencies through
     identity padding, and all-identity tables have empty support. An empty
     table is rejected, as the entrywise projection rejects it.
     """
@@ -383,8 +387,8 @@ def project_local_pauli_table(
 
     Entry p of the projected table is the canonical local Pauli matrix of
     the label at the address whose supported bits are the bits of p, in
-    increasing supported-bit order, and whose unsupported bits are zero;
-    an address at or beyond ``len(labels)`` is identity padding. Flipping an
+    increasing supported-bit order, and whose unsupported bits are zero.
+    An address at or beyond ``len(labels)`` is identity padding. Flipping an
     unsupported bit leaves the entry unchanged, so fixing all unsupported
     bits to zero gives the same projected table as
     ``project_unitary_table_dependencies`` (see ``local_pauli_dependencies``).
@@ -444,9 +448,10 @@ def append_control_diagonal_phases(
 ) -> Gate | None:
     """Append one padded control-register diagonal of phase angles.
 
-    Exact-zero tables construct no gate. Nonzero tables use native RZ
-    multiplexors without angle pruning. With no controls the single branch
-    phase is applied as the circuit global phase.
+    Exact-zero tables construct no gate. Nonzero tables use the Gray-code RZ
+    multiplexors of ``append_uniformly_controlled_rz``, which keep every CX.
+    With no controls the single branch phase is applied as the circuit
+    global phase.
 
     The lowering is the recursion of Shende et al. (quant-ph/0406176v5),
     Theorem 7. On the least-significant remaining qubit,
@@ -780,7 +785,6 @@ def product_formula_select_resource_law(
             "select_formula_occurrence_count": occurrence_count,
             "select_stored_occurrence_count": stored_occurrence_count,
             "select_occurrence_block_repetitions": list(block_repetitions),
-            "select_max_step_count": int(plan.max_step_count),
             "select_multiplexed_rotation_gate_count": 0,
             "select_multiplexed_angle_slot_count": 0,
             "select_structured_unconditional_rotation_count": unconditional_rotations,
@@ -808,7 +812,6 @@ def product_formula_select_resource_law(
         "select_formula_occurrence_count": occurrence_count,
         "select_stored_occurrence_count": stored_occurrence_count,
         "select_occurrence_block_repetitions": list(block_repetitions),
-        "select_max_step_count": int(plan.max_step_count),
         "select_multiplexed_rotation_gate_count": occurrence_count,
         "select_multiplexed_angle_slot_count": occurrence_count * padded_branches,
         "select_structured_unconditional_rotation_count": 0,

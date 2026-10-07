@@ -88,7 +88,8 @@ class PhysicalScale(Record):
         result = np.empty_like(vector)
         limits = np.finfo(float)
         # Outside the entire binary64 exponent span no nonzero binary64 input
-        # can produce a representable nonzero product; avoid huge integer casts.
+        # can produce a representable nonzero product. Returning early avoids
+        # huge integer casts.
         span = limits.maxexp - limits.minexp + limits.nmant + 2
         if abs(self.exponent) > span and np.any(vector != 0):
             return None
@@ -110,8 +111,8 @@ def compose_recovery(*factors):
     Each factor is a PhysicalScale, a positive finite real scalar, or a pair
     (numerator, denominator) whose operands must each be positive and finite.
     A binary mantissa/exponent pair is represented only by PhysicalScale.
-    Current consumers pass a bounded short list; this is scalar arithmetic,
-    not a persisted expression evaluator or a certified error bound.
+    Callers pass a short bounded list. This is scalar arithmetic, not a
+    persisted expression evaluator or a certified error bound.
     """
     # (0.5, 1) is the empty product 1. Each factor multiplies the mantissas
     # and adds the exponents, and frexp returns the mantissa to [0.5, 1). The
@@ -381,8 +382,9 @@ def ingest_vector(vector, *, max_bytes=DEFAULT_INPUT_BYTES) -> StateInput:
             direction. Default 10 GB (decimal, `10_000_000_000`).
 
     Returns:
-        state (StateInput): Its preparation is `"qiskit.direct"`, or none
-            with a `blocker` for a zero vector or an unsupported dimension.
+        state (StateInput): Its `preparation.implementation` is
+            `"qiskit.direct"`, or `None` for a zero vector or an unsupported
+            dimension, with the reason in `preparation.blocker`.
 
     Raises:
         TypeError: If `vector` is another type or holds booleans, objects
@@ -527,7 +529,8 @@ def bind_preparation_circuit(circuit, *, reference: InputRef, basis: Basis,
     Args:
         circuit (qiskit.QuantumCircuit): Unitary circuit without classical
             bits or free parameters.
-        reference (InputRef): An `InputRef` with `representation="circuit"`.
+        reference (InputRef): An [`InputRef`][nwqlib.core.records.InputRef]
+            with `representation="circuit"`.
         basis (Basis): Basis of dimension `2**circuit.num_qubits`.
         max_bytes (int): Byte limit of the copy. Default 10 GB (decimal,
             `10_000_000_000`).
@@ -625,8 +628,6 @@ def prepare_qiskit(state: StateInput, *, max_bytes=DEFAULT_INPUT_BYTES,
     spec = state.preparation
     if type(max_direct_amplitudes) is not int or max_direct_amplitudes < 1:
         raise ValueError("max_direct_amplitudes must be a positive integer")
-    if spec.input != state.manifest.reference or spec.basis != state.manifest.basis:
-        raise ValueError("preparation must keep its admitted input identity and basis")
     if spec.blocker is not None or spec.implementation is None:
         raise ValueError(spec.blocker or "executable state preparation unavailable")
     # The direct magnitude/phase construction has O(q*2**q) arithmetic even

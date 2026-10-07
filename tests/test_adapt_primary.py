@@ -501,8 +501,7 @@ def test_exact_off_diagonal_pair_bounds_cover_the_dense_entry_error(monkeypatch)
                 delta = receipts[chunk.prepared_id].saved_state_error(("amplitude-derived masses",))[0]
                 assert delta is not None
                 bounds.append(entry_bounds(delta, float.fromhex(parameters["c1"]), 1 << parameters["qubits"],
-                                           parameters["terms"], 1, parameters["terms"], diagonal=False,
-                                           ordered=True))
+                                           parameters["terms"], diagonal=False))
     assert bounds and received[-1]
     assert set(received[-1].values()) <= {overlap for overlap, _ in bounds}
     overlap_bound, hamiltonian_bound = map(max, zip(*bounds))

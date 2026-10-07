@@ -90,6 +90,7 @@ from .records import (
     RWPEGaussian,
     bounded_mean,
     identification_note,
+    plan_route,
     public_estimate,
     query_at,
     validate_selection,
@@ -175,7 +176,11 @@ def _new_context():
 
 
 def _check_context(context, target, kind, preparation=None):
-    """Check actual immutable dependencies; numeric tau is not one of them."""
+    """Check that the context belongs to this target, decomposition kind and preparation.
+
+    The cached eigensystem and weights do not depend on tau, so tau is not
+    checked.
+    """
     if context["target"] is not None and context["target"] != (target, kind):
         raise ValueError("live QPE context belongs to another target or decomposition kind")
     if (
@@ -187,7 +192,7 @@ def _check_context(context, target, kind, preparation=None):
 
 
 def _eigensystem(target, matrix, *, kind, context):
-    """Reuse target setup within the admitted live-run/standalone lifetime.
+    """Return the context's eigensystem of the target, computing it once per context.
 
     Within one context, the host signal, the dense Hamiltonian powers and
     explicit verification share this one decomposition. The arrays are made
@@ -392,7 +397,7 @@ def trajectory_labels(width):
     return "I" * width + "X", "I" * width + "Y"
 
 
-def _quantum_program(data, queries, selection, options, shots, route):
+def _quantum_program(data, queries, selection, shots, route):
     """Build the quantum Program of the selected route from its selected power constructions.
 
     ``route`` is ``trajectory``, ``sampled`` or ``rwpe``.
@@ -414,13 +419,13 @@ def _quantum_program(data, queries, selection, options, shots, route):
     observed after the preparation and H as an actual acquisition. The
     base-oracle cost is P_max controlled applications, compared with
     sum_i p_i for separately prepared powers with combined X/Y readout, or
-    2*sum_i p_i for two quadrature circuits; preparation occurs once and
+    2*sum_i p_i for two quadrature circuits. Preparation occurs once and
     there are 2K scalar outputs. A dense gap is one controlled gap-power
     block ``power_p<k>`` of the selected base (powers.select_powers). A
     product-formula gap repeats the one shared step by the difference of the
     cumulative counts r(p_i) - r(p_(i-1)) and applies the identity phase
     increment P(-c_I*(p_i-p_(i-1))*val(tau)) on the control, the binary64
-    value the common-step recheck certifies; an increment accumulated per
+    value the common-step recheck certifies. An increment accumulated per
     gap does not double count earlier phase, as adding -c_I*t_i at every
     position would. Gap node ids are ``gap_<p>``.
 
@@ -577,7 +582,7 @@ def _quantum_program(data, queries, selection, options, shots, route):
         # Static quadratures have fixed phases. RWPE leaves feedback symbolic
         # until the controller binds its next experiment.
         parameters = ()
-        if options.estimator == "rwpe":
+        if route == "rwpe":
             parameters = (Parameter(name="feedback", domain="real"),)
             expressions.append(
                 Expression(id="feedback_value", value=ParameterRef(parameter="feedback"))
@@ -586,7 +591,7 @@ def _quantum_program(data, queries, selection, options, shots, route):
         batches, experiments = [], []
         for index, query in enumerate(queries):
             angle = "feedback_value"
-            if options.estimator != "rwpe":
+            if route != "rwpe":
                 angle = f"quadrature_{index}"
                 expressions.append(
                     Expression(id=angle, value=Constant(value=Float64(value=query.phase_shift)))
@@ -618,7 +623,7 @@ def _quantum_program(data, queries, selection, options, shots, route):
         experiments = tuple(experiments)
         root = (
             batches[0]
-            if options.estimator == "rwpe"
+            if route == "rwpe"
             else define("schedule", Sequence(children=tuple(batches)))
         )
         classical = (ClassicalValue(name="readout", dtype="bits", width=1),)
@@ -722,7 +727,7 @@ def _samples(plan, observations, trace, *, receipts=()):
     selected construction and an independent seed population. A trajectory
     point chunk holds the one-point readout of its declared point, and its
     attempt's completed event names the ``ObservationView`` identity of the
-    ordered point collection; when every declared point is present that
+    ordered point collection. When every declared point is present that
     identity is checked, and a missing point leaves its queries without
     samples, so analysis reports them missing instead of replaying any
     prefix. Each Experiment and binding is resolved once per call, however
@@ -887,9 +892,11 @@ def _trajectory_samples(plan, chunk, event, receipt_map):
     point keeps its logical quadrature (0 for X, -pi/2 for Y) and names the
     point chunk as its one contribution, so the two quadratures of one power
     share one acquisition. Each saved expectation is admitted by
-    ``bounded_mean`` within the receipt's ``probability_window``: one
-    whole-trajectory G gives a conservative window for every point, and the
-    window is not multiplied by the number of saved labels or positions.
+    ``bounded_mean`` within the receipt's ``probability_window``: one native
+    operation count G for the whole trajectory
+    (``PreparedArtifact.probability_window``) gives a conservative window
+    for every point, and the window is not multiplied by the number of
+    saved labels or positions.
     """
     width = plan.reconstruction.preparation.basis.dimension.bit_length() - 1
     if (
@@ -988,8 +995,9 @@ def _mean_window(plan, samples, receipts):
     scalars, whose means ``bounded_mean`` admits within
     NUMERICAL_RELATION_RTOL. Exact trajectory expectations are admitted
     within their receipt's ``probability_window`` (_trajectory_samples): one
-    whole-trajectory G gives a conservative window for every point, so the
-    window is the largest over the Run's receipts, or
+    native operation count G for the whole trajectory
+    (``PreparedArtifact.probability_window``) gives a conservative window
+    for every point, so the window is the largest over the Run's receipts, or
     NUMERICAL_RELATION_RTOL without a receipt.
     """
     if any(sample.shots is not None for sample in samples):
@@ -1013,7 +1021,7 @@ def _static_estimate(plan, samples, options, *, mean_window=None):
 
     Each count-mode SPE or RFE query contributes its mean over the shots
     actually returned, weighted by its original random-power draw
-    multiplicity (``received_fourier_exposure``); the third returned value
+    multiplicity (``received_fourier_exposure``). The third returned value
     holds the exposure facts of those count queries, None otherwise.
     """
     rec = plan.reconstruction
@@ -1095,7 +1103,7 @@ def received_fourier_exposure(pairs, shots):
     query with the same conditional mean and was not selected by its
     outcome or an outcome-dependent stopping rule, linearity gives
     E[m*mean | schedule, counts] = m*mu for every positive integer n,
-    including n < m; the two quadratures need not agree. Keeping the original
+    including n < m. The two quadratures need not agree. Keeping the original
     draw multiplicities therefore keeps the same unconditional finite Fourier
     or CDF target. With conditionally independent +/-1 shots of variance
     v = 1 - mu**2, Var(m*mean | schedule, counts) = m**2*v/n. The RFE
@@ -1139,7 +1147,6 @@ def received_fourier_exposure(pairs, shots):
             effective = per_draw if effective is None else min(effective, per_draw)
         proxy += Fraction(m*m, M*M) * max(Fraction(1, nr), Fraction(1, ni))
     return {
-        "draws": M,
         "queries": tuple(exposures),
         "requested_exposure_complete": all(req == got for _, _, req, got in exposures),
         "minimum_effective_shots_per_draw": effective,
@@ -1364,14 +1371,14 @@ def _split_pauli_terms(raw, rtol):
 
 
 def _host_construction(method, data, d, queries, powers):
-    """Return (construction, experiments, declaration, work, payload) for classical execution.
+    """Return (construction, experiments, declaration) for classical execution.
 
     The Program has one ClassicalStage that calls the host kernel of
     _bind_host. Static estimators evaluate every query in one ``overlaps``
     experiment with scalars ``z_0``, ``z_1``, and so on. RWPE has one
     experiment per query with the single scalar ``z`` and a symbolic
-    ``feedback`` parameter. ``work`` and ``payload`` are the admitted size
-    law of the kernel, stored in QPEReconstruction.
+    ``feedback`` parameter. The declaration carries the admitted size law
+    of the kernel as its invocation work and workspace bytes.
     """
     # Size law of the host kernel for dimension D:
     # - 8*D**3 work: the dense eigendecomposition (numerical.nominal_eigensystem).
@@ -1423,7 +1430,7 @@ def _host_construction(method, data, d, queries, powers):
         if method.estimator == "rwpe"
         else (Experiment(name="overlaps", setting="overlaps", observation=observation),)
     )
-    return construction, experiments, declaration, work, payload
+    return construction, experiments, declaration
 
 
 def _unknown_error_model(problem, output, construction):
@@ -1635,8 +1642,6 @@ class _QPEMethod(Method):
         if execution == "classical" and shots is not None:
             raise ValueError("classical QPE has no requested circuit shots")
         if self.estimator == "rwpe":
-            if kind != "hamiltonian":
-                raise ApplicabilityError("RWPE requires continuous Hamiltonian evolution, not only integer powers of a unitary")
             if execution == "quantum":
                 if shots not in (None, 1):
                     raise ValueError("RWPE uses exactly one shot per Gaussian update")
@@ -1679,7 +1684,7 @@ class _QPEMethod(Method):
             from nwqlib.operators.access import refuse_known_need
 
             # The dense phases below are checked one at a time against the
-            # same limits; their known needs combine by maximum here, before
+            # same limits. Their known needs combine by maximum here, before
             # the range scan: the range scan (8D**2 work) or unitary
             # validation (4D**3 work), both 96D**2 bytes, and a requested
             # dense Pauli conversion (32(q+1)D**2 work, (192(q+1)+q)D**2
@@ -1766,14 +1771,9 @@ class _QPEMethod(Method):
         else:
             entries = ((entry, 1) for entry in schedule)
         # The exact static quantum route observes every query on one
-        # controlled trajectory; sampled static queries and RWPE keep one
+        # controlled trajectory. Sampled static queries and RWPE keep one
         # Hadamard test each, and the classical static route one host kernel.
-        if execution == "classical":
-            route = "classical"
-        elif self.estimator == "rwpe":
-            route = "rwpe"
-        else:
-            route = "trajectory" if shots is None else "sampled"
+        route = plan_route(execution, self.estimator, shots)
         queries = tuple(
             QPEQuery(
                 experiment=f"query_{i}", power=power, phase_shift=phase, multiplicity=count,
@@ -1806,14 +1806,13 @@ class _QPEMethod(Method):
         )
         # Declare native experiments or a bounded host spectral model explicitly.
         # Neither construction performs the eventual acquisition at this point.
-        work = payload = 0
         declaration = None
         if execution == "quantum":
             construction, experiments, blocks = _quantum_program(
-                data, queries, selection, self, shots, route
+                data, queries, selection, shots, route
             )
         else:
-            construction, experiments, declaration, work, payload = _host_construction(
+            construction, experiments, declaration = _host_construction(
                 self, data, d, queries, selection.powers
             )
             blocks = ()
@@ -1845,14 +1844,11 @@ class _QPEMethod(Method):
             pair_commutation_checks=evaluation.pair_commutation_checks if census else 0,
             nested_commutation_checks=evaluation.nested_commutation_checks if census else 0,
             bound_variant=evaluation.bound_variant if census else None,
-            coefficient_arithmetic=evaluation.coefficient_arithmetic if census else None,
             bound_coefficient=(evaluation.coefficient.numerator, evaluation.coefficient.denominator)
             if census else None,
             census_block=selection.census_block,
             common_step=selection.common,
             selected_base=None if base is None else base.reference,
-            numerical_work=work,
-            numerical_payload=payload,
         )
         model = _unknown_error_model(problem, output, construction)
         selected = Plan(
@@ -1959,10 +1955,7 @@ class _QPEMethod(Method):
             import json
             from .controller import Checkpoint
 
-            saved = (
-                json.loads(data.controller) if isinstance(data.controller, str) else data.controller
-            )
-            state = Checkpoint.model_validate(saved.get("state", saved))
+            state = Checkpoint.model_validate(json.loads(data.controller)["state"])
         return _analysis(
             plan,
             data.observations,
@@ -2110,14 +2103,15 @@ class SPE(_QPEMethod):
     `initial_state`. The other arguments are optional, and the
     [shared settings][nwqlib.algorithms.qpe.method._QPEMethod] apply too. The
     result is a [`QPEAnalysis`][nwqlib.algorithms.qpe.records.QPEAnalysis]
-    whose `value` is the lowest value in the prepared spectral support. For
-    a Hamiltonian that is the lowest energy. For a unitary it is the lowest
+    whose `value` estimates the lowest value in the prepared spectral
+    support through a finite-grid threshold crossing. For a Hamiltonian
+    the target is the lowest energy. For a unitary the target is the lowest
     principal eigenphase angle theta, with `U v = exp(i*theta) v` and theta
     scanned on `[-pi/2, pi/2)`. When `tau*|E| < pi/2` for every prepared
-    energy E of `U = exp(-i*tau*H)`, `theta = -tau*E`, so on such a unitary
-    SPE returns the phase of the highest energy of the prepared support.
-    Supplying H, or `U^dagger = exp(i*tau*H)`, targets the lowest energy
-    instead.
+    energy E of `U = exp(-i*tau*H)`, `theta = -tau*E`, so the lowest phase
+    corresponds to the highest energy of the prepared support. Supplying H,
+    or `U^dagger = exp(i*tau*H)`, instead targets its lowest energy. The
+    crossing alone does not establish the accuracy of this estimate.
 
     Statistical phase estimation locates the first crossing of `eta/2` by a
     Fourier-filtered approximate cumulative distribution function (CDF) of
@@ -2128,10 +2122,10 @@ class SPE(_QPEMethod):
     Fourier weights, numbered Eq. (17) in the HTML version. Both
     quadratures of the controlled evolution are measured for each draw, and
     conjugation supplies the negative-frequency contribution. Repeated
-    draws of one frequency share one setting per quadrature, which with
-    counts receives `shots` times the number of draws in fresh shots. The
-    finite filter and sample defaults do not enforce the paper's precision
-    theorem. A scan over `grid_size` thresholds replaces
+    draws of one frequency share one setting per quadrature. With counts,
+    that setting requests `shots` times the number of draws as fresh shots.
+    The finite filter and sample defaults do not enforce the paper's
+    precision theorem. A scan over `grid_size` thresholds replaces
     its O(log(1/delta)) binary-search decisions, and the sample count is not
     derived from its Eq. (11), so its Theorem 1 does not apply. The chosen
     controlled-evolution construction sets its own approximation,
@@ -2202,8 +2196,8 @@ class RFE(_QPEMethod):
     The default exact readout reads the same quadratures as the ancilla X
     and Y expectations at each power of one controlled trajectory, and
     sampled readout keeps the paired tests. Repeated draws of one power
-    share one setting per quadrature, which with counts receives `shots`
-    times the number of draws in fresh shots. The precision theorem,
+    share one setting per quadrature. With counts, that setting requests
+    `shots` times the number of draws as fresh shots. The precision theorem,
     Theorem 2.1 (p. 6), assumes an eigenstate and enough draws, and the
     default M is far below the count it requires. `interval` is None.
     Changing K needs a new Plan. The [QPE guide](../../algorithms/qpe.md)

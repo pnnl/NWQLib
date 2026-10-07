@@ -1,4 +1,4 @@
-"""Natural scientific planning and execution over one selected Plan."""
+"""The user workflow: plan, estimate, compare, prepare, submit, solve and reopen saved Runs and Results."""
 
 from dataclasses import dataclass
 
@@ -31,13 +31,14 @@ class ComparisonRow:
             row without a Plan.
         allocation: The Allocation given to `compare` or `scan`, kept with
             the forecast, or `None`.
-        facts: Accuracy evidence (`FramedFact` records) supplied for this
-            row. Each keeps the subject and point it was stated for and is
-            not applied to another row.
+        facts: Error evidence (`FramedFact` records) supplied for this row.
+            Each keeps the quantity, unit and scope it was stated for and its
+            parameter values, and is not applied to another row.
         reference: The supplied target reference (`TargetReference`), or
             `None`. No reference value is computed.
-        prior_work: Records (`Fact`) of work done earlier, as supplied. They
-            are kept apart from the work of a later run.
+        prior_work: Records (`Fact`) of work done earlier, as supplied in
+            `Candidate.prior_work` to `scan`, or `()` for a row from
+            `compare`. They are kept apart from the work of a later run.
     """
 
     method: Method
@@ -190,7 +191,7 @@ def plan(
             raises `ApplicabilityError`. It does not assert the accuracy
             achieved.
         execution (str): `"quantum"` (the default) or `"classical"`, which
-            evaluates the Method's numerical model on the host.
+            evaluates the Method's numerical model on this computer.
         shots (int | None): Positive number of shots for sampled readout, or
             `None` (the default) for exact readout.
         seed (int | None): Nonnegative seed of the random streams. Omitted,
@@ -232,6 +233,21 @@ def plan(
     _check_shots(shots)
     if output is None:
         output = problem.default_output()
+    return _plan_with_streams(
+        problem, method, output, execution, shots, RandomStreams(seed), accuracy=accuracy
+    )
+
+
+def _plan_with_streams(problem, method, output, execution, shots, streams, *, accuracy=None):
+    """Call ``Method.plan`` and check that the Plan keeps what the caller supplied.
+
+    With ``accuracy``, the Method's ``sampling_shots`` connector first
+    selects the shots, and a Method without one raises ``ApplicabilityError``.
+    The Plan must hold the same Problem, Method and output objects, the RNG
+    snapshot taken after planning draws and the accuracy criterion that selected
+    its acquisition. A Plan that substituted any of them would attach later data
+    to a question the caller did not ask.
+    """
     if accuracy is not None:
         connector = getattr(method, "sampling_shots", None)
         if not callable(connector):
@@ -244,19 +260,6 @@ def plan(
         shots = connector(
             problem, output=output, accuracy=accuracy, execution=execution, shots=shots
         )
-    return _plan_with_streams(
-        problem, method, output, execution, shots, RandomStreams(seed), accuracy=accuracy
-    )
-
-
-def _plan_with_streams(problem, method, output, execution, shots, streams, *, accuracy=None):
-    """Call ``Method.plan`` and check that the Plan keeps what the caller supplied.
-
-    The Plan must hold the same Problem, Method and output objects, the RNG
-    snapshot taken after planning draws and the accuracy criterion that selected
-    its acquisition. A Plan that substituted any of them would attach later data
-    to a question the caller did not ask.
-    """
     # An output unit that conflicts with the Problem's unit would relabel an
     # unconverted value. Reject it before the Method selects anything. The
     # check belongs to the library's OutputRecord kinds. An output record that
@@ -309,7 +312,7 @@ def prepare(plan, *, backend=None, limits=None, progress=None, directory=None, s
             `scan`. A row's device forecast and Allocation stay with the Run
             and its Result.
         backend (object | None): Backend to run on. Omitted, local Aer runs
-            quantum execution and the host runs classical execution.
+            quantum execution and this computer runs classical execution.
         limits (ExecutionLimits | None): Limits on the Run's total
             preparations, circuits, shots and stored data. Omitted,
             the defaults of
@@ -320,8 +323,9 @@ def prepare(plan, *, backend=None, limits=None, progress=None, directory=None, s
         directory (str | os.PathLike | None): New folder in which the Run
             saves its state as it runs, so that
             [`load_run`][nwqlib.scientist.load_run] can reopen it.
-        settings (str): `"first"` (the default) prepares the setting that the
-            Method submits first, which is the first experiment when the
+        settings (str): A setting is one Plan experiment with the parameter
+            values it is prepared with. `"first"` (the default) prepares the
+            setting that the Method submits first, which is the first experiment when the
             experiments are fixed, and `submit` prepares each later one when
             it reaches it. `"all"` prepares every setting of fixed
             experiments now, in Plan order, so that `Prepared.circuits`,
@@ -331,7 +335,7 @@ def prepare(plan, *, backend=None, limits=None, progress=None, directory=None, s
             preparations. The limit check above already covers them, so
             `"all"` adds nothing to the limits and prepares nothing that a
             completed submit would not. `"all"` needs local Aer, local
-            NWQ-Sim or classical host execution. Another backend is refused
+            NWQ-Sim or classical execution on this computer. Another backend is refused
             before a Run exists, because its preparation can be a remote
             compilation that the provider charges for. This restriction lasts
             until the cost disclosure and the handling of pending remote
@@ -398,7 +402,9 @@ def _prepare_plan(
     plan, *, backend, limits, progress, directory=None, forecast=None, allocation=None,
     settings="first",
 ):
-    """The same preparation owner serves a new or explicitly repeated run.
+    """Create a Run for ``plan``, let its Method prepare the requested settings, and return ``Prepared``.
+
+    ``prepare`` and a repeated ``submit`` both use it.
 
     A repeated ``submit`` prepares the first setting of its new Run, and
     ``execute`` prepares the rest as it reaches them.
@@ -500,7 +506,7 @@ def submit(prepared):
         return run.resume()
     except BaseException as error:
         # A repeated submit created a new owner that the caller never received.
-        # The original Prepared.run remains theirs; do not close or cancel it.
+        # The original Prepared.run remains the caller's. Do not close or cancel it.
         if internal_owner:
             if run.directory is not None:
                 error.add_note(f"Original execution data is saved at {run.directory}")
@@ -570,7 +576,14 @@ def solve(
         TypeError: If a Problem is given without `method`.
         ValueError: If a Plan or row is given with `method`, `output`,
             `accuracy`, `execution`, `shots` or `seed`. Pass them to a new
-            `plan(...)` instead.
+            `plan(...)` instead. With a Problem, also for the invalid values
+            that `plan` lists.
+        ApplicabilityError: As for `plan`, if the Method cannot compute this
+            output of this Problem or `accuracy` is given to a Method without
+            `sampling_shots`, and as for `prepare`, if a row without a Plan
+            is given or the Plan lists unmet requirements.
+        RunFailed: As for `Run.wait`, if the run fails or the outcome of an
+            attempt cannot be recovered.
 
     Examples:
         The smallest eigenvalue of `[[1.5, -1], [-1, 0.5]]` is
@@ -641,7 +654,7 @@ def estimate(plan, *, context=None, profile=None, allocation=None, assessed_at=N
         assessed_at (datetime | None): Time-zone-aware time at which the
             device models are evaluated. Omitted, the current time is used.
             It needs a profile or Allocation.
-        facts (tuple[FramedFact, ...]): Accuracy evidence to assess with the
+        facts (tuple[FramedFact, ...]): Error evidence to assess with the
             forecast. It needs a profile, an error model in the Plan and an
             accuracy request in the Plan (`plan(..., accuracy=...)`).
         reference (TargetReference | None): Target reference to assess with
@@ -752,8 +765,9 @@ def compare(
         context (ResourceContext | None): Counting options for the resource
             estimates. Omitted, `ResourceContext()` applies.
         assessed_at (datetime | None): Time-zone-aware time of the device
-            forecasts. It needs a profile or Allocation.
-        facts (tuple[FramedFact, ...]): Accuracy evidence assessed with the
+            forecasts. Omitted, the current time is read once and used for
+            every row. It needs a profile or Allocation.
+        facts (tuple[FramedFact, ...]): Error evidence assessed with the
             forecast of every row and kept with it. It needs a profile and
             `accuracy`, and each Plan needs an error model.
         reference (TargetReference | None): Target reference, with the same
@@ -830,28 +844,12 @@ def compare(
     rows = []
     for method, child in zip(methods, children, strict=True):
         try:
-            if accuracy is not None:
-                connector = getattr(method, "sampling_shots", None)
-                if not callable(connector):
-                    raise ApplicabilityError(f"{type(method).__name__} has no selected accuracy connector; "
-                        "use its explicit scientific controls. Method authors can supply "
-                        "sampling_shots(self, problem, *, output, accuracy, execution, shots); "
-                        "see docs/algorithm_protocol.md")
-                selected_shots = connector(
-                    problem,
-                    output=output or problem.default_output(),
-                    accuracy=accuracy,
-                    execution=execution,
-                    shots=shots,
-                )
-            else:
-                selected_shots = shots
             selected = _plan_with_streams(
                 problem,
                 method,
                 output or problem.default_output(),
                 execution,
-                selected_shots,
+                shots,
                 RandomStreams.from_sequence(child),
                 accuracy=accuracy,
             )
@@ -946,7 +944,7 @@ def load_result(path, *, method=None):
     return load(path, method=method)
 
 
-def load_run(path, *, backend, method=None, progress=None):
+def load_run(path, *, backend=None, method=None, progress=None):
     """Reopen a saved Run to inspect it or continue it.
 
     `load_run` opens the folder of a Run, either the `directory` given to
@@ -963,9 +961,12 @@ def load_run(path, *, backend, method=None, progress=None):
             `Result.save` is not a Run folder. Keep it available and writable
             while the Run is open, because the Run records its progress
             there.
-        backend (object): Backend with the configuration that the Run was
-            saved with. Reopening never submits a replacement for an attempt
-            whose outcome is unknown.
+        backend (object | None): Backend with the configuration that the Run
+            was saved with. Omitted or `None`, a classical Run reopens without
+            a backend and a quantum Run reopens on the default `AerBackend()`,
+            as in [`prepare`][nwqlib.scientist.prepare]. A Run saved with any
+            other backend needs that backend. Reopening never submits a
+            replacement for an attempt whose outcome is unknown.
         method (type | Method | None): The Method class, or an instance of
             it, for a Method that is not built into NWQLib. Built-in Methods
             are found from the saved record.
@@ -975,12 +976,13 @@ def load_run(path, *, backend, method=None, progress=None):
 
     Returns:
         run (Run): The open Run. Close it when done, for example with
-            `with load_run(path, backend=backend) as run:`.
+            `with load_run(path) as run:`.
 
     Raises:
-        ValueError: If the saved records fail their checks, or a Method
-            outside NWQLib is saved and `method` is not given or differs from
-            it.
+        ValueError: If the saved records fail their checks, if `backend`
+            differs from the saved configuration (the message names the saved
+            configuration), or if a Method outside NWQLib is saved and
+            `method` is not given or differs from it.
         BlockingIOError: If another open Run holds the folder. Close that
             Run, for example `prepared.run`, first.
 
@@ -988,7 +990,6 @@ def load_run(path, *, backend, method=None, progress=None):
         >>> import os, tempfile
         >>> from nwqlib import Expectation, load_run, plan, prepare, submit
         >>> from nwqlib.algorithms import ExpectationMethod
-        >>> from nwqlib.backends import AerBackend
         >>> problem = Expectation(state=[1.0, 0.0],
         ...                       observable=[[1.0, 0.0], [0.0, -1.0]])
         >>> selected = plan(problem, method=ExpectationMethod(), shots=64,
@@ -997,7 +998,7 @@ def load_run(path, *, backend, method=None, progress=None):
         >>> prepared = prepare(selected, directory=folder)
         >>> with prepared.run:
         ...     result = submit(prepared).wait()
-        >>> with load_run(folder, backend=AerBackend()) as run:
+        >>> with load_run(folder) as run:
         ...     print(run.wait().value)
         1.0
     """

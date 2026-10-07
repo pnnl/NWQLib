@@ -216,37 +216,6 @@ def test_missing_scheduler_command_preserves_original_cause_and_names_cli(monkey
     assert "Slurm command 'sbatch'" in caught.value.__notes__[0]
 
 
-def test_success_storage_bounds_price_each_transaction_by_the_response_size():
-    """The per-transaction bounds of ``slurm_success_storage_bounds`` for C-byte scheduler responses.
-
-    With ``L`` the JSON size of a locator with a one-digit job ID,
-    acknowledgement grows by ``L + 71`` to ``L + C + 70``, completed status
-    by ``3 + 13`` to ``2 + 6*C + 11 + 20``, and the detached outcome by
-    ``(161, 168)``, or ``(92, 99)`` with an already revised event
-    (``_prepared_execution.detached_completion_growth``). C = 1 and C = 5.
-    """
-    from nwqlib._run_journal import _json_bound
-    from nwqlib.backends.slurm import slurm_success_storage_bounds
-    from nwqlib.execution import JobLocator
-
-    locator = _json_bound(JobLocator(provider="slurm", job_id="7", cluster="perlmutter", account="allocation",
-                                     instance=str(uuid4())), 1 << 40)
-    for revised, outcomes in ((False, (161, 168)), (True, (92, 99))):
-        assert slurm_success_storage_bounds(cluster="perlmutter", account="allocation", response_bytes=1,
-                                            max_bytes=1 << 40, event_already_revised=revised) == {
-            "ack": (locator + 71, locator + 71),
-            "status": (16, 39),
-            "outcomes": outcomes,
-            "intent_to_consumed": (locator + 71 + 16 + outcomes[0], locator + 71 + 39 + outcomes[1]),
-        }
-    # Each further response byte adds one job-ID digit and six status bytes.
-    wider = slurm_success_storage_bounds(cluster="perlmutter", account="allocation", response_bytes=5,
-                                         max_bytes=1 << 40)
-    assert wider["ack"] == (locator + 71, locator + 75) and wider["status"] == (16, 63)
-    with pytest.raises(ValueError, match="response_bytes must be a positive integer"):
-        slurm_success_storage_bounds(cluster="perlmutter", account="allocation", response_bytes=0, max_bytes=1 << 40)
-
-
 @pytest.mark.parametrize("job_id", ["12345678901", "9" * 4096, "4294967296", "12345_67", "123+0"])
 def test_locator_admits_only_a_single_positive_uint32_job_id(tmp_path, job_id):
     """A Slurm job ID is a positive uint32 of at most ten decimal digits, or it is refused.

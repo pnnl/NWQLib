@@ -850,8 +850,7 @@ def test_banded_gate_counts_match_recorded_closed_forms() -> None:
     record = build_block_encoding(matrix, implementation="banded")
     # Closed-form heat normalization: |2c| + |-c| + |-c| = 4 kappa/h^2.
     assert record.alpha == pytest.approx(4.0 * diffusivity / spacing**2, rel=1.0e-15, abs=0)
-    assert record.metadata["band_offsets"] == [-1, 0, 1]
-    assert record.metadata["toeplitz"] is True
+    assert record.metadata["band_specification"]["offsets"] == [-1, 0, 1]
     transpiled = transpile(record.circuit, basis_gates=["u", "cx"], optimization_level=1)
     block = block_encoding_top_left(Operator(transpiled).data, num_ancillas=record.num_ancillas)
     assert np.max(np.abs(block - matrix / record.alpha)) <= 1.0e-12

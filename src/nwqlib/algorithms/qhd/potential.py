@@ -16,7 +16,7 @@ from nwqlib.subroutines.hamiltonian_evolution import (
     PauliEvolutionBlock,
 )
 from nwqlib.subroutines.hamiltonian_evolution.pauli_evolution import (
-    resolve_number_projector_lowering,
+    structured_number_projector_provider,
     wrapped_projector_phase,
 )
 
@@ -150,10 +150,6 @@ class PotentialCompiler:
         Occurrences whose products are all normal pass every range check of
         the construction, the provider's included.
         """
-        from nwqlib.subroutines.hamiltonian_evolution.pauli_evolution import (
-            structured_number_projector_provider,
-        )
-
         occurrences = []
         for support, table in grid_values.items():
             s = len(support)
@@ -181,7 +177,7 @@ class PotentialCompiler:
         return tuple(occurrences)
 
     @staticmethod
-    def _kept_products(value, duration, weight, scale, s, diagonal, where, wraps=None):
+    def _kept_products(value, duration, weight, scale, s, diagonal, where, wraps):
         """Return ``(p, zeta, q)`` of one occurrence, or None when a product would fall below the normal range."""
         coefficient = weight * value
         if _underflows(coefficient, f"the potential coefficient b v of {where}",
@@ -209,25 +205,6 @@ class PotentialCompiler:
                 return None
         return coefficient, angle, identity
 
-    def compile(
-        self,
-        grid_values: SupportTables,
-        grid: OneHotGrid,
-        *,
-        dt: float,
-        potential_weight: float,
-        time: float | None = None,
-    ) -> tuple[PauliEvolutionBlock, ...]:
-        """Return Pauli-evolution blocks for the potential operator (``select_occurrences``, ``compile_selected``).
-
-        ``grid_values`` maps each variable support to the finite real objective
-        table that ``QHDCompiler`` evaluated once on every grid point of that
-        support. This method never evaluates the objective.
-        """
-        occurrences = self.select_occurrences(grid_values, num_grid_points=grid.num_grid_points, dt=dt,
-                                              potential_weight=potential_weight)
-        return self.compile_selected(occurrences, grid, dt=dt, time=time)
-
     def compile_selected(
         self,
         occurrences,
@@ -249,7 +226,7 @@ class PotentialCompiler:
                 for var_index, grid_index in zip(support, grid_indices, strict=True)
             ]
             if abs(angle) >= self.rotation_threshold:
-                resolution = resolve_number_projector_lowering(len(qubits))
+                provider = structured_number_projector_provider(len(qubits))
                 blocks.append(
                     PauliEvolutionBlock(
                         terms=(),
@@ -261,7 +238,7 @@ class PotentialCompiler:
                         metadata={
                             "coefficient": float(hamiltonian_coefficient),
                             "variable_support": tuple(support),
-                            "lowering_resolution": resolution,
+                            "projector_provider": provider,
                         },
                     )
                 )
@@ -273,7 +250,12 @@ class PotentialCompiler:
 
 
 def _evaluate_objective(evaluator, point, *, expression, support, name="QHD objective"):
-    """Return the function ``name`` at one grid point as a finite real float, or raise ValueError naming it."""
+    """Return the value of ``evaluator`` at one grid point as a finite real float.
+
+    An ArithmeticError, ValueError, TypeError or NameError from the call or
+    from the finite-real check is raised as a ValueError naming ``name``, the
+    expression, the support and the point.
+    """
     try:
         return coerce_real_scalar(evaluator(*point), context=name)
     except (ArithmeticError, ValueError, TypeError, NameError) as error:

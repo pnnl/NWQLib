@@ -29,12 +29,13 @@ class BackendRunResult:
 def remap_counts(states, counts, sources):
     """Map native count outcomes to classical outcome indices and sum equal outcomes.
 
-    Classical bit ``b`` takes native bit ``sources[b]``; a ``None`` source
+    Classical bit ``b`` takes native bit ``sources[b]``, and a ``None`` source
     leaves it zero. Bit zero is the least significant bit on both sides, so an
     outcome integer ``j`` is the bit string ``format(j, f"0{len(sources)}b")``
-    (rightmost character bit zero). Each count is checked against
-    ``execution.MAX_COUNT`` while it is still a Python or provider integer,
-    before the cast to int64. Their exact Python total must not exceed
+    (rightmost character bit zero). Each count must be an integer other than
+    a ``bool`` (any ``numbers.Integral``, NumPy integers included), and its
+    Python ``int`` value must lie in ``[0, MAX_COUNT]``
+    (``execution.MAX_COUNT``), checked before the cast to int64. Their exact Python total must not exceed
     ``MAX_COUNT`` either, so no int64 sum of equal outcomes can wrap.
 
     Args:
@@ -51,9 +52,14 @@ def remap_counts(states, counts, sources):
         The identity map (``sources == range(len(sources))``) keeps the native
         integers and skips the bit gather.
     """
+    import numbers
     import numpy as np
     from nwqlib.execution import MAX_COUNT
-    if any(type(count) is not int or not 0 <= count <= MAX_COUNT for count in counts):
+    if any(isinstance(count, bool) or not isinstance(count, numbers.Integral) for count in counts):
+        raise ValueError(f"counts must be integers in [0, {MAX_COUNT}]")
+    # Python integers keep the range check and the total exact, where a NumPy sum could wrap.
+    counts = [int(count) for count in counts]
+    if any(not 0 <= count <= MAX_COUNT for count in counts):
         raise ValueError(f"counts must be integers in [0, {MAX_COUNT}]")
     if sum(counts) > MAX_COUNT:
         raise ValueError(f"the counts sum to more than {MAX_COUNT}")
@@ -72,7 +78,7 @@ def gather_bits(native, sources):
     bit zero least significant on both sides, at most 64 classical bits.
     Native bits that no classical bit takes, such as unmeasured qubits of a
     provider histogram over every qubit, are dropped. The identity map keeps
-    the low ``len(sources)`` native bits with one mask; any other map gathers
+    the low ``len(sources)`` native bits with one mask. Any other map gathers
     one bit per classical position with vectorized shifts.
     """
     import numpy as np

@@ -11,7 +11,8 @@ from nwqlib.core.records import Basis, InputRef, Record, Text
 Count = Annotated[StrictInt, Field(ge=0)]
 """Nonnegative integer field: a Python `int` that is 0 or larger.
 
-A `bool` or a float such as `2.0` is rejected, not converted.
+A `bool`, a NumPy integer or a float such as `2.0` is rejected, not
+converted. Convert a NumPy integer or a whole-number float with `int(...)`.
 """
 DEFAULT_INPUT_BYTES = DEFAULT_MAX_BYTES
 
@@ -39,7 +40,7 @@ def _check_products(count: int, max_products: int, limit_name: str = "max_produc
     ``count`` is a derived count of the scalar products the action will
     perform, fixed by its representation before any product runs. It is a
     work limit, not measured CPU time. ``limit_name`` is the caller's option
-    that supplies ``max_products``; the refusal names it.
+    that supplies ``max_products``, and the refusal names it.
     """
     if type(max_products) is not int or max_products < 1:
         raise ValueError(f"{limit_name} must be a positive integer")
@@ -52,8 +53,8 @@ def refuse_known_need(family, field, cap, known_need, later):
 
     At each planning boundary a Method passes the maximum of the complete
     requirements of every phase whose occurrence and dimensions are already
-    known. Cumulative work laws stay sums where the owner charges a sum;
-    successive peak-memory phases combine by maximum, with data held across
+    known. Cumulative work laws stay sums where the Method counts a sum.
+    Successive peak-memory phases combine by maximum, with data held across
     them added inside each phase. A hypothetical branch that might not be
     selected is a sufficient envelope, not a necessary requirement, and is
     not passed here. ``later`` names the phases whose populations depend on

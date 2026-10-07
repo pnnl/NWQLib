@@ -33,13 +33,13 @@ imaginary component has the corresponding swapped terms. The nonnegative 2x2
 coefficient matrix has spectral norm kappa. Combining the 2D component errors
 gives ``||fl(cz) - cz||_2 <= gamma_2 kappa ||z||_2 + e``. A fused
 implementation is no worse under the same premises. If c is nonzero, compare
-cz with multiplication by ``c/|c|``; its modulus error is
+cz with multiplication by ``c/|c|``. Its modulus error is
 ``||c| - 1| <= |s - 1|``. If c is zero, the same inequality holds with any unit
 phase. Thus ``distance_mod_phase(fl(cz), z) <= t ||z||_2 + e``. This uses the
 actual factor's squared modulus. It needs no one-ulp assumption about
 ``np.exp``, no argument-reduction bound and no estimate of accumulated
-phase-angle error. An incorrect phase is still a unit phase for this metric;
-it matters for phase-defined outputs, whose budget remains unavailable.
+phase-angle error. An incorrect phase is still a unit phase for this metric.
+It matters for phase-defined outputs, whose budget remains unavailable.
 
 The functions use exact rational arithmetic for the few scalar coefficients
 and round each published nonnegative bound upward. There is no scan or copy of
@@ -61,7 +61,7 @@ ETA = F(1, 2**1074)
 
 
 def up_float(value):
-    """The smallest binary64 value at or above the exact rational ``value``; refuses a nonfinite result."""
+    """The smallest binary64 value at or above the exact rational ``value``. It refuses a nonfinite result."""
     value = F(value)
     if abs(value) > F(float_info.max):
         raise ValueError("phase-product envelope is not finite")
@@ -93,7 +93,7 @@ def corrected_state_error(delta, envelope):
     ``||z|| <= 1 + delta`` premise, this is the corrected estimate after the
     multiplication whose envelope is ``(t, e)``. The host propagation is
     finite and includes higher-order and underflow terms. The overall
-    statement is still conditional on the native first-order model; it is not
+    statement is still conditional on the native first-order model. It is not
     an unconditional bound on native execution.
     """
     if delta is None:
@@ -111,7 +111,7 @@ def corrected_mass_window(window, envelope):
     ``omega_saved = omega + (2t + t**2)(1 + omega) + 2(1 + t)(1 + omega) e + e**2``.
     Here ``sqrt(1 + omega) <= 1 + omega`` avoids another rounded square root.
     This propagates the existing validation convention through the selected
-    host operation; it does not convert that convention into a native
+    host operation. It does not convert that convention into a native
     accuracy certificate.
     """
     t, e = map(F, envelope)

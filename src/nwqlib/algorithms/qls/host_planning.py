@@ -21,7 +21,7 @@ from .primary_records import InversePolynomial, ReflectionPolynomial, QLSWork
 
 @dataclass(frozen=True)
 class OriginalSVD:
-    """Already selected original-input singular frames; no independent replay.
+    """Original-input singular frames, computed once and reused.
 
     Dense quantum selection computes this SVD of the original ``A`` once.
     Endpoint selection, dense completion and the archive reuse it, so no
@@ -130,7 +130,7 @@ def original_factor_laws(d, hermitian):
 
     The Hermitian acquisition envelope has four complex matrix slots for
     scaling, driver-layout input and returned eigenvectors, plus vector
-    scratch. The general envelope is the existing ``_original_svd`` law.
+    scratch. The general envelope is the law of ``_original_svd``.
     Both exclude native LAPACK workspace. The Hermitian work is
     ``_linalg_laws.hermitian_eigensystem_work(d)``.
     """
@@ -168,7 +168,7 @@ def _original_factors(operator, method):
     """Acquire the original factorization that classical factor consumers reuse.
 
     Exact admitted Hermiticity metadata (``operator.structure``) selects one
-    full ``eigh``; any other dense ``A`` takes ``_original_svd``.
+    full ``eigh``. Any other dense ``A`` takes ``_original_svd``.
     """
     if operator.structure == "hermitian":
         return _original_eigensystem(operator, method)
@@ -325,8 +325,7 @@ def input_access_refusal(operator, execution):
 
 
 def _spectrum(operator, method, *, alpha=None, factors=None):
-    """Resolve alpha and the encoded singular-value gap from supplied premises or bounded
-    original-matrix work.
+    """Resolve alpha and the encoded singular-value gap from supplied premises or bounded original-matrix work.
 
     Endpoints come from already acquired original factors (the quantum
     dense SVD, or the classical SVD or Hermitian eigensystem that the
@@ -367,7 +366,7 @@ def _spectrum(operator, method, *, alpha=None, factors=None):
         d = operator.basis.dimension
         hermitian = operator.structure == "hermitian"
         if hermitian:
-            # 4 d^3 is the eigenvalues-only dense law; 8 d^2 covers component
+            # 4 d^3 is the eigenvalues-only dense law. 8 d^2 covers component
             # maxima and reductions, binary scaling and lower-order endpoint visits
             # without a second Hermiticity test. Four complex matrix slots
             # cover the scaled matrix, input-layout copy and scaling/scan
@@ -431,15 +430,15 @@ def select_inputs(problem, method, *, execution):
     computes the original SVD once. Classical dense selection acquires the
     original SVD, or one ``eigh`` of a Hermitian original, only when the
     selected inverse or linear norm model needs factors and planning needs
-    spectral endpoints (``classical_factor_consumer``); endpoints then come
-    from those factors, and the classical evaluation reuses them. Compact Pauli input keeps Pauli access
-    and requires a numeric ``kappa``. A non-power-of-two dense system is
-    padded with the positive block ``alpha * I`` and ``b`` with zeros, so the
-    solution occupies the original coordinate slice and the padding adds
-    no singular value below ``sigma_min`` or above ``alpha``. When the
-    selected encoding's ``alpha`` differs from the spectral estimate,
-    ``kappa_be`` is recomputed from the encoding's ``alpha``. The original
-    Problem is never changed.
+    spectral endpoints (``classical_factor_consumer``). Endpoints then come
+    from those factors, and the classical evaluation reuses them. Compact
+    Pauli input keeps Pauli access and requires a numeric ``kappa``. A
+    non-power-of-two dense system is padded with the positive block
+    ``alpha * I`` and ``b`` with zeros, so the solution occupies the original
+    coordinate slice and the padding adds no singular value below
+    ``sigma_min`` or above ``alpha``. When the selected encoding's ``alpha``
+    differs from the spectral estimate, ``kappa_be`` is recomputed from the
+    encoding's ``alpha``. The original Problem is never changed.
 
     Returns:
         ``(encoding, encoded_operator, rhs, svd, spectrum)``: the selected
@@ -484,7 +483,7 @@ def select_inputs(problem, method, *, execution):
             raise ValueError("supplied encoding and requested alpha differ")
         if (execution == "classical" and method.kappa == "auto" and classical_factor_consumer(method)
                 and original.reference.representation == "dense"):
-            # The encoding owns alpha, so only kappa needs endpoints; the
+            # The encoding owns alpha, so only kappa needs endpoints. The
             # classical inverse or linear model reuses the same factors.
             svd = _original_factors(original, method)
         spectrum = _spectrum(original, method, alpha=semantics.alpha, factors=svd)
@@ -548,7 +547,7 @@ def select_inputs(problem, method, *, execution):
                 svd = _original_svd(original, method)
         elif classical_factor_consumer(method) and (method.alpha == "auto" or method.kappa == "auto"):
             # Compute original frames during planning only when planning
-            # needs spectral information; supplied alpha and kappa defer the
+            # needs spectral information. Supplied alpha and kappa defer the
             # single factorization to the admitted classical evaluation.
             svd = _original_factors(original, method)
         spectrum = _spectrum(original, method, factors=svd,
@@ -634,7 +633,7 @@ def select_inputs(problem, method, *, execution):
             max_bytes=method.max_bytes, max_work=method.max_work)
         if method.alpha != "auto" and selected.alpha != method.alpha:
             raise ValueError("Pauli encoding differs from requested normalization")
-        spectrum = _spectrum(original, method.revise(alpha=selected.alpha), alpha=selected.alpha)
+        spectrum = _spectrum(original, method, alpha=selected.alpha)
         spectrum["alpha_source"] = "selected_encoding"
         encoding = _select_planned_encoding("base_encoding", selected, operator=original)
         encoded_operator = original
@@ -737,7 +736,7 @@ def search_envelope(kappa, source):
     ladder = steps + 1
     if source == "grid":
         trials = ceil(100 * log(20 * ladder)) * ladder
-        return ladder, trials, 0  # grid owner keeps trials only, not a query estimate
+        return ladder, trials, 0  # The grid model records trials only, with no query estimate.
     if source == "noisy_binary_search":
         rounds = ceil(log(ladder) / log(1.5))
         trials = ceil(72 * log(40 * rounds)) * rounds
@@ -774,7 +773,7 @@ def selected_work(matrix, *, alpha, embedded, method, polynomial, kappa, t_sourc
     ``s = ceil(log2(kappa))`` for the linear model and ``tgt`` one for a
     grid or noisy-search target solve. ``f`` is one only when a factor
     consumer (the inverse, or the linear norm model) needs factors that
-    planning did not acquire (``factors_held``); ``F(d)``, ``P(d)`` and
+    planning did not acquire (``factors_held``). ``F(d)``, ``P(d)`` and
     ``B_F(d)`` are ``original_factor_laws``. ``E(x) = 8 x**3 + 32 x**2`` is
     ``_linalg_laws.hermitian_eigensystem_work``. In the polynomial-visit
     units the selected kernels are
@@ -814,7 +813,7 @@ def selected_work(matrix, *, alpha, embedded, method, polynomial, kappa, t_sourc
     returns its d-entry original-coordinate branch directly. Then
     ``workspace_bytes = max(B_F if acquired else 0, (P if acquired else 0) +
     max(preparation, numerical, statistics))``. Factors already owned by the
-    Plan are excluded here; planning adds their persistent ``P(d)`` to this
+    Plan are excluded here. Planning adds their persistent ``P(d)`` to this
     field when it compares the resident arrays with ``max_bytes``. These are
     conservative known-array ceilings, not minimal simultaneous allocation
     equalities, and they infer no allocator traffic or RSS.
@@ -841,7 +840,7 @@ def selected_work(matrix, *, alpha, embedded, method, polynomial, kappa, t_sourc
     # Two basis-change matvecs of the selected action, the row product
     # b'^dagger A_t of the rank-one projector and the linear model's
     # coordinate matvec. G_t is formed without a dense matrix product.
-    products, matvecs = 0, 2 + int(shortcut) + linear
+    matvecs = 2 + int(shortcut) + linear
     observable = output.kind in {"quadratic_form", "normalized_expectation"}
     if observable:
         from nwqlib.operators.inputs import _scaled_observable_requirements
@@ -849,13 +848,13 @@ def selected_work(matrix, *, alpha, embedded, method, polynomial, kappa, t_sourc
     else:
         observable_bytes = observable_work = 0
     materialize = any(o.frame == "physical" for o in outputs)
-    # Branch mass, plus one reduction for an embedded inverse, which now
-    # computes its slice mass on the same d entries as the branch mass: the
-    # charge keeps the earlier 2d-entry slice-mass envelope as a conservative
-    # bound. Selected norm and its subnormal refinement; target norm;
-    # full-branch/reference normalization refinements and phase dot;
-    # selected observable dot; model RHS/step reductions; six
-    # finite/nonzero/lost-component reductions at most in apply_vector.
+    # Branch mass, plus one reduction charged for an embedded inverse. That
+    # inverse computes its slice mass on the same d entries as the branch
+    # mass, so the extra reduction is a conservative allowance. Selected norm
+    # and its subnormal refinement. Target norm. Full-branch/reference
+    # normalization refinements and phase dot. Selected observable dot.
+    # Model RHS/step reductions. Six finite/nonzero/lost-component reductions
+    # at most in apply_vector.
     reductions = (
         1
         + int(embedded)
@@ -869,7 +868,7 @@ def selected_work(matrix, *, alpha, embedded, method, polynomial, kappa, t_sourc
     normalization_work = parts * d * d * int(alpha != 1.0) * int(shortcut)
     direction_work = 4 * d
     # Per real/imaginary part: frexp, mantissa product, exponent addition,
-    # ldexp, and four finite/lost-mask ufunc visits; two input masks.
+    # ldexp, and four finite/lost-mask ufunc visits. Two input masks.
     materialization_work = 18 * d * int(materialize)
     if not shortcut:
         size = acquire * factor_work + m * d + 2 * d * d
@@ -928,7 +927,6 @@ def selected_work(matrix, *, alpha, embedded, method, polynomial, kappa, t_sourc
         target_solves=target,
         svd_calls=svd,
         eigh_calls=eigh,
-        matrix_products=products,
         matvecs=matvecs,
         search_rows=rows,
         planned_trials=trials,
@@ -967,7 +965,6 @@ def application_arguments(reconstruction, *, t_value=1.0, rows=None, trials=None
         target_solves=w.target_solves,
         svd_calls=w.svd_calls,
         eigh_calls=w.eigh_calls,
-        matrix_products=w.matrix_products,
         matvecs=w.matvecs,
         search_rows=w.search_rows if rows is None else rows,
         planned_trials=w.planned_trials if trials is None else trials,

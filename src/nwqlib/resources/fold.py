@@ -1,8 +1,8 @@
 """Bounded selected-construction fold. No payload access, SDK or recipe selection.
 
 Planning must report what a selected construction costs without building,
-transpiling or simulating it (docs/FRAMEWORK.md, "Resource Estimation Before
-Execution"). This module walks the same Program that logical lowering
+transpiling or simulating it (docs/FRAMEWORK.md, "Resource estimation before
+execution"). This module walks the same Program that logical lowering
 consumes and combines the laws declared on its selected definitions into
 located quantities, each with its interpretation and original evidence. The
 contract for each quantity is docs/resources.md, and docs/development/execution.md
@@ -302,7 +302,7 @@ class _Fold:
         self.admission.tick(1 + len(bindings))
         if key not in self.contexts:
             result = {}
-            # Reuse admitted expression order; preserve unresolved refs without expansion.
+            # Reuse the admitted expression order, and keep unresolved references unexpanded.
             for name in self.admission.order:
                 self.admission.tick()
                 node = self.admission.expr[name]
@@ -599,7 +599,10 @@ class _Fold:
         return self.quantum_footprints[live]
 
     def snapshot(self, live, classical, bindings, workspace=()):
-        """Current live footprint; no byte conversion from logical quantum width."""
+        """Return the current live footprint per (metric, location).
+
+        Logical quantum width is never converted to bytes.
+        """
         result = dict(self.quantum_snapshot(live))
         def add(key, value):
             result[key] = self.combine(result.get(key, _Value()), value)
@@ -642,7 +645,11 @@ class _Fold:
         return result
 
     def batch_peaks(self, peaks, bindings):
-        """Per-job reuse needs a serial schedule; invariant residents do not."""
+        """Mark each peak that differs from the exact resident footprint as requiring a serial schedule.
+
+        Per-job reuse of space holds only under a serial schedule. A peak
+        equal to the exact resident footprint stays unmarked.
+        """
         resident = self.snapshot((), frozenset(), bindings)
         result = {}
         for key, value in peaks.items():
@@ -839,10 +846,11 @@ class _Fold:
                     peaks[("memory", "host")] = _unknown("adaptive policy extra workspace is not declared")
         elif isinstance(node, MeasurementBatch):
             costs = dict(self.zero_costs)
-            # costs/peaks are local, memoized workload facts; independent bodies
-            # export no lifetime. The terminal-point union, reachability flags and
-            # root populations below are operation-wide inventories, recorded on
-            # the first visit to this admitted context, not copied into each value.
+            # costs and peaks are local, memoized workload facts, and independent
+            # bodies export no lifetime. The terminal-point union, reachability
+            # flags and root populations below are operation-wide inventories,
+            # recorded on the first visit to this admitted context, not copied into
+            # each value.
             terminal = not self.admission.contains_batch[node.body]
             if not terminal and node.axes:
                 self.unique_unavailable.add("distinct terminal-point union across a nonterminal compact axis is unsupported")
@@ -921,9 +929,9 @@ class _Fold:
         else:
             raise ValueError(f"unsupported resource node: {node.kind}")
         peaks = self.peaks(peaks, self.snapshot(live, classical, bindings))
-        # The memo stores four existing immutable/persistent values. Arithmetic,
-        # footprint updates and constructed dictionaries pay at their owners;
-        # storing their references does not copy every child field again.
+        # The memo stores four existing immutable values. Arithmetic, footprint
+        # updates and dictionary construction are counted where they happen, and
+        # storing their references copies no child field again.
         self.admission.tick(4)
         result = (costs, peaks, live, frozenset(classical))
         self.memo[key] = result
@@ -981,8 +989,10 @@ class _Fold:
             derivation_sources=tuple(sorted(value.derived_from)), required_schedule=required_schedule)
 
     def run(self):
-        """Publish selected workload envelopes, live-memory peaks and unique construction work
-        from one fold.
+        """Fold the root once and return the WorkloadEstimate.
+
+        It holds the workload totals, the live-memory peaks and the
+        construction work of the reached definitions.
         """
         bindings = {item.parameter: number(item.value) for item in self.program.bindings}
         costs, peaks, _, _ = self.visit(self.program.root, bindings)
@@ -1038,9 +1048,10 @@ def estimate(construction: SelectedConstruction, *, context: ResourceContext | N
     which calls this function on `plan.construction`. The estimate walks the
     circuit description once per distinct context and keeps symbolic costs
     in a compact expression table. It reads no numerical input data,
-    synthesizes no gates and does not unroll repeated parts. Its work is
-    limited in proportion to the size checks of the circuit description
-    ([engineering
+    synthesizes no gates and does not unroll repeated parts. Its bookkeeping
+    work is at most ``24 * limits.max_steps`` work units,
+    reported as `WorkloadEstimate.work_units`, where `limits` is
+    `construction.program.limits` ([engineering
     constants](../ENGINEERING_CONSTANTS.md#shared-program-admission-limits)).
 
     The result depends only on the construction and the context. A caller
@@ -1063,9 +1074,16 @@ def estimate(construction: SelectedConstruction, *, context: ResourceContext | N
 
     Returns:
         workload (WorkloadEstimate): One quantity per metric and location.
-            Every quantity is `"planned"` and keeps its label, location and
-            original evidence. A metric without an applicable cost rule is
-            present as unavailable, not as zero.
+            Every quantity has `lifecycle="planned"` and keeps its label,
+            location and original evidence. A metric without an applicable
+            cost rule is present as unavailable, not as zero.
+
+    Raises:
+        ValueError: If an exact count needs more integer bits than
+            `construction.program.limits.max_integer_bits`, two applicable
+            cost rules of a block conflict, a block's declared cost rule
+            contradicts its exact gate list, or its bookkeeping work would
+            exceed the limit stated above.
     """
     context = ResourceContext() if context is None else context
     if memo is None:

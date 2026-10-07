@@ -192,8 +192,11 @@ class Method(Record):
         """Turn the collected data of a Plan into its Result, with explicit settings and without collecting new data.
 
         `Result.analyze` and the end of a Run call it. Return an instance of the
-        Method's Result class attached to this Plan and the exact data used.
-        `Result._attach` runs the supported Plan and data checks.
+        Method's Result class computed from this Plan and the exact data used.
+        The caller attaches it with `Result._attach`, which runs the supported
+        Plan and data checks, including `validate_plan`, so `analyze` need not
+        call `validate_plan` itself. A Result that `analyze` has already
+        attached to the same Plan and data is accepted as well.
 
         Args:
             plan (Plan): The Plan.
@@ -201,7 +204,8 @@ class Method(Record):
             settings (dict): Analysis settings.
 
         Returns:
-            result (Result): The Result attached to `plan` and `data`.
+            result (Result): The Result for `plan` and `data`, attached or not
+                yet attached.
         """
         raise NotImplementedError("a Method must interpret its acquired observations")
 
@@ -221,7 +225,18 @@ class Method(Record):
         raise ValueError("this Method has no interrupted controller analysis to recover")
 
     def before_submit(self, plan, prepared, *, run):
-        """Admit a tuple of original acquisitions before their submission intent."""
+        """Check the prepared circuits or classical computation of one submission before the Run records it, and raise to refuse it.
+
+        The Run calls it with the tuple of `PreparedHandle` objects that the
+        submission sends, before it records the submission, so a refusal
+        leaves no attempt behind. The default accepts every submission.
+
+        Args:
+            plan (Plan): The Plan.
+            prepared (tuple[PreparedHandle, ...]): The prepared work of the
+                submission.
+            run (Run): The Run that submits them.
+        """
 
     def error_model(self, plan):
         """Return the known and unavailable error sources of a Plan, each with the quantity and unit it refers to.
@@ -237,14 +252,62 @@ class Method(Record):
         return plan.error_model
 
     def validate_point(self, plan, experiment, values):
-        """Admit method-specific argument relations after generic IR admission."""
+        """Check the parameter values of one experiment point against the Method's own rules, and raise to refuse the point.
+
+        It runs when `Plan.resolve` or a preparation resolves a point, after
+        each value has passed the checks of its Program parameter and, in a
+        measurement batch, of its range axis. The default accepts every
+        point.
+
+        Args:
+            plan (Plan): The Plan.
+            experiment (Experiment): The experiment of the point.
+            values (Mapping[str, object]): Read-only mapping from each bound
+                Program parameter name to its value.
+        """
 
     def specialize_experiment(self, plan, experiment, values):
-        """Resolve an adaptive readout from its actual admitted arguments."""
+        """Return the experiment of one point with its readout fitted to the point's parameter values.
+
+        It is called after `validate_point`, with the same values. A Method
+        whose readout depends on those values, such as the labels a point
+        measures, returns a revised `Experiment` with the same name, setting,
+        batch and setting index. The default returns the experiment
+        unchanged.
+
+        Args:
+            plan (Plan): The Plan.
+            experiment (Experiment): The planned experiment of the point.
+            values (Mapping[str, object]): Read-only mapping from each bound
+                Program parameter name to its value.
+
+        Returns:
+            experiment (Experiment): The experiment to run at this point.
+        """
         return experiment
 
     def selected_kernels(self, plan, experiment, program):
-        """Resolve selected host declarations without replacing native inputs."""
+        """Return the declarations of the classical computations that one point runs on this computer.
+
+        It is called when the construction of a point is built. A Method may
+        revise a declaration of the Plan's `construction.kernels` for the
+        point, for example its scalar labels and its work per invocation,
+        but each returned declaration must be a revision of the Plan's
+        declaration of the same name, with the same implementation, inputs
+        and dependencies, so that a point cannot substitute another
+        computation or another input. The default returns the Plan's
+        declarations unchanged.
+
+        Args:
+            plan (Plan): The Plan.
+            experiment (Experiment): The experiment of the point.
+            program (Program): The point's Program, with every parameter
+                bound.
+
+        Returns:
+            kernels (tuple[SelectedKernel, ...]): The declarations of the
+                point.
+        """
         return plan.construction.kernels
 
     def verify(self, plan, result, *, checks):

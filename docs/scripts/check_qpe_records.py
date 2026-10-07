@@ -95,7 +95,7 @@ def main(argv=None):
     assert {q.acquisition for q in selected.reconstruction.queries} == {"trajectory"}
     with TemporaryDirectory() as directory:
         saved = save_plan(selected, ArchiveFiles(directory, 4_000_000))
-        assert saved["selected"]["format"] == "qpe/qcels/7"
+        assert saved["selected"]["format"] == "qpe/qcels/8"
         restored = load_plan(saved, ArchiveFiles(directory, 4_000_000))
         assert restored == selected
     # A sampled SPE archive keeps pooled draws: one query per setting whose
@@ -109,7 +109,7 @@ def main(argv=None):
     assert [nodes[e.batch].repetitions for e in selected.experiments] == [3 * q.multiplicity for q in queries]
     with TemporaryDirectory() as directory:
         saved = save_plan(selected, ArchiveFiles(directory, 4_000_000))
-        assert saved["selected"]["format"] == "qpe/spe/7"
+        assert saved["selected"]["format"] == "qpe/spe/8"
         restored = load_plan(saved, ArchiveFiles(directory, 4_000_000))
         assert restored == selected
     loaded = [name for name in sys.modules if forbidden(name)]

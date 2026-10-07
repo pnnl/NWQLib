@@ -1,4 +1,7 @@
-"""Lazy Hamiltonian evolution records and native construction exports."""
+"""Hamiltonian-evolution records and circuit builders.
+
+Each name is imported from its module on first access.
+"""
 
 from importlib import import_module
 

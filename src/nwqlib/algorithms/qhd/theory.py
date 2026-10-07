@@ -23,7 +23,6 @@ independent discretization evidence.
 
 from __future__ import annotations
 
-import itertools
 import math
 from collections.abc import Iterable
 
@@ -36,26 +35,10 @@ from nwqlib.subroutines.hamiltonian_evolution import PauliEvolutionBlock
 # First-order local state-operation charges, in units of u = 2**-53, of one
 # direct one-hot hopping and one projector block:
 # rho_H <= (1 + 3 sqrt(2)) u < 6u and rho_P <= 10u (onehot_product_state_error).
+# Registered in docs/ENGINEERING_CONSTANTS.md ("QHD one-hot product budget"). Revisit when the kernel
+# changes its arithmetic.
 ONEHOT_HOPPING_STATE_ROUNDOFF = 6
 ONEHOT_PROJECTOR_STATE_ROUNDOFF = 10
-
-
-def restricted_basis(grid: OneHotGrid) -> tuple[tuple[int, ...], ...]:
-    """Return lexicographic grid-index basis for the one-hot subspace."""
-
-    return tuple(itertools.product(range(grid.num_grid_points), repeat=grid.num_variables))
-
-
-def onehot_basis_indices(grid: OneHotGrid) -> tuple[int, ...]:
-    """Return full computational-basis indices for the restricted basis."""
-
-    indices: list[int] = []
-    for grid_indices in restricted_basis(grid):
-        index = 0
-        for var_index, grid_index in enumerate(grid_indices):
-            index |= 1 << grid.qubit(var_index, grid_index)
-        indices.append(index)
-    return tuple(indices)
 
 
 def restricted_kinetic_work(dimension, variables, raw_slots, entries):
@@ -118,20 +101,21 @@ def restricted_kinetic_sparse(grid: OneHotGrid) -> scipy.sparse.csr_matrix:
 
     Construction. For axis j, the stored diagonal
     contribution is ``1.0/(h_j*h_j)`` and each directed link contributes
-    ``-0.5/(h_j*h_j)``. Use the source's ``h*h``, not an unexamined
-    replacement by ``h**2``. The exact mathematical diagonal is
+    ``-0.5/(h_j*h_j)``. The code forms ``h*h``, the product whose normality
+    grid admission checks (``OneHotGrid.__post_init__``), and the stored bits
+    follow that form. The exact mathematical diagonal is
     ``sum_j h_j**-2``, and each distinct adjacent coordinate differs by
     ``-1/(2*h_j**2)``. At periodic K = 2, two links join the same points, so
     that off-diagonal entry is ``-1/h_j**2``. The diagonal does not double.
-    Broadcasting indices constructs precisely these directed pairs. To
-    reproduce the duplicate summation order as well, the raw COO entries are
-    emitted in column, variable, local-neighbor order. The periodic neighbor
+    Broadcasting indices constructs precisely these directed pairs. To fix
+    the order in which conversion sums duplicate entries, the raw COO entries
+    are emitted in column, variable, local-neighbor order. The periodic neighbor
     order is ``(1,K-1)`` at local 0, ``(i-1,i+1)`` in the interior and
     ``(K-2,0)`` at K-1. A change from point-major to axis-major COO can
     change the order in which duplicate diagonals are summed by conversion,
     so equality of mathematical matrices alone does not prove identical
-    diagonal bits. This order-preserving fill preserves the COO conversion
-    input and therefore its stored values on the same SciPy version.
+    diagonal bits. This fill fixes the COO conversion input and therefore its
+    stored values on a given SciPy version.
 
     Buffer cost. With ``D = K**d``, the raw slots S
     and final stored entries M are ``S = 3dD`` (periodic) or
@@ -378,10 +362,11 @@ def onehot_product_state_error(steps, *, start) -> float:
     the initial-state and final-phase charges. A zero block skipped exactly
     has no local charge. Occurrence counts come from the selected steps, not
     unique constructions, and a count that is not exactly representable is
-    converted upward. As in Proposition 41, local relative defects rho give
-    the finite propagation relation ``delta_next <= (1+rho)*delta + rho``,
-    hence ``(1+delta0)*prod(1+rho)-1``, and this budget keeps only its
-    first-order part. Underflowing state components need absolute local
+    converted upward. As in Proposition 41 of docs/mathematics.md (anchor
+    r41), local relative defects rho give the finite propagation relation
+    ``delta_next <= (1+rho)*delta + rho``, hence
+    ``(1+delta0)*prod(1+rho)-1``, and this budget keeps only its first-order
+    part. Underflowing state components need absolute local
     terms for an all-orders extension, which is not established here.
 
     ``steps`` are the stored ``QHDBlock`` groups and ``start`` the bound of
@@ -518,10 +503,10 @@ def run_binary_product(grid: OneHotGrid, method, reconstruction, state: np.ndarr
     from .binary import BinaryModel, lexicographic_table
     from .method import _binary_source_reservation
 
-    # The state buffers and the retained complex phase tables coexist with the model and its
+    # The state buffers and the complex phase tables that stay live coexist with the model and its
     # construction cache. The swap path can hold three D-entry state owners (the caller's start
     # buffer, the current tensor and a new swap result), 48D bytes, because each diagonal's local
-    # view is released right after its in-place multiplication; for the generated first/second-order
+    # view is released right after its in-place multiplication. For the generated first/second-order
     # schedule the current step's potential exponentials, the previous kinetic factor and a preceding
     # block's table reference fit 16 (sum_potential E_t + K + E_max) bytes. The Plan's source records,
     # including its source tables once, stay live beside the model's address-ordered copies

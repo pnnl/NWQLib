@@ -56,10 +56,9 @@ experiment from data. It uses the same preparation, submission and outcome
 commits, with its controller checkpoint (``Run.checkpoint``) in place of the
 workflow row. The numbering is the same as in ``docs/development/execution.md``,
 and each function below that makes one of these commits names it in its
-docstring. The docstrings of the other
-writes (limit amendments, synthesis reservations, cancellation requests,
-failure revisions and the Result row) state what a stop before or after them
-leaves.
+docstring. The docstrings of the other writes (limit amendments, synthesis
+reservations, cancellation requests, failure revisions and the Result row)
+state what a stop before or after them leaves.
 
 1. Workflow row, with the experiment's runtime seed and the RNG position
    (``_static_item``). A restart before commit 2 prepares the experiment with this
@@ -85,12 +84,7 @@ leaves.
    by the original submission identity. A synchronous backend has no
    acknowledgement step, so this window lasts until commit 6. Without a
    retrieval route, resume raises the recovery error. A reopened synchronous
-   Aer submission with no locator is marked failed with its results consumed
-   because its in-process output is unavailable. Its attempt stays uncertain
-   and charged, and continuation raises the recovery error with that
-   attempt's identity when the Method cannot return a lawful Result and
-   cancellation has not been requested. Its output reservation is released
-   (lifecycle rule 3). A host kernel
+   Aer submission with no locator follows lifecycle rule 3. A host kernel
    (``_submit_host``) commits only its reserved event, because nothing leaves
    the process. Reopening makes that event uncertain, and no route can
    retrieve its outcome.
@@ -193,7 +187,7 @@ def _cumulative_limit_error(name, limit, noun, used, requested, *, owner="this R
     whose limit it is, ``"the proposed"`` for a value that ``extend_limits``
     has not yet published. For ``max_total_circuits`` and ``max_total_shots``
     the request is an exact count, and the message names the sum of both
-    amounts as the smallest limit that admits it; an adaptive Method requests
+    amounts as the smallest limit that admits it. An adaptive Method requests
     its work in steps, so its whole workload can need more than that sum.
     For ``max_data_bytes`` the cap reserves nothing and the complete
     requirement is not known at this point, so the message suggests
@@ -212,7 +206,7 @@ def _cumulative_limit_error(name, limit, noun, used, requested, *, owner="this R
 
 
 def _notebook_progress():
-    """Use one live-kernel display; ordinary Python does not import IPython."""
+    """Use one live-kernel display. Ordinary Python does not import IPython."""
     ipython = sys.modules.get("IPython")
     shell = None if ipython is None else ipython.get_ipython()
     if getattr(shell, "kernel", None) is None:
@@ -259,8 +253,8 @@ class Run:
     waiting. Close a Run when done, for example with
     `with prepared.run as run:`. Closing cancels no job.
 
-    The Run is the only object that sets work aside, submits it, saves its
-    outcomes and counts it against the limits. The limits apply to totals
+    The Run submits the work, saves its outcomes and counts the work against
+    the limits. The limits apply to totals
     over the Run's whole life, failed and uncertain attempts included, so
     raising the limits or reopening the Run never gives back work already
     counted. A Run with a folder records every step in `run.sqlite` there
@@ -272,7 +266,8 @@ class Run:
 
     Attributes:
         plan: The Plan being executed. Continuing the Run never replaces it.
-        backend: The backend, or `None` for a Run of host computations only.
+        backend: The backend, or `None` for a Run whose only computations are
+            classical computations that the Method runs on this computer.
         forecast: The `PlanEstimate` given with the Plan, or `None`.
         allocation: The `Allocation` given with the Plan, or `None`. Continuing
             the Run does not recompute it.
@@ -291,7 +286,7 @@ class Run:
     def __init__(self, plan, *, backend=None, limits=None, directory=None, progress=None,
                  forecast=None, allocation=None):
         # Admit the selected execution and create its original identity, streams
-        # and optional journal. ``prepare`` constructs the Run; users never do.
+        # and optional journal. ``prepare`` normally constructs the Run.
         #
         # A durable Run writes, in this order, its new directory, the journal
         # with its controller lock, the selected inputs with ``run.json``, and
@@ -300,11 +295,11 @@ class Run:
         # crash before the header commits leaves a folder that ``load_run``
         # rejects, and no preparation or acquisition can have happened by then.
         #
-        # plan: selected Plan; its randomness snapshot seeds the Run's streams.
-        # backend: backend connection; None selects local Aer for quantum
+        # plan: selected Plan. Its randomness snapshot seeds the Run's streams.
+        # backend: backend connection. None selects local Aer for quantum
         # execution and no backend for classical execution. limits: cumulative
         # ExecutionLimits, the defaults when None. directory: new durable
-        # folder; remote-capable backends always get one, under
+        # folder. Remote-capable backends always get one, under
         # ~/.nwqlib/runs/<run_id> when none is given, so that an acknowledged
         # external job can be reopened after the process ends. progress:
         # progress callback, False to disable, or None for the notebook
@@ -509,8 +504,8 @@ class Run:
         if any(kind not in {"cache", "checkpoint_field"} for kind, _ in removed):
             raise ValueError("only cache rows and checkpoint fields can be deleted from a run journal")
         # A chunk row stores its readout through its receipt
-        # (_run_journal._row_value), so the two must declare the same readout;
-        # a point chunk holds its point's one-point readout of the receipt's trajectory.
+        # (_run_journal._row_value), so the two must declare the same readout.
+        # A point chunk holds its point's one-point readout of the receipt's trajectory.
         for kind, _, value in records:
             if kind == "chunk" and isinstance(value, ObservationChunk):
                 receipt = state["prepared_artifacts"].get(value.prepared_id)
@@ -950,8 +945,10 @@ class Run:
     def observations(self):
         """The observations that the Method has collected so far, in the order it collected them.
 
-        An `ObservationView` whose `chunks` hold the statistics of each
-        measurement. A completed measurement that the Method has not yet
+        An `ObservationView`. Its `chunks` are the
+        [`ObservationChunk`][nwqlib.execution.ObservationChunk] records, each
+        holding the statistics of one measurement or of one trajectory point.
+        A completed measurement that the Method has not yet
         collected is absent. The same object is returned until the next
         collection.
         """
@@ -1212,7 +1209,7 @@ class Run:
         its result in process, after which decoding or publication refused
         it: the work ran and no later refresh can retrieve the output. Its
         submission becomes failed with its results consumed, which releases
-        the output reservation durably (also on reopen); the event stays
+        the output reservation durably (also on reopen). The event stays
         uncertain, the only unsuccessful status of a quantum attempt.
 
         If the process stops before this write commits, reopening turns the
@@ -1248,8 +1245,8 @@ class Run:
 
         It includes failed, uncertain and unused work, so a Result built from
         it accounts for all the work of the Run rather than only the
-        measurements it uses. The same snapshot is returned until an attempt,
-        submission, count or limit changes.
+        measurements it uses. The same `ExecutionTrace` object is returned
+        until an attempt, submission, count or limit changes.
         """
         # The comparison key holds the current event and submission records,
         # which a change replaces, and the counters and limits themselves.
@@ -1289,7 +1286,7 @@ class Run:
         It holds the collected observations, preparation records, trace and
         saved arrays, shared rather than copied. Its `method_context` is set
         only when the Method keeps analysis data with the Result. Repeated
-        reads reuse the snapshots of `observations` and `trace`.
+        reads reuse the same `observations` and `trace` objects.
         """
         store = self._state["artifacts"]
         context = None
@@ -1306,14 +1303,17 @@ class Run:
 
         A dictionary with the keys `"completed"`, `"reserved"`, `"uncertain"`
         and `"failed"`, each mapping `jobs`, `circuits`, `shots` and
-        `provider_managed_sampling` to a count. Jobs are counted per
-        submission. Submissions not yet acknowledged by the backend, or
+        `provider_managed_sampling` to a count. `provider_managed_sampling`
+        counts attempts that return a provider estimate whose sampling the
+        provider chooses. Their sampling is unknown and is not in `shots`.
+        Jobs are counted per submission. Submissions not yet acknowledged by the backend, or
         acknowledged and not finished, are reserved. Failed, cancelled and
         uncertain submissions are all counted as uncertain jobs, because a
         provider's final status does not state how much work it consumed.
         Circuits, shots and provider-managed sampling are counted per attempt,
-        by the attempt's status. Only host computations can fail, so the
-        failed category never contains circuits or shots.
+        by the attempt's status. Only classical computations that the Method
+        runs on this computer can fail, so the failed category never contains
+        circuits or shots.
         """
         result = {status: dict(jobs=0, circuits=0, shots=0, provider_managed_sampling=0)
                   for status in ("completed", "reserved", "uncertain", "failed")}
@@ -1499,7 +1499,7 @@ class Run:
             submission = state["submissions"].get(event.submission)
             if submission is not None:
                 if submission.status in {"failed", "cancelled"} and submission.failure != _AER_REOPEN_FAILURE:
-                    continue  # Preserve the existing known-terminal wait behavior.
+                    continue  # _raise_terminal_failure reports a confirmed failed or cancelled submission.
                 if refreshable and submission.locator is not None:
                     continue
                 if refreshable and reconcilable:
@@ -1522,11 +1522,11 @@ class Run:
 
         Each pass calls `resume`, which reads every pending provider job once,
         and then sleeps `poll_interval` seconds. A Method may return a valid
-        partial Result from the data it has before a failed job is reported,
-        and the Run never invents scientific output. A retrieval error
-        propagates and keeps the job's locator, so a later `resume` or `wait`
-        can read the same job, and an uncertain submission is never
-        resubmitted.
+        partial Result from the data it has before a failed job is reported.
+        A retrieval error propagates and keeps the job's locator (a
+        `JobLocator` with the provider, the job identifier and the account
+        context, without credentials), so a later `resume` or `wait` can read
+        the same job, and an uncertain submission is never resubmitted.
 
         Args:
             timeout (float | None): Seconds to wait before raising
@@ -1541,12 +1541,13 @@ class Run:
             result (Result): The Run's Result.
 
         Raises:
-            RunFailed: If a preparation, host computation or submission ended
-                in failure or cancellation, or an uncertain attempt cannot be
-                recovered.
+            RunFailed: If a preparation, classical computation or submission
+                ended in failure or cancellation, or an uncertain attempt cannot
+                be recovered.
             TimeoutError: If the Run is still pending after `timeout`. The
                 same Run can be continued later.
-            RuntimeError: If the Run was cancelled before it completed. Its
+            RuntimeError: If `cancel` was called on this Run before it
+                completed and no failed or cancelled work is confirmed yet. Its
                 pending work is saved in its folder.
 
         Examples:
@@ -1600,8 +1601,9 @@ class Run:
     def artifacts(self):
         """The store of the arrays this Run has saved, created on first use.
 
-        Read one array with `artifacts.get(manifest)`, or take the handles from
-        `run.data.artifacts`.
+        Get the handle of one array with `run.artifacts.get(manifest)`, which
+        needs the full `ArtifactManifest`, or take the handles from
+        `run.data.artifacts`. Read the values with `handle.array`.
         """
         # The store shares the Run lock and routes each publication through the
         # Run, so an array commits in the same transaction as the observation
@@ -1777,7 +1779,8 @@ class Run:
         The header supplies the run identity, the initial limits and the saved
         forecast and allocation. A different Plan or backend configuration
         raises before any other row is read, because the saved acquisitions
-        belong to the original selection only.
+        belong to the original selection only. ``backend`` None selects local
+        Aer for a quantum Run, as in ``__init__``.
         """
         headers = list(journal.rows("header"))
         if len(headers) != 1:
@@ -1787,9 +1790,19 @@ class Run:
             raise unsupported_run_format(header.get("format"), "saved run journal")
         if header["plan_id"] != plan.content_id:
             raise ValueError("saved run differs from its original selected Plan")
+        saved = header["backend"]
+        if backend is None and plan.execution == "quantum":
+            # A Run on any backend other than the default AerBackend() fails
+            # the comparison below and is asked for its saved configuration.
+            from nwqlib.backends.connection import AerBackend
+            backend = AerBackend()
         configuration = None if backend is None else backend.model_dump(mode="json")
-        if configuration != header["backend"]:
-            raise ValueError("saved run requires its original backend configuration")
+        if configuration != saved:
+            if saved is None:
+                raise ValueError("saved run was prepared with backend=None (classical execution); "
+                                 "pass backend=None or omit backend")
+            raise ValueError(f"saved run was prepared with the backend configuration {json.dumps(saved)}; "
+                             "pass a backend with that configuration")
         from nwqlib._run_archive import load_provenance
         forecast, allocation = load_provenance(header)
         result = object.__new__(cls)
@@ -1907,7 +1920,7 @@ class Run:
         failed with ``results_consumed=True`` in one revised row. The event
         restoration below then makes its reserved event uncertain, and
         ``_restore_observations`` removes its pending reservation. The failed
-        submission records failed retrieval; it does not establish failed
+        submission records failed retrieval. It does not establish failed
         execution, refund exposure or retry the quantum call. The capacity
         invariant is::
 
@@ -1982,7 +1995,7 @@ class Run:
                     readouts[receipt.content_id] = observation.point_observations()
                 observation = readouts[receipt.content_id][fields["point"]]
             # A probability chunk reads its arrays through the Run's store on
-            # first use; nothing is hydrated here.
+            # first use. Nothing is hydrated here.
             chunk = ObservationChunk.model_validate(dict(fields, observation=observation))._attach_store(self.artifacts)
             state["receipts"][chunk.acquisition_key] = chunk
             if chunk.point is None:
@@ -2068,7 +2081,7 @@ class Run:
         return save(self, path=path)
 
     def release_native(self):
-        """Release the in-memory circuits of preparations that are fully collected, idle and saved as QPY.
+        """Release the in-memory Qiskit circuits whose results the Method has all collected, that are not in use and that are saved as QPY.
 
         For a long Run with a folder, this frees the Qiskit circuits that are
         no longer needed. The preparation records and the order of the
@@ -2183,8 +2196,8 @@ class PreparedHandle:
             circuit (QuantumCircuit): The copy.
 
         Raises:
-            ValueError: If this preparation is a host computation without a
-                circuit.
+            ValueError: If this preparation is a classical computation
+                (`execution="host_kernel"`) without a circuit.
         """
         self._restore_native()
         if self.record.execution != "quantum_circuit" or self._native.circuit is None:
@@ -2192,13 +2205,14 @@ class PreparedHandle:
         return self._native.circuit.copy()
 
     def inspect_resources(self, *, transpile_options=None, max_operations=100_000, max_bytes=DEFAULT_MAX_BYTES):
-        """Count the operations of the prepared circuit, without copying or running it.
+        """Count the operations of the prepared circuit, without changing or running it.
 
         Each top-level instruction of the circuit counts once under its
         operation name, measurements, barriers, simulator saves, `Clifford`
         objects and user-defined gates included, and names are reported as
-        they are. Gate definitions and control-flow bodies are not expanded. With `transpile_options`, a transpiled copy is
-        counted instead, with the simulator saves removed first. The circuit
+        they are. Gate definitions and control-flow bodies are not expanded.
+        With `transpile_options`, a transpiled copy is counted instead, with
+        the simulator saves removed first. The circuit
         that executes is never changed or run.
 
         Args:
@@ -2211,8 +2225,9 @@ class PreparedHandle:
                 does not bound the compiler's own memory.
 
         Returns:
-            inventory (dict): `circuit`, `basis`, `compiler` (Qiskit version
-                and options, or `None`), `operations` (count by name),
+            inventory (dict): `circuit` (a text description of the counted
+                circuit), `basis` (the gate basis label), `compiler` (Qiskit
+                version and options, or `None`), `operations` (count by name),
                 `total_operations`, `num_qubits`, `num_clbits` and `depth`
                 (Qiskit's default depth, which skips directives such as
                 barriers and simulator saves).
@@ -2264,8 +2279,8 @@ class Prepared:
 
         The index of a circuit is the one that `circuit`, `setting_names` and
         `inspect_resources` use. Each access copies every circuit, and
-        `circuit(index)` copies one. Host computations have no circuit and
-        are skipped.
+        `circuit(index)` copies one. Classical computations that the Method
+        runs on this computer have no circuit and are skipped.
         """
         return tuple(handle.inspect_circuit() for handle in self._circuit_handles())
 
@@ -2312,13 +2327,14 @@ class Prepared:
         return tuple(handle.realization.experiment for handle in self._circuit_handles())
 
     def inspect_resources(self, *, index=0, transpile_options=None, max_operations=100_000, max_bytes=DEFAULT_MAX_BYTES):
-        """Count the operations of one prepared circuit, without copying or running it.
+        """Count the operations of one prepared circuit, without changing or running it.
 
         Each top-level instruction of the circuit counts once under its
         operation name, measurements, barriers, simulator saves, `Clifford`
         objects and user-defined gates included, and names are reported as
-        they are. Gate definitions and control-flow bodies are not expanded. With `transpile_options`, a transpiled copy is
-        counted instead, with the simulator saves removed first. The circuit
+        they are. Gate definitions and control-flow bodies are not expanded.
+        With `transpile_options`, a transpiled copy is counted instead, with
+        the simulator saves removed first. The circuit
         that executes is never changed or run.
 
         Args:
@@ -2332,8 +2348,9 @@ class Prepared:
                 does not bound the compiler's own memory.
 
         Returns:
-            inventory (dict): `circuit`, `basis`, `compiler` (Qiskit version
-                and options, or `None`), `operations` (count by name),
+            inventory (dict): `circuit` (a text description of the counted
+                circuit), `basis` (the gate basis label), `compiler` (Qiskit
+                version and options, or `None`), `operations` (count by name),
                 `total_operations`, `num_qubits`, `num_clbits` and `depth`
                 (Qiskit's default depth, which skips directives such as
                 barriers and simulator saves).
@@ -2441,7 +2458,7 @@ def _selected_readout(plan, point, experiment, construction):
     return admission, qwidths, cwidths, setting, observation, header
 
 
-def prepare_experiment(point, *, run, runtime=None, reduction_allowance=None, held=None):
+def prepare_experiment(point, *, run, runtime=None, held=None):
     """Prepare one actual point, saving its backend draw before native work.
 
     Admission runs from cheap to expensive, so an unsupported request fails before
@@ -2450,18 +2467,15 @@ def prepare_experiment(point, *, run, runtime=None, reduction_allowance=None, he
     state preparation of the Plan, amplitude materialization size and the
     cumulative circuit cap, in that order, except that a trajectory's target
     support is checked before its readout shape and metadata allowance, so a
-    backend that cannot execute it refuses naming the capability. A trajectory's selected IR must
-    be one coherent evolution along its executed prefix
-    (``admit_pure_trajectory`` with ``_selected_body_issues``), checked
-    before its reductions. A trajectory also admits the
-    registered host work of its reductions against ``reduction_allowance``,
-    the calling Method's remaining work allowance, and the saved simulator
-    states of its amplitude and reduction points (``_admit_trajectory_work``).
-    A caller that passes no allowance, such as the inherited static path
-    (``Method.prepare`` and ``Method.execute``), receives it from the Method's
-    ``reduction_allowance`` hook, which also runs the Method's own gate on
-    its private reduction workspace (``_method_reduction_allowance``).
-    Then,
+    backend that cannot execute it refuses naming the capability. A
+    trajectory's selected IR must be one coherent evolution along its
+    executed prefix (``admit_pure_trajectory`` with
+    ``_selected_body_issues``), checked before its reductions. A trajectory
+    also admits the registered host work of its reductions against the
+    allowance of the Method's ``reduction_allowance`` hook, which first runs
+    the Method's own gate on its private reduction workspace
+    (``_method_reduction_allowance``), and the saved simulator states of its
+    amplitude and reduction points (``_admit_trajectory_work``). Then,
     unless the caller supplies ``runtime``, the runtime seed is drawn, and the
     preparation charge commits with the RNG position. Only after that commit does
     lowering start, reusing the Run's definition cache, and the backend prepares
@@ -2516,19 +2530,16 @@ def prepare_experiment(point, *, run, runtime=None, reduction_allowance=None, he
             _refuse_unsupported_target(run, observation)
         if observation.kind == "trajectory":
             # The selected IR must be one coherent evolution along the
-            # executed prefix; the adapter checks its own facts later.
+            # executed prefix. The adapter checks its own facts later.
             try:
                 selected_length, body_issue, view_issues = _selected_body_issues(construction, admission, observation,
                                                                                  dict(qwidths))
             except AdmissionStepsExceeded as error:
                 raise _named_admission_refusal(plan, error) from error
             admit_pure_trajectory(observation, backend_name="selected IR", body_length=selected_length,
-                classical_width=cwidth, noise_bound=False, pure_state_execution=True, body_issue=body_issue,
-                view_issues=view_issues, phase_faithful=True,
-                require_reducer=lambda point, *, state_kind, backend: None)
-            if reduction_allowance is None:
-                reduction_allowance = _method_reduction_allowance(run, point, observation, width)
-            _admit_trajectory_work(observation, width=width, run=run, allowance=reduction_allowance)
+                classical_width=cwidth, body_issue=body_issue, view_issues=view_issues)
+            _admit_trajectory_work(observation, width=width, run=run,
+                                   allowance=_method_reduction_allowance(run, point, observation, width))
             # A view's tail and inverse are definitions of the selected Program.
             defined = {item.id for item in construction.program.definitions}
             for scheduled in observation.positions:
@@ -2620,7 +2631,7 @@ def prepare_experiment(point, *, run, runtime=None, reduction_allowance=None, he
                         tails.append(lowered)
                     if (definition, scheduled.view.wires) not in checked:
                         # A single-call tail acts on its ports' wires in port
-                        # order, which must be the declared order; a longer
+                        # order, which must be the declared order. A longer
                         # tail acts only on declared wires.
                         circuit = views[definition]
                         calls = [tuple(circuit.find_bit(qubit).index for qubit in item.qubits) for item in circuit.data]
@@ -2637,7 +2648,8 @@ def prepare_experiment(point, *, run, runtime=None, reduction_allowance=None, he
         snapshot = str(uuid4())
         callback = getattr(run.backend, "prepare_local", None) or run.backend.prepare
         # The template hook (backends/connection.py module docstring) reaches
-        # only an adapter that declares it, so other adapters prepare as before.
+        # only an adapter that declares ``prepares_from_templates``, so other
+        # adapters receive no template arguments.
         hook = {}
         if getattr(run.backend, "prepares_from_templates", False):
             hook = dict(construction_id=construction.content_id, backend_context=state["backend_context"],
@@ -2729,7 +2741,6 @@ def _finish_native_preparation(preparation, *, run, reservation, fields, items, 
         run._state["workflow_items"][current] = item
     run._state["prepared_artifacts"][record.content_id] = record
     run._state["local_prepared_ids"].append(record.content_id)
-    run._state["handles"][record.content_id] = handle
     run._state["preparation_charges"][reservation.preparation_id] = reservation.revise(prepared_id=record.content_id)
     run._state["construction_work"] += record.construction_work_reserved
     if remote is not None:
@@ -2742,7 +2753,7 @@ def _publishes_arrays(observation):
     """Whether an acquisition of ``observation`` publishes binary arrays with its outcome.
 
     Amplitude and probability readouts do, and so does a trajectory with an
-    amplitude or probability point; their arrays commit in the outcome's
+    amplitude or probability point. Their arrays commit in the outcome's
     transaction, so the acquisition opens a publication batch first.
     """
     kinds = {"amplitudes", "probabilities"}
@@ -2837,7 +2848,7 @@ def _statistic_stride(kind, *, key_width, shots=0, max_bytes=DEFAULT_MAX_BYTES):
 
 
 def _admit_readout(observation, *, width, classical_width, run, header=None):
-    """Admit a readout's items and payload bytes before native preparation; return its item count.
+    """Admit a readout's items and payload bytes before native preparation, and return its item count.
 
     The NWQLib admission law: admission precedes native
     construction and submission. Subtract known declaration and metadata
@@ -2848,10 +2859,10 @@ def _admit_readout(observation, *, width, classical_width, run, header=None):
     ``1 << q_k``. Check heterogeneous additions against remaining capacity and
     apply the corresponding division check before multiplying by the selected
     byte stride. Unresolved executable dimensions reject rather than count as
-    zero. Pauli and count values use the existing conservative JSON prototype
-    envelope, and probabilities the eight bytes per possible outcome of their
-    binary array. Existing amplitude artifacts keep their own binary payload and
-    scalar-metadata accounting. An unsupported reduction or a reduction with
+    zero. Pauli and count values use the conservative JSON prototype envelope
+    of ``_statistic_stride``, and probabilities the eight bytes per possible
+    outcome of their binary array. Amplitude artifacts keep their own binary
+    payload and scalar-metadata accounting. An unsupported reduction or a reduction with
     unresolved output shape fails before native preparation.
 
     For a single-endpoint readout the declaration reserve is the
@@ -2872,14 +2883,14 @@ def _admit_readout(observation, *, width, classical_width, run, header=None):
     ``_trajectory_value_bounds``). ``header`` holds the lowering-independent
     selected context (experiment, setting, bindings, Plan and realization
     identities) and the logical layouts derived from the resolved registers
-    (``_prospective_point_headers``). The Run's identity, the known encoded
+    (``_point_chunk_headers``). The Run's identity, the known encoded
     lengths of the attempt UUID and of a SHA-256 content identity, the
     trajectory identity, each point's slot, explicit position and
     acquisition source join it. Only the end shorthand is resolved after
-    lowering; it is priced at its shortest form, so this gate charges no more
+    lowering. It is priced at its shortest form, so this gate charges no more
     than the final one, and the completed receipt supplies the final
-    submission-time bound (``readout_bytes``). Without ``header`` (restoration), the point headers
-    are not charged. The early condition ``M_min(K) <= M`` applies as well,
+    submission-time bound (``readout_bytes``). Without ``header``
+    (restoration), the point headers are not charged. The early condition ``M_min(K) <= M`` applies as well,
     except to a detached NWQ-Sim or NWQ-Sim Slurm restoration. A fetch's
     outcome transaction credits the actual stored event and status rows
     when published, and a new submission from a restored handle is admitted
@@ -2910,7 +2921,7 @@ def _admit_readout(observation, *, width, classical_width, run, header=None):
         if kind == "amplitudes":
             stride = 16
         elif kind == "estimated_observable":
-            stride = 1  # One provider estimate; its size is completion metadata.
+            stride = 1  # One provider estimate. Its size is completion metadata.
         else:
             key_width = {"pauli_expectation": width, "probabilities": len(observation.qubits),
                          "counts": classical_width}.get(kind, 0)
@@ -2936,11 +2947,16 @@ def _admit_readout(observation, *, width, classical_width, run, header=None):
     # only after native preparation are charged by readout_bytes at submission.
     common = per_point = None
     if header is not None:
-        common, per_point = _prospective_point_headers(observation, header, run)
+        backend = getattr(run, "backend", None)
+        version = getattr(backend, "native_target_version", None)
+        common, per_point = _point_chunk_headers(
+            observation, header, run_id=run.run_id, prepared_id=_CONTENT_ID_PROTOTYPE, attempt=_UUID_PROTOTYPE,
+            boundaries=tuple(0 if point.position is None else point.position for point in observation.positions),
+            backend_kind=getattr(backend, "kind", "x"), target_version=version() if callable(version) else "x")
     # The receipt's declaration field: key, colon, separating comma and value.
     receipt = _json_bound("observation", limit) + 2 + declaration
-    # Preparation checks against the Run's remaining stored-data capacity;
-    # restoration, whose receipt is already stored, against the cap.
+    # Preparation checks against the Run's remaining stored-data capacity,
+    # and restoration, whose receipt is already stored, against the cap.
     available = limit if header is None else run._available_data_bytes()
     declarations, headers, minimum = _trajectory_fixed_bounds(observation, common=common, per_point=per_point,
                                                               max_bytes=limit, job_length=_job_length(run),
@@ -2964,9 +2980,7 @@ def _admit_readout(observation, *, width, classical_width, run, header=None):
     return sum(point_items(point, width=width) for point in observation.positions)
 
 
-def admit_pure_trajectory(spec, *, backend_name, body_length, classical_width,
-                          noise_bound, pure_state_execution, body_issue,
-                          view_issues, phase_faithful, require_reducer):
+def admit_pure_trajectory(spec, *, backend_name, body_length, classical_width, body_issue, view_issues):
     """Admit a trajectory as one deterministic, noiseless coherent evolution of a pure state.
 
     The selected contract is a normalized pure initial state with fixed,
@@ -2997,8 +3011,6 @@ def admit_pure_trajectory(spec, *, backend_name, body_length, classical_width,
     - Unknown or unsupported simulator method or opaque instruction
       semantics: refuse unless the adapter establishes the pure-state,
       non-destructive semantics for this selected operation/readout.
-    - Registered reducer with only a shape function, no state-domain or
-      execution support: refuse before native work.
 
     This is a sufficient structural admission rule for the selected
     contract, not a claim that every listed operation always mixes every
@@ -3006,10 +3018,8 @@ def admit_pure_trajectory(spec, *, backend_name, body_length, classical_width,
     point, its preparation, and its executed views affect these
     quantities. ``body_issue`` is the first incompatible operation on the
     executed prefix, including hidden definitions. ``view_issues`` is
-    computed during the same view traversal. The reducer callback performs
-    the registered parameter/shape and backend/state-domain checks.
-    Refusals name the first body/view feature or effective backend
-    configuration that violates the contract.
+    computed during the same view traversal. Refusals name the first
+    body/view feature that violates the contract.
 
     The selected-IR side (``_selected_body_issues``) calls it before
     lowering with the facts of the bound IR. The adapter-side facts (noise
@@ -3022,10 +3032,6 @@ def admit_pure_trajectory(spec, *, backend_name, body_length, classical_width,
     if spec.shots != 0 or spec.population != "unconditional" or classical_width:
         raise ValueError("trajectory requires zero shots and an unconditional coherent body without measurement registers")
     boundaries = spec.boundaries(body_length)
-    if noise_bound or not pure_state_execution:
-        raise ValueError(
-            f"{backend_name} trajectory requires deterministic noiseless pure-state execution"
-        )
     if body_issue is not None:
         raise ValueError(
             f"{backend_name} trajectory cannot observe the selected pure prefix: {body_issue}"
@@ -3033,10 +3039,6 @@ def admit_pure_trajectory(spec, *, backend_name, body_length, classical_width,
     for point, boundary in zip(spec.positions, boundaries, strict=True):
         if point.id in view_issues:
             raise ValueError(f"trajectory point {point.id!r} has an unsupported coherent view: {view_issues[point.id]}")
-        if point.kind == "amplitudes" and not phase_faithful:
-            raise ValueError(f"{backend_name} cannot preserve the amplitude phase at trajectory point {point.id!r}")
-        if point.kind == "reduction":
-            require_reducer(point, state_kind="pure", backend=backend_name)
 
 
 def _selected_body_issues(construction, admission, observation, widths):
@@ -3131,13 +3133,13 @@ def _method_reduction_allowance(run, point, observation, width):
     refuse the point, and then returns the remaining allowance in the unit
     of the registered ``work`` functions. ``admit_reductions`` checks the
     summed registered work against it. The call happens before native
-    work: before the preparation charge in ``prepare_experiment`` when its
-    caller passes no allowance, and again when the static path hands an
-    existing preparation, live or saved by an earlier process, to
-    submission (``_prepare_static_item``), so a resumed static Run is
-    admitted under its current ledger and limits. The hook can therefore
-    be asked more than once for one point; it reads the Method's ledger
-    and does not change it. Only a trajectory with a reduction point asks.
+    work: before the preparation charge in ``prepare_experiment``, and
+    again when the static path hands an existing preparation, live or saved
+    by an earlier process, to submission (``_prepare_static_item``), so a
+    resumed static Run is admitted under its current ledger and limits. The
+    hook can therefore be asked more than once for one point. It reads the
+    Method's ledger and does not change it. Only a trajectory with a
+    reduction point asks.
     A Method without the hook supplies no allowance, and
     ``admit_reductions`` then refuses its reductions.
     """
@@ -3162,11 +3164,12 @@ def _admit_trajectory_work(observation, *, width, run, allowance):
     reservation: the registry's shape, work and execution functions are.
 
     Saved buffers: a backend with ``admit_trajectory_buffers`` (Aer) admits
-    the live state, every retained save (probability marginals, saved
+    the live state, every kept save (probability marginals, saved
     expectations and states) and its transient marginal workspace against
-    ``simulator_memory_mb``; otherwise the saved states are checked here. An
-    amplitude or reduction point saves the complex128 simulator state, and a saved state costs ``16*2**w`` bytes per position,
-    in addition to the live simulator state. Standard Aer saves accumulate
+    ``simulator_memory_mb``. Otherwise the saved states are checked here. An
+    amplitude or reduction point saves the complex128 simulator state, and a
+    saved state costs ``16*2**w`` bytes per position, in addition to the live
+    simulator state. Standard Aer saves accumulate
     results until job completion, so reducing them afterwards does not reduce
     that peak. The simultaneous footprint of ``S`` saved states and the live
     state, ``(1+S)*16*2**w`` bytes for the full native width ``w``, must fit
@@ -3183,7 +3186,7 @@ def _admit_trajectory_work(observation, *, width, run, allowance):
 
     admit_reductions(observation, width=width, allowance=allowance)
     # A backend that executes trajectories admits its own simulation-phase
-    # arrays (AerBackend.admit_trajectory_buffers: live state, retained
+    # arrays (AerBackend.admit_trajectory_buffers: live state, kept
     # saves, marginal workspace), also when no state is saved.
     admit = getattr(run.backend, "admit_trajectory_buffers", None)
     if admit is not None:
@@ -3251,13 +3254,13 @@ def trajectory_reservation(declarations, headers, values, *, metadata_bytes, ava
 
     - ``J_T`` (``new_receipt_bytes``): bound of the full trajectory
       declaration in its receipt, including its ``observation`` field
-      envelope, charged when that receipt is first stored;
+      envelope, charged when that receipt is first stored.
     - ``D_k`` (``declarations``): ``J({"observation": S_k})`` for the point's
-      one-point spec ``S_k``;
+      one-point spec ``S_k``.
     - ``H_k`` (``headers``): bound of that chunk's known fields and its
-      funded probability record and net publication JSON, once per point;
+      funded probability record and net publication JSON, once per point.
     - ``V_k`` (``values``): worst-case value payload of the actual
-      representation, excluding the fields in ``D_k`` or ``H_k``;
+      representation, excluding the fields in ``D_k`` or ``H_k``.
     - ``M`` (``metadata_bytes``): ``max_completion_metadata_bytes``, once per
       acquisition. It funds the variable remainder ``J(U_k)`` of every point
       chunk and the net other completion rows of the acquisition.
@@ -3289,9 +3292,8 @@ def trajectory_reservation(declarations, headers, values, *, metadata_bytes, ava
     (``_completion_minimum``). Each amount is compared with the remaining bytes
     before it is added, so no product is formed beyond the available budget.
 
-    Source: the NWQLib trajectory admission derivation, with the refusal
-    messages naming the point, the counted, requested and remaining bytes
-    and the limit.
+    The derivation is given above. The refusal messages name the point, the
+    counted, requested and remaining bytes and the limit.
 
     Args:
         declarations: ``D_k`` per point, in schedule order.
@@ -3331,47 +3333,6 @@ def trajectory_reservation(declarations, headers, values, *, metadata_bytes, ava
     return total
 
 
-def _prospective_point_headers(observation, header, run):
-    """The point-chunk header maps known before lowering, as ``(common, per_point)``.
-
-    They mirror ``_point_chunk_headers``, which the submission gate prices
-    from the stored receipt. ``header`` holds the lowering-independent
-    selected context (experiment, setting, bindings, Plan and realization
-    identities) and the logical layouts derived from the resolved registers
-    (``quantum_layout``, ``classical_layout``). The Run's identity, the
-    known encoded lengths of the attempt UUID and of a SHA-256 content
-    identity, the trajectory identity, each point's slot, explicit position
-    and acquisition source join it. The source's target version is the
-    adapter's (``native_target_version``), else its shortest legal text. An
-    end-shorthand boundary is resolved after lowering, so zero, its shortest
-    decimal form, stands for it; every other field equals its submission-time
-    value.
-    """
-    fields = dict(header)
-    classical = fields.pop("classical_layout")
-    common = dict(fields, schema_version=3, parent_id=None, run_id=run.run_id, execution="quantum_circuit",
-                  prepared_id=_CONTENT_ID_PROTOTYPE, attempt=_UUID_PROTOTYPE, population="unconditional",
-                  returned_shots=None, trajectories=1, selected_kernel_id=None, applications=(),
-                  trajectory_id=observation.content_id)
-    target_version = getattr(getattr(run, "backend", None), "native_target_version", None)
-    target_version = target_version() if callable(target_version) else "x"
-    kind = getattr(getattr(run, "backend", None), "kind", "x")
-    per_point = []
-    for point in observation.positions:
-        key = point_chunk_key("0", point.id)
-        values = dict(chunk=key, point=point.id, boundary=0 if point.position is None else point.position)
-        if point.kind == "amplitudes":
-            values.update(classical_layout=(), source=point.amplitudes.source)
-        else:
-            values.update(classical_layout=classical, physical_scale=None, physical_scale_unavailable=None,
-                          artifacts=(), unavailable=(),
-                          source=Source(name=f"{kind} acquisition", version=target_version,
-                                        domain="backend observation",
-                                        reference=f"{run.run_id}/{_UUID_PROTOTYPE}/{key}"))
-        per_point.append(values)
-    return common, per_point
-
-
 def _register_layout(widths):
     """Logical register maps of consecutive bits for ``(name, width)`` pairs, zero-width registers omitted.
 
@@ -3386,41 +3347,53 @@ def _register_layout(widths):
     return tuple(layout)
 
 
-def _point_chunk_headers(prepared, *, run_id, attempt, backend_kind, result_key="0"):
-    """The fixed fields of the point chunks of one trajectory acquisition, as ``(common, per_point)``.
+def _point_chunk_headers(observation, header, *, run_id, prepared_id, attempt, boundaries, backend_kind,
+                         target_version, result_key="0"):
+    """Return the fixed point-chunk fields as ``(common, per_point)``.
 
-    ``common`` holds the fields every point chunk shares and ``per_point[k]``
-    the fields of point ``k``: its slot, point ID, resolved boundary,
-    classical layout and source, and for a point other than an amplitude
-    point its absent scale, explanation and arrays. ``_trajectory_chunks``
-    builds each chunk from these maps and checks the published chunk against
-    them, and ``readout_bytes`` prices them as ``H_k``, so the reserved header
-    is the header that publication stores. The Run generates the run and
-    attempt UUIDs, and the other values come from the receipt and the
-    prepared point. A point chunk's remaining fields are its declaration and
-    its variable fields (``_point_variable_fields``).
+    ``header`` supplies the selected identities, experiment, setting,
+    bindings and logical layouts. Before lowering, callers supply the
+    encoded-length identity prototypes, zero for an unresolved end boundary,
+    and the adapter's target version or its shortest legal text. Submission
+    and publication supply the receipt's identities, boundaries and version.
+
+    ``readout_bytes`` prices these maps in ``H_k`` and ``_trajectory_chunks``
+    uses them when publishing each point. The declaration and variable fields
+    remain separate. Amplitude points keep their declared source and an empty
+    classical layout.
+    """
+    fields = dict(header)
+    classical = fields.pop("classical_layout")
+    common = dict(fields, schema_version=3, parent_id=None, run_id=run_id, execution="quantum_circuit",
+                  prepared_id=prepared_id, attempt=attempt, population="unconditional", returned_shots=None,
+                  trajectories=1, selected_kernel_id=None, applications=(), trajectory_id=observation.content_id)
+    per_point = []
+    for point, boundary in zip(observation.positions, boundaries, strict=True):
+        key = point_chunk_key(result_key, point.id)
+        values = dict(chunk=key, point=point.id, boundary=boundary)
+        if point.kind == "amplitudes":
+            values.update(classical_layout=(), source=point.amplitudes.source)
+        else:
+            values.update(classical_layout=classical, physical_scale=None, physical_scale_unavailable=None,
+                          artifacts=(), unavailable=(),
+                          source=Source(name=f"{backend_kind} acquisition", version=target_version,
+                                        domain="backend observation", reference=f"{run_id}/{attempt}/{key}"))
+        per_point.append(values)
+    return common, per_point
+
+
+def _receipt_header(prepared):
+    """The ``header`` of a prepared point read from its receipt, for its chunk-field and metadata laws.
+
+    It holds the same fields that ``_selected_readout`` derives before
+    lowering, so submission and publication price and store the receipt's
+    values.
     """
     record = prepared.record
-    spec = record.observation
-    common = dict(schema_version=3, parent_id=None, run_id=run_id, execution="quantum_circuit",
-                  plan_id=record.plan_id, realization_id=prepared.realization.content_id,
-                  prepared_id=record.content_id, experiment=prepared.realization.experiment,
-                  setting=prepared._setting, bindings=prepared._bindings, quantum_layout=record.quantum_layout,
-                  attempt=attempt, population="unconditional", returned_shots=None, trajectories=1,
-                  selected_kernel_id=None, applications=(), trajectory_id=spec.content_id)
-    per_point = []
-    for point, boundary in zip(spec.positions, record.boundaries, strict=True):
-        key = point_chunk_key(result_key, point.id)
-        fields = dict(chunk=key, point=point.id, boundary=boundary)
-        if point.kind == "amplitudes":
-            fields.update(classical_layout=(), source=point.amplitudes.source)
-        else:
-            fields.update(classical_layout=record.classical_layout, physical_scale=None,
-                          physical_scale_unavailable=None, artifacts=(), unavailable=(),
-                          source=Source(name=f"{backend_kind} acquisition", version=record.target.version,
-                                        domain="backend observation", reference=f"{run_id}/{attempt}/{key}"))
-        per_point.append(fields)
-    return common, per_point
+    return dict(plan_id=record.plan_id, realization_id=prepared.realization.content_id,
+                experiment=prepared.realization.experiment, setting=prepared._setting,
+                bindings=prepared._bindings, quantum_layout=record.quantum_layout,
+                classical_layout=record.classical_layout)
 
 
 def _job_length(run):
@@ -3679,12 +3652,14 @@ def _scalar_endpoint_metadata(observation, header, *, run, max_bytes,
 
         G_counts = G_scalar + max(0, digits(shots) - 4)
 
-    is sufficient even when the returned-shot field may remain null; on the
+    is sufficient even when the returned-shot field may remain null. On the
     successful counts path it is the tighter ``G_scalar + digits(shots) - 4``,
     which this function uses. The chunk also holds ``returned_shots``, priced
     at J(shots) for the successful counts-only domain. Counts have
-    ``trajectories=None``; exact Pauli scalars have ``trajectories=1`` and
-    ``returned_shots=None``. For the RFE Plan the difference between a
+    ``trajectories=None``. Exact Pauli scalars have ``trajectories=1`` and
+    ``returned_shots=None``. For the RFE Plan of the ``rfe`` case of
+    ``tests/test_observation_schedule.py::test_static_metadata_check_names_the_largest_setting_requirement``,
+    the difference between a
     three-digit and a four-digit (pooled, 1,200-shot) setting is exactly these
     two returned-shot occurrences, one byte each, so its allowance grows from
     2,079 to 2,081.
@@ -3693,11 +3668,10 @@ def _scalar_endpoint_metadata(observation, header, *, run, max_bytes,
     Source and job domains. A detached adapter needs its own event
     returned-shot delta added to its completion-growth owner, and unpriced
     backend text or provider estimate records are not bounded by it, so the
-    callers apply it on Aer only (``_known_endpoint_metadata``). Source: the
-    NWQLib accounting derivation for counts and exact scalar completion
-    metadata, measured on an exact Expectation (2,078 bytes, completed at that
-    value) and the 92-setting RFE Plan (2,079 or 2,081 by pooled shots;
-    maximum actual charge 2,081).
+    callers apply it on Aer only (``_known_endpoint_metadata``). The
+    derivation is given above. Its allowances were measured on an exact
+    Expectation (2,078 bytes, completed at that value) and the 92-setting RFE
+    Plan (2,079 or 2,081 by pooled shots, maximum actual charge 2,081).
     """
     from nwqlib._run_journal import _json_bound
 
@@ -3738,8 +3712,8 @@ def _amplitude_endpoint_metadata(observation, header, *, run, max_bytes):
     For each legal amplitude outcome o, U_o is the full chunk remainder:
     scalar mass summaries, physical scale and either the array manifest or
     the declared unavailability record. The successful-array branch also adds
-    ``J(publication_completed) - J(publication_reserved) + J(payload_reference)``;
-    the reserved publication row holds only integers and strings, so its J
+    ``J(publication_completed) - J(publication_reserved) + J(payload_reference)``.
+    The reserved publication row holds only integers and strings, so its J
     equals its stored size. The sufficient allowance is the maximum of these
     branch totals plus G_max (``_completion_minimum``). The binary array bytes
     stay in the separate data reservation.
@@ -3752,15 +3726,15 @@ def _amplitude_endpoint_metadata(observation, header, *, run, max_bytes):
     the composed exponent, covering subnormals and normalization, and a
     negative prototype at that magnitude bounds its decimal length. The two
     unavailable-output reasons and the scalar-mass unavailability message come
-    from the existing producer; no provider text is bounded by an invented
+    from those two functions. No provider text is bounded by an invented
     length.
 
     The prototype identities have the fixed lengths of the actual prepared
     and attempt identities. A trajectory amplitude point uses its own header
-    split instead. Source: the NWQLib accounting derivation for amplitude
-    endpoint completion metadata, measured on the exact default QLS (four
-    qubits, admitted at 5,316 bytes covering its 5,264-byte charge) and LCHS
-    (nine qubits, admitted at 5,132 covering 5,128) Plans.
+    split instead. The derivation is given above. Its allowance was measured
+    on the exact default QLS (four qubits, admitted at 5,316 bytes covering
+    its 5,264-byte charge) and LCHS (nine qubits, admitted at 5,132 covering
+    5,128) Plans.
     """
     from nwqlib._run_journal import _json_bound
     from nwqlib.artifacts import ArtifactManifest, UnavailableOutput
@@ -3829,7 +3803,7 @@ def _known_endpoint_metadata(observation, header, *, run, max_bytes, **identitie
     are sufficient for the synchronous Aer lifecycle only, so another backend
     or readout kind returns None and is checked at publication. ``identities``
     are the actual prepared and attempt identities, result key, target version
-    and population of a completed receipt; the amplitude law uses the
+    and population of a completed receipt. The amplitude law uses the
     fixed-length prototypes and the fresh result key ``"0"`` of a synchronous
     acquisition.
     """
@@ -3888,17 +3862,19 @@ def _trajectory_value_bounds(observation, *, width, capacity, max_bytes, source=
        bound ``e`` has bound ``n + 1 + n*e`` (``_repeated_bound``), plus one
        separating comma per component.
 
-    The published array-value law is ``8*sum(unindexed real L) +
-    16*sum(complex L) + 8*sum(indexed (W+1)*s)``. It does not include
-    declarations or headers, and it does not imply that a scalar stored as
-    JSON occupies eight stored bytes. ``point_items`` supplies ``L_k``, which
-    for a probability point is ``2**q_k``, independently of its eventual
-    sparse stored count. With a ``capacity`` (the pre-lowering gate), each
-    point's item capacity is ``capacity`` divided by its stride, checked
-    before ``1 << q_k`` is formed, and a reduction output larger than
-    ``capacity`` refuses before its prototype is counted. Source: the NWQLib
-    trajectory admission derivation (its value laws) and the NWQLib
-    readout-array derivation (the payload law shared with the array readout).
+    Only probability and amplitude points publish binary arrays: a
+    probability point reserves eight bytes per outcome (law 2) and an
+    amplitude point 16 bytes per complex128 value (law 3). Pauli and
+    reduction values are JSON records (laws 1 and 4). These laws do not
+    include declarations or headers, and they do not imply that a scalar
+    stored as JSON occupies eight stored bytes. ``point_items`` supplies
+    ``L_k``, which for a probability point is ``2**q_k``, independently of
+    its eventual sparse stored count. With a ``capacity`` (the pre-lowering
+    gate), each point's item capacity is ``capacity`` divided by its stride,
+    checked before ``1 << q_k`` is formed, and a reduction output larger than
+    ``capacity`` refuses before its prototype is counted. The laws are given
+    above, and ``docs/development/execution.md`` (Readout reservation) gives
+    the reservation of each readout kind.
     """
     from nwqlib._run_journal import _json_bound
     from nwqlib.core.planning import point_items, reducer_outputs
@@ -3973,12 +3949,17 @@ def readout_bytes(prepared, *, metadata_bytes, max_bytes=DEFAULT_MAX_BYTES, run=
     """
     from nwqlib._run_journal import _json_bound
 
-    spec = prepared.record.observation
+    record = prepared.record
+    spec = record.observation
+    # Only the metadata checks against a Run read the receipt's header.
+    header = None if run is None else _receipt_header(prepared)
     if spec.kind == "trajectory":
         if run is None or attempt is None:
             raise ValueError("a trajectory reservation needs its Run and attempt, whose values its point chunks hold")
-        common, per_point = _point_chunk_headers(prepared, run_id=run.run_id, attempt=attempt,
-                                                 backend_kind=run.backend.kind, result_key=result_key)
+        common, per_point = _point_chunk_headers(spec, header, run_id=run.run_id, prepared_id=record.content_id,
+                                                 attempt=attempt, boundaries=record.boundaries,
+                                                 backend_kind=run.backend.kind, target_version=record.target.version,
+                                                 result_key=result_key)
         declarations, headers, minimum = _trajectory_fixed_bounds(spec, common=common, per_point=per_point,
                                                                   max_bytes=max_bytes, job_length=_job_length(run),
                                                                   completion_minimum=_completion_minimum(run, max_bytes))
@@ -3998,10 +3979,6 @@ def readout_bytes(prepared, *, metadata_bytes, max_bytes=DEFAULT_MAX_BYTES, run=
     if run is not None and spec.kind in {"counts", "pauli_expectation", "amplitudes"}:
         # The counts, exact Pauli scalar and amplitude laws repeat the
         # preparation-time check with the completed receipt's identities.
-        header = dict(plan_id=prepared.record.plan_id, realization_id=prepared.realization.content_id,
-                      experiment=prepared.realization.experiment, setting=prepared._setting,
-                      bindings=prepared._bindings, quantum_layout=prepared.record.quantum_layout,
-                      classical_layout=prepared.record.classical_layout)
         identities = {} if spec.kind == "amplitudes" else dict(
             prepared_id=prepared.record.content_id, attempt=_UUID_PROTOTYPE if attempt is None else attempt,
             result_key=result_key, target_version=prepared.record.target.version,
@@ -4029,10 +4006,6 @@ def readout_bytes(prepared, *, metadata_bytes, max_bytes=DEFAULT_MAX_BYTES, run=
                 + metadata_reservation)
     if spec.kind == "probabilities":
         if run is not None:
-            header = dict(plan_id=prepared.record.plan_id, realization_id=prepared.realization.content_id,
-                          experiment=prepared.realization.experiment, setting=prepared._setting,
-                          bindings=prepared._bindings, quantum_layout=prepared.record.quantum_layout,
-                          classical_layout=prepared.record.classical_layout)
             required = _probability_endpoint_minimum(
                 spec, header, run=run, max_bytes=max_bytes, prepared_id=prepared.record.content_id,
                 attempt=_UUID_PROTOTYPE if attempt is None else attempt, result_key=result_key,
@@ -4116,7 +4089,7 @@ def _completion_metadata_bound(records, max_bytes):
 
 
 def synchronous_completion_growth(*, provider, timing_reference, job_length, max_bytes,
-                                  event_already_revised=False, native_simulations=None):
+                                  event_already_revised=False):
     """Return ``(minimum, maximum)`` of the net JSON growth of a synchronous acquisition's completion rows.
 
     Trajectory metadata admission includes the minimum point envelopes and
@@ -4124,7 +4097,7 @@ def synchronous_completion_growth(*, provider, timing_reference, job_length, max
     calculation includes revision parents, completion timestamps, the
     observation identity, the job locator and timing evidence, with the
     original stored rows credited once. Fields copied unchanged, including
-    the output reservation, cancel. The minimum is a necessary admission
+    the output reservation, cancel out. The minimum is a necessary admission
     check. Aer admission uses the maximum because its UUID, timestamp and
     completion-field domains establish an upper bound. Variable metadata is
     also checked against the acquisition's allowance when published.
@@ -4137,7 +4110,7 @@ def synchronous_completion_growth(*, provider, timing_reference, job_length, max
     nonnegative (zero for these initial rows, whose field trees hold no
     floats or array encodings). The same keys occur before and after, so
     braces, keys, colons and commas cancel in each difference and only the
-    changed field values remain; the reservation integer cancels for any
+    changed field values remain. The reservation integer cancels for any
     number of digits. The changed fields are the event's parent, status,
     finish time, observation identity and timing, and the submission's
     parent, status, locator, finish time, invocation count, timing and
@@ -4150,12 +4123,10 @@ def synchronous_completion_growth(*, provider, timing_reference, job_length, max
     2*J_t + J_l + 241 = 1099`` and ``G_max = G_min + 14 = 1113`` with
     ``J_t = 322`` and ``J_l = 214``. A forecast revises the event before it
     is stored (``Run._begin_submission``), so its parent contributes nothing
-    (``event_already_revised``). ``native_simulations`` is the completed
-    submission's value: Aer supplies none, and a backend whose value is not
-    established passes the smallest legal count, ``0``, for the minimum.
-    ``job_length`` is an established escaped-size bound for the job
-    identifier, a lower bound for the minimum and an upper bound for the
-    maximum. Aer's ASCII UUID has the same bound in both directions. Source: the NWQLib completion-admission derivation.
+    (``event_already_revised``). ``job_length`` is an established
+    escaped-size bound for the job identifier, a lower bound for the minimum
+    and an upper bound for the maximum. Aer's ASCII UUID has the same bound in
+    both directions. The derivation is given above.
     """
     from nwqlib._run_journal import _json_bound
 
@@ -4175,7 +4146,7 @@ def synchronous_completion_growth(*, provider, timing_reference, job_length, max
         (cid if event_already_revised else None, cid),
         ("reserved", "completed"), (None, time_min), (None, cid), (None, timing),
         (None, cid), ("intent", "completed"), (None, locator), (None, time_min),
-        (None, 1), (None, native_simulations), (None, timing), (False, True),
+        (None, 1), (None, timing), (False, True),
     ]
     minimum = sum(bound(new) - bound(old) for old, new in changes)
     return minimum, minimum + 14
@@ -4200,8 +4171,8 @@ def detached_completion_growth(*, max_bytes, event_already_revised=False):
     independent of the number of trajectory points. It covers a fresh
     successful NWQ-Sim or NWQ-Sim Slurm acquisition with one event, no
     timing evidence and no prior event failure. Recovery must credit its
-    actual stored rows. These are JSON bytes, not process memory.
-    Source: the NWQLib completion-admission derivation.
+    actual stored rows. These are JSON bytes, not process memory. The
+    derivation is given above.
     """
     from nwqlib._run_journal import _json_bound
 
@@ -4233,9 +4204,9 @@ def _completion_minimum(run, max_bytes):
     trajectories and single-endpoint probability readouts alike. It ends
     when a derivation of that backend's completion lifecycle, as for
     ``detached_completion_growth``, establishes the growth of its
-    completion rows.
-    The historical name denotes the required admission allowance supplied
-    to the callers, rather than the lower end of the row-growth range.
+    completion rows. Despite its name, ``_completion_minimum`` returns the
+    upper end of the row-growth range for Aer and NWQ-Sim, the allowance its
+    callers require.
     """
     backend = getattr(run, "backend", None)
     kind = getattr(backend, "kind", None)
@@ -4296,8 +4267,10 @@ def _trajectory_chunks(prepared, result, *, run, attempt, result_key):
     readouts = spec.point_observations()
     if set(returned) != {point.id for point in spec.positions}:
         raise ValueError("trajectory output differs from its declared points")
-    common, per_point = _point_chunk_headers(prepared, run_id=run.run_id, attempt=attempt,
-                                             backend_kind=run.backend.kind, result_key=result_key)
+    common, per_point = _point_chunk_headers(spec, _receipt_header(prepared), run_id=run.run_id,
+                                             prepared_id=record.content_id, attempt=attempt,
+                                             boundaries=record.boundaries, backend_kind=run.backend.kind,
+                                             target_version=record.target.version, result_key=result_key)
     chunks = []
     for point, fields in zip(spec.positions, per_point, strict=True):
         raw = returned[point.id]
@@ -4381,7 +4354,7 @@ def _probability_output(raw, *, width, items):
     from bit-string key to value is the output of adapters that return
     dictionaries and of test backends. The number of entries of a pair or a
     mapping is checked against the selected cardinality ``items`` before
-    any array is built; a dense buffer has exactly ``2**width`` entries,
+    any array is built. A dense buffer has exactly ``2**width`` entries,
     which ``artifacts.probability_readout`` checks, and which also sorts the
     indices of the other forms and chooses the stored encoding.
     """
@@ -4432,8 +4405,8 @@ def _decoded_chunk(prepared, result, *, run, attempt, result_key):
     if len(raw[1] if spec.kind == "counts" and isinstance(raw, tuple) else raw) > prepared._items:
         raise ValueError("backend output exceeds the selected readout cardinality")
     if spec.kind == "counts" and isinstance(raw, tuple):
-        # An indexed pair (indices, integer counts) in the Histogram layout;
-        # counts stay JSON count records, totalled with Python integers.
+        # An indexed pair (indices, integer counts) in the Histogram layout.
+        # Counts stay JSON count records, totalled with Python integers.
         return ObservationChunk.from_histogram(raw, returned_shots=sum(int(count) for count in raw[1]), **fields)
     # Counts and Pauli values enter as field mappings, so the chunk validates
     # each one once instead of validating a built record again.
@@ -4512,7 +4485,7 @@ def _prepare_static_item(plan, run, experiment, *, held=None):
     ``PreparationNotRebuilt``. The item's seed stays in its workflow row.
     The reductions of an existing preparation are admitted again against
     the allowance of the Method's ``reduction_allowance`` hook before it is
-    returned (``_method_reduction_allowance``); a new preparation is
+    returned (``_method_reduction_allowance``). A new preparation is
     admitted inside ``prepare_experiment``.
     ``held`` is the experiment's ``(Experiment, SelectedConstruction)``
     pair when the caller already holds it, which a new preparation reuses.
@@ -4633,7 +4606,7 @@ def prepare_static(plan, *, run, settings="first"):
         try:
             run.backend.target_for(spec)
         except ValueError as error:
-            # A counts readout names its shots per program; any other readout
+            # A counts readout names its shots per program. Any other readout
             # kind names the kind, which is what the target refuses.
             request = (f"{spec.shots} shots per program" if spec.kind == "counts"
                        else f"readout kind {spec.kind!r}")
@@ -4921,9 +4894,10 @@ def _publish_amplitudes(prepared, result, *, run, attempt, result_key="0", point
 
 
 def restore_prepared(prepared_id, *, run, for_submission=False):
-    """Fetch-only restoration never decodes the original native circuit.
+    """Rebuild the handle of a saved preparation from its receipt, without lowering.
 
-    The handle is rebuilt from its saved receipt without lowering. The receipt must
+    A fetch-only handle (``for_submission=False``) reads no saved native
+    payload, so it never decodes the original native circuit. The receipt must
     still match the Plan's selected construction and readout and the Run's backend
     configuration. A fetch-only handle is enough to decode results of a known job.
     A handle for new execution also needs the saved native payload, which a
@@ -5006,7 +4980,7 @@ def submit_detached(prepared, *, run, checkpoint_sequences=None):
     if type(prepared) is not tuple or not prepared or any(type(handle) is not PreparedHandle for handle in prepared):
         raise TypeError("detached submission requires a nonempty tuple of native handles")
     # A trajectory item publishes one chunk per point from its refresh
-    # (_refresh_outcomes); its reservation is the trajectory's readout_bytes.
+    # (_refresh_outcomes). Its reservation is the trajectory's readout_bytes.
     for handle in prepared:
         handle._restore_native()
     if checkpoint_sequences is not None and (len(checkpoint_sequences) != len(prepared)
@@ -5249,7 +5223,7 @@ def _commit_refresh_status(run, submission_id, submission, update):
     revised = submission.revise(status=update.status, provider_status=update.provider_status,
         failure=update.failure, refresh_failure=None, native_simulations=update.native_simulations,
         finished=finished)
-    # A revision records its parent; every other field is compared.
+    # A revision records its parent. Every other field is compared.
     if all(getattr(revised, name) == getattr(stored, name) for name in type(stored).model_fields
            if name != "parent_id"):
         return submission, stored

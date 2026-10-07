@@ -1,4 +1,7 @@
-"""Finite typed expression definitions; exact integer work, never source evaluation."""
+"""Finite typed expression definitions with exact integer work.
+
+No source is ever evaluated.
+"""
 
 from typing import Annotated, Literal
 
@@ -65,7 +68,8 @@ class AdmissionLimits(Record):
             integer the check accepts or computes.
     """
 
-    # See ENGINEERING_CONSTANTS.md: finite planning inventory, not dynamic work limits.
+    # Reasons and revisit conditions: ENGINEERING_CONSTANTS.md, "Shared Program
+    # admission limits". They bound the stored planning inventory, not dynamic work.
     max_definitions: PositiveInt = 16384
     max_depth: Annotated[PositiveInt, Field(le=128)] = 128
     max_steps: PositiveInt = 100000
@@ -177,6 +181,8 @@ class Constant(Record):
 
     Attributes:
         value: Required. An exact integer or a `Float64`.
+        kind: Fixed `"constant"`. Names the expression type in the saved
+            record.
     """
 
     kind: Literal["constant"] = "constant"
@@ -193,6 +199,8 @@ class ParameterRef(Record):
 
     Attributes:
         parameter: Required. Name of a declared parameter.
+        kind: Fixed `"parameter"`. Names the expression type in the saved
+            record.
     """
 
     kind: Literal["parameter"] = "parameter"
@@ -212,6 +220,7 @@ class Binary(Record):
             `"lt"` or `"le"`.
         left: Required. ID of the left operand's expression.
         right: Required. ID of the right operand's expression.
+        kind: Fixed `"binary"`. Names the expression type in the saved record.
     """
 
     kind: Literal["binary"] = "binary"

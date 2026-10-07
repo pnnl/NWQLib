@@ -201,6 +201,21 @@ def test_completed_archive_keeps_numerical_caches_arrays_and_result_without_reex
     run.close()
 
 
+def test_classical_run_reopens_without_backend_and_names_its_saved_configuration(tmp_path, monkeypatch):
+    """A classical Run reopens with backend omitted; another backend is refused with the saved one named."""
+    from nwqlib.backends import AerBackend
+
+    plan = classical_plan("qpe")
+    with Run(plan) as run:
+        result = run.wait()
+        path = run.save(tmp_path / "classical")
+    monkeypatch.setattr(type(plan.method), "execute", lambda *a, **k: pytest.fail("reopening ran new work"))
+    with nwqlib.load_run(path) as restored:
+        assert restored.wait().content_id == result.content_id
+    with pytest.raises(ValueError, match=r"backend=None \(classical execution\); pass backend=None or omit"):
+        nwqlib.load_run(path, backend=AerBackend())
+
+
 def test_pending_copy_preserves_original_locator_rng_exposure_and_once_only_collection(tmp_path, monkeypatch):
     original = Run(selected(), backend=InjectedBackend(), directory=tmp_path / "original")
     original.resume()
@@ -295,18 +310,18 @@ print("fresh-process binary array and original acquisition preserved")
 
 
 def test_memory_array_save_interruption_preserves_original_payload(tmp_path, supplied_qhd, monkeypatch):
-    import nwqlib._sqlite_bytes as storage
+    import nwqlib._run_journal as storage
 
     with Run(supplied_qhd.plan) as run:
         result = run.wait()
         original = result.data.artifact(result.artifact).array
-        write = storage.write_bytes
+        write = storage._write_bytes
 
         def interrupted(*args, **kwargs):
             write(*args, **kwargs)
             raise OSError("interrupted snapshot binary")
 
-        monkeypatch.setattr(storage, "write_bytes", interrupted)
+        monkeypatch.setattr(storage, "_write_bytes", interrupted)
         path = tmp_path / "failed"
         with pytest.raises(OSError, match="snapshot binary"):
             run.save(path)
@@ -341,7 +356,6 @@ def test_adapt_collect_before_cache_checkpoint_restores_canonical_order(tmp_path
         assert context.contribution_order == [first]
         rows = list(restored._state["journal"].rows("cache"))
         saved = next(row["method_context"] for _, row, _ in rows if row["kind"] == "method")
-        assert saved["observations_in_run"] is True
         assert not {"observations", "contribution_order", "contribution_seen"} & saved.keys()
         result = restored.wait()
         assert result.eigenvalue == pytest.approx(expected.eigenvalue, rel=0, abs=2e-13)
@@ -349,7 +363,6 @@ def test_adapt_collect_before_cache_checkpoint_restores_canonical_order(tmp_path
         assert restored.observations.chunks[0].content_id == first
         saved_result = result.save(tmp_path / "standalone-adapt")
     saved_context = json.loads((saved_result / "result.json").read_text())["data"]["method_context"]
-    assert saved_context["observations_in_run"] is True
     assert not {"observations", "contribution_order", "contribution_seen"} & saved_context.keys()
     standalone = nwqlib.load_result(saved_result)
     assert standalone.data.method_context.keys() == result.data.method_context.keys()

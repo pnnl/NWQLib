@@ -1,7 +1,8 @@
-"""Local method data, using JSON, NumPy and SDK-owned circuit serialization.
+"""The files of a saved Result or Run folder, written as JSON, NumPy arrays and QPY circuits.
 
-This is an explicit execution archive, not a Python session or an evidence
-certificate. Method owners choose their data and bind their own constructors.
+Loading rebuilds records from these files. It does not restore a Python
+session and does not certify the saved evidence. Method code chooses its data
+and binds its own constructors.
 
 Loading checks layout, not contents. The array headers of native state and
 operator inputs (``read_state``, ``read_operator``) and of published Result arrays
@@ -194,7 +195,12 @@ class ArchiveFiles:
         self._written_files.add(name)
 
     def _remember(self, kind, value, name):
-        """Index actual identity-cache mutations by their one owned file."""
+        """Record that ``value`` was written to or read from the file ``name``.
+
+        The record lets ``_forget_objects`` drop the value's cache entries when
+        that file is deleted or its native handle is released
+        (``_run_archive.release_native``).
+        """
         key = id(value)
         getattr(self, "_written_" + kind)[key] = (value, name)
         self._file_cache_keys.setdefault(name, set()).add((kind, key))
@@ -302,7 +308,7 @@ class ArchiveFiles:
             return self._read_arrays[name]
         import numpy as np
         # Consumers accept ordinary ndarray semantics. This view shares the
-        # read-only mapping; it neither copies values nor exposes a subclass
+        # read-only mapping. It neither copies values nor exposes a subclass
         # with overridden numerical operations at a scientific input boundary.
         path = self.read_path(name)
         try:
@@ -420,7 +426,12 @@ class ArchiveFiles:
         return name
 
     def _unused_name(self, name):
-        """Changed cache data gets a new file until its frontier commits."""
+        """Return a name derived from ``name`` that no file in the folder has.
+
+        While a cache delta is open (``_begin_cache_files``) the name starts
+        with ``CACHE_FILE_PREFIX``, which marks a file that reopening deletes
+        when no committed row names it (``_run_archive.restore_caches``).
+        """
         self.file(name)
         prefix = CACHE_FILE_PREFIX if self._pending_files is not None else ""
         if prefix and name.startswith(prefix):
@@ -748,7 +759,12 @@ class ArchiveFiles:
 
 
 def method_class(name, supplied=None):
-    """Storage-only known type dispatch, never imports a saved module path."""
+    """Return the Method class that a saved name denotes.
+
+    The class is the explicitly supplied one, which must match the name, or a
+    built-in Method listed in ``_METHOD_OWNERS``. A saved name outside that
+    table is never imported.
+    """
     from importlib import import_module
     if supplied is not None:
         cls = supplied if isinstance(supplied, type) else type(supplied)

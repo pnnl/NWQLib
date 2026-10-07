@@ -384,8 +384,8 @@ def test_a_standalone_refinement_resumes_between_levels(tmp_path, counted):
 def test_level_file_save_and_load_are_admitted_against_the_level_max_bytes(tmp_path):
     """Saving and loading a level file are admitted against the level's QHD.max_bytes before the file is
     written or read, and each refusal names the smallest admitting limit, at which the file round-trips
-    (``refinement._LevelTables``). The file-byte bound is the version-3 law of
-    ``refinement._level_json_bound``, and a file of an earlier development format is refused.
+    (``refinement._LevelTables``). The written file holds the four fields of the version-3 format within the
+    file-byte bound ``refinement._level_json_bound``, whose value is also checked on a three-table fixture.
     """
     problem = Optimization(objective=(2 * x**2 - 1) ** 2 + 3 * x / 5 + 2 * (y - sp.Rational(3, 10)) ** 2
                            + 6 * x * y / 5, variables=(x, y), bounds=((-1.2, 1.2), (-1.2, 1.2)))
@@ -448,7 +448,7 @@ def test_resume_refuses_another_backend_another_layer_and_a_second_controller(tm
         resume_augmented_lagrangian(tmp_path / "a", backend=AerBackend.from_noise_model(_noise_model()),
                                     progress=False)
     assert (tmp_path / "a" / "controller.json").read_bytes() == record and not (tmp_path / "a" / "iterations").exists()
-    with pytest.raises(ValueError, match="continue it with resume_box_refinement"):
+    with pytest.raises(ValueError, match="holds format"):
         resume_augmented_lagrangian(tmp_path / "refined", backend=None)
     from nwqlib.algorithms.qhd._durable import Directory
 

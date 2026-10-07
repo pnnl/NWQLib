@@ -8,7 +8,7 @@ This page describes how error evidence is represented and checked inside NWQLib.
 
 A `FramedFact` keeps its complete error frame and its parameter restrictions. A projected, zero-input or conditional quantity therefore cannot silently become an unconditional bound for the full operator. A bare `Fact` lacks this association. Unit and scope compatibility concern scientific meaning, independently of record ancestry.
 
-A witnessed proof or bound needs a receipt with a matching subject and scope. A numerical estimate, an observation or a user assertion does not become a certified bound by passing record validation. Unresolved premises stay attached when an assessed value is exported and reused.
+A witnessed proof or bound needs a witnessing receipt, as [Record contracts](records/README.md#accuracy-and-facts) defines it, with a matching subject and scope. A numerical estimate, an observation or a user assertion does not become a certified bound by passing record validation. Unresolved premises stay attached when an assessed value is exported and reused.
 
 `AssessmentContext` identifies the original Problem, the construction, the parameter point that ran, the Plan, the observations, the contributing chunks and the Result. `result_context(result)` obtains these from the attached Plan and RunData. Conflicting point restrictions raise an error. Evidence restricted to a parameter point applies only in an admitted context (`admitted=True`), which names the Plan and the construction that ran. Without one, such evidence stays inconclusive.
 
@@ -25,7 +25,7 @@ The guard conservatively counts unreduced cross products, so a rejected calculat
 
 ## Covariance and binary inference
 
-`linear_variance` groups identical data IDs before it applies the covariance identity. Thus `Var(2X)=4 Var(X)`, and `X-X=0` needs no variance that is unavailable and unused. Distinct variables need a supplied cross-covariance or an explicit `IndependenceLaw`, and a missing covariance never means independence. The law keeps its joint identity, frame, restrictions and premises.
+`linear_variance` groups identical data IDs before it applies the covariance identity. Thus `Var(2X)=4 Var(X)` for a random variable `X`. The variance of `X-X` is zero, so this difference needs no supplied variance of `X`. Distinct variables need a supplied cross-covariance or an explicit `IndependenceLaw`, and a missing covariance never means independence. The law keeps its joint identity, frame, restrictions and premises.
 
 Every supplied variance must be nonnegative, even when its coefficient cancels. A supplied covariance must obey `c² <= vx*vy` when both variances are known. This pairwise condition does not establish that an entire covariance matrix is positive semidefinite. A negative complete exact sum is rejected, and an incomplete subtotal stays unknown. Separately rounded impossible moments are not repaired without a justified model of the code that produced them.
 
@@ -69,7 +69,7 @@ Apart from the Hoeffding inequality in binary inference (Hoeffding 1963, doi:10.
 | --- | --- | --- |
 | `Fact`, `Evidence` | Availability and evidence kind are separate. Validation never turns a declared kind into witnessed support. | `records.py` |
 | `ErrorFrame`, `FramedFact` | A value is used only in its own quantity, metric, unit, scope, conditioning, domain and parameter point. A replacement bound carries its own failure probability. | `error_model.py::applicable` |
-| `ErrorModel.assess` | Triangle inequality and union bound over the required sources. A component criterion never covers total error. PASS needs witnessed proved or certified support without open assumptions. | `error_model.py::ErrorModel.assess`, `error_model.py::supported` |
+| `ErrorModel.assess` | Triangle inequality and union bound over the required sources. A component criterion never covers total error. PASS needs witnessed evidence of kind `proved_relation` or `certified_bound` without open assumptions. | `error_model.py::ErrorModel.assess`, `error_model.py::supported` |
 | `CheckSpec`, `CheckDomain` | Domain checks precede status. A roundoff window is explicit, and the raw value stays in the fact. | `error_model.py::_assemble_check` |
 | `Certificate.with_verification`, `assemble_check` | A verification fact answers only the options record and `CheckSpec` that produced it. | `error_model.py::Certificate`, `verification.py::_publish` |
 | `linear_variance` | One data identity is one random variable. A missing covariance is unknown, never zero. | `statistics.py::linear_variance` |

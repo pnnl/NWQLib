@@ -14,7 +14,7 @@ from nwqlib.operators.access import Count
 
 
 class QasmWriteBudget(Record):
-    """Limits for writing a Program as OpenQASM 3 text with `write_qasm3` or `write_qasm3_file`.
+    """Limits for writing a Plan's circuit (`plan.construction`) as OpenQASM 3 text with `write_qasm3` or `write_qasm3_file`.
 
     Build it with keyword arguments, for example
     `QasmWriteBudget(max_metadata_bytes=1_000_000, max_walk_steps=100_000, max_qubits=1, max_clbits=0, max_bytes=4096, max_instructions=100, max_chunk_bytes=256)`,
@@ -24,14 +24,16 @@ class QasmWriteBudget(Record):
 
     Attributes:
         max_metadata_bytes: Required. Limit in bytes on a conservative JSON size
-            of the Program graph and of the final `QasmWriteReceipt`, each checked before it
-            is used.
+            of the [Program](../glossary.md#program) graph and of the final
+            `QasmWriteReceipt`, each checked before it is used.
         max_walk_steps: Required. Limit on the steps of each walk over the graph
             and of the counting and writing passes. A `Repeat` count is not
             multiplied in.
         max_qubits: Required. Limit on the total declared qubits.
         max_clbits: Required. Limit on the total declared classical bits.
-        max_bytes: Required. Limit on the bytes of text written.
+        max_bytes: Required. Limit on the bytes of text written. It is checked
+            while the text is written, so exceeding it raises `QasmWriteError`
+            after part of the text has been delivered.
         max_instructions: Required. Limit on the gate, measurement and reset
             statements in the text, gate definitions included.
         max_chunk_bytes: Required. Positive. Limit in bytes on each buffer offered
@@ -58,13 +60,16 @@ class QasmWriteReceipt(Record):
     memory, and they are not hardware estimates.
 
     Attributes:
-        construction_id: Content hash of the written construction.
+        construction_id: Content hash (`content_id`) of the written
+            construction. `materialize_qasm3_file` refuses a receipt whose
+            `construction_id` is not the `content_id` of the construction
+            passed with it.
         subset: `"nwqlib.direct-qasm3.v1"`, the supported subset of OpenQASM 3.0
             with `stdgates.inc`.
         angle_convention: `"binary64-repr"`, meaning that each angle is the
             shortest decimal that rounds back to the same binary64 value.
-        selected_definitions: Content hashes of the block recipes reachable from
-            the root.
+        selected_definitions: Content hashes of the block definitions that the
+            written circuit uses.
         quantum_layout: `(original name, generated name, width)` of each quantum
             register, in declaration order. Qubit index 0 is the least
             significant bit.
@@ -78,12 +83,10 @@ class QasmWriteReceipt(Record):
             counting a definition body once for each time it appears in the text.
         expanded_operations: Primitive gates plus one per measured or reset bit,
             after expanding loops and calls.
-        dynamic_visits: Visits to Program nodes, empty calls and loop bodies
-            included.
+        dynamic_visits: Visits to [Program](../glossary.md#program) nodes,
+            empty calls and loop bodies included.
         completion: `"stream"` from `write_qasm3` or `"file"` from
             `write_qasm3_file`.
-        native_bytes: Always `None`, because the SDK memory is not known.
-        peak_rss: Always `None`, because peak process memory is not known.
     """
 
     construction_id: str
@@ -100,8 +103,6 @@ class QasmWriteReceipt(Record):
     expanded_operations: Count
     dynamic_visits: Count
     completion: Literal["stream", "file"]
-    native_bytes: None = None
-    peak_rss: None = None
 
 
 @dataclass(frozen=True)
@@ -174,8 +175,10 @@ class _Prepared:
     Writing has two passes over the same kept graph. The counting pass here checks
     the supported subset (one root batch setting without axes, bit registers,
     Repeat, CoherentRegion, Sequence, computational Measure and Reset,
-    Allocate/Release without reallocation, and the four registered primitive
-    recipes without parameters), folds dynamic work through Repeat counts without
+    Allocate/Release without reallocation, and the five registered primitive
+    recipes without parameters, ``preparation.native``, ``preparation.hzh``,
+    ``reflection.positive_zero``, ``pauli.parity`` and ``pauli.group_basis``),
+    folds dynamic work through Repeat counts without
     expanding them, and counts static emission with each shared definition once.
     It also bounds the final receipt. The emission pass (``fragments``) then
     streams text whose instruction and walk counts are already known to fit. The
@@ -185,9 +188,7 @@ class _Prepared:
     """
 
     def __init__(self, construction, budget):
-        """Admit the supported QASM subset and count bounded static output before exposing any
-        bytes.
-        """
+        """Admit the supported QASM subset and count its static output before any byte is exposed."""
         _metadata(construction, budget)
         self.construction = construction
         self.budget = budget
@@ -232,9 +233,7 @@ class _Prepared:
             return admission.bounded(a * b)
 
         def count(name):
-            """Fold repeated dynamic work and static emission separately without expanding the
-            repeated body.
-            """
+            """Count dynamic work and static emission of node ``name`` without expanding a repeated body."""
             nonlocal work
             if name in memo:
                 return memo[name]
@@ -271,8 +270,6 @@ class _Prepared:
                 statements = 1 if width else operations
                 static_visits += width
             elif isinstance(node, Measure):
-                if node.basis != "computational":
-                    raise ValueError("only computational measurement is supported")
                 operations = statements = self.widths[node.wire]
             elif isinstance(node, Reset):
                 operations = statements = self.widths[node.wire]
@@ -367,9 +364,7 @@ class _Prepared:
             yield "\n", False
 
     def fragments(self):
-        """Stream admitted definitions and calls, marking instruction boundaries for byte/count
-        accounting.
-        """
+        """Stream the admitted definitions and calls, marking instruction boundaries for the byte and count checks."""
         yield 'OPENQASM 3.0;\ninclude "stdgates.inc";\n', False
         for name, record in self.selected.items():
             width = self.gwidths[name]
@@ -476,7 +471,7 @@ def _write(prepared, sink, cancel, completion):
 
 
 def write_qasm3(construction, sink, *, budget: QasmWriteBudget, cancel=None) -> QasmWriteReceipt:
-    """Write a Program's circuit as OpenQASM 3 text to a binary stream, without any quantum SDK.
+    """Write a Plan's circuit (`plan.construction`) as OpenQASM 3 text to a binary stream, without any quantum SDK.
 
     The construction must use the writer subset of the
     [OpenQASM guide](../qasm-streaming.md#writer-subset): exact gate recipes,
@@ -489,28 +484,32 @@ def write_qasm3(construction, sink, *, budget: QasmWriteBudget, cancel=None) -> 
     cannot be interrupted.
 
     Args:
-        construction (SelectedConstruction): The Program and its selected
-            definitions, such as `plan.construction`.
+        construction (SelectedConstruction): The
+            [Program](../glossary.md#program) and its selected definitions,
+            such as `plan.construction`.
         sink (BinaryIO): Binary stream with a `write` method.
         budget (QasmWriteBudget): The limits.
-        cancel (Callable[[], bool] | None): Called between writes,
-            and a true result stops the write.
+        cancel (Callable[[], bool] | None): Called between writes. A true
+            result stops the write and raises `QasmWriteError`.
 
     Returns:
         receipt (QasmWriteReceipt): The receipt, with
             `completion="stream"`.
 
     Raises:
-        ValueError: If the construction is outside the writer subset or exceeds
-            `budget`, before any text is written.
-        QasmWriteError: If writing fails after it started. Its `prefix` describes
-            the text already delivered.
+        ValueError: If the construction is outside the writer subset or
+            exceeds a limit of `budget` other than `max_bytes`, before any
+            text is written.
+        QasmWriteError: If writing fails after it started, including when the
+            text exceeds `budget.max_bytes` or `cancel` returns true. After a
+            cancellation its `__cause__` is an `InterruptedError`. Its
+            `prefix` describes the text already delivered.
     """
     return _write(_Prepared(construction, budget), sink, cancel, "stream")
 
 
 def write_qasm3_file(construction, path, *, budget: QasmWriteBudget, cancel=None) -> QasmWriteReceipt:
-    """Write a Program's circuit as an OpenQASM 3 file, replacing the destination only when the write is complete.
+    """Write a Plan's circuit (`plan.construction`) as an OpenQASM 3 file, replacing the destination only when the write is complete.
 
     It writes the text as [`write_qasm3`][nwqlib.io.streaming.write_qasm3] does,
     into a temporary file in the destination's directory, and replaces the
@@ -519,26 +518,30 @@ def write_qasm3_file(construction, path, *, budget: QasmWriteBudget, cancel=None
     unchanged. No `fsync` or durability across power loss is promised.
 
     Args:
-        construction (SelectedConstruction): The Program and its selected
-            definitions, such as `plan.construction`.
+        construction (SelectedConstruction): The
+            [Program](../glossary.md#program) and its selected definitions,
+            such as `plan.construction`.
         path (str | Path): Destination file. Its directory must exist.
         budget (QasmWriteBudget): The limits.
-        cancel (Callable[[], bool] | None): Called between writes,
-            and a true result stops the write.
+        cancel (Callable[[], bool] | None): Called between writes. A true
+            result stops the write and raises `QasmWriteError`.
 
     Returns:
         receipt (QasmWriteReceipt): The receipt, with
             `completion="file"`.
 
     Raises:
-        ValueError: If the construction is outside the writer subset or exceeds
-            `budget`, before any file is created.
-        QasmWriteError: If writing fails after it started. Its `prefix`
-            describes the text already delivered, its
-            `temporary` names the temporary file if it could not be removed, and
-            `secondary` holds later cleanup failures. An exception that is not an
-            `Exception`, such as `KeyboardInterrupt`, keeps its type, with cleanup
-            failures in its notes.
+        ValueError: If the construction is outside the writer subset or
+            exceeds a limit of `budget` other than `max_bytes`, before any
+            file is created.
+        QasmWriteError: If writing fails after it started, including when the
+            text exceeds `budget.max_bytes` or `cancel` returns true. The
+            destination is left unchanged. Its `prefix` describes the text
+            already delivered, its `temporary` names the temporary file if it
+            could not be removed, and `secondary` holds later cleanup
+            failures. An exception that is not an `Exception`, such as
+            `KeyboardInterrupt`, keeps its type, with cleanup failures in its
+            notes.
     """
     prepared = _Prepared(construction, budget)
     path = Path(path)

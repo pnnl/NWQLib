@@ -1,4 +1,4 @@
-"""Configured QLS methods on natural A,b, with actual selected model execution."""
+"""QLS Method: input checks, planning, the classical polynomial model and analysis on the original A and b."""
 
 from nwqlib._limits import DEFAULT_MAX_BYTES
 
@@ -64,7 +64,7 @@ def _unknown(name, frame, reason):
     )
 
 
-def _error_model(problem, method, output, execution, shots, construction, rec):
+def _error_model(problem, output, execution, shots, construction):
     """Declare every error source of the selected route as unknown.
 
     QLS publishes no propagated total-error certificate. The polynomial
@@ -128,8 +128,7 @@ def _array_output(problem, output):
 
 
 def _admit(problem, method, output, execution, shots):
-    """Reject output/access combinations whose requested physical quantity the selected QLS route
-    cannot recover.
+    """Reject output/access combinations whose requested physical quantity the selected QLS route cannot recover.
     """
     if not isinstance(problem, LinearSystem) or not isinstance(
         output, (Solution, StateVector, NormSquared, QuadraticForm, NormalizedExpectation, Samples)
@@ -152,7 +151,7 @@ def _admit(problem, method, output, execution, shots):
     if isinstance(output, Samples) and shots is None:
         raise ValueError("QLS Samples requires an explicit positive shot count")
     if execution == "classical":
-        if shots is not None or isinstance(output, Samples):
+        if shots is not None:
             raise ApplicabilityError(
                 "classical QLS evaluates its numerical polynomial model without sampled circuit acquisition"
             )
@@ -227,9 +226,10 @@ class QLS(Method):
     phase fit, the circuit execution and sampling. Vector outputs
     (`Solution`, `StateVector`) need exact amplitude readout, so they take
     no `shots`, and `Samples` needs positive `shots` with quantum execution.
-    `execution="classical"` evaluates the chosen polynomial model on the
-    host. It needs a dense A, a vector, product or occupation b and, for an
-    observable output, a dense observable, and it takes no `shots`.
+    `execution="classical"` evaluates the chosen polynomial model
+    classically, without circuits. It needs a dense A, a vector, product
+    or occupation b and, for an observable output, a dense observable, and
+    it takes no `shots`.
     `result.analyze()` takes no settings, so another polynomial needs a new
     Plan. `result.verify(checks=...)` takes a
     [`QLSVerification`][nwqlib.algorithms.qls.verification.QLSVerification].
@@ -290,9 +290,11 @@ class QLS(Method):
             `"pauli_lcu"`, `"multiplexed_pauli"`, `"banded"` and
             `"dense_dilation"` request one family, which the input must
             support.
-        encoding: Default `None`. A supplied block encoding of the original
-            A, with its declared operator. Its projected equation and error
-            are the caller's assumptions, not checked by a dense test.
+        encoding: Default `None`. A `SelectedBlock` block encoding of the
+            original A, with its declared operator, for example one composed
+            as [Compose blocks](../../blocks.md) shows. Its projected
+            equation and error are the caller's assumptions, not checked by
+            a dense test.
         dense_control_route: Default `"auto"`. How a controlled query
             controls a dense-dilation encoding. `"gatewise"` synthesizes the
             dilation and lets Qiskit control each synthesized gate,
@@ -328,22 +330,23 @@ class QLS(Method):
             limit on the known bytes of numerical arrays, including those
             syntheses. It excludes undocumented vendor workspace. Each exact
             scalar readout must fit it before the circuits run.
-        max_admission_steps: Default `1_000_000`, ten times the shared
-            default, because the planning work of a sampled `Program` grows
-            with the number of its distinct measured registers. Upper limit
-            on the planning work of checking the quantum `Program` (NWQLib's
-            description of a circuit as named steps), counting its stored
-            fields and the work of each validation, preparation and circuit
-            building check. Each stage applies the limit before doing that
-            work. Summing the Program's resource counts may use up to 24
-            times this value. Raising it changes neither the polynomial nor
-            any quantum operation. See the
+        max_admission_steps: Default `1_000_000`, sized for sampled
+            `Program`s, whose planning work grows with the number of their
+            distinct measured registers. Upper limit on the planning work of
+            checking the quantum `Program` (NWQLib's description of a circuit
+            as named steps), counting its stored fields and the work of each
+            validation, preparation and circuit building check. Each stage
+            applies the limit before doing that work. Summing the Program's
+            resource counts may use up to 24 times this value. A larger
+            Program is refused with a ValueError that names this field, the
+            refused stage and its count. Raising the limit changes neither
+            the polynomial nor any quantum operation. See the
             [planning work limit](../../development/program_checks.md#planning-work-limit).
 
     Raises:
         ValueError: If `encoded_solution_norm_estimate` is set with
             `"qsvt_inverse"`.
-        TypeError: If `encoding` is not a selected block encoding.
+        TypeError: If `encoding` is not a `SelectedBlock`.
     """
 
     result_type: ClassVar[type] = QLSAnalysis
@@ -392,8 +395,7 @@ class QLS(Method):
         return self
 
     def plan(self, problem, *, output, execution, shots, rng):
-        """Select the encoding, inverse/reflection polynomial and physical recovery before
-        declaring execution.
+        """Select the encoding, inverse/reflection polynomial and physical recovery before declaring execution.
         """
         _admit(problem, self, output, execution, shots)
         encoding, encoded_operator, rhs, svd, spectrum = select_inputs(
@@ -462,7 +464,6 @@ class QLS(Method):
         rec = QLSReconstruction(
             original_operator=problem.A.reference,
             original_rhs=problem.b.reference,
-            encoding_operator=encoded_operator.reference,
             original_dimension=problem.dimension,
             padded_dimension=encoded_operator.basis.dimension,
             system_dimension=encoded_operator.basis.dimension * (2 if embedding != "none" else 1),
@@ -471,7 +472,6 @@ class QLS(Method):
             polynomial=polynomial,
             t=t if isinstance(t, float) else None,
             t_source=source,
-            encoding_id=encoding.record.content_id,
             encoding_family=encoding.record.implementation.domain,
             encoding_ancillas=encoding.record.semantics.index_qubits,
             encoding_error=encoding.record.semantics.epsilon,
@@ -534,7 +534,7 @@ class QLS(Method):
         spent = sum(projected_requirements(json.loads(item.parameters), width)[1]
                     for chunk in run.observations.chunks
                     if chunk.point is not None and chunk.experiment != point.experiment
-                    for item in reductions(chunk.readout()))
+                    for item in reductions(chunk.observation))
         return max(0, self.max_work - spent)
 
     def validate_point(self, plan, experiment, values):
@@ -576,8 +576,8 @@ class QLS(Method):
     def load_run_context(self, data, files):
         """Restore the ``qls_base_gates`` cache written by ``save_run_context``.
 
-        JSON stores an adjoint key ``(base_id, "adjoint")`` as a list, so it
-        is turned back into a tuple.
+        JSON stores an adjoint key ``(base_id, "adjoint", native_ucg)`` as a
+        list, so it is turned back into a tuple.
         """
         return dict(
             qls_base_gates={
@@ -659,7 +659,7 @@ def _classical_plan(method, problem, *, output, rng, rec, svd):
                 observation=ObservationSpec(kind="host_scalars", labels=scalars),
             ),
         ),
-        error_model=_error_model(problem, method, output, "classical", None, construction, rec),
+        error_model=_error_model(problem, output, "classical", None, construction),
         assumptions=(
             "explicit classical selected polynomial model; native phase/synthesis error is not simulated",
         ),
@@ -744,8 +744,7 @@ def _classical_publication(plan, chunk):
 
 
 def _analyze_classical(plan, data):
-    """Read one associated host acquisition and reconstruct its requested physical scalar or
-    stored vector.
+    """Read one associated host acquisition and reconstruct its requested physical scalar or stored vector.
     """
     if len(data.observations.chunks) != 1:
         raise ValueError("classical QLS requires one completed model acquisition")
@@ -849,7 +848,7 @@ def _realize(plan, *, matrix, rhs_direction):
     ``||y||**2`` (``numerical.inverse_polynomial_action``). For the inverse,
     ``x = ||b|| (kappa_poly s / alpha) (P/s)(A/alpha) b_hat``, and the
     returned recovery composes that scale in binary form. A shortcut
-    normalizes original A once; the grid and noisy-search norm models make
+    normalizes original A once. The grid and noisy-search norm models make
     one encoded reference solve to evaluate their success-probability model,
     that solve never supplies the output, and its norm is recorded as the
     ``encoded_reference_norm`` argument of the application. Physical array
@@ -890,7 +889,6 @@ def _realize(plan, *, matrix, rhs_direction):
             plan.method.encoded_solution_norm_estimate,
             kappa_be=r.polynomial_kappa,
             encoded_norm=reference_norm,
-            eta=r.polynomial.eta,
             factors=factors,
             alpha=r.alpha,
             rhs=rhs_direction,
@@ -916,8 +914,7 @@ def _realize(plan, *, matrix, rhs_direction):
 
 
 def _execute(plan, kernel, *, matrix, rhs_direction, observable):
-    """Evaluate the selected polynomial model and publish its recoverable physical statistics and
-    arrays.
+    """Evaluate the selected polynomial model and publish its recoverable physical statistics and arrays.
     """
     selected, recovery, mass, slice_mass, arguments = _realize(
         plan, matrix=matrix, rhs_direction=rhs_direction

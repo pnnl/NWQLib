@@ -1,4 +1,7 @@
-"""Bounded numerical inputs; native numerical dependencies load on selection."""
+"""Bounded numerical inputs.
+
+Native numerical dependencies load on selection.
+"""
 
 from importlib import import_module
 

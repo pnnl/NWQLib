@@ -148,12 +148,9 @@ def decode_statevector_probabilities(
     evaluation whose relative rounding ``_validation.ABSOLUTE_SQUARE_ROUNDOFF``
     bounds.
 
-    Decode each level's joint observations once into its valid grid
-    population. One-hot indices set the bit ``j*K+i_j`` for every variable,
-    and binary indices use the variable-axis permutation. Valid, invalid and
-    total masses describe their respective observed populations. Joint box
-    mass sums the selected grid slice and conditions it on valid mass. A
-    result containing only marginals has no directly observed joint mass.
+    One-hot indices set the bit ``j*K+i_j`` for every variable, and binary
+    indices use the variable-axis permutation. Valid, invalid and total
+    masses describe their respective observed populations.
 
     The valid amplitudes are gathered once (``onehot_register_indices``, or
     ``binary.lexicographic_register_array``) before their probabilities are
@@ -166,9 +163,9 @@ def decode_statevector_probabilities(
     in exact arithmetic, not fsum semantics in floating point: a valid
     weight 1 and an invalid weight ``2**-54`` give correctly rounded total 1,
     and subtraction returns zero although the directly summed invalid mass
-    is ``5.551115123125783e-17``. Switching from sequential ``+=`` to these
-    accurate reductions improves summation but changes last bits and can
-    change threshold decisions. The analysis of
+    is ``5.551115123125783e-17``. These accurate reductions can differ from a
+    sequential ``+=`` sum in the last bits, which can change threshold
+    decisions. The analysis of
     the same populations uses the same reduction. ``points`` keeps each
     valid point whose probability is not ``<= 0``, so a NaN reaches the mass
     checks instead of disappearing as a zero probability.

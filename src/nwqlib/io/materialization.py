@@ -14,7 +14,7 @@ class QasmMaterializationBudget(Record):
 
     Build it with keyword arguments, for example
     `QasmMaterializationBudget(max_bytes=4096, max_qubits=1, max_clbits=0, max_dynamic_visits=100, max_operations=100)`,
-    and pass it as `budget=`. The first five fields are required. The counts are
+    and pass it as `budget=`. All five fields are required. The counts are
     derived from the matching construction and checked before the file is
     opened. Use the unchanged file from that writer call. No limit here
     estimates the importer's memory.
@@ -23,16 +23,14 @@ class QasmMaterializationBudget(Record):
         max_bytes: Required. Limit on the bytes of the file text.
         max_qubits: Required. Limit on the total declared qubits.
         max_clbits: Required. Limit on the total declared classical bits.
-        max_dynamic_visits: Required. Limit on Program node visits after
-            expanding loops, empty and identity loops included.
+        max_dynamic_visits: Required. Limit on
+            [Program](../glossary.md#program) node visits after expanding
+            loops, empty and identity loops included, the count that the
+            writer's `QasmWriteReceipt.dynamic_visits` reports.
         max_operations: Required. Limit on primitive gate, measurement and reset
-            applications after expanding loops. Gates that Qiskit synthesizes for
-            controls are not counted.
-        required_max_native_bytes: Default `None`, the only accepted value. Any
-            other value is rejected before import, because this importer cannot
-            bound its memory.
-        required_max_peak_rss: Default `None`, the only accepted value, for the
-            same reason.
+            applications after expanding loops, the count that
+            `QasmWriteReceipt.expanded_operations` reports. Gates that Qiskit
+            synthesizes for controls are not counted.
     """
 
     max_bytes: Count
@@ -40,8 +38,6 @@ class QasmMaterializationBudget(Record):
     max_clbits: Count
     max_dynamic_visits: Count
     max_operations: Count
-    required_max_native_bytes: Count | None = None
-    required_max_peak_rss: Count | None = None
 
 
 @dataclass(frozen=True)
@@ -55,18 +51,15 @@ class QasmMaterialization:
     Attributes:
         circuit: The imported Qiskit circuit without loops. Gate definitions from
             the file stay as logical gates.
-        source: The writer’s [`QasmWriteReceipt`][nwqlib.io.streaming.QasmWriteReceipt].
+        source: The [`QasmWriteReceipt`][nwqlib.io.streaming.QasmWriteReceipt]
+            passed as `receipt`, whose `construction_id` names the construction.
         output_nodes: Top-level instructions of `circuit` after unrolling. It can
             differ from `source.expanded_operations`.
-        native_bytes: Always `None`, because the allocation size is not known.
-        peak_rss: Always `None`, because peak process memory is not known.
     """
 
     circuit: object
     source: QasmWriteReceipt
     output_nodes: int
-    native_bytes: None = None
-    peak_rss: None = None
 
 
 def materialize_qasm3_file(construction, path, receipt: QasmWriteReceipt, *,
@@ -75,13 +68,15 @@ def materialize_qasm3_file(construction, path, receipt: QasmWriteReceipt, *,
     """Import an OpenQASM 3 file written by `write_qasm3_file` into Qiskit within explicit limits.
 
     Use the unchanged file, construction and receipt from the same writer
-    call. The sizes are derived again from the construction and checked against
-    `budget` before the file is opened. Its actual byte size is checked before
-    reading. The text then goes to Qiskit’s OpenQASM 3
-    importer and the `UnrollForLoops` pass. Gate definitions stay logical. Z
-    with more than two controls in total is rejected before import, because
-    the installed importer can synthesize such gates eagerly. It needs the
-    `qasm` extra
+    call. Before the file is opened, the receipt’s `construction_id` is
+    compared with `construction.content_id`, and the sizes derived again from
+    the construction are checked against `budget`. The comparison pairs the
+    receipt with the construction and does not compare either with the file’s
+    text. The file’s actual byte size is checked before reading. The text then
+    goes to Qiskit’s OpenQASM 3 importer and the `UnrollForLoops` pass. Gate
+    definitions stay logical. Z with more than two controls in total is
+    rejected before import, because the installed importer can synthesize such
+    gates eagerly. It needs the `qasm` extra
     (`pip install "nwqlib[qasm]"`). The checked combination is OpenQASM parser
     1.0.1, qiskit-qasm3-import 0.6.0 and Qiskit 2.5.2.
 
@@ -89,7 +84,8 @@ def materialize_qasm3_file(construction, path, receipt: QasmWriteReceipt, *,
         construction (SelectedConstruction): The construction the file was
             written from.
         path (str | Path): The file.
-        receipt (QasmWriteReceipt): The record that `write_qasm3_file` returned.
+        receipt (QasmWriteReceipt): The record that `write_qasm3_file` returned
+            for `construction`.
         writer_budget (QasmWriteBudget): The budget the file was written with.
         budget (QasmMaterializationBudget): The import limits.
 
@@ -97,13 +93,16 @@ def materialize_qasm3_file(construction, path, receipt: QasmWriteReceipt, *,
         materialization (QasmMaterialization): The imported circuit and its writer’s `QasmWriteReceipt`.
 
     Raises:
-        ValueError: If the construction exceeds `budget`, `budget` asks for a
-            memory bound, a Z gate has more than two controls, or the actual
-            file exceeds the byte limit.
+        ValueError: If `receipt.construction_id` is not `construction.content_id`,
+            the construction exceeds `budget`, a Z gate has more than two
+            controls, or the actual file exceeds the byte limit.
     """
     prepared = _Prepared(construction, writer_budget)
-    if budget.required_max_native_bytes is not None or budget.required_max_peak_rss is not None:
-        raise ValueError("consumer cannot establish a hard native-byte or peak-RSS bound")
+    # After _Prepared, so writer_budget.max_metadata_bytes bounds the JSON that content_id hashes.
+    if receipt.construction_id != construction.content_id:
+        raise ValueError(f"receipt.construction_id {receipt.construction_id} is not "
+                         f"construction.content_id {construction.content_id}. Pass as receipt "
+                         "the QasmWriteReceipt that the writer returned for this construction")
     if (sum(prepared.widths.values()) > budget.max_qubits
             or sum(prepared.cwidths.values()) > budget.max_clbits
             or prepared.visits > budget.max_dynamic_visits

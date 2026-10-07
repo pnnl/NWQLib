@@ -36,8 +36,9 @@ from nwqlib.subroutines.hamiltonian_evolution import (
 # docs/ENGINEERING_CONSTANTS.md ("Budgets and mechanical bounds"). H0 is an
 # explicit allowance for scalar bookkeeping, ndarray headers, iterators and
 # fixed sort stacks on the checked 64-bit CPython/NumPy stack, not a universal
-# interpreter or process-RSS theorem (support_workspace here, and the table
-# metadata and serialization headers of method._support_table_bytes).
+# interpreter or process-RSS theorem (the wrapper_fixed_bytes part of each support
+# table's fixed headers H_S, passed to support_chunk_size, and the table metadata
+# and serialization headers of method._support_table_bytes).
 # OBJECT_HEADER_BYTES is the allowance of 256 bytes per inventoried array or
 # wrapper object of the evaluator (support_workspace). Requalify them when the
 # NumPy printer, NumPy or the Python runtime changes.
@@ -70,8 +71,9 @@ def support_chunk_size(entries, support_size, remaining, evaluator_bytes_per_ent
 
     For support size s and a chunk of b entries the slab charge is
     ``B_slab,S(b) = W_S(b) + (8s+64)b + H_S``: the evaluator's intermediates
-    ``W_S(b)`` (``support_workspace``), ``8(s+4)b`` for s coordinate
-    arrays, an index vector and quotient/remainder scratch, ``32b`` for
+    ``W_S(b)`` (``support_workspace``), ``8(s+4)b`` comprising ``8(s+3)b``
+    for s coordinate arrays, an index vector and quotient/remainder scratch
+    and an additional 8b allowance, ``32b`` for
     complex conversion, Boolean validation and float64 conversion, and the
     fixed headers ``H_S``, here ``evaluator_fixed_bytes + wrapper_fixed_bytes``.
     With the linear evaluator law ``W_S(b) = A_S b`` of ``support_workspace``
@@ -119,7 +121,7 @@ def user_point(grid, centers, support, expression):
     """
     def locate(indices):
         point = tuple(grid.grid_value(j, i) for j, i in zip(support, indices, strict=True))
-        # The grid may name its variables by string; shift the expression's own symbols of those names.
+        # The grid may name its variables by string. Shift the expression's own symbols of those names.
         symbols = {str(s): s for s in expression.free_symbols}
         pairs = [(symbols[str(grid.variables[j])], centers[j]) for j in support if str(grid.variables[j]) in symbols]
         return uncentered_objective(expression, [v for v, _ in pairs], [c for _, c in pairs]), point
@@ -153,11 +155,12 @@ def evaluate_support(evaluator, centered_axes, chunk, *, expression, support, na
     slab's bits.
 
     An expression whose callable cannot be evaluated or converted on arrays
-    (an exception from the chunk call or its complex128 conversion) keeps its
-    admitted scalar functionality: that chunk is evaluated entry by entry by
-    ``potential._evaluate_objective``, which raises the existing error for an
-    entry that is not finite and real. A nonfinite or complex array result
-    is never re-evaluated as a scalar.
+    (an ArithmeticError, ValueError, TypeError or NameError from the chunk
+    call or its complex128 conversion) keeps its admitted scalar
+    functionality: that chunk is evaluated entry by entry by
+    ``potential._evaluate_objective``, which raises ValueError for an entry
+    that is not finite and real. Any other exception propagates. A nonfinite
+    or complex array result is never re-evaluated as a scalar.
     """
     shape = tuple(len(axis) for axis in centered_axes)
     entries = math.prod(shape)
@@ -178,9 +181,10 @@ def evaluate_chunk(evaluator, axes, start, stop, out, *, expression, support, na
     chunk's coordinate arguments, and a scalar output is a constant broadcast
     over the chunk. Each output must convert to finite complex128 with
     imaginary part exactly zero, then to float64, which ``out`` receives. An
-    exception of the chunk call or of its conversion evaluates the chunk
-    entry by entry (``potential._evaluate_objective``), which raises for an
-    entry that is not finite and real. A nonfinite or complex array result is
+    ArithmeticError, ValueError, TypeError or NameError from the chunk call or
+    its conversion evaluates the chunk entry by entry
+    (``potential._evaluate_objective``), which raises for an entry that is not
+    finite and real. A nonfinite or complex array result is
     never re-evaluated as a scalar: its first bad entry is mapped back to its
     indices and coordinates and reported under ``name``, the function the
     expression belongs to. When ``axes`` are centered coordinates,
@@ -337,10 +341,10 @@ class QHDCompiler:
         for time, kinetic_weight, potential_weight in self.step_weights:
             blocks: list[PauliEvolutionBlock] = []
 
-            self._record_kinetic_global_phase(dt, kinetic_weight, time)
+            self._record_kinetic_global_phase(dt, kinetic_weight)
 
             if constant_objective != 0:
-                self._record_constant_phase(dt, potential_weight, constant_objective, time)
+                self._record_constant_phase(dt, potential_weight, constant_objective)
 
             if self.options.trotter_order == 1:
                 blocks.extend(self._compile_potential_with_phase_record(dt, potential_weight, time))
@@ -467,13 +471,11 @@ class QHDCompiler:
             self._record_global_phase(
                 coefficient=occurrence.identity,
                 evolution_time=dt,
-                time=time,
                 source="projector_identity",
-                support=occurrence.support,
             )
         return self.potential_compiler.compile_selected(occurrences, self.grid, dt=dt, time=time)
 
-    def _record_constant_phase(self, dt: float, potential_weight: float, constant: float, time: float) -> None:
+    def _record_constant_phase(self, dt: float, potential_weight: float, constant: float) -> None:
         """Record the objective constant's phase ``-fl(dt fl(b c))`` of one step, or omit a tiny one.
 
         When ``fl(b c)`` or its product with dt would be nonzero and below
@@ -497,7 +499,6 @@ class QHDCompiler:
         self._record_global_phase(
             coefficient=coefficient,
             evolution_time=dt,
-            time=time,
             source="objective_constant",
         )
 
@@ -505,7 +506,6 @@ class QHDCompiler:
         self,
         dt: float,
         kinetic_weight: float,
-        time: float,
     ) -> None:
         """Record the kinetic stencil diagonal of one step as phase.
 
@@ -522,8 +522,9 @@ class QHDCompiler:
         evolution of the finite model, which the error ledger compares with
         its phase included (``resources.circuit_resources``). Each
         ``a/h**2`` is a normal binary64 number (``validation._normal_range``),
-        and their compensated sum of positive terms is finite. A kinetic term
-        outside that range is refused (``validation._kinetic_range_error``).
+        and their compensated sum of positive terms is finite. The built-in
+        ``sum`` below is compensated for floats from Python 3.12, the minimum
+        that ``pyproject.toml`` requires. A kinetic term outside that range is refused (``validation._kinetic_range_error``).
         """
         try:
             coefficient = sum(
@@ -538,7 +539,6 @@ class QHDCompiler:
         self._record_global_phase(
             coefficient=coefficient,
             evolution_time=dt,
-            time=time,
             source="kinetic_diagonal",
         )
 
@@ -547,9 +547,7 @@ class QHDCompiler:
         *,
         coefficient: float,
         evolution_time: float,
-        time: float,
         source: str,
-        support: tuple[int, ...] | None = None,
     ) -> None:
         """Add the phase of ``exp(-i * evolution_time * coefficient * I)``.
 
@@ -591,7 +589,7 @@ class QHDCompiler:
         allowance of a kept state to stay below pi. The total uses all M events
         (``method._phase_contributions``), including both
         second-order potential halves, and a source total uses its own event
-        count, N for the objective constant's one event per step. Cancellation
+        count, N (``num_steps``) for the objective constant's one event per step. Cancellation
         does not reduce the required sum of absolute contributions. Comparing with
         the intended Hamiltonian phase adds each contribution's formation
         allowance. For the constant, whose coefficient ``fl(b_k c)`` and

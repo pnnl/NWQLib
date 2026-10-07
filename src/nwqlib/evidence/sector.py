@@ -1,5 +1,7 @@
 """Number-sector diagnostics of actual stored computational-basis counts."""
 
+from typing import ClassVar
+
 from pydantic import model_validator
 
 from nwqlib.core.records import Nonnegative, Record, Source, Text, Unit
@@ -47,12 +49,12 @@ class NumberSectorOptions(Record):
     name: Text
     particles: Count
     tolerance: Nonnegative
-    source: Source = _SOURCE
+    source: ClassVar[Source] = _SOURCE
 
     @model_validator(mode="after")
     def _criterion(self):
-        if self.tolerance > 1 or self.source != _SOURCE:
-            raise ValueError("number-sector tolerance is in [0,1] and source is the actual count reducer")
+        if self.tolerance > 1:
+            raise ValueError("number-sector tolerance must lie in [0, 1]")
         return self
 
     def verification_checks(self, result):
@@ -87,7 +89,7 @@ def _exact_count_sum(counts):
 
     Each count c is below 2**63 and equals (c >> 32) * 2**32 + (c & (2**32 - 1)).
     Each half is below 2**32, so a uint64 sum of fewer than 2**32 halves
-    cannot wrap; the two sums are then combined as Python integers. A
+    cannot wrap. The two sums are then combined as Python integers. A
     larger population is summed as Python integers.
     """
     import numpy as np
@@ -124,9 +126,10 @@ def verify_number_sector(result, *, options: NumberSectorOptions, max_integer_bi
     Raises:
         TypeError: If `options` is not a `NumberSectorOptions`.
         ValueError: If the Result supplies no complete-register counts,
-            `particles` exceeds the register width, or the stored counts are
+            `particles` exceeds the register width, the stored counts are
             not unconditional counts of the whole register that sum to the
-            returned shots.
+            returned shots, or an exact intermediate value needs more than
+            `max_integer_bits` bits.
     """
     import numpy as np
 

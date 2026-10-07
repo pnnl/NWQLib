@@ -99,13 +99,20 @@ def child(poison=None):
             options_schema(row)
     finally:
         Method.__init__ = original_init
-    unrelated = third_party_registrations(
-        (
-            EntryPoint(
-                name="unrelated@1", value="unrelated_fixture:factory", group="nwqlib.algorithms"
-            ),
-        )
+    import nwqlib.algorithms.registry as registry_module
+
+    # Stand in for installed metadata at the entry-point boundary, then restore it.
+    installed = (
+        EntryPoint(
+            name="unrelated@1", value="unrelated_fixture:factory", group="nwqlib.algorithms"
+        ),
     )
+    metadata_entry_points = registry_module.entry_points
+    registry_module.entry_points = lambda *, group: installed if group == "nwqlib.algorithms" else ()
+    try:
+        unrelated = third_party_registrations()
+    finally:
+        registry_module.entry_points = metadata_entry_points
     registry = AlgorithmRegistry((REGISTRATION,) + unrelated)
     registry.discover()
     assert "_hadamard_method" not in sys.modules

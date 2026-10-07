@@ -1,17 +1,13 @@
-"""Native leaves for the actual LCHS Program; no numerical reselection."""
+"""Circuit constructors for the blocks of an LCHS Program.
+
+They read the numerical data chosen at planning and never select it again.
+"""
 
 from __future__ import annotations
 from nwqlib._limits import DEFAULT_MAX_BYTES
 
 from nwqlib.blocks.selection import _no_arguments
-from typing import Any, Mapping, get_args
-
-from .method import LCHS
-
-# Accepted backend names, read from the Method field that validates them.
-LCHS_HAMILTONIAN_EVOLUTION_IMPLEMENTATIONS: tuple[str, ...] = get_args(
-    LCHS.model_fields["hamiltonian_evolution_backend"].annotation
-)
+from typing import Any
 
 # Additional allowance for the selected Hamiltonian synthesis, not a guarantee
 # that the returned physical solution meets approximation_tolerance. Available
@@ -24,21 +20,7 @@ LCHS_QSP_EPSILON_FRACTION = 0.1
 LCHS_TROTTER_EPSILON_FRACTION = 0.1
 
 
-def resolve_hamiltonian_evolution_backend(
-    method,
-) -> str:
-    """Return the configured numerical/native Hamiltonian-evolution recipe."""
-
-    return method.hamiltonian_evolution_backend
-
-
-def resolve_lcu_select_implementation(
-    method,
-    *,
-    he_backend: str,
-    candidate_costs: Mapping[str, Any] | None = None,
-    select_plan: Any | None = None,
-) -> dict[str, Any]:
+def resolve_lcu_select_implementation(method, *, select_plan: Any | None = None) -> str:
     """Resolve homogeneous or inhomogeneous SELECT synthesis without a circuit.
 
     Decision table, by Hamiltonian-evolution backend:
@@ -62,15 +44,11 @@ def resolve_lcu_select_implementation(
     again with the plan (parameters.select_parameters).
 
     Returns:
-        A record with the requested and resolved implementation, the reason,
-        structure eligibility and rejection reasons, the candidate CX costs,
-        and the resource-law entries of the resolved implementation.
+        The resolved implementation name.
     """
 
     requested = method.lcu_select_implementation
-    rejection_reasons = ("no structure certificate is available",)
-    costs = dict(candidate_costs or {})
-    candidate_record: dict[str, int | None] | None = None
+    he_backend = method.hamiltonian_evolution_backend
     # Eligibility is a construction property. Dense, QSP and variable-step
     # product formulas expose different SELECT implementations.
     if he_backend == "qsp_block_encoding":
@@ -79,9 +57,8 @@ def resolve_lcu_select_implementation(
                 "hamiltonian_evolution_backend='qsp_block_encoding' uses its "
                 "internal compiled_qsp SELECT; lcu_select_implementation must be 'auto'"
             )
-        resolved = "compiled_qsp"
-        reason = "qsp_block_encoding uses its internal compiled-QSP SELECT"
-    elif he_backend == "dense_exact":
+        return "compiled_qsp"
+    if he_backend == "dense_exact":
         if requested == "multiplexor":
             raise ValueError(
                 "lcu_select_implementation='multiplexor' requires an elementary "
@@ -92,136 +69,50 @@ def resolve_lcu_select_implementation(
                 "lcu_select_implementation='structured' requires a structure "
                 "certificate, which dense_exact does not provide"
             )
-        resolved = "branch_controlled"
-        reason = (
-            "dense_exact has no product-formula plan; auto selects the "
-            "validation-only branch-controlled compiler"
-            if requested == "auto"
-            else "explicit validation-only branch-controlled compiler requested"
-        )
-    elif he_backend == "trotter_error_budgeted":
-        rejection_reasons = (
-            "fixed-step product formula is required; trotter_error_budgeted is ineligible",
-        )
+        return "branch_controlled"
+    if he_backend == "trotter_error_budgeted":
         if requested == "structured":
             raise ValueError(
                 "lcu_select_implementation='structured' failed eligibility condition: "
-                + rejection_reasons[0]
+                "fixed-step product formula is required; trotter_error_budgeted is ineligible"
             )
-        resolved = "multiplexor" if requested == "auto" else requested
-        reason = (
-            "product-formula auto selection uses the generic multiplexor because "
-            + rejection_reasons[0]
-            if requested == "auto"
-            else (
-                "explicit generic product-formula multiplexor requested"
-                if requested == "multiplexor"
-                else "explicit validation-only branch-controlled compiler requested"
+        return "multiplexor" if requested == "auto" else requested
+    # trotter
+    certificate = (
+        select_plan.structure_certificate
+        if select_plan is not None and requested in ("auto", "structured")
+        else None
+    )
+    if certificate is None:
+        if requested == "structured" and select_plan is not None:
+            raise ValueError(
+                "lcu_select_implementation='structured' failed eligibility condition: "
+                "no structure certificate is available"
             )
-        )
-    else:  # trotter
-        inspect_structure = requested in ("auto", "structured")
-        certificate = (
-            select_plan.structure_certificate
-            if select_plan is not None and inspect_structure
-            else None
-        )
-        if not inspect_structure:
-            rejection_reasons = ()
-        if certificate is None:
-            if requested == "structured" and select_plan is not None:
-                raise ValueError(
-                    "lcu_select_implementation='structured' failed eligibility condition: "
-                    "no structure certificate is available"
-                )
-            resolved = "structured" if requested == "structured" else (
-                "multiplexor" if requested == "auto" else requested
+        return "multiplexor" if requested == "auto" else requested
+    rejection_reasons = tuple(certificate.get("rejection_reasons", ()))
+    eligible = bool(certificate.get("eligible", False)) and not rejection_reasons
+    if requested == "structured":
+        if not eligible:
+            details = "; ".join(rejection_reasons) or "certificate is not eligible"
+            raise ValueError(
+                "lcu_select_implementation='structured' failed eligibility "
+                f"condition(s): {details}"
             )
-            reason = (
-                "structured eligibility is deferred until a product-formula plan is available"
-                if requested == "structured"
-                else (
-                    "product-formula auto selection uses the generic multiplexor because "
-                    "no structure certificate is available"
-                    if requested == "auto"
-                    else (
-                        "explicit generic product-formula multiplexor requested"
-                        if requested == "multiplexor"
-                        else "explicit validation-only branch-controlled compiler requested"
-                    )
-                )
-            )
-        else:
-            from nwqlib.subroutines._multiplexors import (
-                product_formula_select_resource_law,
-            )
+        return "structured"
+    if not eligible:
+        return "multiplexor"
+    from nwqlib.subroutines._multiplexors import (
+        product_formula_select_resource_law,
+    )
 
-            # Compare costs only after a valid structure certificate exists. Auto
-            # chooses structured SELECT only for a strict reduction in the same CX basis.
-            rejection_reasons = tuple(certificate.get("rejection_reasons", ()))
-            eligible = bool(certificate.get("eligible", False)) and not rejection_reasons
-            multiplexor_costs = costs or product_formula_select_resource_law(select_plan)
-            structured_costs = (
-                product_formula_select_resource_law(select_plan, implementation="structured")
-                if eligible
-                else None
-            )
-            multiplexor_cx = int(multiplexor_costs["select_basis_cx_count"])
-            structured_cx = (
-                None
-                if structured_costs is None
-                else int(structured_costs["select_basis_cx_count"])
-            )
-            candidate_record = {
-                "multiplexor_select_basis_cx_count": multiplexor_cx,
-                "structured_select_basis_cx_count": structured_cx,
-            }
-            if requested == "structured":
-                if not eligible:
-                    details = "; ".join(rejection_reasons) or "certificate is not eligible"
-                    raise ValueError(
-                        "lcu_select_implementation='structured' failed eligibility "
-                        f"condition(s): {details}"
-                    )
-                resolved = "structured"
-                reason = "explicit structured product-formula SELECT requested and certified"
-            elif eligible and structured_cx is not None and structured_cx < multiplexor_cx:
-                resolved = "structured"
-                reason = (
-                    "product-formula auto selection chose structured because certified "
-                    f"basis-CX cost {structured_cx} is lower than multiplexor {multiplexor_cx}"
-                )
-            else:
-                resolved = "multiplexor"
-                reason = (
-                    "product-formula auto selection keeps the generic multiplexor because "
-                    f"structured basis-CX cost {structured_cx} is not lower than "
-                    f"multiplexor {multiplexor_cx}"
-                    if eligible
-                    else "product-formula auto selection uses the generic multiplexor because "
-                    + "; ".join(rejection_reasons)
-                )
-            costs = dict(
-                structured_costs
-                if resolved == "structured" and structured_costs is not None
-                else multiplexor_costs
-            )
-
-    return {
-        "requested_lcu_select_implementation": requested,
-        "resolved_lcu_select_implementation": resolved,
-        "lcu_select_resolution_reason": reason,
-        "lcu_select_structure_eligible": None if (
-            he_backend == "trotter" and requested in ("multiplexor", "branch_controlled")
-        ) else bool(
-            select_plan is not None
-            and select_plan.structure_certificate is not None
-            and select_plan.structure_certificate.get("eligible", False)
-        ),
-        "lcu_select_structure_rejection_reasons": list(rejection_reasons),
-        "lcu_select_candidate_costs": candidate_record or costs,
-        **costs,
-    }
+    # Compare costs only after a valid structure certificate exists. Auto
+    # chooses structured SELECT only for a strict reduction in the same CX basis.
+    multiplexor_cx = int(product_formula_select_resource_law(select_plan)["select_basis_cx_count"])
+    structured_cx = int(
+        product_formula_select_resource_law(select_plan, implementation="structured")["select_basis_cx_count"]
+    )
+    return "structured" if structured_cx < multiplexor_cx else "multiplexor"
 
 
 
@@ -407,20 +298,25 @@ def _dense_branches(data, specifications, finish=None, *, cache=False):
     """Yield dense_exact branch circuits one at a time from node eigensystems.
 
     ``specifications`` yields (k, elapsed time, branch) triples, with k None
-    for an address padding slot. Each distinct k-node's Hermitian eigensystem
-    (time_independent_terms._node_eigensystem) is formed once per
-    invocation, one H eigensystem serving every node when L is exactly
-    zero; the branch matrix is (V * exp(-i t lambda)) @ V† (_branch_unitary),
-    the identity at zero elapsed time or when L and H are both zero. Each
-    branch matrix is released once its circuit is yielded, so only the
-    current branch's matrix is alive while SELECT controls and appends it.
-    With ``cache`` (the source layouts, whose nodes recur across
-    applications) every distinct node's eigensystem stays alive for this
-    invocation, K*(16*D**2 + 8*D) bytes; otherwise only the current node's is
-    alive and a recurring k would be factorized again, so
-    parameters.construction_work counts one eigensystem per homogeneous
-    branch.
-    ``finish(branch, unitary)`` builds a source branch circuit; otherwise the
+    for an address padding slot. With ``cache`` enabled, each distinct
+    k-node's Hermitian eigensystem (time_independent_terms._node_eigensystem)
+    is formed at most once per invocation. When L is exactly zero, any
+    required H eigensystem is shared across nodes whether or not ``cache``
+    is enabled. The branch matrix is ``(V * exp(-i t lambda)) @ V†``
+    (_branch_unitary), with eigenvectors V and eigenvalues lambda, and t the
+    elapsed time. It is the identity at zero elapsed time or when L and H
+    are both zero. Each branch matrix is released once its circuit is
+    yielded, so only the current branch's matrix is alive while SELECT
+    controls and appends it. With ``cache`` (the source layouts, whose nodes
+    recur across applications), the eigensystem arrays occupy at most
+    ``K*(16*D**2 + 8*D)`` bytes, where K is the number of distinct nonpadding
+    k-node keys and D is the encoded system dimension. Each computed
+    eigensystem stays alive for this invocation, with the shared H
+    eigensystem used when L is exactly zero. Without ``cache`` and with
+    nonzero L, only the current node's eigensystem is alive and a recurring
+    k would be factorized again, so parameters.construction_work counts
+    one eigensystem per nonzero-time homogeneous branch.
+    ``finish(branch, unitary)`` builds a source branch circuit. Otherwise the
     circuit holds the matrix as one UnitaryGate. The selected unitary skips
     the redundant input check (check_input=False), which does not project it
     onto the unitary group.

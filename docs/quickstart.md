@@ -15,7 +15,7 @@ Add an extra for each further capability you need, for example `python -m pip in
 | Extra | Use it for | Packages it adds |
 | --- | --- | --- |
 | `aer` | Running circuits on the local Aer simulator | Qiskit ≥ 2.5.2, Qiskit Aer ≥ 0.17.2 |
-| `qiskit` | Building Qiskit circuits, passing Qiskit objects as input, exporting circuits, and the Qiskit-based kernels some methods choose | Qiskit ≥ 2.5.2 |
+| `qiskit` | Building Qiskit circuits, passing Qiskit objects as input, exporting circuits, and the Qiskit-based classical evaluations that some methods choose | Qiskit ≥ 2.5.2 |
 | `notebook` | Running the [example notebooks](examples.md) | Jupyter, ipykernel, nbclient, Matplotlib |
 | `chemistry` | Building molecular Hamiltonians | Qiskit, PySCF, OpenFermion |
 | `tensor` | Matrix-product-state (MPS) circuit state preparation | Qiskit, plus `scikit_tt` installed as shown below |
@@ -59,7 +59,7 @@ print(result.solution)
 
 The result is the physical solution vector u(0.1), including its scale and phase. It is not normalized to unit length.
 
-LCHS, the linear combination of Hamiltonian simulation of An, Childs and Lin (ACL, arXiv:2312.03916v2, Eq. (6)), writes `exp(-tA)` for a matrix A with positive semidefinite Hermitian part as an integral over a kernel variable k of unitary evolutions, and approximates the integral by a quadrature sum. NWQLib shifts an A whose Hermitian part is not positive semidefinite and restores the resulting growth. Each quadrature node is one branch of that sum. SELECT is the circuit block that applies the branch whose index an address register holds (ACL Appendix A.3, Lemma 24, Eq. (178)). The default Aer circuit uses one system qubit and eight coefficient ancillas, which hold the address. It has 204 physical branches, padded to 256 address slots. The [LCHS guide](algorithms/lchs.md) describes the construction.
+LCHS, the linear combination of Hamiltonian simulation of An, Childs and Lin (ACL, arXiv:2312.03916v2, Eq. (6)), writes `exp(-tA)` for a matrix A with positive semidefinite Hermitian part as an integral over a kernel variable k of unitary evolutions, and approximates the integral by a quadrature sum. NWQLib shifts an A whose Hermitian part is not positive semidefinite and restores the resulting growth. Each quadrature node is one branch of that sum. SELECT is the circuit block that applies the branch whose index an address register holds (ACL Appendix A.3, Lemma 24, Eq. (178)). The default Aer circuit uses one system qubit and eight coefficient ancillas, which hold the address. It has 204 branches, padded to 256 address slots, the branch count rounded up to a power of two. The [LCHS guide](algorithms/lchs.md) describes the construction.
 
 ## Check the answer
 
@@ -80,7 +80,7 @@ print(np.linalg.norm(result.solution - reference))
 0.0008214720329548587
 ```
 
-The printed absolute L2 discrepancy, about `.000821472`, is that of the default finite LCHS approximation in this example. LCHS gives half of `LCHS.approximation_tolerance`, 0.01 by default, to the tail of the k integral that the cutoff drops and half to the k quadrature. Here the tail bound is `.005` and the quadrature bound is about `.00431140`. These two component bounds do not bound the total physical-output error, which also depends on the preparation, evolution and numerical approximations. The [LCHS guide](algorithms/lchs.md#selection-and-accuracy) describes these bounds, and [Check accuracy and verify a result](verification.md) describes NWQLib's own checks.
+The printed absolute L2 discrepancy, about `.000821472`, is that of the default finite LCHS approximation in this example. LCHS gives half of `LCHS.approximation_tolerance`, 0.01 by default, to the tail of the k integral that the cutoff drops and half to the k quadrature. Here the tail bound is `.005` and the quadrature bound is about `.00431140`. For this unit input without a shift, they equal the facts `kernel_approximation` and `k_quadrature` in `result.plan.facts` ([LCHS frames](conventions.md#lchs-frames)). These two component bounds do not bound the total physical-output error, which also depends on the preparation, evolution and numerical approximations. The [LCHS guide](algorithms/lchs.md#selection-and-accuracy) describes these bounds, and [Check accuracy and verify a result](verification.md) describes NWQLib's own checks.
 
 ## Change the approximation
 
@@ -123,7 +123,7 @@ logical_width at logical_device: 9 count [exact]
 unavailable
 ```
 
-Each quantity prints its value, its unit and a label (`exact`, `upper_bound`, `estimate`, `conditional` or `unavailable`), and on the second line what it counts. Here the circuit holds 9 qubits at the same time, an exact count. The operation count is unavailable because the blocks of this construction have no gate-count formula. An unavailable count carries its reason and is never treated as zero.
+Each quantity prints its value, its unit and a label (`exact`, `upper_bound`, `estimate`, `conditional` or `unavailable`). The second line gives the gate basis (`basis`), the workflow stage (`lifecycle`, which is `planned` before any circuit exists) and what is counted (`population`). Here the circuit holds 9 qubits at the same time, an exact count. The operation count is unavailable because the [blocks](glossary.md#block) (subroutines) of this construction have no gate-count formula. An unavailable count carries its reason and is never treated as zero.
 
 Planning computes the numerical data the Method needs and takes no measurements. Run the Plan with `solve(lchs_plan)`, or pass it to `prepare` and `submit` to control preparation and submission yourself ([Run on a backend](prepared_execution.md)). A Result keeps its Plan as `result.plan`. [Estimate resources](resources.md) explains how counts from formulas differ from counts of a built circuit and from device predictions.
 
@@ -148,7 +148,7 @@ print(restored.solution)
 - [Examples](examples.md): the linear dynamics notebook (`examples/lchs_linear_dynamics_intro.ipynb`) applies LCHS to advection-diffusion. It separates product-formula error from quadrature error and compares kernels, quadratures, and exact and MPS state preparation by their errors and success probabilities, with compiled gate counts for the isolated state loaders.
 - [Plan, compare and solve](scientist.md) compares Lanczos and FixedGCIM for the same `Eigenproblem`.
 - [Supply inputs](inputs.md) covers dense, sparse and structured inputs.
-- [Run on a backend](prepared_execution.md) and [Continue an interrupted run](run_archives.md) cover pending work and continuation.
+- [Run on a backend](prepared_execution.md) and [Continue an interrupted run](run_archives.md) cover submitting to a backend and continuing a saved run.
 - [Save, load and reanalyze results](saved_evidence.md) covers saved results and reanalysis.
 - [Use the command line](cli.md) lists methods and their parameters and inspects saved reports.
 - [How NWQLib works](how_it_works.md) explains Problem, Method, Plan, Run and Result.

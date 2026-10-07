@@ -1,9 +1,8 @@
 """Shared JSON-serialization helpers for record payloads.
 
-Leaf module: imports nothing from ``nwqlib``. It is safe for algorithms and
-subroutines; backend modules should avoid importing through
-``nwqlib.subroutines`` during package initialization. These shared array and
-complex-scalar encodings keep the same JSON shapes across record consumers.
+Leaf module: imports nothing from ``nwqlib``, so algorithms, subroutines
+and backends can import it without import cycles. These shared array and
+complex-scalar encodings keep the same JSON shapes in every record.
 Changing those shapes changes the record's serialization contract.
 """
 

@@ -31,7 +31,7 @@ Install NWQLib with the extras in the notebook's row, for example for the linear
 python -m pip install "nwqlib[aer,notebook]"
 ```
 
-The `tensor` extra supplies the matrix-product-state loading that the linear-ODE notebook compares, and it also needs `scikit_tt`, which [Install and first result](https://pnnl.github.io/NWQLib/quickstart/#install) shows how to install. The `chemistry` extra supplies the molecular Hamiltonian of the eigenvalue notebook. Open the notebook in Jupyter and run all cells.
+The linear-ODE notebook compares matrix-product-state loading, which needs the `tensor` extra and `scikit_tt`, installed separately as [Install and first result](https://pnnl.github.io/NWQLib/quickstart/#install) shows. The `chemistry` extra supplies the molecular Hamiltonian of the eigenvalue notebook. Open the notebook in Jupyter and run all cells.
 
 `python -m nwqlib algorithms` lists every method with the outputs it supports, and `python -m nwqlib card qls` prints one method's declared inputs, references and limitations. [Why NWQLib](../docs/why_nwqlib.md) compares this problem-level workflow with other quantum software packages.
 

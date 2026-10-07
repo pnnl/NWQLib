@@ -21,11 +21,10 @@ def raw_blocks(reconstruction):
     A kinetic record becomes its XX and YY terms on the stored pair with the
     stored coefficient, and keeps its pair and angle. A projector record keeps
     its support and angle, so the direct ``ir_product`` kernel reads both
-    kinds without parsing labels. The
-    objective is not evaluated and the schedule is not recompiled. Each block
-    is rebuilt when it is consumed, so the circuit builder and the classical
-    ``ir_product`` kernel (``theory._run_ir_product``) hold one block at a
-    time instead of a copy of every stored block.
+    kinds without parsing labels. Each block is rebuilt when it is consumed,
+    so the circuit builder and the classical ``ir_product`` kernel
+    (``theory._run_ir_product``) hold one block at a time instead of a copy
+    of every stored block.
     """
     for group in reconstruction.steps:
         for block in group:
@@ -57,7 +56,10 @@ def _binary_native_bytes(reconstruction, method, d):
     The qualified graph allowance is 65536+4096*C+512*Q+2048*G+32*A+64*V
     on CPython 3.12.14 and Qiskit 2.5.2. Two graph allowances permit source
     and appended-copy coexistence. These rates price named objects and
-    storage, not process RSS or arbitrary SDK synthesis.
+    storage, not process RSS or arbitrary SDK synthesis. Revisit when the
+    builder, the copying of gate definitions, the parameter representation
+    or the SDK version changes, or a measured workload falls outside the
+    checked range (docs/ENGINEERING_CONSTANTS.md).
 
     A nonzero dense n-qubit diagonal has E=2**n entries. It adds n+1
     circuits of total width q=n+n*(n+1)//2, 2*E+n-2 gate positions,
@@ -70,7 +72,8 @@ def _binary_native_bytes(reconstruction, method, d):
 
     Structured preparation contributes d*b H gates. StatePreparation
     contributes d gates and d*K complex parameters, with its later lazy
-    synthesis outside this constructor. A resource-only recipe refuses.
+    synthesis outside this constructor. Both callers exclude the resource-only
+    recipe first (``method.QHD._select_binary_native``, ``construct_qhd``).
     A zero dense block adds no graph but keeps its padding scratch charge.
 
     The scratch is 65536+(320+L(n_max))*E_max plus
@@ -97,8 +100,6 @@ def _binary_native_bytes(reconstruction, method, d):
         gates += d
         args += d * bits
         params += d * k
-    else:
-        raise ValueError("initial_state_preparation='none' is resource-only")
     largest = k
     widest = bits
     for group in reconstruction.steps:

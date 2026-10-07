@@ -65,7 +65,12 @@ def test_shared_walk_metadata_counts_and_padding_readout():
     # Index label 3 is padding. Its frequency stays in the denominator and
     # contributes zero first AND second moment; no success postselection.
     readout = plan._native["readout"]
-    statistics = decode_histogram(readout, odd, {0: 2, 4: 1, 1: 3, 5: 2, 3: 2}, counts=True)
+    counts = {0: 2, 4: 1, 1: 3, 5: 2, 3: 2}
+    statistics = decode_histogram(
+        readout, odd,
+        Histogram(odd.histogram_width, list(counts), np.array(list(counts.values()), dtype=np.int64)),
+        counts=True,
+    )
     assert statistics.mean == 0.0
     assert statistics.second_moment == 0.8 and statistics.shots == 10
     assert statistics.variance == pytest.approx(0.8 / 9, rel=0, abs=1e-16)
@@ -73,11 +78,17 @@ def test_shared_walk_metadata_counts_and_padding_readout():
         readout, even, Histogram(even.histogram_width, [0, 1], np.array([1, 4])), counts=True
     )
     assert reflection.mean == -0.6 and reflection.second_moment == 1.0
-    # Exact probabilities keep denominator one: a mapping of total mass 0.5
+    # Exact probabilities keep denominator one: a histogram of total mass 0.5
     # decodes to its signed sum, -0.125 (address 0, IX, sign -1, system bit 0
     # reads 0) + 0.25 (address 0, system bit 0 reads 1) + 0 (padding address
     # 3), not to that sum divided by the mass.
-    exact = decode_histogram(readout, odd, {0: 0.125, 4: 0.25, 3: 0.125}, counts=False)
+    probabilities = {0: 0.125, 4: 0.25, 3: 0.125}
+    exact = decode_histogram(
+        readout, odd,
+        Histogram(odd.histogram_width, list(probabilities),
+                  np.array(list(probabilities.values()), dtype=np.float64)),
+        counts=False,
+    )
     assert (exact.mean, exact.second_moment, exact.shots) == (0.125, 0.375, None)
 
 
@@ -127,11 +138,20 @@ def test_readout_wider_than_64_bits_decodes_label_parity_and_padding():
         return (1 if coefficient > 0 else -1) * (-1) ** bin(system & support).count("1")
 
     outcomes = {1 << 67: 3, 1 | 1 << 66: 2, 2 | 3 << 66 | 1 << 3: 4, 3 | 1 << 67: 1, 2 | 1 << 3: 6}
-    statistics = decode_histogram(readout, odd, outcomes, counts=True)
+    statistics = decode_histogram(
+        readout, odd,
+        Histogram(odd.histogram_width, list(outcomes), np.array(list(outcomes.values()), dtype=np.int64)),
+        counts=True,
+    )
     assert statistics.shots == 16
     assert statistics.mean == sum(expected(b) * w for b, w in outcomes.items()) / 16 == -1 / 16
     assert statistics.second_moment == sum(expected(b) ** 2 * w for b, w in outcomes.items()) / 16
-    reflection = decode_histogram(readout, even, {1 << 67: 2, 1: 3}, counts=True)
+    reflected = {1 << 67: 2, 1: 3}
+    reflection = decode_histogram(
+        readout, even,
+        Histogram(even.histogram_width, list(reflected), np.array(list(reflected.values()), dtype=np.int64)),
+        counts=True,
+    )
     assert reflection.mean == -0.2 and reflection.second_moment == 1.0
 
 

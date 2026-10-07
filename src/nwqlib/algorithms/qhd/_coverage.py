@@ -1,23 +1,24 @@
 """Simultaneous population-mass bounds for QHD's selected old-grid regions.
 
-Coverage result: Wu et al., https://arxiv.org/abs/2605.12066.
-Proposition 49 of docs/mathematics.md supplies the full derivation.
+NWQLib derives this coverage bound in Proposition 49 of docs/mathematics.md
+from Hoeffding and one-sided Clopper–Pearson bounds. The refinement
+procedure follows Wu et al., arXiv:2605.12066v1, Sec. V.
 Given earlier history and validity indicators, the S valid
 positions of a level are iid from its conditional population. Its raw shot
 count, grid, seam and distribution were fixed before seeing those positions.
 The total failure probability alpha and maximum number H of levels are also
-fixed in advance. For AL, H is max_iterations * max_levels; dimensions may
+fixed in advance. For AL, H is max_iterations * max_levels. Dimensions may
 depend on earlier rounds and include slack coordinates.
 
 There are I = K (K + 1)/2 nonempty nonwrapping intervals per axis, hence
 J = d I marginal events and N = I**d joint boxes. These families cover the
 data-selected ordinary box and either stall-split side including its valley.
 Half of alpha goes to each method. Their conditional failure probabilities
-per level are at most alpha/(2H); conditional averaging and a union bound
+per level are at most alpha/(2H). Conditional averaging and a union bound
 over H levels give total failure at most alpha. No independence between
 the two methods or different levels is required. Taking the larger lower
 bound is valid on their common simultaneous event. Each bound concerns its
-own level population; multiplying them does not give final-box coverage.
+own level population. Multiplying them does not give final-box coverage.
 
 All numerical formulas use ordinary binary64 evaluation, not directed
 rounding. Reporting reads the integer sufficient statistics already stored
@@ -28,9 +29,12 @@ from math import exp, isfinite, log, sqrt
 from sys import float_info
 
 
-# Predeclared report policy, not fitted to observations. Both result types
-# use this same total run failure probability and split it equally between
-# Hoeffding and Clopper-Pearson. See docs/ENGINEERING_CONSTANTS.md.
+# Default total run failure probability of the coverage report, the
+# conventional 0.05, a chosen value and not a derived one. It is fixed in
+# advance, not fitted to observations. Both result types use it and split it
+# equally between Hoeffding and Clopper-Pearson. failure_probability is the
+# user's parameter. report(failure_probability=alpha) uses another value, and
+# None omits the statistical report. See docs/ENGINEERING_CONSTANTS.md.
 DEFAULT_FAILURE_PROBABILITY = 0.05
 
 
@@ -44,7 +48,7 @@ def validate_alpha(value):
 
 
 def selected_intervals(level, k):
-    """Return the retained old-grid event, including the valley of a selected split side."""
+    """Return the kept old-grid event, including the valley of a selected split side."""
     if level.split is None:
         return level.intervals
     split = level.split
@@ -79,13 +83,13 @@ def cp_lower(m, n, log_beta):
     I_beta**(-1)(M, S-M+1) otherwise. For M=S, the tail is p**S, so
     L_CP=exp(log_beta/S). This is frequentist binomial-test inversion,
     without a prior. Source: Clopper and Pearson, Biometrika 26 (1934),
-    doi:10.1093/biomet/26.4.404; SciPy's scipy.special.betaincinv implements
+    doi:10.1093/biomet/26.4.404. SciPy's scipy.special.betaincinv implements
     the inverse regularized incomplete beta function.
 
     bounds_from_counts allocates beta=alpha/(2 H I**d) to every candidate
     joint box. The module docstring supplies the selection and horizon
     union bounds. Exact integer shapes and a normal target beta delimit
-    the nonanalytic evaluation; they do not establish an inverse error
+    the nonanalytic evaluation. They do not establish an inverse error
     bound. Large shapes or extreme tails can lose relative tail accuracy.
     A finite output in [0,1) is an ordinary binary64 approximation and may
     be subnormal or zero. An output rounded to one is unavailable because
@@ -134,7 +138,7 @@ def bounds_from_counts(*, n, axis_counts, joint_count, intervals, k, horizon, al
     misses = sum(n - axis_counts[j] for j in active)
     empirical_union_lower = max(0, n - misses) / n
     h_lower = max(0.0, empirical_union_lower - len(active) * radius)
-    # N = I**d can be enormous; log(N) = d log(I) avoids forming it.
+    # N = I**d can be enormous. log(N) = d log(I) avoids forming it.
     intervals_per_axis = k * (k + 1) // 2
     log_beta = log(alpha) - log(2) - log(horizon) - len(intervals) * log(intervals_per_axis)
     c_lower, reason = cp_lower(joint_count, n, log_beta)
@@ -150,8 +154,8 @@ def coverage(entries, *, k, horizon, failure_probability=DEFAULT_FAILURE_PROBABI
     The callers supply the configured horizon, never the observed number
     of levels. A completed counts level has positive valid_count by
     RefinementLevel._domain. Exact levels supply no sampling statement.
-    CP unavailability keeps the original alpha/2 Hoeffding allocation;
-    reallocating it after inspecting the counts would change the event.
+    CP unavailability keeps the original alpha/2 Hoeffding allocation.
+    Reallocating it after inspecting the counts would change the event.
     """
     alpha = validate_alpha(failure_probability)
     if alpha is None:
@@ -202,7 +206,7 @@ def coverage_lines(confidence):
             bound = "1 (full valid-grid support)"
         else:
             # repr preserves a binary64 value below one instead of rounding
-            # it to a displayed one; a computed endpoint remains approximate.
+            # it to a displayed one. A computed endpoint remains approximate.
             bound = f"approximately {row['lower_bound']!r}"
             if row["lower_bound"] == 1.0:
                 bound += " (rounded)"

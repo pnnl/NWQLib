@@ -106,20 +106,12 @@ def _detect_banded_structure_with_error(
     """
 
     array = np.asarray(matrix, dtype=complex)
-    if array.ndim != 2 or array.shape[0] != array.shape[1]:
-        raise ValueError("banded structure detection requires a square matrix")
     dimension = array.shape[0]
-    if dimension <= 0 or dimension & (dimension - 1):
-        raise ValueError("banded structure detection requires a power-of-two dimension")
-    if not np.all(np.isfinite(array)):
-        raise ValueError("banded structure detection requires finite matrix entries")
     if atol is None:
         # Scaled machine-precision equality for an explicit "banded" request,
         # registered in docs/ENGINEERING_CONSTANTS.md. Automatic routing
         # passes atol=0. Revisit with a changed precision or detector.
         atol = 1.0e-12 * max(1.0, float(np.max(np.abs(array))))
-    if not np.isfinite(atol) or atol < 0.0:
-        raise ValueError("banded structure detection atol must be finite and nonnegative")
 
     columns = np.arange(dimension)
     row_errors = np.zeros(dimension)
@@ -184,12 +176,14 @@ def build_banded_block_encoding(
 
     The address PREP is the direct magnitude and phase tree of
     [`build_qiskit_state_preparation`][nwqlib.subroutines.state_preparation.direct.build_qiskit_state_preparation]
-    over the `2**a` band addresses. It is not a declared PREP block, so a
-    Run's `max_direct_amplitudes` does not apply to it. Planning checks it
-    at `64 * 2**a * (q + 16)` bytes and `32 * 2**a * q**2` work for q
-    system qubits, and with at most `2**q` distinct bands that allows at
-    most `2**13` addresses at a `max_work` of `10**8` and `2**16` at the
-    default of `10**9`, which QLS shares.
+    over the ``2**a`` band addresses, where ``a`` is the number of address
+    qubits. It is not a declared PREP block, so a Run's
+    `max_direct_amplitudes` does not apply to it. Planning checks it
+    at ``64 * 2**a * (q + 16)`` bytes and ``32 * 2**a * q**2`` work for q
+    system qubits. With at most ``2**q`` distinct bands, the work check
+    allows at most ``2**13`` addresses at a `max_work` of ``10**8`` and
+    ``2**16`` at the default of ``10**9``. QLS uses the same default
+    `max_work` of ``10**9``.
 
     Args:
         operator (BandSpecification): The bands. No dense matrix is formed.
@@ -283,8 +277,6 @@ def build_banded_block_encoding(
         register_order=("lcu_control", "system"),
     )
     metadata["band_specification"] = specification.to_dict()
-    metadata["band_offsets"] = [int(offset) for offset in specification.offsets]
-    metadata["toeplitz"] = True
     metadata["num_bands"] = num_bands
     metadata["structure_detection"] = "given_band_specification"
     # S**b has adjoint S**(-b). Pairing the stored coefficients proves

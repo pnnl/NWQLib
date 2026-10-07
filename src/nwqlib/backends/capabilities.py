@@ -36,10 +36,33 @@ class BackendCapability(str, Enum):
 
 
 class InstructionSupport(Record):
-    """A concrete logical primitive or selected kernel, including its transform.
+    """One primitive gate or circuit-block implementation that a backend target supports, with its control, adjoint and width.
 
-    max_qubits bounds the complete instruction width, including controls.
-    Kernel support matches the exact implementation Source, never its name alone.
+    Build it with keyword arguments and list it in `BackendTarget.instructions`.
+    Each entry names exactly one of `primitive` and `implementation`. Profile
+    assessment counts a circuit block of a Plan as supported when entries
+    with the block's `controlled` and `adjoint` form either name the
+    block's exact implementation `Source` with a `max_qubits` of at least the
+    block's width, or name every primitive gate of the block's decomposition,
+    each with a `max_qubits` of at least the gate's width plus one for a
+    controlled block. An entry with only the same implementation name does
+    not match.
+
+    Attributes:
+        primitive: Default `None`. Primitive gate among `"x"`, `"h"`, `"z"`,
+            `"sdg"`, `"cx"`, `"mc_z"` and `"phase"`.
+        implementation: Default `None`. The `implementation` `Source` of a
+            circuit block's `SelectedDefinition`.
+        controlled: Default `False`. Whether the entry covers the controlled
+            form instead of the uncontrolled one.
+        adjoint: Default `False`. Whether the entry covers the adjoint form
+            instead of the original one.
+        max_qubits: Required. Largest supported instruction width, controls
+            included.
+
+    Raises:
+        ValueError: If both or neither of `primitive` and `implementation`
+            are given.
     """
 
     primitive: Literal["x", "h", "z", "sdg", "cx", "mc_z", "phase"] | None = None
@@ -76,8 +99,9 @@ class BackendTarget(Record):
         provider: Required. Provider family, such as `"qiskit_aer"` or
             `"ionq"`.
         capabilities: Default `None`, unknown. Coarse execution
-            capabilities, such as `"statevector"`, `"counts"` or
-            `"noise_model"`.
+            capabilities among `"statevector"`, `"counts"`, `"expectation"`,
+            `"estimated_observable"`, `"qasm_export"`, `"hardware_submit"`,
+            `"noise_model"`, `"native_gate_target"` and `"host_kernel"`.
         description: Default `""`. Text for reports.
         native_basis_gates: Default `()`. Native or preferred basis gates
             when known, in the given order.
@@ -105,11 +129,12 @@ class BackendTarget(Record):
             classical routines on this target. Profile assessment requires
             every dependency that a chosen routine declares to be listed.
         instructions: Default `None`, unknown. Exact instruction subset,
-            including controls and adjoints, as `InstructionSupport`
+            including controls and adjoints, as
+            [`InstructionSupport`][nwqlib.backends.capabilities.InstructionSupport]
             records, each naming one primitive gate or one implementation
             `Source` and its width.
-        program_nodes: Default `None`, unknown. Supported `Program` node
-            kinds.
+        program_nodes: Default `None`, unknown. Supported
+            [Program](../glossary.md#program) node kinds.
 
     Raises:
         ValueError: If a collection declares a value twice.
@@ -160,7 +185,7 @@ def unsupported_readout(target, observation):
     feature, each point's readout kind, the ``views`` feature for a point with
     a view, and each reducer by name, or any registered reducer on a target
     that declares ``reducers="registered"``. The ``views`` feature covers Pauli and
-    probability points; a view on an amplitude or reduction point is named
+    probability points. A view on an amplitude or reduction point is named
     as unsupported on every target. An unknown (None) or absent declaration
     supports nothing.
     """

@@ -1,4 +1,4 @@
-"""Scalar checks used at scientific input boundaries."""
+"""Scalar input checks and the binary64 roundoff windows of exact simulator readouts and host state evolution."""
 
 from __future__ import annotations
 
@@ -14,8 +14,7 @@ import numpy as np
 # excess beyond the endpoints of host-kernel probabilities, masses and QPE
 # ancilla means, the normalization window of a marginal without a preparation
 # receipt, the floor of exact_probability_window, and the window of subset-mass
-# and QHD mass-partition comparisons. Revisit for changed precision
-# or units.
+# and QHD mass-partition comparisons. Revisit for changed precision or units.
 NUMERICAL_RELATION_RTOL = 1e-12
 
 # Binary64 unit roundoff u.
@@ -29,11 +28,11 @@ UNIT_ROUNDOFF = 2.0**-53
 # relation again by the chunk (ObservationChunk._statistics), before a reader
 # creates an int64 array. For one validated chunk every intermediate sum of
 # its nonnegative entries lies in [0, T], so an int64 sum of that chunk's
-# weights cannot overflow; sums across acquisitions, or of scaled products,
+# weights cannot overflow. Sums across acquisitions, or of scaled products,
 # still need an overflow-safe accumulation. It is a representation boundary:
 # the reader returns counts as int64 weights. execution.MAX_COUNT names the
 # same value. Registered in docs/ENGINEERING_CONSTANTS.md ("Readout count
-# representation"). Source: the NWQLib count-domain derivation.
+# representation").
 MAX_COUNT = 2**63 - 1
 
 # Exact-probability roundoff window. The bounds below are first order in u, and
@@ -67,9 +66,9 @@ MAX_COUNT = 2**63 - 1
 # GATE_ENTRY_ERROR = 10 covers both. The entries of Aer's u, u2, u3, cu, cu2,
 # cu3, mcu, mcu2 and mcu3 gates also round a sum of angles inside the
 # exponential, which moves an entry's phase by at most 2*u*A, A being the sum of
-# the gate's |parameters|. For A <=
-# PHASE_SUM_LIMIT the entry error is at most (GATE_ENTRY_ERROR + 2*A)*u, and a
-# gate with || |G| ||_2 <= 2 then moves ||G x||_2 by at most twice that.
+# the gate's |parameters|. For A <= PHASE_SUM_LIMIT the entry error is at most
+# (GATE_ENTRY_ERROR + 2*A)*u, and a gate with || |G| ||_2 <= 2 then moves
+# ||G x||_2 by at most twice that.
 #
 # Aer (qiskit-aer 0.17.2 statevector method, src/transpile/fusion.hpp). Aer fuses
 # only circuits wider than fusion_threshold, 14 qubits by default, so a circuit
@@ -96,15 +95,14 @@ MAX_COUNT = 2**63 - 1
 # records of include/circuit.hpp and include/private/sim_gate.hpp). A runner
 # built from a revision that descends from efd0226 with these files unchanged is
 # inside this derivation (_ROUNDOFF_SOURCES and _ROUNDOFF_BASE_REVISION in
-# backends/nwqsim.py). The runner sends only U and
-# CX gates. Fusion multiplies 2 x 2 and 4 x 4 gate matrices. Its Kronecker
-# products with the identity and its control-target reversal are exact, and
-# every product merges two gates, so G gates give at most G - 1 inexact products
-# and at most G applied 4 x 4 blocks. A product of two 4 x 4 factors with
-# || |.| ||_2 <= 2 changes the action on a unit vector by at most
-# sqrt(2)*gamma_8*2*2, and
-# applying a 4 x 4 block costs at most sqrt(2)*gamma_8*2. CX entries are exact,
-# and a U gate has || |G| ||_2 <= sqrt(2).
+# backends/nwqsim.py). The runner sends only U and CX gates. Fusion multiplies
+# 2 x 2 and 4 x 4 gate matrices. Its Kronecker products with the identity and
+# its control-target reversal are exact, and every product merges two gates, so
+# G gates give at most G - 1 inexact products and at most G applied 4 x 4
+# blocks. A product of two 4 x 4 factors with || |.| ||_2 <= 2 changes the
+# action on a unit vector by at most sqrt(2)*gamma_8*2*2, and applying a 4 x 4
+# block costs at most sqrt(2)*gamma_8*2. CX entries are exact, and a U gate has
+# || |G| ||_2 <= sqrt(2).
 #
 # Each constant charges every native instruction its worst inexact fold, applied
 # block and entry error, and doubles the sum because the total probability is

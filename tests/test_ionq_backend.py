@@ -291,7 +291,6 @@ def test_unsupported_populations_reject_before_submission_and_sdk_error_propagat
 
     state, backend, _ = api
     for connection, match in (
-        (backend.revise(debiasing=True), "variant acquisitions"),
         (backend.revise(device="simulator"), "ignores shots"),
     ):
         with pytest.raises(ValueError, match=match):
@@ -473,7 +472,9 @@ def handle_for(selected, backend, run):
 
 def test_restore_admits_before_json_and_keeps_original_measurement_map(monkeypatch):
     from dataclasses import replace
+    import numpy as np
     from nwqlib.backends import ionq
+    from nwqlib.backends.results import remap_counts
     from test_nexus_backend import IO
     from nwqlib.execution import ExecutionLimits
 
@@ -496,6 +497,9 @@ def test_restore_admits_before_json_and_keeps_original_measurement_map(monkeypat
         run=run,
     )
     assert dict(zip(*(array.tolist() for array in result.raw_output["counts"]))) == {0b001: 3, 0b100: 1}
+    # NumPy int64 counts map to the same classical counts as the provider's Python integers.
+    mapped = remap_counts(np.array([4, 1], dtype=np.uint64), np.array([3, 1], dtype=np.int64), restored.measurement_map)
+    assert dict(zip(*(array.tolist() for array in mapped))) == {0b001: 3, 0b100: 1}
     # An identity map over the first two of three qubits drops the unmeasured q2 of every state.
     prefix = replace(restored, measurement_map=(0, 1))
     result = backend._decode({"5": 3, "1": 1}, artifact_format="ionq.result.histogram.json.v1", native=prefix,

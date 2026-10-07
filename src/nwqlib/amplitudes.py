@@ -3,7 +3,7 @@
 Block-encoding convention: An, Childs & Lin, arXiv:2312.03916v2,
 Appendix A.2 Definition 23 and A.3 Lemma 24, Eq. (178).
 https://arxiv.org/html/2312.03916v2#A3
-The method supplies its positive recovery factor; this owner projects the
+The method supplies its positive recovery factor. This module projects the
 actual native output and never reconstructs a missing state from counts.
 """
 
@@ -23,7 +23,7 @@ from nwqlib._validation import NUMERICAL_RELATION_RTOL, validate_normalized_mass
 AMPLITUDE_MASS_LABELS = ("algorithm_success_mass", "physical_slice_mass")
 AMPLITUDE_MASS_UNAVAILABLE = "nonzero selected mass is not representable in binary64"
 # A direct helper has a finite known-array envelope. A Run supplies its actual
-# selected backend allowance; this is neither a Plan limit nor process RSS.
+# selected backend allowance. This is neither a Plan limit nor process RSS.
 DEFAULT_AMPLITUDE_BYTES = DEFAULT_MAX_BYTES
 
 
@@ -31,7 +31,7 @@ def _slice(native, free, fixed, *, size=None):
     """Project fixed bits and an optional original-coordinate prefix.
 
     Free bits are least significant first in the output index. Contiguous bit
-    positions produce a strided view; a noncontiguous projection allocates only
+    positions produce a strided view. A noncontiguous projection allocates only
     the requested number of coordinates, never a full-native-width index map.
     """
     import numpy as np
@@ -81,24 +81,39 @@ def validate_amplitude_masses(declaration, values):
 
 
 class AmplitudeReadout(Record):
-    """One phase-faithful amplitude projection of a selected construction.
+    """An amplitude readout: which qubits of a circuit's state form the output vector, and how it is scaled to physical units.
 
-    coordinates are least significant first. success is the algorithm event;
-    conditions and the original output length select the physical coordinates.
-    No execution limit enters this scientific selection. recovery is a positive
+    An `ObservationSpec` of kind `"amplitudes"` and an amplitude point of a
+    trajectory carry it as `amplitudes`. The returned amplitudes are complex
+    and keep their phase.
+
+    `coordinates` are least significant first. `success` is the algorithm event.
+    The `conditions` and the original output length select the physical coordinates.
+    No execution limit enters this scientific selection. `recovery` is a positive
     method scale, not an observed norm or a promise about approximation error.
-    A physical-frame output requires that recovery.
+    A physical-frame output requires that `recovery`.
 
     Attributes:
-        construction_id: Selected construction whose native state is read.
-        source: Method source of the projection.
-        width: Native circuit width in qubits.
-        coordinates: Native qubits that form the output coordinate index, least significant first.
+        construction_id: Content hash of the `SelectedConstruction` whose
+            circuit state is read.
+        source: `Source` of the Method that declares the readout.
+        width: Width of the circuit in qubits.
+        coordinates: Circuit qubits that form the output coordinate index,
+            least significant first.
         success: Fixed ``(qubit, bit)`` pairs of the algorithm's success event, such as ancillas at zero.
         conditions: Further fixed ``(qubit, bit)`` pairs that select the physical coordinates.
         output: Requested vector output, its frame and its original dimension.
         recovery: Positive composed scale that maps the selected encoded amplitudes to physical units. None is allowed only for a unit-frame output.
-        keep_masses: Whether the reduction also returns the algorithm-success and physical-slice masses.
+        keep_masses: Default `False`. Whether the readout also returns the
+            algorithm-success and physical-slice masses.
+
+    Raises:
+        ValueError: If the coordinates and the fixed qubits do not list every
+            circuit qubit exactly once, a fixed bit is not 0 or 1, the output
+            is not a complex128 vector whose original dimension fits the
+            coordinates, a physical-frame output has no recovery, or a
+            recovery is zero or its `evidence` is not
+            `"composed_floating_point_recovery"`.
     """
 
     schema_version: Literal[2] = 2
@@ -119,9 +134,8 @@ class AmplitudeReadout(Record):
         The coordinates and the fixed success and condition qubits must
         partition the native width, fixed values must be 0 or 1, and the
         original vector dimension must fit the coordinate register. The output
-        is a complex128 vector. A
-        physical-frame output needs a recovery, and any recovery must be
-        positive with ``composed_floating_point_recovery`` evidence.
+        is a complex128 vector. A physical-frame output needs a recovery, and
+        any recovery must be positive with ``composed_floating_point_recovery`` evidence.
         """
         fixed = self.success + self.conditions
         bits = self.coordinates + tuple(bit for bit, _ in fixed)
@@ -180,7 +194,7 @@ class AmplitudeReadout(Record):
         return payload
 
     def select(self, native):
-        """Access original coordinates; padded dummy entries are excluded."""
+        """Access original coordinates. Padded dummy entries are excluded."""
         import numpy as np
 
         if (type(native) is not np.ndarray or native.dtype != np.dtype("complex128")
@@ -212,11 +226,10 @@ def reduce_amplitudes(readout, native, *, max_bytes=DEFAULT_AMPLITUDE_BYTES, max
     if not np.isfinite(selected).all():
         raise ValueError("selected native amplitudes must be finite")
     # ACL arXiv:2312.03916v2, Eq. (178): the zero-ancilla block is the desired
-    # LCU divided by
-    # ||c||_1. Here selected is that encoded amplitude vector after the method's
-    # physical-coordinate projection, and recovery includes ||c||_1 plus its
-    # input/encoding factors. Multiply by this positive factor, preserving phase;
-    # a normalized direction is selected only by an explicit unit-vector output.
+    # LCU divided by ||c||_1. Here selected is that encoded amplitude vector
+    # after the method's physical-coordinate projection, and recovery includes
+    # ||c||_1 plus its input/encoding factors. Multiply by this positive factor,
+    # preserving phase.
     recovery = readout.recovery
     # Only a unit-frame output returns the normalized direction. The norm and
     # its binary scale do not depend on whether the direction is formed, so a

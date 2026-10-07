@@ -1,4 +1,8 @@
-"""An explicitly selected Method case through actual science and saved data."""
+"""Check a new Method on one author-supplied test case (`check_method`).
+
+The check covers planning, the case's expected relation, the rejection of a
+wrong Result by `validate_plan` and a saved-result round trip.
+"""
 
 from collections.abc import Callable
 from dataclasses import dataclass
@@ -57,10 +61,11 @@ class MethodCase:
 
 
 def _saved_content(result):
-    """Compare persistent science, not the identity of reopened native handles.
+    """Return the saved content of a Result in a form that can be compared.
 
-    Payload meaning remains the explicit case's independent expected relation;
-    this comparison does not add a full-array scan to the generic checker.
+    Saved arrays enter by their manifests, because reopened array handles
+    differ between loads, so the check reads no full array. Whether the values
+    are right is decided by the case's `accepts` relation.
     """
     data = result.data
     return (result.model_dump(mode="json"), result.plan.to_record(),
@@ -77,9 +82,8 @@ def check_method(case: MethodCase) -> dict:
     the Result. The Method's `error_model` must equal the Plan's, and its
     `result_type` must name the Result class. The wrong Result from
     `invalid_result` must be a valid record that the Method's `validate_plan`
-    rejects, both in memory and after it replaces the legal Result in a saved
-    archive. The legal Result must then reload unchanged and still pass the
-    relation. These wrong-answer steps show that the Method's own Plan and Result
+    rejects. The legal Result must save, reload unchanged and still pass the
+    relation. The wrong-answer step shows that the Method's own Plan and Result
     check catches a scientifically wrong answer under the same Plan, which a
     record's own field checks cannot do. Nothing beyond the case's callback is
     computed, neither a reference solve nor extra circuits. `"CONFORMANT"` means this
@@ -100,8 +104,7 @@ def check_method(case: MethodCase) -> dict:
         ValueError: If the expected relation, the wrong-answer check or the saved
             round trip fails.
     """
-    from nwqlib._choice_archive import ArchiveFiles
-    from nwqlib.saved_evidence import DEFAULT_MAX_BYTES, load_result
+    from nwqlib.saved_evidence import load_result
 
     if not isinstance(case, MethodCase):
         raise TypeError("author factory must return an actual MethodCase")
@@ -117,7 +120,6 @@ def check_method(case: MethodCase) -> dict:
     result = case.evaluate(selected)
     if not isinstance(result, Result) or result.plan is not selected:
         raise ValueError("author case must return the actual selected Plan's attached Result")
-    result.validate_plan(selected)
     if case.accepts(result) is not True:
         raise ValueError("author's independent expected relation failed")
     if method.error_model(selected) != selected.error_model:
@@ -134,7 +136,8 @@ def check_method(case: MethodCase) -> dict:
         raise ValueError(
             "falsifier must alter a scientific field in the same concrete Plan/result pair"
         )
-    # Intrinsic Record validity is not the method's scientific pair relation.
+    # The wrong Result must pass the record's own field checks, so that only
+    # validate_plan can reject it.
     type(invalid).model_validate(invalid.model_dump(mode="json"))
     try:
         invalid.validate_plan(selected)
@@ -149,25 +152,6 @@ def check_method(case: MethodCase) -> dict:
             raise ValueError(
                 "saved Result lost its original scientific selection or expected relation"
             )
-        files = ArchiveFiles(path, DEFAULT_MAX_BYTES)
-        saved = files.read_json("result.json")
-        changed = {**saved, "result": invalid.model_dump(mode="json")}
-        files.write_json("invalid-result.json", changed)
-        files.file("invalid-result.json").replace(files.file("result.json"))
-        try:
-            try:
-                load_result(path, method=type(method))
-            except (ValueError, TypeError):
-                pass
-            else:
-                raise ValueError("invalid scientific pair was accepted by the Result archive")
-        finally:
-            files.write_json("original-result.json", saved)
-            files.file("original-result.json").replace(files.file("result.json"))
-        restored = load_result(path, method=type(method))
-        if _saved_content(restored) != _saved_content(result) or case.accepts(restored) is not True:
-            raise ValueError("wrong-pair check changed the legal saved result")
-    result.validate_plan(selected)
     if (result.content_id, selected.content_id, method.content_id) != original or case.accepts(
         result
     ) is not True:

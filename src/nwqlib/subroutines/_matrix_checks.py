@@ -1,4 +1,4 @@
-"""Neutral absolute structural predicates for dense matrices."""
+"""Absolute-tolerance structural checks of dense matrices."""
 
 from __future__ import annotations
 

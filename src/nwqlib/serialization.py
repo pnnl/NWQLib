@@ -1,7 +1,9 @@
-"""Leaf record-serialization helpers shared across contract and backend records.
+"""Leaf record-serialization helpers shared by reporting and LCHS records.
 
-This module imports no NWQLib owner. Backend records and kept LCHS
-builder records use its recursive conversion without an owner import cycle.
+This module imports no other NWQLib module, so ``reporting.records`` and the
+LCHS provider and application records (``algorithms/lchs/provider_config.py``,
+``algorithms/lchs/solution_error_budget.py``) use its recursive conversion
+without an import cycle.
 """
 
 from __future__ import annotations
@@ -42,7 +44,8 @@ class FieldSerializedRecord:
 
     Keys follow dataclass field declaration order. Subclasses override
     ``to_dict`` only for genuine custom serialization (numpy arrays, derived
-    keys); such overrides should call this base and patch, not re-list.
+    keys). Such overrides call this base and patch its result instead of
+    listing the fields again.
     """
 
     def to_dict(self) -> dict[str, Any]:

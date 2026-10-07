@@ -75,7 +75,7 @@ def active_screen_labels(pool, cache, removed, limit):
 
     The union is formed once per selected chain, keyed by the removed pool
     indices, so every query of a screening round and its reads share it. At
-    most ``limit + 1`` removed sets are kept; one run meets at most
+    most ``limit + 1`` removed sets are kept. One run meets at most
     ``max_selections + 1``. ``cache`` is not saved.
     """
     store = cache.setdefault("active_screen_labels", {})
@@ -171,8 +171,9 @@ class AdaptPoolMember(Record):
 
 
 class AdaptSymmetry(Record):
-    """Raw symmetry-projection evidence; no approximation is hidden as zero.
+    """Raw symmetry-projection evidence.
 
+    No approximation is hidden as zero.
     A generator must be anti-Hermitian for ``exp(theta A)`` to be unitary and a
     Hamiltonian Hermitian for real energies. Admission projects each generator
     onto its anti-Hermitian part within ``input_symmetry_tolerance`` and records
@@ -379,7 +380,7 @@ def _exponential_action_work(member, theta, dimension):
     Each of the s steps first copies a vector, and each Horner term
     performs one Pauli action, one scaling and one addition. The final 10d is
     the normalization allowance in ``adapt_acquisition._vector`` and the
-    zero-step copy; it remains conservative when a suffix is used without
+    zero-step copy. It remains conservative when a suffix is used without
     normalization. Packing is absent from ``W_A`` because it has its
     once-per-Plan charge (``adapt_actions.build_action_tables``). The
     per-action group construction and rotated coefficients remain present on
@@ -404,8 +405,7 @@ def _energy_gradient_work(members, thetas, dimension, hamiltonian_work):
     The units are those of ``_exponential_action_work``: one amplitude of
     ``d = dimension`` visited by one elementwise pass or reduction.
     ``W_Aj`` is the shared packed Pauli action of generator j with ``T_j``
-    stored rows (``adapt_actions.action_requirements``), substituted into
-    the existing derivative graph without changing that graph. ``W_H``
+    stored rows (``adapt_actions.action_requirements``). ``W_H``
     (``hamiltonian_work``) is one Hamiltonian action. With
     the degree ``m = GENERATOR_TAYLOR_DEGREE`` and the step counts ``s_j`` of
     ``_taylor_steps``, each nonzero-step derivative Horner term makes two A
@@ -418,7 +418,7 @@ def _energy_gradient_work(members, thetas, dimension, hamiltonian_work):
                    2d                                (s_j = 0, theta_j != 0).
 
     The last branch differentiates the locally constant identity
-    approximation caused by underflow; at zero angle the limiting tangent is
+    approximation caused by underflow. At zero angle the limiting tangent is
     ``A @ state``. The unnormalized reverse Taylor action has
     ``W_back,j = s_j [d + m (W_Aj + 2d)]`` for ``s_j > 0`` and ``d`` for
     ``s_j = 0``. Each forward factor normalization takes nine passes, each
@@ -482,9 +482,9 @@ class AdaptRound(Record):
             Ritz state. It is recorded only under `"residual_norm"` stopping
             and is None otherwise.
         flat_count: Consecutive small energy changes counted after this round.
-        contribution_ids: Observation data first collected after the previous
-            round's screening and up to this round's screening, including any
-            optimizer energy queries in between.
+        contribution_ids: Content hashes of the data first collected after
+            the previous round's screening and up to this round's screening,
+            including any optimizer energy queries in between.
         basis_realization: Content hash of the query that supplied the
             diagonal of the full selected product, which the
             completed matrix stage must contain: the shared full-chain query
@@ -556,10 +556,14 @@ class ADAPTResult(Result):
             `pool_exhausted`, `max_iterations`,
             `optimization_evaluation_budget_exhausted`,
             `no_usable_overlap_subspace` and `invalid_sampled_evidence`.
-            Execution states are `running`, `cancelled`,
-            `partial_observation`, `pending_preparation`,
-            `pending_acquisition`, `uncertain_preparation`,
-            `uncertain_native_intent`, `backend_failed` and `not_started`.
+            Execution states are `running`, `cancelled`, `not_started`,
+            `partial_observation` (data that a decision needs are missing or
+            unusable), `pending_preparation` and `pending_acquisition` (a
+            circuit preparation or a backend job has not finished),
+            `uncertain_preparation` (an upload or compilation may or may not
+            have completed), `uncertain_native_intent` (a recorded backend
+            submission may or may not have reached the backend) and
+            `backend_failed`.
         pending: Labels of queries or statuses that blocked further progress.
         optimizer_attempts: Number of optimizer invocations started.
         optimizer_rounds: Completed BFGS iterations over all invocations.

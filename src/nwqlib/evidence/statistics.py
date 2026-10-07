@@ -73,8 +73,10 @@ class IndependenceLaw(Record):
         frame: Required. The variance frame the independence applies in.
         bindings: Required. Parameter values the independence is restricted to.
         evidence: Required. The basis of the independence claim.
-        conditions: Default `()`. Boolean predicates that must hold, in the
-            predicate frame of `frame`.
+        conditions: Default `()`. Boolean predicates that must hold, each a
+            `FramedFact` in the predicate frame of `frame`, which has the
+            same quantity, scope, conditioning and domain, with
+            `metric="predicate"` and the dimensionless unit `"1"`.
 
     Raises:
         ValueError: If a parameter is restricted twice, or a condition is not
@@ -168,8 +170,11 @@ def linear_variance(*, joint_id: str, frame: ErrorFrame,
         ValueError: If the frame's metric is not `"variance"`, both
             covariances and an `IndependenceLaw` are given, a variance is
             negative, a covariance pair repeats or names an unknown
-            variable, a covariance violates Cauchy-Schwarz, or the complete
-            sum is negative.
+            variable, a covariance violates Cauchy-Schwarz, the complete sum
+            is negative, two contributions give one `data_id` different
+            variance facts, the `IndependenceLaw` has another `joint_id` or
+            an incompatible frame, or an exact intermediate value needs more
+            than `max_integer_bits` bits.
         TypeError: If `independence` is not an `IndependenceLaw`.
     """
     arithmetic = ExactArithmetic(max_integer_bits=max_integer_bits)
@@ -272,7 +277,7 @@ def linear_variance(*, joint_id: str, frame: ErrorFrame,
             bases.append(independence.evidence)
         # Proposition-specific rule: proof of exact supplied variances plus the
         # exact covariance identity can remain proof. A bound is not an exact
-        # covariance value; other numerical bases stay numerical, not certified.
+        # covariance value. Other numerical bases stay numerical, not certified.
         proved = all(receipt_supported(b, scope=frame.scope, subjects=(joint_id,),
                                        kinds={"proved_relation"}) for b in bases)
         kind = "proved_relation" if proved else "numerical_estimate"

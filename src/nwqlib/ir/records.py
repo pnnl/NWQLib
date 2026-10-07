@@ -70,8 +70,10 @@ class QuantumPort(Record):
     Build it as `QuantumPort(name="system", width=2)` and pass it in `quantum=`
     of a [`BlockSignature`][nwqlib.ir.records.BlockSignature]. `name` and `width`
     are required. A call maps each port, in signature order, to a register that
-    no other port of the call uses. The zero state counts as coherent. A `"unitary"` effect keeps the register's coherence
-    epoch but clears a known zero state, and `"preserve"` promises that the
+    no other port of the call uses. The zero state counts as coherent. A
+    `"unitary"` effect keeps the register's coherence epoch (the generation
+    counter that `StateClaim` defines) but clears a known zero state, and
+    `"preserve"` promises that the
     state is restored exactly. A `"zero"` or `"coherent"` output asserts a newly
     prepared state, which the block's implementation must guarantee. An
     `"unknown"` effect makes the Program not ready and cannot satisfy a later
@@ -169,6 +171,7 @@ class Sequence(Record):
 
     Attributes:
         children: Default `()`. Definition IDs, in order.
+        kind: Fixed `"sequence"`. Names the node type in the saved record.
     """
 
     kind: Literal["sequence"] = "sequence"
@@ -185,6 +188,7 @@ class Parallel(Record):
 
     Attributes:
         children: Default `()`. Definition IDs of the block calls.
+        kind: Fixed `"parallel"`. Names the node type in the saved record.
     """
 
     kind: Literal["parallel"] = "parallel"
@@ -202,6 +206,7 @@ class Repeat(Record):
         body: Required. Definition ID of the body.
         count: Required. Nonnegative repetition count, an integer or an
             [`ExprRef`][nwqlib.ir.expressions.ExprRef].
+        kind: Fixed `"repeat"`. Names the node type in the saved record.
     """
 
     kind: Literal["repeat"] = "repeat"
@@ -223,6 +228,7 @@ class BlockCall(Record):
             in signature order.
         arguments: Default `()`. [`Argument`][nwqlib.ir.records.Argument] values
             of the signature's parameters.
+        kind: Fixed `"block_call"`. Names the node type in the saved record.
     """
 
     kind: Literal["block_call"] = "block_call"
@@ -263,6 +269,8 @@ class CoherentRegion(Record):
         body: Required. Definition ID of the body.
         claims: Required. The [`StateClaim`][nwqlib.ir.records.StateClaim]
             records.
+        kind: Fixed `"coherent_region"`. Names the node type in the saved
+            record.
     """
 
     kind: Literal["coherent_region"] = "coherent_region"
@@ -277,6 +285,7 @@ class Allocate(Record):
 
     Attributes:
         wire: Required. Register name.
+        kind: Fixed `"allocate"`. Names the node type in the saved record.
     """
 
     kind: Literal["allocate"] = "allocate"
@@ -290,6 +299,7 @@ class Release(Record):
 
     Attributes:
         wire: Required. Register name.
+        kind: Fixed `"release"`. Names the node type in the saved record.
     """
 
     kind: Literal["release"] = "release"
@@ -297,7 +307,7 @@ class Release(Record):
 
 
 class Measure(Record):
-    """Measures a whole register into a classical bits value. The register stays allocated in a new epoch.
+    """Measures a whole register in the computational basis into a classical bits value. The register stays allocated in a new epoch.
 
     Build it as `Measure(wire="q", result="bits")`. `wire` and `result` are
     required.
@@ -305,14 +315,12 @@ class Measure(Record):
     Attributes:
         wire: Required. Register name.
         result: Required. Name of a classical bits value of the same width.
-        basis: Default `"computational"`, the only basis that `lower_qiskit` and
-            OpenQASM export support.
+        kind: Fixed `"measure"`. Names the node type in the saved record.
     """
 
     kind: Literal["measure"] = "measure"
     wire: Text
     result: Text
-    basis: Text = "computational"
 
 
 class Reset(Record):
@@ -322,6 +330,7 @@ class Reset(Record):
 
     Attributes:
         wire: Required. Register name.
+        kind: Fixed `"reset"`. Names the node type in the saved record.
     """
 
     kind: Literal["reset"] = "reset"
@@ -339,6 +348,7 @@ class Branch(Record):
         condition: Required. Name of an available classical value.
         when_true: Required. Definition ID of the body for true.
         when_false: Required. Definition ID of the body for false.
+        kind: Fixed `"branch"`. Names the node type in the saved record.
     """
 
     kind: Literal["branch"] = "branch"
@@ -348,12 +358,13 @@ class Branch(Record):
 
 
 class ClassicalStage(Record):
-    """A classical computation inside the quantum job or on the host. The check runs no code.
+    """A classical computation inside the quantum job or outside it (`boundary="host"`).
 
-    Build it with keyword arguments, for example
+    The check runs no code. Build it with keyword arguments, for example
     `ClassicalStage(implementation=source, inputs=("bits",), outputs=("value",))`.
-    `implementation` is required. A host stage requires every register to be
-    released first and can name the selected kernel that runs it.
+    `implementation` is required. A stage with `boundary="host"` requires
+    every register to be released first and can name the selected kernel
+    that runs it.
 
     Attributes:
         implementation: Required. Versioned Source of the computation.
@@ -363,8 +374,12 @@ class ClassicalStage(Record):
         arguments: Default `()`. Scalar [`Argument`][nwqlib.ir.records.Argument]
             values.
         boundary: Default `"in_job"`, processing inside the quantum job, or
-            `"host"`.
-        kernel: Default `None`. Name of the selected kernel that runs a host stage.
+            `"host"`, a classical computation that NWQLib runs outside the
+            quantum job.
+        kernel: Default `None`. Name of the selected kernel that runs a
+            `"host"` stage.
+        kind: Fixed `"classical_stage"`. Names the node type in the saved
+            record.
     """
 
     kind: Literal["classical_stage"] = "classical_stage"
@@ -393,6 +408,8 @@ class AdaptiveLoop(Record):
         resource_envelope: Default `None`. Stated bound on the cost of every
             round. With `None`, the resource estimate leaves the loop's cost
             unknown.
+        kind: Fixed `"adaptive_loop"`. Names the node type in the saved
+            record.
     """
 
     kind: Literal["adaptive_loop"] = "adaptive_loop"
@@ -497,6 +514,9 @@ class MeasurementBatch(Record):
             A `"trajectory"` is one exact evaluation of the body whose
             observation points belong to the selected experiment's readout, not
             to the settings. An outer batch has `None`.
+        schema_version: Fixed `2`. Version of the saved record format.
+        kind: Fixed `"measurement_batch"`. Names the node type in the saved
+            record.
     """
 
     schema_version: Literal[2] = 2
@@ -614,9 +634,11 @@ class Program(Record):
         signatures: Default `()`. [`BlockSignature`][nwqlib.ir.records.BlockSignature]
             records of the blocks called.
         bindings: Default `()`. Parameter values bound so far.
-        limits: Default `AdmissionLimits()`, the default
-            [`AdmissionLimits`][nwqlib.ir.expressions.AdmissionLimits].
+        limits: Default `AdmissionLimits()`. The
+            [`AdmissionLimits`][nwqlib.ir.expressions.AdmissionLimits] on the
+            stored structure and on the work of checking it.
         premises: Default `()`. Stated assumptions of the construction.
+        schema_version: Fixed `2`. Version of the saved record format.
 
     Raises:
         ValueError: If the structure breaks a lifecycle rule, refers to an
@@ -710,7 +732,8 @@ class Program(Record):
         global constraints. It creates no observation or execution ID, because the
         original Program identifies the whole source graph. Use it before
         [`lower_qiskit`][nwqlib.blocks.lowering.lower_qiskit], which builds the
-        circuit of one static experiment.
+        circuit of one static experiment, a Program that describes exactly one
+        circuit.
 
         Args:
             batch_id (str): Definition ID of the measurement batch.

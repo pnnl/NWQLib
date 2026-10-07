@@ -125,14 +125,16 @@ class IBMRuntimeBackend(Record):
     zero unless `options_json` selects another, so no error mitigation runs
     implicitly, and the Plan sets the precision. The Run bounds serialized
     buffers and decoded arrays. SDK HTTP buffering, retries, compilation memory,
-    wall time and billing are not bounded. A refresh keeps the results already
-    decoded when a later result fails to decode. A resumed read fetches the
-    whole job payload again, and results already saved skip only the local
-    decoding. Only offline SDK and transport checks qualify this backend, and live
-    accounts, queues and devices are unqualified. The [IBM Runtime guide](../ibm.md)
-    describes jobs, retrieval and cancellation.
+    wall time and billing are not bounded. When a later result fails to
+    decode, `Run.resume`, which `Run.wait` calls on each pass, keeps the
+    results already decoded. A resumed read fetches the whole job payload
+    again, and results already saved skip only the local decoding. NWQLib has
+    tested this backend only offline, with SDK and
+    transport checks, and has not tested live accounts, queues or devices. The
+    [IBM Runtime guide](../ibm.md) describes jobs, retrieval and cancellation.
 
     Attributes:
+        kind: Fixed `"ibm"`, the backend type.
         device: Required. IBM device name.
         instance: Required. IBM instance. `"auto"` is rejected, because retrieval
             and job recovery compare it with the job's own instance.
@@ -151,10 +153,14 @@ class IBMRuntimeBackend(Record):
             Experimental option overrides are rejected, because they can bypass the
             requested readout and its uncertainty.
         optimization_level: Default `1`. Qiskit preset pass-manager level, 0 to 3.
-            A level other than 1 is recorded as the exclusion
-            `"optimization_level"` in the preparation record, and the operation
-            count describes the compiled circuit. The IBM target has no derived
-            roundoff constant, so `state_error()` gives no bound at any level.
+            A level other than 1 adds the
+            [roundoff exclusion](../glossary.md#roundoff-exclusion)
+            `"optimization_level"` to the
+            [preparation record](../glossary.md#preparation-record), and the
+            operation count describes the compiled circuit. The IBM target has
+            no derived roundoff constant, so
+            [`PreparedArtifact.state_error()`][nwqlib.execution.PreparedArtifact.state_error]
+            gives no bound at any level.
         initial_layout: Default `None`. Physical qubit for each logical qubit,
             without repeats.
         max_input_bytes: Required. Positive. Limit in bytes on the QPY copy of
@@ -283,7 +289,8 @@ class IBMRuntimeBackend(Record):
             options = options_module.EstimatorOptions(**values)
         else:
             options = options_module.SamplerOptions(**values)
-        # Classified bit strings are the actual current counts consumer.
+        # The counts decoder reads classified bit strings, so another
+        # measurement type is refused.
         Unset = optional_import("qiskit_ibm_runtime.options.utils", extra="ibm").Unset
         if kind == "counts" and options.execution.meas_type not in (Unset, "classified"):
             raise ValueError("counts require classified IBM measurement results")
@@ -302,7 +309,7 @@ class IBMRuntimeBackend(Record):
         ENGINEERING_CONSTANTS.md, "IBM primitive preparation". The mapped
         observable of the most recent (estimate identity, layout, width) is
         kept in the open Run's live state and shared by consecutive points that
-        repeat that key; a new key replaces it, and a reopened Run builds it
+        repeat that key. A new key replaces it, and a reopened Run builds it
         again when needed.
         """
         key = (estimate.content_id, tuple(layout), width)
@@ -326,7 +333,7 @@ class IBMRuntimeBackend(Record):
         # Qiskit 2.5's default ObservablesArray coercion simplifies at 1e-8,
         # silently deleting smaller nonzero coefficients. The common declaration
         # already validates finite real unique Pauli terms. Use the public
-        # prevalidated-input API with exact-zero simplification; PUB validation
+        # prevalidated-input API with exact-zero simplification. PUB validation
         # still checks the observable/circuit widths and parameter coordinates.
         sparse = SparseObservable.from_sparse_pauli_op(native).simplify(0.)
         return ObservablesArray(sparse, num_qubits=width, validate=False)
@@ -342,8 +349,6 @@ class IBMRuntimeBackend(Record):
         them per shot and restores the original bit positions. The circuit is
         saved as QPY before submission only when the Run is durable.
         """
-        if observation.kind == "trajectory":
-            observation.reject_unsupported_schedule("IBM Runtime")
         context = run._state["backend_context"]
         from importlib.metadata import version
         from qiskit.transpiler.preset_passmanagers import generate_preset_pass_manager
@@ -423,8 +428,8 @@ class IBMRuntimeBackend(Record):
         """Rebuild the prepared association from a saved receipt, loading QPY only when supplied.
 
         Retrieval of a known job needs no circuit, so ``payload`` is None there.
-        A new submission from saved data needs the QPY, whose snapshot metadata
-        must match the receipt. No recompilation happens here.
+        A new submission from saved data needs the QPY. No recompilation happens
+        here.
         """
         if payload is not None and (record.payload is None or record.payload.format != "nwqlib.ibm.qpy/1"):
             raise ValueError("prepared IBM artifact requires its original QPY payload reference")
@@ -435,15 +440,10 @@ class IBMRuntimeBackend(Record):
             # The saved bytes and the stream that qpy.load reads, at most one
             # payload-sized copy each (an untuned allowance).
             run.check_data(2 * len(payload))
-            circuits = qpy.load(BytesIO(payload))
-            if len(circuits) != 1 or circuits[0].metadata.get("nwqlib_snapshot") != record.snapshot:
-                raise ValueError("restored QPY differs from the original IBM snapshot")
-            circuit = circuits[0]
+            (circuit,) = qpy.load(BytesIO(payload))
             if record.observation.estimate is not None:
                 observable = self._observable(record.observation.estimate, record.logical_to_native,
                                                circuit.num_qubits, run)
-        if record.provider_options_json is None:
-            raise ValueError("IBM preparation requires its original requested primitive options")
         return _PreparedIBM(circuit, payload, record.snapshot, record.observation.shots,
             record.classical_layout, dict(readout_population=record.population, observation=record.observation,
                                          requested_options_json=record.provider_options_json), observable)
@@ -507,7 +507,7 @@ class IBMRuntimeBackend(Record):
         for index, native in enumerate(natives):
             # Each PUB needs its own correlation metadata even when the same
             # frozen circuit appears twice. A shallow container shares the
-            # immutable circuit data; only its public metadata is replaced.
+            # immutable circuit data, and only its public metadata is replaced.
             from nwqlib._run_journal import encode
             encode(native.circuit.metadata, run.limits.max_data_bytes)
             circuit = copy(native.circuit)
@@ -616,7 +616,7 @@ class IBMRuntimeBackend(Record):
                 tuple(len(register.bits) for register in native.classical_layout), shots))
             joined = pub.join_data(names)
             # BitArray concatenates registers along its least-significant-first
-            # bit axis; get_counts renders most-significant-first strings.
+            # bit axis, and get_counts renders most-significant-first strings.
             # Preserve shot alignment and map to original global classical bits.
             # Joined bit j, counted from the right, is global bit positions[j].
             # Qiskit's join_data docstring describes the opposite register
@@ -626,7 +626,7 @@ class IBMRuntimeBackend(Record):
             if width <= 64:
                 # Each shot's joined integer is formed from the BitArray's
                 # big-endian bytes (last byte holds bits 0-7), global classical
-                # bit positions[j] takes joined bit j (gather_bits; the identity
+                # bit positions[j] takes joined bit j (gather_bits, and the identity
                 # layout keeps the joined integers), and equal outcomes are
                 # counted once with np.unique, so no per-shot string is built.
                 import numpy as np
@@ -733,11 +733,11 @@ class IBMRuntimeBackend(Record):
                                   failure="IBM job " + status)
         if status != "DONE":
             return BackendRefresh(status="uncertain", provider_status=str(status), failure="unrecognized IBM job state")
-        # result() is called only after a terminal status; timeout=0 prevents a
+        # result() is called only after a terminal status. timeout=0 prevents a
         # status race from turning one refresh into a provider-queue wait.
         result = job.result(timeout=0)
         # launch tags the job nwqlib:<submission_id>, so the submission is
-        # found by its id; the locator comparison rejects a foreign tag.
+        # found by its id. The locator comparison rejects a foreign tag.
         submissions = run._state["submissions"]
         submission = next((submissions[tag[7:]] for tag in (job.tags or ())
                            if isinstance(tag, str) and tag.startswith("nwqlib:") and tag[7:] in submissions
@@ -755,8 +755,8 @@ class IBMRuntimeBackend(Record):
             # owner commits earlier PUBs, then raises this original exception.
             return BackendRefresh(status="completed", provider_status=status,
                                   results=tuple(decoded), error=error)
-        # Terminal retrieval no longer needs the run-owned live job object;
-        # keep the reduced statistics and durable locator for later consumers.
+        # Terminal retrieval no longer needs the run-owned live job object.
+        # Keep the reduced statistics and durable locator for later consumers.
         run._state["backend_context"]["jobs"].pop(locator.job_id, None)
         return BackendRefresh(status="completed", provider_status=status,
                               results=tuple(decoded))

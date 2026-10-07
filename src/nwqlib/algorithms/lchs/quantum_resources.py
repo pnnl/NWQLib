@@ -1,8 +1,9 @@
 """Explicit native representatives of an existing LCHS selection.
 
 This samples saved numerical data and actual PREP children, without new phases,
-MPS decomposition or a Run. Weighted totals are representative estimates;
-full native inventory belongs to prepare(plan).circuits and shared inspection.
+MPS decomposition or a Run. Weighted totals are representative estimates.
+The full native inventory comes from prepare(plan).circuits and the shared
+circuit inspection.
 """
 
 from __future__ import annotations
@@ -178,10 +179,10 @@ def dense_representative_envelope(q, a, route="gatewise"):
     + p(a) of native.dense_branch_select_cx, with x the ancilla-free
     multi-controlled X count, z, y and u the MCRZ, MCRY and U costs and p
     the branch global phase, and the control constructor populations of
-    _dense_synthesis.gatewise_control_counts; a gatewise U bound is not
+    _dense_synthesis.gatewise_control_counts. A gatewise U bound is not
     available and is reported as None, not zero. Open controls conjugate by
     at most 2*a X gates, which change no CX count. With no address bits the
-    route is ``uncontrolled``; a one-system-qubit branch follows the
+    route is ``uncontrolled``. A one-system-qubit branch follows the
     gatewise count, as the builder does, and ``auto`` resolves through
     select_dense_control_route. The basis U bound of the whole-matrix and
     uncontrolled routes is the direct translation of U, RZ, H and the open
@@ -237,7 +238,7 @@ def _dense_select_bound(payload, data):
     """Return the dense SELECT's structural upper-bound record for N physical branches.
 
     Every physical branch of a homogeneous dense Plan has the same width and
-    route, so one bound C per branch gives N*C for SELECT CX; no smallest,
+    route, so one bound C per branch gives N*C for SELECT CX. No smallest,
     median or largest |k| branch is built. The record keeps its basis and
     route, and it is not added to the raw representative inventory.
     """
@@ -305,7 +306,8 @@ def _qsp_samples(payload, data, operation):
     from qiskit import QuantumCircuit
     from nwqlib.subroutines.qiskit_compat import controlled
     from nwqlib.subroutines.qsp import build_control_diagonal_generator_encoding
-    from nwqlib.subroutines.qsp.evolution import _reflection_about_ancilla_zero,_append_projector_phase
+    from nwqlib.subroutines._semantic import zero_reflection
+    from nwqlib.subroutines.qsp.evolution import _append_projector_phase
     from .native import _build_compiled_qsp_part_encoding,_compiled_coefficient_phase_gate
 
     selected=payload.qsp_plan
@@ -360,12 +362,11 @@ def _qsp_samples(payload, data, operation):
     circuit=QuantumCircuit(1)
     circuit.p(float(global_phase),0)
     yield "parity_scalar_phase",circuit,law["parity_scalar_phase_count"]
-    yield "ancilla_reflection",_reflection_about_ancilla_zero(ancillas),law["oaa_reflection_count"]
+    yield "ancilla_reflection",zero_reflection(ancillas),law["oaa_reflection_count"]
 
 
 def _representatives(plan,payload,operation,bounds):
-    """Yield explicit selected PREP, evolution and readout representatives with their
-    multiplicities.
+    """Yield explicit selected PREP, evolution and readout representatives with their multiplicities.
 
     A dense exact SELECT builds no representative: its structural upper-bound
     record (_dense_select_bound) is appended to ``bounds`` instead.
@@ -425,7 +426,7 @@ def _representatives(plan,payload,operation,bounds):
                 raise ValueError('sampled readout needs its exact selected group basis change')
             circuit.compose(child._constructor(child,(),context),qubits=rec.system_bits,inplace=True)
         if plan.shots is not None:
-            observed=observed_bits(rec,plan.output,setting)
+            observed=observed_bits(rec)
             register=ClassicalRegister(len(observed),'readout')
             circuit.add_register(register)
             circuit.measure(observed,register)
@@ -454,8 +455,8 @@ def sample_resources(plan, *, max_qubits=13, max_bytes=DEFAULT_MAX_BYTES,
     readout setting (a sampled group, a mass setting or the exact reduction):
     every core representative's operation counts times its multiplicity,
     plus that setting's readout representative (its group basis change and
-    measurements; the exact reduction adds none). The weighted
-    totals are estimates of the selected construction's operation counts; they
+    measurements, none for the exact reduction). The weighted
+    totals are estimates of the selected construction's operation counts. They
     do not model angle-specific cancellation, cross-block optimization or SDK
     workspace. ``structural_bounds`` lists the records that no raw inventory
     represents: for a dense exact SELECT, its structural upper bound for

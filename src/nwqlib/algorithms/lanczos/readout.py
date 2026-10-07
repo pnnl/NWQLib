@@ -1,4 +1,4 @@
-"""SDK-free signed readout over supplied histograms; no operator application.
+"""SDK-free signed readout over supplied histograms. No operator is applied.
 
 A Lanczos count outcome stores the SELECT index in its least significant
 bits. Its used row supplies a sign and the system-support mask. The signed
@@ -8,9 +8,7 @@ the same first and second moments and the returned count population. Exact
 probability reduction preserves the supplied mass without renormalization.
 """
 
-from collections.abc import Mapping
 from math import fsum
-from numbers import Integral
 
 import numpy as np
 
@@ -20,13 +18,6 @@ from .records import MomentStatistics
 
 def packed_lanczos_census(table):
     """Derive the Lanczos frame and ordered SELECT metadata from packed Pauli words.
-
-    A row is identity when every word of x OR z is zero. The identity
-    coefficients sum to center, and the absolute nonzero nonidentity
-    coefficients sum to alpha, using fsum in table order. The selected signs
-    are sign(c.real), support masks are x OR z, and K coefficients are c.real
-    divided by alpha. A zero alpha selects the algebraic scalar-operator path
-    and performs no division.
 
     A native row ``(x, z, c)`` represents ``c i**popcount(x&z) X**x Z**z``.
     Its support is ``x|z``. It is identity exactly when every support word is
@@ -39,14 +30,24 @@ def packed_lanczos_census(table):
         K = sum_(j<J) (c_j/alpha) P_j,
 
     the encoding of Kirby, Motta and Mezzacapo, arXiv:2208.00567v4, Section
-    2.1, Eqs. (2)-(4), after the identity term is removed. The sign is
-    ``sign(c_j.real)`` and the parity mask is ``x_j|z_j``. No extra Y phase
-    belongs in that sign: the basis rotation already maps the actual
-    Hermitian Pauli P_j to the measured Z parity. The identity mask also
-    handles a table with more than one identity row. Keep `fsum`, as
-    `_pauli_census` does, if correctly rounded center and alpha are part of
-    equivalence. Replacing it with np.sum can move the frame and near-tie
-    decisions. With one nonidentity term K is +-P, so its even
+    2.1, Eqs. (2)-(4), after the identity term is removed. A zero alpha
+    selects the algebraic scalar-operator path and performs no division.
+    The sign is ``sign(c_j.real)`` and the parity mask is ``x_j|z_j``. No
+    extra Y phase belongs in that sign: the basis rotation already maps the
+    actual Hermitian Pauli P_j to the measured Z parity. The identity mask also
+    handles a table with more than one identity row.
+    Keep `fsum` for center and alpha.
+    Their binary64 values define the Plan's stored frame and must be
+    reproduced when the readout is rebuilt (``method._plan_readout``).
+    Correct rounding assumes finite
+    binary64 inputs and a reduction that completes without overflow under
+    IEEE-754 round-to-nearest-even arithmetic. On some builds,
+    extended-precision addition can cause double rounding and change the
+    last bit. Replacing `fsum` with `np.sum` can change the frame
+    `[center - alpha, center + alpha]` and the scaled coefficients
+    `c_j/alpha`. Changes to those coefficients can propagate through the
+    classical moments to decisions near the overlap cutoff.
+    With one nonidentity term K is +-P, so its even
     moments are one. The SELECT index width is zero for J<=1 and
     ``(J-1).bit_length()`` otherwise.
 
@@ -96,9 +97,9 @@ class LanczosReadout:
     allowance before allocation. The data law covers simultaneous support,
     coefficient, index and sign arrays and the constructor's owning row
     copy. The input Pauli table is excluded. The fixed allowance covers
-    headers and bookkeeping on the qualified stack, including empty and
-    small tables. Derivation: at the largest return-expression frontier,
-    support arrays contribute 8W(M+J), two masks 2M and the selected
+    headers and bookkeeping on the qualified stack, checked by
+    measurement (ENGINEERING_CONSTANTS.md, term "qualified"), including empty and small tables. Derivation: at the largest
+    return-expression frontier, support arrays contribute 8W(M+J), two masks 2M and the selected
     coefficient/index/sign arrays at most 33J bytes, so the frontier holds
     at most 8W(M+J)+2M+33J <= M(16W+35) <= M(16W+56) bytes for J <= M used
     rows. Earlier identity, mask and reduction phases fit that envelope, and
@@ -174,9 +175,9 @@ def outcome(readout, kind, bits):
     their Eq. (26), p. 6:
     mu_2j = <psi_j|R|psi_j> and mu_(2j+1) = <psi_j|U|psi_j>.
 
-    The low num_index_qubits bits hold the SELECT address and the remaining
-    bits the system register. A reflection readout returns +1 when the index
-    register reads all zeros after PREP^dagger and -1 otherwise, which
+    The low a = readout.index_width bits hold the SELECT address and the
+    remaining bits the system register. A reflection readout returns +1 when
+    the index register reads all zeros after PREP^dagger and -1 otherwise, which
     measures R=2|G><G|-I (Kirby Eq. (6) and Section 3.1, step 2). A select
     readout of a used address i returns sign(c_i) times the parity of the
     system bits where P_i acts:
@@ -281,6 +282,8 @@ def readout_values(readout, kind, width, histogram):
             index_width=readout.index_width,
             histogram_width=width,
             signs=readout.signs,
+            # SELECT outcomes include all system bits, so the 64-bit branch
+            # needs only the first support word. Reflection decoding ignores masks.
             masks=readout.masks[:, 0],
             reflection=kind == "reflection",
         )
@@ -302,11 +305,6 @@ def reduce_moments(values, weights, *, counts):
     padding, and one everywhere for reflection. The products are formed
     elementwise and exactly, and fsum reduces them in stored order.
 
-    Decode the signed marginal with denominator one and zero weight for
-    unused SELECT addresses. Comparison adds probability-evaluation and
-    signed-sum errors to both routes' state contributions. Unknown execution
-    error is not replaced by the population floor.
-
     Decode `m_hat=fsum(s_j*p_hat_j)` with exact signs `s_j` in `{-1,0,1}`,
     zero signs on unused SELECT addresses, and denominator one. Let
     `psi_tilde` be the computed state entering probability formation,
@@ -315,7 +313,7 @@ def reduce_moments(values, weights, *, counts):
     probabilities with round-to-nearest, gradual underflow, no overflow,
     truncation or renormalization, and `2*N*u<=1/2`, use
     `e_prob=max(exact_readout_roundoff(w)*u, (2*N*u)/(1-2*N*u))` and
-    `U_prob=4*N*eta`; the latter bounds absolute probability-evaluation
+    `U_prob=4*N*eta`. The latter bounds absolute probability-evaluation
     underflow and may be zero under an established normal-range or
     exact-underflow premise. With correctly rounded `fsum`, the absolute
     arithmetic error relative to `sum_j s_j*p_j`, where `p_j` is the exact
@@ -323,7 +321,7 @@ def reduce_moments(values, weights, *, counts):
     `a_moment <= e_prob*R2 + u*sum_j abs(p_hat_j) + U_prob + eta
     <= [e_prob+u*(1+e_prob)]*R2 + (1+u)*U_prob + eta`. If the receipt
     supplies a state-distance allowance `delta` from a unit target,
-    `R2 <= (1+delta)**2`; otherwise that substitution is unavailable.
+    `R2 <= (1+delta)**2`. Otherwise that substitution is unavailable.
     Evaluate bound expressions outward when publishing them as numerical
     upper bounds.
 
@@ -381,10 +379,7 @@ def reduce_moments(values, weights, *, counts):
     None) and the comparison supplies no numerical acceptance tolerance.
     Knowing `eps_B`, observing a nearly unit norm or reducing the operation
     count does not provide the missing execution error, and the `1e-12`
-    probability-window floor does not replace it. A named regression at
-    full native width at most three compares with `atol=2e-12, rtol=0`, an
-    empirical threshold, and a wider register records the degreewise
-    differences and both receipts without a derived pass or fail tolerance.
+    probability-window floor does not replace it.
 
     Sources: Aer 0.17.2, `QubitVector::probability` and `probabilities`
     (https://github.com/Qiskit/qiskit-aer/blob/0.17.2/src/simulators/statevector/qubitvector.hpp#L2090-L2148),
@@ -392,7 +387,7 @@ def reduce_moments(values, weights, *, counts):
     (https://github.com/python/cpython/blob/v3.12.14/Modules/mathmodule.c#L1249-L1465),
     and the gamma propagation model in Higham, *Accuracy and Stability of
     Numerical Algorithms*, 2nd ed., DOI 10.1137/1.9780898718027. The `fsum`
-    statement retains the qualification against excess precision and unsafe
+    statement keeps the qualification against excess precision and unsafe
     reassociation: platforms subject to the documented excess-precision
     exception need an additional correctly-rounded-sum allowance or a proved
     conservative summation owner.
@@ -403,7 +398,7 @@ def reduce_moments(values, weights, *, counts):
         counts: True for count weights.
 
     Returns:
-        MomentStatistics with shots equal to the count total, or None for probabilities.
+        MomentStatistics whose shots is the count total, or None for probability weights.
     """
     first = values * weights
     second = (values * values) * weights
@@ -426,15 +421,12 @@ def reduce_moments(values, weights, *, counts):
 def decode_histogram(readout, setting, histogram, *, counts):
     """Reduce one returned histogram to the first two moments of its signed outcome.
 
-    histogram is a Histogram (``ObservationChunk.histogram()``) or a mapping
-    from outcome to weight. Mapping keys are bit strings, ``0x`` hex strings
-    or nonnegative integers, and they are validated as integers before any
-    uint64 conversion. With counts, each weight is a nonnegative integer
-    frequency, so the mean is sum(w*x)/sum(w) over the outcome values x.
+    histogram is a Histogram (``ObservationChunk.histogram()``). With counts,
+    each weight is a nonnegative integer frequency, so the mean is
+    sum(w*x)/sum(w) over the outcome values x.
     Without counts, the weights are exact probabilities that are used as
     returned, with population 1. Missing probability, negative roundoff and
-    padding leakage then stay in the moments. Weights may also be analytical
-    fixture weights.
+    padding leakage then stay in the moments.
 
     Calling this kernel makes no acquisition/provenance claim. Runtime analysis
     separately validates actual ObservationChunks against their completed trace.
@@ -444,47 +436,5 @@ def decode_histogram(readout, setting, histogram, *, counts):
         outcome and shots equal to the returned count total, or None for
         probabilities.
     """
-    if isinstance(histogram, Mapping):
-        histogram, weights = _mapping_histogram(histogram, setting.histogram_width, counts=counts)
-    else:
-        weights = histogram.weights
     values = readout_values(readout, setting.readout, setting.histogram_width, histogram)
-    return reduce_moments(values, weights, counts=counts)
-
-
-def _mapping_histogram(mapping, width, *, counts):
-    """Validate a mapping histogram and return it as (indices, weights) arrays."""
-    keys, weights = [], []
-    for key, weight in mapping.items():
-        if isinstance(key, str):
-            value = key.replace(" ", "")
-            bits = int(value, 16 if value.startswith("0x") else 2)
-        elif isinstance(key, Integral) and not isinstance(key, bool):
-            bits = int(key)
-        else:
-            raise ValueError("histogram outcomes must be bit strings or integers")
-        if not 0 <= bits < 1 << width:
-            raise ValueError("histogram outcome exceeds readout width")
-        if counts and (isinstance(weight, bool) or not isinstance(weight, Integral) or weight < 0):
-            raise ValueError("counts require nonnegative integer frequencies")
-        if counts and weight > np.iinfo(np.int64).max:
-            raise ValueError("a count exceeds the int64 readout limit 2**63 - 1")
-        keys.append(bits)
-        weights.append(weight)
-    return (_Outcomes(width, keys),
-            np.array(weights, dtype=np.int64 if counts else np.float64).reshape(len(weights)))
-
-
-class _Outcomes:
-    """Validated mapping outcomes with the Histogram index accessors readout_values reads."""
-
-    __slots__ = ("width", "entries", "_keys")
-
-    def __init__(self, width, keys):
-        self.width, self.entries, self._keys = width, len(keys), keys
-
-    def indices(self):
-        return np.array(self._keys, dtype=np.uint64).reshape(self.entries)
-
-    def index_list(self):
-        return self._keys
+    return reduce_moments(values, histogram.weights, counts=counts)

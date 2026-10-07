@@ -47,10 +47,10 @@ from nwqlib.subroutines.qsp.phases import chebyshev_grid, chebyshev_norming_sup_
 
 
 # Engineering constants (registered in docs/ENGINEERING_CONSTANTS.md):
-# - LSQ_NODE_MULTIPLIER 4: the odd-coefficient LSQ is exactly determined on
-#   (d+1)/2 domain nodes; a 4x overdetermined grid removes fit-the-grid
-#   minima, mirroring the phase solver's grid-multiplier rationale.
-# - CERTIFICATE_GRID_PER_DEGREE 25: the sampling density N = 25d of
+# - QLS_FIT_LSQ_NODE_MULTIPLIER 4: the odd-coefficient LSQ is exactly determined on
+#   (d+1)/2 domain nodes, and a 4x overdetermined grid removes fit-the-grid
+#   minima, as for the phase solver's grid multiplier.
+# - QLS_FIT_CERTIFICATE_GRID_PER_DEGREE 25: the sampling density N = 25d of
 #   [SNWPB] arXiv:2507.15537v1, Sec. III, Eq. (26), placed on affine
 #   Chebyshev-zero nodes of [1/kappa, 1]
 #   so that the shared norming inequality bounds the degree-(d+1) residual.
@@ -76,7 +76,7 @@ QLS_FIT_CERTIFICATE_GRID_PER_DEGREE = 25
 QLS_INVERSE_DEGREE_LAW_FACTOR = 1.25
 
 # Runaway stop for the doubling search, far above the tripwire. If no tested
-# degree passes within this limit, fail with the finite search scope; this
+# degree passes within this limit, fail with the finite search scope. The failure
 # does not prove that every larger degree or different fit would fail.
 # Registered in docs/ENGINEERING_CONSTANTS.md. Revisit when the fit
 # construction or the certificate grid changes.
@@ -107,12 +107,13 @@ class _FitCost(NamedTuple):
 class InverseChebyshevFit:
     """Certified odd-Chebyshev fit of `1/(kappa * x)` on `D(1/kappa)`.
 
-    QLS polynomial selection produces it, and its `coefficients` define the
+    The QLS Method's planning produces it, and no public function of this
+    module returns a fitted instance. Its `coefficients` define the
     polynomial `P`. The fields below are read-only.
 
     Attributes:
         coefficients: Full Chebyshev coefficient vector ``(c_0..c_d)`` of the
-            fitted ``P``; even entries are exactly zero.
+            fitted ``P``. Even entries are exactly zero.
         degree: Selected odd degree ``d`` from the bounded search.
         kappa: Domain parameter, greater than 1, defining the domain
             ``D = {1/kappa <= |x| <= 1}``. QLS passes its ``polynomial_kappa``.
@@ -134,7 +135,7 @@ class InverseChebyshevFit:
 
 
 def inverse_degree_law_bound(kappa: float, epsilon_inv: float) -> int:
-    """Return the quick upper check `ceil(C_law * kappa * log(kappa/eps))` on the inverse-fit degree, in the form of [CKS] arXiv:1511.02306v2.
+    """Return the quick upper bound `ceil(C_law * kappa * log(kappa/eps))` on the inverse-fit degree, in the form of [CKS] arXiv:1511.02306v2.
 
     `C_law` is 1.25.
     """
@@ -145,9 +146,8 @@ def inverse_degree_law_bound(kappa: float, epsilon_inv: float) -> int:
 def _odd_chebyshev_values(x_values: np.ndarray, degree: int) -> np.ndarray:
     """Return the matrix ``T_{2l+1}(x_i)`` for ``l = 0..(degree-1)//2``."""
 
-    # One three-term-recurrence pass builds every column at once; a
-    # per-column chebval loop repays O(degree) extra work per column on
-    # every candidate of the doubling/bisection search.
+    # chebvander builds every column in one three-term-recurrence pass, which the doubling
+    # and bisection search repeats for each candidate.
     return np.polynomial.chebyshev.chebvander(x_values, degree)[:, 1::2]
 
 
@@ -209,12 +209,14 @@ def inverse_candidate_cost(degree) -> _FitCost:
 
     The terms are summed although the Vandermonde matrix is released before
     ``lstsq`` runs, so ``peak_bytes`` is an allowance above the peak of these
-    arrays. ``work`` is NWQLib's work formula for ``numpy.linalg.lstsq`` for an
-    ``n x u`` matrix for the
-    dense least squares, ``4 n (d + 1)`` for the Vandermonde recurrence and
-    design scaling, and ``8 q (d + 1)`` for the Clenshaw evaluation and
-    residual on the certificate grid. The caller checks ``peak_bytes`` per
-    candidate and sums ``work`` over all candidates.
+    arrays.
+    With d, u, n and q as defined above, ``work`` adds
+    ``least_squares_work(n, u)``, NWQLib's work formula for
+    ``numpy.linalg.lstsq`` on the ``n x u`` design matrix,
+    ``4 n (d + 1)`` for the Vandermonde recurrence and design scaling, and
+    ``8 q (d + 1)`` for the Clenshaw evaluation and residual on the
+    certificate grid. The caller checks ``peak_bytes`` per candidate and
+    sums ``work`` over all candidates.
     """
     u = (degree + 1) // 2
     n = QLS_FIT_LSQ_NODE_MULTIPLIER * u
@@ -242,9 +244,10 @@ def _fit_inverse_chebyshev(
     bisected within that bracket. This search does not establish global
     degree optimality or monotonicity of floating-point least-squares fits.
     The reference degree law is
-    ``d = O(kappa log(kappa/eps))`` [CKS arXiv:1511.02306v2, Lemmas 17-19];
-    the doubling search
-    aborts loudly at ``8x`` the registered tripwire bound.
+    ``d = O(kappa log(kappa/eps))`` [CKS arXiv:1511.02306v2, Lemmas 17-19].
+    The doubling search stops at the smaller of `max_degree` and ``8x`` the
+    registered quick upper bound (``inverse_degree_law_bound``), rounded down
+    to an odd degree, and raises if no tested degree passes.
 
     Args:
         kappa: Domain parameter, greater than 1. QLS passes its
@@ -252,9 +255,13 @@ def _fit_inverse_chebyshev(
         epsilon_inv: Certificate tolerance in ``(0, 1)`` on the relative
             residual ``|kappa * x * P(x) - 1|``.
         max_degree: Largest admitted odd degree, checked before every fit.
-        max_work: Cumulative known scalar-work envelope over actual candidates.
-        max_bytes: Known simultaneous numerical arrays, excluding vendor workspace.
-        candidate_degrees: Optional actual attempted-degree ledger, including failed candidates.
+        max_work: Limit on the summed work of all fitted candidates
+            (``inverse_candidate_cost``).
+        max_bytes: Limit on the NumPy arrays alive at once in one candidate
+            fit, excluding LAPACK workspace.
+        candidate_degrees: Optional list to which every attempted degree,
+            passing or failing, is appended.
+
     Returns:
         InverseChebyshevFit with the selected coefficients, residual norming
         bound and grid density.

@@ -24,7 +24,7 @@ from nwqlib.execution import (
 )
 from nwqlib.ir import Binding
 from .records import QHDVerification
-from .method import _admit_observations, _bits, _decoder, _generator_norms, _grid, restricted_sizes
+from .method import _admit_observations, _bits, _generator_norms, _grid, restricted_sizes
 from .objective import node_count
 
 
@@ -140,10 +140,9 @@ def _verify(plan, result, choice):
     """Compare the observed candidate or stored state with the requested finite-grid references.
 
     ``grid_minimum``: the explicit grid reference evaluates the original
-    objective and required constraints on the declared original-variable
-    grid. It chooses the lexicographically first point attaining the least
-    computed feasible objective. Feasibility uses the normalized residual
-    test at the stored tolerance. All reported reference values come from
+    objective on the declared original-variable grid. It chooses the
+    lexicographically first point attaining the least computed objective.
+    All reported reference values come from
     the same evaluated table. The result describes this finite numerical
     grid and supplies neither a continuous optimum nor an
     expression-evaluation error certificate. The table
@@ -155,11 +154,11 @@ def _verify(plan, result, choice):
     the most probable point's gap (``most_probable_gap``), the reference
     minimum and ``reported_value_difference`` read that one table. The
     success mass is ``fsum`` of the observed valid weights whose rounded
-    ``abs(table - minimum)`` passes ``minimum_tolerance``, the current
-    subtraction rule; a difference that overflows cannot pass a finite
-    tolerance. Vectorized expression evaluation may change the reference
-    table's entries and can change a minimum or feasibility decision near a
-    threshold, compared with the former scalar evaluation at each point.
+    ``abs(table - minimum)`` passes ``minimum_tolerance``. A difference that
+    overflows cannot pass a finite tolerance. Vectorized expression evaluation
+    can give table entries that differ from a scalar evaluation at each
+    point, and such a difference can change a minimum decision near a
+    threshold.
     Objective-evaluation error is not bounded here. Each fidelity comparison runs one
     restricted evolution and compares it with the stored state. A native
     state is first restricted to its grid amplitudes in lexicographic order,
@@ -289,7 +288,7 @@ def _verify(plan, result, choice):
         from .compiler import evaluate_support
 
         evaluator = _lambdify_objective(plan.problem.variables, plan.problem.objective)
-        # Original coordinates, filled one scalar at a time into the final axis arrays (A_axis = 0).
+        # Original coordinates, filled one scalar at a time into the final axis arrays.
         axes = []
         for j in range(grid.num_variables):
             axis = np.empty(grid.num_grid_points, dtype=np.float64)
@@ -413,14 +412,19 @@ def _grid_minimum_bytes(d, k, nodes, *, max_bytes, held_bytes):
     result under a sequential evaluator schedule. A full D-entry objective
     table adds ``8D``. This table is the mutable evaluation output and is
     never independently frozen, so with ``F = 8dK + 8D + H_eval`` and
-    ``S(b) = W_eval,f(b) + (8d+96)b`` the law is ``F + max(A_axis, S(b))``.
+    ``S(b) = W_eval,f(b) + (8d+96)b`` the law is ``F + S(b)``.
     The axes are filled one scalar at a time into their final
     ``np.empty(K, dtype=np.float64)`` arrays, so only a bounded number of
-    Python scalar temporaries are live, covered by ``H_eval``, no ``40K``
-    list population exists and ``A_axis = 0``. The success-mass selection
+    Python scalar temporaries are live, covered by ``H_eval``. With a stored
+    state, the success-mass selection (``passing_weights`` in ``_verify``)
     reads the table and the state in slabs of at most b entries, so its
     growing temporaries stay within ``S(b)``. Adding the concurrently held
     data gives ``B_held + 8dK + 8D + H_eval + S(b) <= QHDVerification.max_bytes``.
+    Without a stored state, ``_observed_success_mass`` decodes each whole
+    histogram chunk of the observed counts or probabilities and keeps the
+    divided passing weights of every chunk until the final ``fsum``. At every
+    readout width this law leaves out that storage, so ``max_bytes`` does not
+    bound that route.
 
     ``W_eval,f(b) = 8b(N_f+2)`` is an engineering allowance, not a derived
     bound: at most one slab-sized float64 temporary per expression node,
@@ -451,43 +455,29 @@ def _grid_minimum_bytes(d, k, nodes, *, max_bytes, held_bytes):
 
 
 def _observed_success_mass(plan, observations, table, minimum, tolerance):
-    """Return the ``fsum`` of the observed valid weights whose points pass the rounded minimum test.
+    """Return the observed mass of valid points that pass the rounded minimum test.
 
-    Each chunk's histogram is decoded by array operations
-    (``decoding.onehot_valid_words`` and ``decoding.onehot_local_indices``
-    for one-hot words, the base-K digits of the register index for binary)
-    and each passing weight is ``count/N`` over all returned shots N for
-    counts, or ``value/C`` over C chunks, as before. A readout wider than one
-    64-bit index is decoded entry by entry (``method._decoder``).
+    Each histogram is decoded by ``decoding.decode_histogram`` in stored
+    entry order. Passing count weights are divided by the total returned
+    shots across all chunks; passing probability weights are divided by
+    the number of chunks. Invalid one-hot outcomes contribute no passing
+    weight and do not reduce either denominator. The divided weights are
+    combined with ``fsum``.
     """
     import numpy as np
-    from .decoding import onehot_local_indices, onehot_valid_words
+    from .decoding import decode_histogram
 
     grid = _grid(plan)
     d, k = grid.num_variables, grid.num_grid_points
-    bits = None if plan.method.encoding != "binary" else _bits(plan.method)
+    bits = _bits(plan.method)
     counts_total = sum(c.returned_shots or 0 for c in observations.chunks)
     passing = []
     for chunk in observations.chunks:
         histogram = chunk.histogram()
         counts = chunk.observation.kind == "counts"
         denominator = counts_total if counts else len(observations.chunks)
-        if histogram.width > 64:
-            decode = _decoder(plan)
-            for index, weight in zip(histogram.index_list(), histogram.weights.tolist(), strict=True):
-                point = decode(index)
-                if point is not None and abs(table[int(np.ravel_multi_index(point, (k,) * d))] - minimum) <= tolerance:
-                    passing.append(weight / denominator)
-            continue
-        words, weights = histogram.indices(), histogram.weights
-        if bits is None:
-            valid = onehot_valid_words(words, k, d)
-            points = onehot_local_indices(words[valid], k, d)
-        else:
-            valid = np.ones(words.shape, dtype=bool)
-            mask = np.uint64(k - 1)
-            points = np.stack([((words >> np.uint64(j * bits)) & mask).astype(np.int64) for j in range(d)],
-                              axis=-1).reshape(-1, d)
+        valid, points = decode_histogram(histogram, grid, bits)
+        weights = histogram.weights
         flat = np.ravel_multi_index(tuple(points.T), (k,) * d) if d else np.zeros(0, dtype=np.int64)
         selected = np.abs(table[flat] - minimum) <= tolerance
         passing.extend(weight / denominator for weight in weights[valid][selected].tolist())
@@ -529,8 +519,8 @@ def _reference_sizes(plan, grid, flavor):
                                     start_bytes=24 * dimension + 8 * grid.num_variables * k,
                                     held_bytes=16 * dimension)
     return restricted_sizes(
-        r.restricted_dimension, grid.num_variables, len(r.support_values), (r.step_weights, r.steps), flavor,
-        _generator_norms(flavor, method, grid, r.support_values, r.steps, r.step_weights), start)
+        r.restricted_dimension, grid.num_variables, len(r.support_values), r.steps, flavor,
+        _generator_norms(flavor, method, grid, r.support_values, r.step_weights), start)
 
 
 def _infidelity(left, right):

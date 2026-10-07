@@ -28,7 +28,6 @@ from nwqlib.ir import Binding, BlockSignature, Parameter, QuantumPort
 from nwqlib.resources import ResourceLaw
 from nwqlib.subroutines._dense_synthesis import controlled_synthesis_size
 from nwqlib.subroutines.trotterization.error_budget import (
-    COEFFICIENT_ARITHMETIC,
     PruningBudgetExhausted,
     TrotterStepSelection,
     _BoundCoefficientEvaluation,
@@ -283,7 +282,7 @@ def _census_envelope(count, width, config, variant, pairs, nested, triples):
     return work, chosen[1], chosen[0]
 
 
-def _census(labels, coefficients, width, config, *, reservation=(0, 0)):
+def _census(labels, coefficients, width, config, *, reservation):
     """Admit one census together with reserved common-step work and bytes.
 
     reservation is (R, B), computed by _common_recheck_law with W=None
@@ -292,13 +291,15 @@ def _census(labels, coefficients, width, config, *, reservation=(0, 0)):
     C.bytes <= max_bytes and B <= max_bytes. The census arrays are released
     before the exact stage, so their byte envelopes are not added.
 
-    The initial admission uses E=P, N=F=J for the full variant and E=P for
-    the relaxation. After pairs, price the actual E,N with F=N. Prefer
-    the full expression when the combined charge fits, otherwise select
-    the admitted relaxation. These are successive bounds on one census,
-    not two charges. The fixed R covers either coefficient representation
-    and every checked contraction block. No later common-step work gate
-    can refuse an admitted candidate. Step-count and error checks remain.
+    E, N, F, P and J are the symbols of ``error_budget.census_work`` and
+    ``error_budget.census_sizes``. The initial admission uses E=P, N=F=J for
+    the full variant and E=P for the relaxation. After pairs, price the
+    actual E,N with F=N. Prefer the full expression when the combined
+    charge fits, otherwise select the admitted relaxation. These are
+    successive bounds on one census, not two charges. The fixed R covers
+    either coefficient representation and every checked contraction block.
+    No later common-step work gate can refuse an admitted candidate.
+    Step-count and error checks remain.
 
     Returns:
         (evaluation, block, work), with work counting the census only.
@@ -328,7 +329,7 @@ def _census(labels, coefficients, width, config, *, reservation=(0, 0)):
         )
 
     total_pairs, nested_envelope = census_sizes(count)
-    _, initial = choose_envelope(total_pairs, nested_envelope)
+    choose_envelope(total_pairs, nested_envelope)
     chosen = {}
 
     def choose(pairs, nested):
@@ -339,8 +340,6 @@ def _census(labels, coefficients, width, config, *, reservation=(0, 0)):
     evaluation = _pauli_bound_coefficient_from_terms(
         tuple(zip(labels, coefficients, strict=True)), 2, choose=choose
     )
-    if not chosen:
-        chosen.update(block=65536, work=initial[0])
     return evaluation, chosen["block"], chosen["work"]
 
 
@@ -409,7 +408,7 @@ def _common_recheck_law(W, loss, powers, coefficients, identity, tau, allowances
     dyadics are a/D with abs(a)<2**a_bits. The integer envelope follows rational
     selection, the five subtotal parts, residual scaling and publication.
 
-    Premises. Binary64 round-to-nearest with gradual underflow; coefficients,
+    Premises. Binary64 round-to-nearest with gradual underflow. Coefficients,
     identity, tau and allowances are finite native floats, powers are
     distinct native nonnegative integers, W and loss are native ints, floats
     or Fractions, and the allowance dictionary has precisely the power keys.
@@ -422,7 +421,7 @@ def _common_recheck_law(W, loss, powers, coefficients, identity, tau, allowances
     ell = bit_length(max(1, L)), k = bit_length(max(1, K)) and
     R_M = bit_length(M) for M = max_steps. For a finite nonzero float x,
     s_x is the exponent of its reduced denominator 2**s_x and
-    u_x = frexp(abs(x))[1], so abs(x) < 2**u_x; zero has both shapes zero.
+    u_x = frexp(abs(x))[1], so abs(x) < 2**u_x. Zero has both shapes zero.
     s_in, u_in bound all ordinary inputs (u_in >= 1), s_c, u_c the
     coefficients (u_c >= 0), with separate shapes for tau and the identity.
     An accepted candidate has r_max = (p_max/g)m <= M, hence h = g*tau/m >=
@@ -436,14 +435,14 @@ def _common_recheck_law(W, loss, powers, coefficients, identity, tau, allowances
     s = max(s_in, s_h, min(1074, s_h+s_c+1), min(1074, s_tau+s_I)) and
     u = max(u_in, min(1024, P+u_tau+1), min(1024, P+u_tau+u_c+2),
     min(1024, P+u_tau+u_I+3)), every ordinary input and every finite emitted
-    value is a/D with D = 2**s and abs(a) < 2**a_bits, a_bits = max(1, s+u);
+    value is a/D with D = 2**s and abs(a) < 2**a_bits, a_bits = max(1, s+u).
     s >= 1, so 2D**2 divides D**3. A candidate refused before emission uses
     only the inputs, which fit the same envelope: the candidate square fits
     Q = w+d+3P+3a_bits+2, and the floor, integer square root, increment and
     multiplication by p/g give R = max(P+ceil(Q/2)+2, R_M), which covers a
     count refused by the step limit. The five subtotal parts share a
     denominator dividing B_w*B_d*D**3 and their sum fits
-    T = w+d+3a_bits+P+R+ell+k+5; rescaling the residual to r_max adds at
+    T = w+d+3a_bits+P+R+ell+k+5. Rescaling the residual to r_max adds at
     most R+2. Hence H = w+d+3P+4a_bits+2R+2ell+2k+32 and
     b = max(2H+2, H+1076): the first term covers unreduced cross-products,
     the second comparisons with a general binary64 boundary during
@@ -457,11 +456,11 @@ def _common_recheck_law(W, loss, powers, coefficients, identity, tau, allowances
     and exact prefix addition per power, the five scalar parts and their
     sum, residuals, publication and grid validation; 4Kk for the two sorts;
     32K**2 for integer-key hash-collision comparisons. The arithmetic
-    reductions are O(L+K); the admission stays O(L+K**2) because it prices
+    reductions are O(L+K). The admission stays O(L+K**2) because it prices
     hostile collisions.
 
     Work is V*c*c*(1+ceil(log2(c))), c=ceil(bits/1075), a logical proxy rather
-    than a timing guarantee. Bytes keep the prior convention
+    than a timing guarantee. Bytes use the convention
     I(b) = 32+4*ceil(b/30) and B = 65536+192L+2048K+(2L+13K+64)*I(b): 2L
     integer slots for the coefficient Fractions while the shared reductions
     are formed, 13K for six Fractions per completed prefix and its count, and
@@ -558,7 +557,7 @@ def independent_recheck_work(W, loss, powers, coefficients, identity, tau,
     """Return (work, visits, integer bits) of the exact recheck in _independent_powers.
 
     K is the number of powers actually passed to this invocation, including
-    zero. L is the number of kept nonidentity terms. The existing code forms
+    zero. L is the number of kept nonidentity terms. _independent_powers forms
     half angles and performs the exact angle reduction even for power zero,
     so that entry must not be omitted from KL. Repeated shots and the two
     interference quadratures do not multiply K when they share one selected
@@ -577,7 +576,7 @@ def independent_recheck_work(W, loss, powers, coefficients, identity, tau,
     Work units. Each power forms and checks L half angles and evaluates the
     exact reduction A_p = 2 sum_j |val(a_pj)-val(h_p)c_j/2|, then the five
     emitted-error parts, their comparison with the allowance and the
-    upward-rounded publications; the candidate inversion performs a fixed
+    upward-rounded publications. The candidate inversion performs a fixed
     number of rational operations and one integer square root per active
     power. These are O(KL+K+L) logical arithmetic visits. With the
     integer-width weighting of _common_recheck_law,
@@ -595,7 +594,7 @@ def independent_recheck_work(W, loss, powers, coefficients, identity, tau,
     n/D with D=2^s, s>=1, |n|<2^a, a=s+u, derived from the native float
     shapes. For positive displayed time with frexp(time)[1]=u_t, a nonzero
     emitted h=RN(time/r) with r<=M has denominator exponent at most
-    s_h = min(1074, max(0, 54-min_positive(u_t)+bit_length(M))); half
+    s_h = min(1074, max(0, 54-min_positive(u_t)+bit_length(M))). Half
     angles at most min(1074, s_h+s_c+1) and phases at most
     min(1074, s_p+s_tau+s_I). With ell=bit_length(max(1,L)),
     r_M=bit_length(M), d the pruning mass width and w the larger of W's
@@ -607,20 +606,20 @@ def independent_recheck_work(W, loss, powers, coefficients, identity, tau,
     W_independent = V_T C(b_T) + V_S C(b_S) + V_I C(b_I).
     H_T places the angle difference on denominator D^3 (two terms below
     2^(3a), one bit for the difference, ell for the sum, one for the factor
-    two); doubling covers unreduced cross-products. The five emitted parts
+    two). Doubling covers unreduced cross-products. The five emitted parts
     share a denominator dividing den(W)*den(loss)*D^3, the count adds at
     most r_M bits, the coefficient sum ell and the five-part sum fewer than
-    three; H_S+1076 covers comparison/publication against a finite binary64
+    three. H_S+1076 covers comparison/publication against a finite binary64
     boundary and the 2,152-bit floor scalar operations on two binary64
     values. The selector divides W*time^3 by a positive binary64 remaining
-    allowance, whose numerator and denominator fit Q; the square-root
-    candidate has at most R bits even above M; publishing W*time^3/r^2
+    allowance, whose numerator and denominator fit Q. The square-root
+    candidate has at most R bits even above M. Publishing W*time^3/r^2
     needs H_I. The law covers the work before both scientific refusals and
     the step-count refusal. It is not a wall-clock guarantee, a Plan-wide
     work total or a heap/RSS envelope.
 
     Source: NWQLib's derivation of the independent exact recheck
-    admission; the widths reuse the coefficient-width premise of
+    admission. The widths reuse the coefficient-width premise of
     _census_coefficient_bits and the chunk convention of
     _common_recheck_law.
     """
@@ -691,8 +690,8 @@ def polar_base(matrix, config):
     gap powers of that base. For a nonsingular admitted A the ideal target
     is V = polar(A), a unitary. If eta_A = ||A^dagger A - I|| < 1, singular
     values give ||A - V||_2 = max_j |sigma_j(A) - 1|
-    <= eta_A/[1 + sqrt(1 - eta_A)], from |sigma-1| = |sigma**2-1|/(sigma+1);
-    the entrywise admission implies eta_A <= D*entry_tolerance. Numerical
+    <= eta_A/[1 + sqrt(1 - eta_A)], from |sigma-1| = |sigma**2-1|/(sigma+1).
+    The entrywise admission implies eta_A <= D*entry_tolerance. Numerical
     polar computation contributes its own error relative to V.
 
     Admission. The polar stage charges 9*D**3 + 8*D**2 work units and
@@ -722,7 +721,7 @@ def gap_powers(powers):
     """Return the positive gaps p_i - p_(i-1) of sorted distinct nonnegative powers, with p_0 = 0.
 
     Between powers p_(i-1) and p_i the trajectory applies controlled V
-    exactly p_i - p_(i-1) times; since the two control projectors are
+    exactly p_i - p_(i-1) times. Since the two control projectors are
     orthogonal, controlled(A) controlled(B) = controlled(AB), so the
     boundary after the gap to p_i holds (|0>|phi> + |1> V**p_i |phi>)/sqrt2.
     Repeated powers have zero gaps and reuse their point, and power zero is
@@ -782,7 +781,7 @@ def select_powers(*, target, base, tau, labels, coefficients, identity, pruned_m
     (``_census``).
 
     Product formula, exact static trajectory. The exact static trajectory
-    uses one propagated state and keeps the common grid; only this route
+    uses one propagated state and keeps the common grid. Only this route
     reserves common-step work. The reservation bounds the census
     coefficient width from the input exponents before any pair work. After
     this combined admission,
@@ -796,7 +795,7 @@ def select_powers(*, target, base, tau, labels, coefficients, identity, pruned_m
     shared trajectory and need not minimize each prefix independently. Every
     power's allowance is ``controlled_power_error_budget``. A failed
     subtotal refuses planning, naming the power, the allowance and the
-    contributions; no retry is made. Target increments are
+    contributions. No retry is made. Target increments are
     ``(p_k-p_(k-1))*val(tau)``.
 
     Product formula, sampled static settings and RWPE. A sampled setting
@@ -809,8 +808,8 @@ def select_powers(*, target, base, tau, labels, coefficients, identity, pruned_m
     subtotal in _independent_powers. The step block carries its intrinsic
     formula-plus-angle bound at the represented step time. Pruning, time
     displacement and identity phase enter only the complete power bound.
-    These routes reserve no common-step work and record no common step;
-    their exact recheck is admitted separately at its entry.
+    These routes reserve no common-step work and record no common step.
+    Their exact recheck is admitted separately at its entry.
 
     Dense powers. A Hamiltonian power is the exact spectral power. For a
     dense unitary input A, the selected base is its unitary polar factor V
@@ -875,8 +874,7 @@ def select_powers(*, target, base, tau, labels, coefficients, identity, pruned_m
         # An empty kept generator: W = 0 and no census work.
         evaluation = _BoundCoefficientEvaluation(
             coefficient=Fraction(0), pauli_term_count=0, pair_commutation_checks=0,
-            nested_commutation_checks=0, bound_variant="exact_census",
-            coefficient_arithmetic=COEFFICIENT_ARITHMETIC)
+            nested_commutation_checks=0, bound_variant="exact_census")
     if not terms:
         _admit_common_recheck(
             evaluation.coefficient, pruned_mass, tuple(allowances), coefficients,
@@ -886,7 +884,7 @@ def select_powers(*, target, base, tau, labels, coefficients, identity, pruned_m
         evaluation, coefficients=coefficients, identity=identity, tau=tau,
         allowances=allowances, dropped_mass=pruned_mass, max_steps=config.max_trotter_steps)
     common = step = None
-    # The recheck certified these emitted increments; without a positive
+    # The recheck certified these emitted increments. Without a positive
     # power the only position is power 0, with no phase.
     increments = certified or {power: 0.0 for power in powers}
     if selection is not None:
@@ -925,8 +923,8 @@ def select_powers(*, target, base, tau, labels, coefficients, identity, pruned_m
 def _display_time(power, tau):
     """Return the binary64 display of the target time |p|*val(tau), or None for unitary input.
 
-    For an integer power the display is the correctly rounded exact product;
-    an RWPE relative time keeps its binary64 product.
+    For an integer power the display is the correctly rounded exact product.
+    An RWPE relative time keeps its binary64 product.
     """
     if tau is None:
         return None
@@ -966,7 +964,7 @@ def _independent_powers(target, tau, terms, identity, pruned_mass, powers, confi
     formula bound at the displayed time, not the complete emitted-parameter
     subtotal. Source: the independent minimum-count rule of Childs et al.
     doi:10.1103/PhysRevX.11.011020, Sec. V B, with the second-order
-    coefficient of Prop. 10, Eq. (121); docs/algorithms/qpe.md states the
+    coefficient of Prop. 10, Eq. (121). docs/algorithms/qpe.md states the
     per-power selection.
 
     Before forming the coefficient Fractions, the recheck is admitted
@@ -1021,7 +1019,6 @@ def _independent_powers(target, tau, terms, identity, pruned_mass, powers, confi
                         pair_commutation_checks=current.pair_commutation_checks,
                         nested_commutation_checks=current.nested_commutation_checks,
                         bound_variant=current.bound_variant,
-                        coefficient_arithmetic=current.coefficient_arithmetic,
                     )
                 else:
                     selection = _selection_from_evaluation(
@@ -1059,9 +1056,8 @@ def _independent_powers(target, tau, terms, identity, pruned_mass, powers, confi
         total = _finite_upper(exact, "power error")
         step_error = _finite_upper(W * abs(h)**3 + angle_per_step, "step error")
         block = bind_power(
-            target=target, terms=terms, power=power, backend="trotter_error_budgeted",
-            steps=steps, step_time=step_time, step_error=step_error, config=config,
-            step_cx=step_cx,
+            target=target, terms=terms, power=power, steps=steps, step_time=step_time,
+            step_error=step_error, config=config, step_cx=step_cx,
         )
         if block is not None:
             blocks.append(block)
@@ -1081,7 +1077,7 @@ def _step_block(target, terms, step_time, evaluation, config, *, angle_per_step)
     again in reverse order (``rotation_schedule``), with leaf times
     ``0.5*step_time*c_j``, the values the common-step recheck certifies.
     Two controlled Pauli rotations per term, each on at most width+1 qubits,
-    give 2*L*(width+1) work units for L terms; bytes are an allowance of 32
+    give 2*L*(width+1) work units for L terms. Bytes are an allowance of 32
     per term and qubit. The block's structural operator-norm error is the
     upward rounding of W_up*abs(val(step_time))**3 + angle_per_step, where
     angle_per_step is twice the exact sum of represented half-angle
@@ -1119,22 +1115,16 @@ def _step_block(target, terms, step_time, evaluation, config, *, angle_per_step)
 def _dense_block(target, reference, matrix, tau, exponent, config, *, squares):
     """Return the controlled dense block of one nonnegative exponent k of the selected base.
 
-    Construct a controlled gap power of the Plan's selected polar base. For
-    a computed gap matrix B with operator-norm unitarity defect eta below
-    one, its polar factor differs from B by at most eta/(1+sqrt(1-eta)).
-    Error against the selected ideal power additionally includes B's
-    formation error and circuit-synthesis error.
-
     Work counts D**3 units per product of two D-square matrices, the unit of
     _linalg_laws. For a unitary the per-exponent envelope is
-    W_k = [bitlength(k) + popcount(k) - 2]*D**3 + 8*D**2 + W_synthesis; it
+    W_k = [bitlength(k) + popcount(k) - 2]*D**3 + 8*D**2 + W_synthesis. It
     remains valid with shared squares, since a cache miss cannot require
     more squares than an independent construction. For a Hamiltonian,
     V*exp(-i*E*tau*k)*V^dagger is one product, and the eigendecomposition it
     reads is computed by whichever block is constructed first, so every
     block is charged _linalg_laws.hermitian_eigensystem_work as well.
     Bytes: for a Hamiltonian an allowance of six D x D complex128 arrays
-    (96*D**2); for a unitary the 96*D**2 allowance does not cover the
+    (96*D**2). For a unitary the 96*D**2 allowance does not cover the
     persistent square cache, and the sufficient replacement is
     (96+16J)*D**2 + B_synthesis,working + B_synthesis,kept + H_cache with
     H_cache = 256(J+1) + H0, H0 = 65536, and J the largest square index of
@@ -1142,7 +1132,7 @@ def _dense_block(target, reference, matrix, tau, exponent, config, *, squares):
     populated (``construct_dense_power``). The synthesis of the controlled
     matrix on width + 1 qubits adds the work, working bytes and kept circuit
     of _dense_synthesis.controlled_synthesis_size. Each block is admitted on
-    its own; turning the reported total into a Plan-wide rejection gate is
+    its own. Turning the reported total into a Plan-wide rejection gate is
     a separate policy (docs/algorithms/qpe.md).
     """
     dimension = target.manifest.basis.dimension
@@ -1177,8 +1167,7 @@ def _dense_block(target, reference, matrix, tau, exponent, config, *, squares):
     )
 
 
-def bind_power(*, target, terms, power, backend, steps, step_time, step_error, config,
-               step_cx=None):
+def bind_power(*, target, terms, power, steps, step_time, step_error, config, step_cx):
     """Return one independently selected sampled or RWPE power's controlled step at its step_time.
 
     step_time is the checked signed binary64 step time of that power.
@@ -1192,7 +1181,7 @@ def bind_power(*, target, terms, power, backend, steps, step_time, step_error, c
     """
     dimension = target.manifest.basis.dimension
     width = dimension.bit_length() - 1
-    if backend == "trotter_error_budgeted" and steps:
+    if steps:
         # Two controlled Pauli rotations per term (rotation_schedule), each on
         # at most width+1 qubits, give 2*L*(width+1) work units for L terms.
         # Bytes: an allowance of 32 per term and qubit.
@@ -1380,7 +1369,7 @@ def construct_dense_power(block, arguments, method_context):
     signal reuse one eigendecomposition. For unitary input the payload
     matrix is the selected polar base, and its power comes from the binary
     squares kept in the method context under the base's identity
-    (``cached_unitary_power``); the squares are a recomputable construction
+    (``cached_unitary_power``). The squares are a recomputable construction
     cache and are not saved with a Result. ``qiskit_compat.controlled``
     synthesizes the unitary polar factor of the controlled matrix to
     binary64 rounding (``_dense_synthesis.controlled_unitary_circuit``). On

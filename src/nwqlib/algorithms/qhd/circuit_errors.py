@@ -16,10 +16,10 @@ the chain continues, each stage against the next:
 
 1. S against the ideal blocks with their stored angles for the blocks the
    circuit keeps, and with their exact intended exponents for the blocks it
-   omits (``angle_formation``);
+   omits (``angle_formation``).
 2. those blocks against the ideal product without the omitted blocks, the
    blocks that ``rotation_threshold`` pruned or that planning omitted below
-   the normal binary64 range (``omitted_blocks``);
+   the normal binary64 range (``rotation_pruning``).
 3. the ideal kept blocks and the stored scalar phase ``exp(i Phi^)`` against
    the native circuit: the fused hopping gate's own parameter
    (``block_errors``), the phase-diagonal provider's phase wrap, which has no
@@ -78,9 +78,10 @@ def preparation_error(reconstruction, method, grid):
     Q = sqrt(N**2+1), N >= 1. Therefore A >= min(sum_j e_j, sqrt(2)).
     If A < sqrt(2), sum_j e_j <= A. Otherwise the nonnegative unit-product
     cap applies. The complete product-direction error is consequently at
-    most D_G = min(sqrt(2), A+d*eta_K). This uses the current aggregate
-    construction and its Gaussian arithmetic assumptions, without another
-    amplitude evaluation or a native Kronecker-product operation.
+    most D_G = min(sqrt(2), A+d*eta_K). This uses the aggregate construction
+    of restricted_state_error and its Gaussian arithmetic assumptions,
+    without another amplitude evaluation or a native Kronecker-product
+    operation.
 
     Tensor-product telescoping of unit directions gives a direction
     allowance D capped at sqrt(2). It is zero for a uniform direction,
@@ -324,7 +325,7 @@ def _spectral_scale():
 
 
 def _kinetic_walsh_summary(model, bits, spacing):
-    """Return ``(C, B_c)`` of one variable's kinetic Walsh coefficients, or None when an enclosure is missing.
+    """Return ``(C, B_c)`` of one variable's kinetic Walsh coefficients, or ``(None, None)`` when an enclosure is missing.
 
     ``C = sum_(m != 0) |c^_m|`` over the actual coefficients of
     ``binary.kinetic_walsh`` and ``B_c = sum_(m != 0) rho_m`` with
@@ -345,12 +346,16 @@ def _kinetic_walsh_summary(model, bits, spacing):
     ``w = popcount(m)`` and ``s_w = cos, -sin, -cos, sin`` for
     ``w mod 4 = 0, 1, 2, 3``, for a mask that contains the top bit, and zero
     for any other. At b = 1 the only nonidentity coefficient is exactly
-    ``-1/h**2``. Each factor is recomputed with the same call on the same
+    ``-1/h**2``. Here h is the spacing and b the register's bit count.
+    For b > 1, each factor is recomputed with the same call on the same
     binary64 argument as ``kinetic_walsh`` and enclosed by ``_trig_interval``
     under the one-ulp premise for ``math.sin`` and ``math.cos``, the premise
-    ``binary.qft_error_bound`` states for its sines. The nonnegative factor
-    intervals multiply, the product is divided by the exact ``h**2`` and
-    signed.
+    ``binary.qft_error_bound`` states for its sines. On this branch,
+    ``kinetic_fd_summary_up`` multiplies outward binary64 enclosures of the
+    nonnegative factors and divides by outward binary64 enclosures of the
+    exact ``h**2``, using the known sign for the coefficient's error radius.
+    At b = 1 it forms the exact discrepancy from ``-1/h**2`` before
+    converting the radius upward.
 
     The spectral sums stay exact rationals. Only masks of weight one or two
     have a nonzero analytic coefficient, so the enclosure is formed on that
@@ -358,9 +363,9 @@ def _kinetic_walsh_summary(model, bits, spacing):
     which is zero for the exact zeros of ``kinetic_walsh``. The
     finite-difference summary is ``kinetic_fd_summary_up``: upper binary64
     values of C and B_c, converted exactly to Fractions for the later chain.
-    Its C can exceed the exact sum by a few ulps, and its outward radii can
-    exceed the exact-rational enclosure's radii by more, so neither is the
-    same rational number. An infinite upper value
+    Its C can exceed the exact coefficient-magnitude sum, and its ``B_c`` can
+    exceed the sum of radii obtained by propagating the same factor
+    intervals in exact rational arithmetic. An infinite upper value
     returns ``(None, None)``, which ``binary_angle_formation`` caps at 2 for a
     nonzero contribution.
     """
@@ -623,7 +628,7 @@ def binary_angle_formation(reconstruction, method, grid, model):
     potential = {}
     for support, table in model.potential.items():
         n, size = table.qubits, table.values.size
-        # Upper a and C, computed once and converted exactly; None when not finite.
+        # Upper a and C, computed once and converted exactly, or None when not finite.
         a_up = _scaled_absolute_sum_up(table.values, float(size))
         c_up = _scaled_absolute_sum_up(table.coefficients[1:], 1.0)
         gamma = n * _U / (1 - n * _U)
@@ -633,7 +638,6 @@ def binary_angle_formation(reconstruction, method, grid, model):
             Fraction(c_up) if finite else None,
             (size - 1) * gamma * Fraction(a_up) + table.omission.charge if finite else None,
             Fraction(magnitudes[support]),
-            size,
         )
     kinetic, energies = {}, {}
     total = Fraction(0)
@@ -651,9 +655,9 @@ def binary_angle_formation(reconstruction, method, grid, model):
                         kinetic[j] = _kinetic_walsh_summary(model.kinetic_model, bits, model.spacings[j])
                     total_c, radii = kinetic[j]
                 else:
-                    total_c, radii, _largest, _size = potential[tuple(block.variables)]
+                    total_c, radii, _largest = potential[tuple(block.variables)]
                 if total_c is None:
-                    # An infinite upper C or B_c caps a nonzero contribution at 2; a zero
+                    # An infinite upper C or B_c caps a nonzero contribution at 2. A zero
                     # exponent with zero target still contributes zero.
                     bound = Fraction(0) if exact == 0 and x == 0 else Fraction(2)
                 else:

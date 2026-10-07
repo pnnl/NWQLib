@@ -41,8 +41,7 @@ factor. Reading only the first creation index of a base term gives the
 opposite sign. The one-body terms never enter the pool, because
 ``p == s`` with the ordering above forces ``p == q == r == s``, where
 ``B`` is Hermitian and the operator is skipped. This agreement holds for
-every enumerated double, including repeated indices. The test
-``test_generalized_pool_has_the_signed_operators_of_zheng_table_5`` checks
+every enumerated double, including repeated indices. NWQLib's tests check
 all operators of Table V (Table 5 in the npj version,
 doi:10.1038/s41534-024-00916-8). The ``q < p``
 condition of Eq. (E4) belongs to the elementary circuit decomposition and
@@ -51,8 +50,9 @@ does not restrict this enumeration.
 Reversing an orientation replaces ``A`` by ``-A``. At a fixed ADAPT angle
 this changes the product states and the adaptive trajectory. Flipping the
 sign of a molecular orbital negates every generator whose ladder operators
-act on that orbital an odd number of times, which is why the chemistry
-builder fixes the sign of every orbital.
+act on that orbital an odd number of times, which is why
+``nwqlib.algorithms.gcim.chemistry.build_gcim_chemistry_problem`` fixes the
+sign of every molecular orbital.
 
 UCCSD-SD pool (``enumerate_uccsd_sd_pool``). A smaller, reference-dependent
 comparison pool. Occupied and virtual spin orbitals are read from a
@@ -152,7 +152,12 @@ class FermionicGenerator:
 
     Attributes:
         family: Generator family, which fixes its excitation pattern and
-            orientation (see the module text above).
+            orientation (see the module text above): `"single"`,
+            `"double_singlet"` or `"double_triplet"` in the default pool,
+            `"uccsd_single"` or `"uccsd_double"`, `"qeb_single"` or
+            `"qeb_double"`, `"ceo_ovp_single"`, `"ceo_ovp_plus"` or
+            `"ceo_ovp_minus"`, or `"custom"` for a generator supplied as its
+            own Pauli sum.
         spatial_indices: Ordered spatial-orbital indices defining the generator,
             ``(p, q)`` for singles and ``(p, q, r, s)`` for doubles.
         pool_index: Position in the enumerated pool.
@@ -197,9 +202,9 @@ def _check_generator_work(max_bytes, max_products, *, payload_bytes=0, work=0):
 def _snapshot_generator(generator, *, max_bytes=DEFAULT_INPUT_BYTES, max_products=1_000_000_000):
     """Admit named raw fields before traversal/copy, returning an immutable snapshot.
 
-    Only builtin finite tuples/lists are accepted; iterators are never consumed.
-    Arbitrary instance attributes are not scientific input fields and are
-    neither read nor included in raw identity.
+    Only builtin finite tuples and lists are accepted, and iterators are never
+    consumed. Arbitrary instance attributes are not scientific input fields
+    and are neither read nor included in the content hash.
     """
     stored_bytes = products = 0
 
@@ -286,11 +291,12 @@ def _snapshot_generator(generator, *, max_bytes=DEFAULT_INPUT_BYTES, max_product
 
 
 def _generator_reference(generator, *, max_bytes=DEFAULT_INPUT_BYTES, max_products=1_000_000_000):
-    """Hash an admitted snapshot in generator/1 encoding; signed zeros become +0.
+    """Hash an admitted snapshot in the generator/1 encoding, with signed zeros written as +0.
 
     Sorted-key compact UTF-8 JSON keeps row/operator order, exact indices,
-    and finite binary64 [real, imaginary] coefficients. It asserts raw content
-    identity; it does not prove the later projection/mapping scientifically.
+    and finite binary64 [real, imaginary] coefficients. The hash identifies
+    the raw content and does not prove the later projection or mapping
+    scientifically.
     """
     slots = (len(generator.pauli_terms) * (generator.num_qubits + 64)
              + sum(64 + len(ops) * (32 + generator.num_qubits.bit_length())
@@ -412,6 +418,10 @@ def enumerate_uccsd_sd_pool(reference_occupations) -> tuple[FermionicGenerator, 
     Returns:
         pool (tuple[FermionicGenerator, ...]): The generators in pool-index
             order.
+
+    Raises:
+        ValueError: If `reference_occupations` is empty or contains a value
+            other than 0 or 1.
     """
 
     bits, occupied, virtual = _occupation_sets(reference_occupations)
@@ -466,6 +476,20 @@ def enumerate_qeb_sd_pool(reference_occupations) -> tuple[FermionicGenerator, ..
     ``Q_a^dagger Q_b^dagger Q_i Q_j - Q_i^dagger Q_j^dagger Q_a Q_b``, with
     ``Q_j = (X_j + i Y_j)/2`` and no Jordan-Wigner parity string. Eqs. (21)-(22)
     of the same paper give their exponentials as Pauli rotations.
+
+    Args:
+        reference_occupations (str | Sequence[int]): Nonempty 0/1 string or
+            sequence whose entry `j` is the occupation of spin orbital `j`,
+            in the interleaved order of `spin_orbital`, as for
+            `enumerate_uccsd_sd_pool`.
+
+    Returns:
+        pool (tuple[FermionicGenerator, ...]): The generators in pool-index
+            order.
+
+    Raises:
+        ValueError: If `reference_occupations` is empty or contains a value
+            other than 0 or 1.
     """
 
     bits, occupied, virtual = _occupation_sets(reference_occupations)
@@ -522,6 +546,20 @@ def enumerate_ceo_ovp_pool(reference_occupations) -> tuple[FermionicGenerator, .
     Eqs. (23)-(24), p. 8). For each same-spin quadruple it holds the sums and
     differences of every pair of its three qubit excitations, the six
     OVP-CEOs described on p. 9.
+
+    Args:
+        reference_occupations (str | Sequence[int]): Nonempty 0/1 string or
+            sequence whose entry `j` is the occupation of spin orbital `j`,
+            in the interleaved order of `spin_orbital`, as for
+            `enumerate_uccsd_sd_pool`.
+
+    Returns:
+        pool (tuple[FermionicGenerator, ...]): The generators in pool-index
+            order.
+
+    Raises:
+        ValueError: If `reference_occupations` is empty or contains a value
+            other than 0 or 1.
     """
 
     bits, occupied, virtual = _occupation_sets(reference_occupations)
@@ -745,34 +783,13 @@ def _native_ladder_sum(terms, num_qubits, *, mapping, max_bytes=DEFAULT_INPUT_BY
 
     ``mapping`` is ``jw`` (Jordan-Wigner, Eq. (E8)) or ``z_free`` (qubit
     ladders without parity strings). The complete mapping byte law of
-    ``mapping_requirements`` is checked before the first product. Returns
-    ``(operator, max_bytes)``.
+    ``mapping_requirements`` is checked before the first product. Returns the
+    operator.
     """
     table = fermion_table(terms, num_modes=num_qubits, max_bytes=max_bytes)
     lengths = (int(table.offsets[i+1])-int(table.offsets[i]) for i in range(len(table)))
     _check(max_bytes, mapping_requirements(lengths, num_modes=num_qubits, max_bytes=max_bytes, labels=labels))
-    return table.to_pauli(mapping=mapping, max_bytes=max_bytes), max_bytes
-
-
-def _ladder_expansion_to_pauli(
-    terms: Iterable[tuple[complex, NormalTerm]],
-    num_qubits: int,
-    *,
-    mapping: Literal["jw", "z_free"],
-    coefficient_cutoff: float = GENERATOR_COEFFICIENT_CUTOFF,
-    max_bytes: int = DEFAULT_INPUT_BYTES,
-) -> SparsePauliOp:
-    """Map ordered terms natively, then apply the caller cutoff after the sum.
-
-    Full raw contributions reach one stable coalescing boundary, so the
-    cutoff acts on each label's summed coefficient and never on an individual
-    contribution. Conversion to a Qiskit ``SparsePauliOp`` happens only here.
-    """
-    from qiskit.quantum_info import SparsePauliOp
-
-    kept = _ladder_expansion_terms(terms, num_qubits, mapping=mapping,
-                                      coefficient_cutoff=coefficient_cutoff, max_bytes=max_bytes)
-    return SparsePauliOp.from_list(kept or [("I" * num_qubits, 0.0)])
+    return table.to_pauli(mapping=mapping, max_bytes=max_bytes)
 
 
 def _ladder_expansion_terms(terms, num_qubits, *, mapping, coefficient_cutoff=GENERATOR_COEFFICIENT_CUTOFF,
@@ -780,10 +797,10 @@ def _ladder_expansion_terms(terms, num_qubits, *, mapping, coefficient_cutoff=GE
     """Return the ``(label, coefficient)`` Pauli terms of ordered ladder terms.
 
     All contributions to a label are summed before the absolute
-    ``coefficient_cutoff`` is applied to the sum, as in
-    ``_ladder_expansion_to_pauli``, which adds the SDK conversion.
+    ``coefficient_cutoff`` is applied to the sum. ``_fermion_terms_to_pauli``
+    adds the SDK conversion.
     """
-    native, max_bytes = _native_ladder_sum(terms, num_qubits, mapping=mapping, max_bytes=max_bytes, labels=True)
+    native = _native_ladder_sum(terms, num_qubits, mapping=mapping, max_bytes=max_bytes, labels=True)
     labels = native.pauli_terms().labels(max_bytes=max_bytes)
     return tuple((label, value) for label, value in labels
                  if hypot(value.real, value.imag) > coefficient_cutoff)
@@ -920,11 +937,16 @@ def apply_generator_exponential(
     """Return `exp(theta * A) @ state` for a pool generator `A`, by scaled Taylor steps without forming a matrix.
 
     The state is not normalized, and a new vector of the same length is
-    returned. The step count is `max(1, ceil(2 |theta| sum_k |c_k|))` over
-    the Pauli coefficients `c_k` of `A` (0 when that product is zero), so
-    each step `h` has `||h A|| <= 1/2`. Each step is a Taylor polynomial of
-    degree 18, whose remainder is below
-    `exp(1/2) (1/2)**19 / 19! < 2.6e-23` per step. The work is 18
+    returned. The step count is ``max(1, ceil(2 |theta| sum_k |c_k|))`` over
+    the Pauli coefficients ``c_k`` of ``A`` (0 when that product is zero), so
+    in exact arithmetic each step ``h = theta / s``, with ``s`` the positive
+    step count, has ``||h A||_2 <= 1/2``. Each step is a Taylor polynomial of
+    degree 18. Its operator 2-norm remainder is at most
+    ``eta = exp(1/2) (1/2)**19 / 19! < 2.6e-23``, so its error on an input
+    vector ``v`` is at most ``eta * ||v||_2``. For ``s`` steps and initial
+    vector ``v_0``, the total truncation error is at most
+    ``((1 + eta)**s - 1) * ||v_0||_2`` in exact arithmetic. These bounds
+    exclude floating-point rounding. The work is 18
     matrix-free Pauli-sum actions per step. ADAPT's classical work counts
     use the same step count.
 
@@ -934,8 +956,8 @@ def apply_generator_exponential(
         theta: Rotation angle in radians.
 
     Returns:
-        ``exp(theta * A) @ state`` up to the Taylor remainder above and
-        rounding errors.
+        result (numpy.ndarray): `exp(theta * A) @ state` up to the Taylor
+            remainder above and rounding errors.
     """
 
     vector = np.asarray(state, dtype=complex).reshape(-1)
@@ -1010,8 +1032,8 @@ def apply_spin_squared(state: np.ndarray, *, num_qubits: int) -> np.ndarray:
         up_p = spin_orbital(p, "up")
         minus_terms.append((1.0, ((down_p, 1), (up_p, 0))))
         plus_terms.append((1.0, ((up_p, 1), (down_p, 0))))
-    minus, _ = _native_ladder_sum(minus_terms, num_qubits, mapping="jw")
-    plus, _ = _native_ladder_sum(plus_terms, num_qubits, mapping="jw")
+    minus = _native_ladder_sum(minus_terms, num_qubits, mapping="jw")
+    plus = _native_ladder_sum(plus_terms, num_qubits, mapping="jw")
     # Only the two already admitted references and dimension metadata are owned.
     metadata_bytes = 16 + ((2**num_qubits).bit_length() + 7) // 8
     factors = FactorizedOperatorProduct((minus, plus), max_bytes=metadata_bytes)
@@ -1271,12 +1293,11 @@ def _fermion_terms_to_pauli(
     Summed Pauli coefficients at or below ``coefficient_cutoff`` are removed.
     The XACC reader passes its own cutoff, zero by default.
     """
-    return _ladder_expansion_to_pauli(
-        tuple((coefficient, ops) for ops, coefficient in terms.items()),
-        num_qubits,
-        mapping="jw",
-        coefficient_cutoff=coefficient_cutoff,
-    )
+    from qiskit.quantum_info import SparsePauliOp
+
+    kept = _ladder_expansion_terms(tuple((c, ops) for ops, c in terms.items()), num_qubits, mapping="jw",
+                                   coefficient_cutoff=coefficient_cutoff)
+    return SparsePauliOp.from_list(kept or [("I" * num_qubits, 0.0)])
 
 
 __all__ = [

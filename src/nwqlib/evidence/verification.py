@@ -1,7 +1,13 @@
-"""Explicit checks of stored scientific quantities; no acquisition or eigensolve."""
+"""Checks of stored projected quantities, and the receipt step shared by most verifications.
+
+`_publish` and `witness_check_facts` bind check values to a
+VerificationReceipt for the projected, energy-shift and number-sector checks
+and for the QLS, QPE and QHD verifications. Nothing here acquires data or
+solves an eigenproblem.
+"""
 
 from dataclasses import dataclass
-from typing import Literal
+from typing import ClassVar, Literal
 
 from pydantic import model_validator
 
@@ -26,8 +32,9 @@ class ProjectedDiagnostics:
     Attributes:
         overlap: The overlap (Gram) matrix S of the trial basis, as rows:
             the raw Chebyshev Gram matrix of Lanczos, with float entries, or
-            the acquired matrix of FixedGCIM and ADAPT, completed from its
-            upper triangle by conjugation, with `Complex128` entries. `None`
+            the matrix that FixedGCIM and ADAPT assembled from their
+            readouts, completed from its upper triangle by conjugation, with
+            `Complex128` entries. `None`
             when unavailable.
         spectrum: The eigenvalues of S before the overlap cutoff, negative
             ones included. `None` when unavailable.
@@ -101,14 +108,12 @@ class ProjectedVerificationOptions(Record):
     name: Text
     comparisons: tuple[ProjectedCriterion, ...]
     tolerance: Nonnegative
-    source: Source = _PROJECTED_SOURCE
+    source: ClassVar[Source] = _PROJECTED_SOURCE
 
     @model_validator(mode="after")
     def _selection(self):
         if not self.comparisons or len(set(self.comparisons)) != len(self.comparisons):
             raise ValueError("select distinct nonempty projected criteria")
-        if self.source != _PROJECTED_SOURCE:
-            raise ValueError("projected checks require their actual implementation source")
         return self
 
     def verification_checks(self, result):
@@ -261,6 +266,8 @@ def verify_projected(result, *, options: ProjectedVerificationOptions, max_integ
     Raises:
         TypeError: If `options` is not a `ProjectedVerificationOptions`, or
             the Result supplies no projected diagnostics.
+        ValueError: If an exact intermediate value needs more than
+            `max_integer_bits` bits.
     """
     if type(options) is not ProjectedVerificationOptions:
         raise TypeError("projected verification requires concrete selected options")

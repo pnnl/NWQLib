@@ -5,8 +5,11 @@ Native operations are called only by the common admitted execution owner,
 ``nwqlib._prepared_execution`` (docs/development/execution.md).
 
 An adapter is an immutable configuration Record with one of two call shapes.
-A synchronous adapter (Aer) implements ``target_for``, ``prepare`` and
-``submit``, and ``submit`` returns the native result. A detached adapter
+A synchronous adapter (Aer) implements ``target_for``, ``prepare``, ``submit``
+and ``restore_native_data``, and ``submit`` returns the native result.
+``restore_native_data`` rebuilds the native object from a saved circuit when a
+handle of a reopened Run, or one released by ``Run.release_native``, is used
+again. A detached adapter
 (NWQ-Sim, Slurm, IBM Runtime, IonQ and Nexus) sets ``supports_synchronous``
 false and implements ``target_for``, ``prepare`` (Nexus uses staged remote
 preparation instead), ``restore_native``, ``admit_batch``, ``launch`` and
@@ -68,7 +71,7 @@ backend dictionary) and ``template_seed`` (a seed for building that template,
 derived from the Plan's randomness and the construction identity, see
 ``_prepared_execution._template_seed``). An adapter that used a template
 returns that seed in ``NativePreparation.template_seed`` and the receipt
-records it. Other adapters receive none of the three and prepare as before.
+records it. Other adapters receive none of the three.
 """
 
 from dataclasses import dataclass
@@ -79,7 +82,6 @@ from uuid import uuid4
 
 from pydantic import PrivateAttr
 
-from nwqlib.backends.capabilities import unsupported_readout
 from nwqlib.core.records import Record, Source, Text
 from nwqlib.execution import CountsSampling, RegisterMap, SubmissionItem
 
@@ -101,19 +103,19 @@ class NativePreparation:
         quantum_layout: Ordered native quantum registers and global bit indices.
         classical_layout: Ordered native classical registers and global bit indices.
         logical_to_native: Map from selected logical wires to actual native wire positions.
-        operations: Actual prepared-operation count; None if unavailable.
+        operations: Actual prepared-operation count. None if unavailable.
         population: Readout population meaning, including conditioning or explicit unknown status.
         transformation: Scientific/compiler description of how the selected input became this native input.
-        payload: Optional saved native bytes for later restoration; None if not supplied.
-        payload_format: Native byte format identifier; None without a payload format.
-        counts_sampling: Fresh/fixed-seed/unknown sampling-source description for counts; None for other readouts.
+        payload: Optional saved native bytes for later restoration. None if not supplied.
+        payload_format: Native byte format identifier. None without a payload format.
+        counts_sampling: Fresh/fixed-seed/unknown sampling-source description for counts. None for other readouts.
         provider_options_json: Optional serialized effective provider settings, excluding credentials.
         probability_window_exclusions: Labels of the native operations, readout path,
             simulator version or non-default compiler optimization level outside the
             exact-probability roundoff derivation, an empty
             tuple when nothing is, or None when not assessed.
         template_seed: The ``template_seed`` that the preparation hook supplied,
-            when this preparation used a per-construction template; None otherwise.
+            when this preparation used a per-construction template. None otherwise.
         statevector_roundoff: The ``(t, e)`` envelope of the host phase
             correction of the saved statevectors, the componentwise maxima
             over the save keys (``PreparedArtifact.statevector_roundoff``).
@@ -156,12 +158,12 @@ class BackendRefresh:
         status: Common submission state reported by this refresh: "acknowledged"
             (still pending), "completed", "failed", "cancelled" or "uncertain"
             (the outcome cannot be established and nothing is resubmitted).
-        results: Original item keys paired with available backend results; already published items are not new populations.
+        results: Original item keys paired with available backend results. Already published items are not new populations.
         provider_status: Raw provider state label, or None if unavailable.
-        failure: Provider failure explanation without changing prior observations; None when absent.
+        failure: Provider failure explanation without changing prior observations. None when absent.
         native_simulations: Observed native simulation count, or None when unavailable.
         associations: Newly learned child/result locators tied to original submission items.
-        error: Original retrieval/decoding exception to propagate after preserving available state; None on a successful refresh.
+        error: Original retrieval/decoding exception to propagate after preserving available state. None on a successful refresh.
     """
 
     status: str
@@ -209,13 +211,13 @@ def coherent_body_issue(circuit, stop=None):
     A trajectory evaluates the declared points of one deterministic, noiseless
     coherent evolution, so the selected body and views must not introduce
     measurement-conditioned evolution, resets, postselection or non-unitary
-    channels. A Qiskit ``Gate`` denotes a unitary operation and is admitted;
-    a barrier or delay does not act on the state. A measurement, a reset or a
+    channels. A Qiskit ``Gate`` denotes a unitary operation and is admitted.
+    A barrier or delay does not act on the state. A measurement, a reset or a
     control-flow operation is refused wherever it occurs, including inside the
     definition of a composite instruction, so a composite (``Initialize``
     among them, whose definition resets) cannot hide one. Any other
     instruction is admitted only through its definition, each shared
-    definition being inspected once; an opaque instruction without one has no
+    definition being inspected once. An opaque instruction without one has no
     established pure-state semantics and is refused. No operator is built and
     nothing is simulated.
     """
@@ -270,6 +272,7 @@ class AerBackend(Record):
     readouts, noise and circuit inspection.
 
     Attributes:
+        kind: Fixed `"qiskit_aer"`, the backend type.
         noise_model_id: Default `None`, no noise model. `from_noise_model` sets
             it to a fresh UUID that identifies the binding, not the model's
             contents. A configuration rebuilt from JSON with this field set
@@ -349,7 +352,7 @@ class AerBackend(Record):
         """Lower one selected logical circuit for Aer and describe the native input.
 
         ``views`` maps each trajectory readout view's tail and inverse
-        definition to its logical circuit on the body's registers; each is
+        definition to its logical circuit on the body's registers. Each is
         checked like the body and inserted at its view's boundary.
 
         Lowered gate definitions are cached per Run and target, keyed by the
@@ -368,9 +371,6 @@ class AerBackend(Record):
         """
         from nwqlib.backends import qiskit_aer as aer
         target = self.target_for(observation)
-        unsupported = unsupported_readout(target, observation)
-        if unsupported is not None:
-            raise ValueError(f"Aer target {target.name!r} does not execute {unsupported}")
         # A trajectory's position is the tuple of its resolved point
         # boundaries (ReadoutDetails.boundaries), resolved before this call.
         trajectory, phase_keys = None, frozenset()
@@ -385,7 +385,7 @@ class AerBackend(Record):
             trajectory = aer._trajectory_saves(observation, position)
             # A saved state that serves an amplitude point, or a reduction
             # whose reducer is not registered phase invariant, gets the phase
-            # of its own prefix; one serving only phase-invariant reductions
+            # of its own prefix. One serving only phase-invariant reductions
             # may be read with the executed circuit's phase.
             from nwqlib.core.planning import registered_reducer
             phase_keys = frozenset(
@@ -401,7 +401,8 @@ class AerBackend(Record):
             from nwqlib._run_archive import _CacheEntries
             preparations[target.name]._blocks = _CacheEntries(prefix=("aer", target.name),
                 changes=run._state["cache_changes"])
-        # Keep only definitions owned by the selected live lowering population.
+        # Release the cached definitions, in every target's cache, whose source
+        # gates are not in the current selection (``_AerPreparation.keep_sources``).
         sources = tuple(source_definitions)
         for owner in preparations.values():
             owner.keep_sources(iter(sources))
@@ -447,22 +448,24 @@ class AerBackend(Record):
             quantum_layout=circuit_layout(native.circuit, native.circuit.qregs),
             classical_layout=circuit_layout(native.circuit, native.circuit.cregs),
             logical_to_native=tuple(range(circuit.num_qubits)), population=population,
-            # G of a coherent statevector readout counts its native evolution
-            # operations and no save instruction (qiskit_aer._aer_operation_counts).
+            # G, the operation count of the exact-probability window
+            # (``_validation.exact_probability_window``), counts the native
+            # evolution operations of a coherent statevector readout and no save
+            # instruction (qiskit_aer._aer_operation_counts).
             # A body with control flow has no fixed native count and keeps its
-            # instruction inventory; shot sampling keeps its own count.
+            # instruction inventory. Shot sampling keeps its own count.
             operations=(aer._aer_operation_counts(native.circuit)[0] if observation.kind != "counts"
                         and not native.circuit.has_control_flow_op() else len(native.circuit.data)),
             counts_sampling=CountsSampling(kind="fixed_seed", seed=runtime.seed) if observation.kind == "counts" else None,
             probability_window_exclusions=native.metadata.get("probability_window_exclusions"),
-            # The envelope of the stored phase factors; (0, 0) when no saved
+            # The envelope of the stored phase factors, (0, 0) when no saved
             # state is multiplied, including every non-trajectory readout.
             statevector_roundoff=aer._statevector_roundoff(native),
             transformation="fresh logical container with run-owned definitions; shared Aer lowering/readout; "
                 "owned in-process snapshot; selected simulator memory limit, no process RSS claim")
 
     def admit_trajectory_buffers(self, observation, *, width, memory_mb, run):
-        """Admit a trajectory's live state, retained saves and marginal workspace against ``memory_mb``.
+        """Admit a trajectory's live state, kept saves and marginal workspace against ``memory_mb``.
 
         This is the Aer trajectory preflight before native lowering
         (``qiskit_aer._admit_aer_saved_buffers``). The trajectory memory check
@@ -475,14 +478,18 @@ class AerBackend(Record):
         """
         from nwqlib.backends import qiskit_aer as aer
         return aer._admit_aer_saved_buffers(observation, width=width, memory_mb=memory_mb,
-                                            state_threads=_run_state_threads(run), additional_peak_bytes=0)
+                                            state_threads=_run_state_threads(run))
 
     def native_target_version(self):
         """Version of the executing package, ``qiskit-aer``, recorded in each receipt's target and chunk source."""
         return version("qiskit-aer")
 
     def native_job_id_length(self):
-        """Encoded length of Aer's job identifier, ``str(uuid.uuid4())`` in ``AerBackend.run``: 36 characters."""
+        """Encoded length of Aer's job identifier, 36 characters.
+
+        qiskit-aer 0.17.2 generates it with ``str(uuid.uuid4())`` in its own
+        ``AerBackend.run``.
+        """
         return 36
 
     def _refuse_inadmissible_trajectory(self, circuit, stop=None):
@@ -520,11 +527,6 @@ class AerBackend(Record):
                        zero_threshold=metadata["simulator_zero_threshold"])
         if target.name == AER_STATEVECTOR_TARGET.name:
             # The thread cap that the saved-buffer admission used.
-            if "simulator_max_parallel_threads" not in metadata:
-                raise ValueError(
-                    "a restored Aer statevector preparation lacks its native metadata key "
-                    "simulator_max_parallel_threads; its Run folder was written by a revision "
-                    "that did not record the thread cap and cannot be restored by this one")
             options["max_parallel_threads"] = metadata["simulator_max_parallel_threads"]
         if self.noise_model_id is not None:
             options["noise_model"] = self._bound_noise_model()

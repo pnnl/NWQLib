@@ -283,13 +283,15 @@ def test_only_sampled_quantum_plans_admit_readout_grouping():
 
 
 def test_label_cache_charge_covers_the_decoded_cache_it_reserves():
-    """The per-Plan decoded label cache stays within ``label_cache_bytes`` on ten synthetic pools.
+    """The per-Plan decoded label cache fits its allowance on ten synthetic pools.
 
-    Each pool has K members sharing one commutator table of r rows on q
-    qubits and S selections. The cache decodes the rows, sorts the screen and
-    energy labels and fills active-label entries up to its clearing boundary
-    (the sampled caller's limit K, the exact one S). Its traced incremental
-    peak must not exceed the charge, which assumes every row label distinct.
+    Each pool has K members with pairwise distinct commutator labels,
+    r rows per member on q qubits, and S selections. The label encoding
+    requires K*r <= 4**q, so the distinct-label population is R = K*r.
+    The cache decodes the rows, sorts the screen and energy labels, and
+    fills active-label entries through their clearing boundary: limit K
+    for sampled calls and S for exact calls. Its traced incremental peak
+    must not exceed the default label_cache_bytes allowance.
     """
     import itertools
     import tracemalloc
@@ -301,9 +303,10 @@ def test_label_cache_charge_covers_the_decoded_cache_it_reserves():
     from nwqlib.algorithms.gcim.fixed_basis import PauliArrays
 
     for q, K, r, S in ((2, 3, 0, 2), (2, 3, 1, 2), (8, 12, 19, 4), (10, 12, 257, 4), (20, 5, 1024, 3)):
-        rows = [("".join("IXYZ"[(i >> (2 * j)) & 3] for j in reversed(range(q))), float(i + 1)) for i in range(r)]
-        pool = tuple(SimpleNamespace(commutator=PauliArrays.from_rows(rows, q)) for _ in range(K))
-        energies = tuple(label for label, _ in rows[:min(r, 5)])
+        members = [[("".join("IXYZ"[(i >> (2 * j)) & 3] for j in reversed(range(q))), float(i + 1))
+                    for i in range(k * r, (k + 1) * r)] for k in range(K)]
+        pool = tuple(SimpleNamespace(commutator=PauliArrays.from_rows(rows, q)) for rows in members)
+        energies = tuple(label for label, _ in members[0][:min(r, 5)])
         for sampled in (False, True):
             tracemalloc.start()
             baseline = tracemalloc.get_traced_memory()[0]
@@ -317,5 +320,6 @@ def test_label_cache_charge_covers_the_decoded_cache_it_reserves():
                 active_screen_labels(pool, cache, key, limit)
             peak = tracemalloc.get_traced_memory()[1]
             tracemalloc.stop()
-            charge = label_cache_bytes(q, (r,) * K, K, len(energies), S, sampled=sampled, distinct_cap=len(labels))
+            assert len(labels) == K * r
+            charge = label_cache_bytes(q, (r,) * K, K, len(energies), S, sampled=sampled)
             assert charge >= peak - baseline

@@ -401,11 +401,11 @@ class GroupMoment(Record):
 
     Attributes:
         experiment: The setting's experiment name.
-        contribution_id: The count chunk these moments come from.
+        contribution_id: Content hash of the count data these moments come from.
         pair: ``(i, j)`` with ``i <= j``.
         quadrature: ``real`` (ancilla X) or ``imag`` (ancilla Y).
         group: Index into ``FixedGCIMReconstruction.groups``.
-        shots: The chunk's returned population N.
+        shots: Returned shots N of that count data.
         label_means: The mean of each member's ``Z_k`` in group order.
         mean: ``mean(Y)``.
         second: ``mean(Y**2)``.
@@ -469,12 +469,13 @@ class SampledPairVariance(Record):
 
 
 class PairEstimate(Record):
-    """The acquired ``H0_ij`` and ``S_ij`` of one exact pair and the reductions they were pooled from.
+    """The reported ``H0_ij`` and ``S_ij`` of one exact pair and the reductions they were pooled from.
 
-    Each contribution is one ``block_matrix_elements`` reduction of the pair's
-    phase-faithful joint state (or diagonal system state), with population
-    one. Its two raw complex scalars are the offset-free Hamiltonian entry and
-    the overlap entry in the requested ``(left, right)`` orientation. A
+    Each contribution is one exact readout (``block_matrix_elements``) of the
+    pair's phase-faithful joint state (or of its diagonal system state) and
+    counts once in the pooling. Its two raw complex scalars are the
+    offset-free Hamiltonian entry and the overlap entry in the requested
+    ``(left, right)`` orientation. A
     diagonal pair's overlap is its raw squared norm, kept as evidence while
     assembly uses unit diagonal overlap. The individual Pauli-term
     transitions are not recorded and cannot be recovered from the weighted
@@ -485,18 +486,21 @@ class PairEstimate(Record):
         pair: ``(left, right)`` with ``left <= right``.
         hamiltonian: Pooled offset-free ``H0_ij``.
         overlap: Pooled ``S_ij``.
-        contribution_ids: Contributing reduction chunks.
-        weights: Population fraction of each contribution.
-        hamiltonian_bound: Outward error allowance for the acquired H0
-            entry under the state-error model of the producing preparation
-            records, combined with the classical action, contraction and
-            pooling bounds. None when a producing preparation record
-            has an unresolved exclusion or no applicable state budget.
+        contribution_ids: Content hashes of the contributing exact readouts.
+        weights: Share of each contribution in the pooled `hamiltonian` and
+            `overlap`.
+        hamiltonian_bound: Outward error allowance for the reported offset-free
+            Hamiltonian entry ``H0_ij`` under the state-error model of the
+            preparation records. It combines that model with bounds for applying
+            H0 to the right state, taking its complex inner product with the left
+            state, and forming the weighted average of repeated acquisitions of
+            the same pair. None when a preparation record has an unresolved
+            exclusion or no applicable state budget.
             When a supplied matrix is synthesized under control, this
             allowance also assumes the exact-to-rounding convention of
             [exact dense synthesis](../../development/dense_synthesis.md).
             It does not add an independently certified synthesis residual.
-        overlap_bound: The corresponding allowance for the acquired overlap,
+        overlap_bound: The corresponding allowance for the reported overlap,
             with state, contraction and pooling terms. The solved diagonal
             is algebraic one and contributes zero to the Gram allowance.
             When a supplied matrix is synthesized under control, this
@@ -529,11 +533,11 @@ class ProjectedPencil(Record):
 
     Attributes:
         hamiltonian: Projected Hamiltonian ``H = H0 + c_I S`` of shape (m, m)
-            in the problem's energy unit, from the acquired ``H0`` without the
-            identity term ``c_I I`` and the acquired ``S``, completed from its
-            upper triangle by conjugation. The solve used ``H0`` and added
+            in the problem's energy unit, from ``H0`` without the identity
+            term ``c_I I`` and from ``S``, completed from its upper triangle
+            by conjugation. The solve used ``H0`` and added
             ``c_I`` to its Ritz values.
-        overlap: Acquired Gram matrix ``S`` of shape (m, m), completed the same way.
+        overlap: Gram matrix ``S`` of shape (m, m), completed the same way.
         overlap_eigenvalues: Full ascending spectrum of ``S``, before the cutoff.
         eigenvalues: Ascending Ritz values of the kept subspace.
         coordinate_vectors: Rows index the m basis states and columns the Ritz
@@ -619,7 +623,7 @@ class ProjectedPencil(Record):
         must carry no enclosure fields.
         """
         if self.overlap_filter != ("sampled_positive_subspace" if sampled else "deterministic_gram"):
-            raise ValueError("pencil sampling policy differs from its selected observations")
+            raise ValueError("pencil overlap filter differs from its selected observations")
         bounds = processed_pauli_enclosure(reconstruction) if sampled else None
         if self.sampled_enclosure != bounds:
             raise ValueError("sampled pencil enclosure differs from its processed operator")
@@ -635,7 +639,10 @@ class ProjectedPencil(Record):
 
 
 def sampled_pencil_fields(diagnostics):
-    """Keep only the enclosure facts beside the existing solver diagnostics."""
+    """Return the ``sampled_*`` ProjectedPencil fields of a sampled enclosure diagnostic, or an empty dict when there is none.
+
+    A nonfinite violation is stored as None.
+    """
     if diagnostics is None:
         return {}
     violation = diagnostics["enclosure_violation"]
@@ -673,7 +680,7 @@ def processed_pauli_enclosure(reconstruction):
 # Shown with ``negative_deterministic_overlap_eigenvalue`` when an
 # off-diagonal pair has no overlap bound. The solve then receives zero input
 # allowance and refuses when min_k s_hat_k < -tau_ro, with
-# tau_ro = B*eps*max_k |s_hat_k| the eigensolver roundoff allowance; the
+# tau_ro = B*eps*max_k |s_hat_k| the eigensolver roundoff allowance. The
 # negative-mode check precedes rank filtering, so overlap_cutoff cannot
 # change it.
 UNQUALIFIED_GRAM_REFUSAL = (
@@ -749,7 +756,7 @@ def _offset_free_requirements(operator, count, shift):
     action visits the shifted pattern, including inserted diagonals. With h
     missing diagonals the extra work is ``W_setup + count*h`` on the first
     acquisition and ``count*h`` on a cache hit, relative to the
-    ``count*(z + d)`` of the plain actions; the bytes are
+    ``count*(z + d)`` of the plain actions. The bytes are
     ``_shifted_sparse_requirements``. This charge includes the setup, so a
     caller that reuses a Run's shifted operator is charged conservatively.
     Before the scan, h is bounded by d
@@ -1143,7 +1150,7 @@ def sampled_settings(b, groups):
     """Enumerate ``(name, i, j, quadrature, group)`` of the declared sampled settings.
 
     An off-diagonal pair ``i < j`` has one setting per quadrature and system
-    group, ``max(1, G)`` of each; group zero supplies the overlap. A
+    group, ``max(1, G)`` of each. Group zero supplies the overlap. A
     diagonal pair has one real setting per group. For M required pairs with
     D diagonal ones and G nonempty groups the count is
     ``2(M - D) max(1, G) + DG``, which is ``b**2 G`` for the complete
@@ -1170,7 +1177,7 @@ def _sampled_construction(basis, q, basis_record, groups, shots):
     measures the system group only. Each group's system readout rotates X
     positions by H, Y positions by S^dagger then H, and leaves I and Z.
 
-    The ancilla is native and classical bit zero; system qubit k is
+    The ancilla is native and classical bit zero. System qubit k is
     classical bit k + 1, so a displayed key reads ``system_bits phase``. Two
     shared classical declarations of common width ``n + 1`` keep every
     setting's layout equal. A diagonal setting leaves the ancilla classical
@@ -1243,7 +1250,7 @@ def group_requirements(c, terms, entries):
     covers floating weights, X, Y, parity conversions and moment products,
     which occur in successive phases, and 8L_g holds the label means. Work
     covers key decoding, population checks, wordwise AND/popcount/parity
-    passes, the coefficient accumulation, label dots and moment dots; the
+    passes, the coefficient accumulation, label dots and moment dots. The
     last term is the mask construction scanning each label once per word.
     These are conservative kernel/pass units. Python integer, list and
     record headers, decoder object temporaries, opaque NumPy workspace and
@@ -1310,7 +1317,7 @@ def sampled_analysis_work(b, n, terms, groups, shots):
     with S_b = 32b²+16b³ the projected solve (``_projected_solve_work``).
     For L > 0, 1 <= G <= L and A is monotone in G, so A(1) is a necessary
     analysis-work floor and A(L) a sufficient analysis envelope before
-    grouping; after grouping A(G) is the exact admission charge. Identity
+    grouping. After grouping A(G) is the exact admission charge. Identity
     terms do not enter L. Sampled FixedGCIM checks grouping, the projected
     solve and grouped analysis against ``max_analysis_work``. These are
     phase ceilings, so the required common limit is their maximum,
@@ -1338,10 +1345,11 @@ def reduce_group(chunk, rec, setting, rows=None):
     unconditional population, so selected shots equal returned shots. The
     common width, the diagonal's unused phase bit and the exact count total
     against ``returned_shots`` are checked, and packed masks cover every
-    word of the key. The label means satisfy
-    ``mean(Y_g) = sum_(k in g) c_k mean(Z_k)`` mathematically, with ordinary
-    reduction rounding in its evaluation; the weighted reduction is the H0
-    owner.
+    word of the key.
+    The label means satisfy ``mean(Y_g) = sum_(k in g) c_k mean(Z_k)``
+    mathematically, with ordinary reduction rounding in its evaluation.
+    Each H0 quadrature is formed by summing the pooled weighted group
+    means ``mean(Y_g)``.
     """
     name, i, j, quad, g = setting
     group = rec.groups[g] if rec.groups else SampledGroup(basis="I" * rec.num_qubits, indices=())
@@ -1365,7 +1373,7 @@ def reduce_group(chunk, rec, setting, rows=None):
     for index in group.indices:
         label, coefficient = rows[index]
         parity = np.zeros(len(counts), np.uint8)
-        # System qubit k is classical bit k + 1; the ancilla sign follows.
+        # System qubit k is classical bit k + 1. The ancilla sign follows.
         for word in range(words.shape[1]):
             mask = 0
             for bit, letter in enumerate(reversed(label)):
@@ -1403,7 +1411,7 @@ def pooled_statistics(rec, moments):
     weights here. The quadratures are ``H0_ij,q = sum_g mean(Y_ij,q,g)`` and
     ``S_ij,q = mean(X_ij,q,0)``, with ``S_ii = 1`` and zero imaginary
     diagonal. The variances follow ``SampledPairVariance``. Pooling
-    uncertainty is conditional on an independent-acquisition model; shared
+    uncertainty is conditional on an independent-acquisition model. Shared
     deterministic simulator seeds do not prove independence. Returns
     ``(estimates, missing, pairs, variances)``, with empty pairs and
     variances when a setting is missing.
@@ -1475,7 +1483,7 @@ def read_groups(plan, data):
 
     where the third term is a logical payload allowance for the
     contribution scalars and indices, and the fourth the once-decoded
-    nonidentity label and coefficient payload; the projected solve's own
+    nonidentity label and coefficient payload. The projected solve's own
     allowance is added. The pass work ``sum_a W_a + L(n + 1) + 32b**2 +
     16b**3`` is checked against ``max_analysis_work``. Repeated acquisitions
     enter these sums separately. Stored observations and the immutable
@@ -1643,11 +1651,6 @@ class FixedGCIMResult(Result):
                 raise ValueError("GCIM pencil differs from its basis or analysis settings")
             if self.eigenvalue != (p.eigenvalues[0] if p.eigenvalues else None):
                 raise ValueError("GCIM eigenvalue differs from its projected spectrum")
-            expected_filter = (
-                "sampled_positive_subspace" if plan.shots is not None else "deterministic_gram"
-            )
-            if p.overlap_filter != expected_filter:
-                raise ValueError("GCIM Gram filter differs from its actual acquisition policy")
             p._validate_sampled_enclosure(plan.reconstruction, sampled=plan.execution == "quantum" and plan.shots is not None)
 
     def energy_endpoint(self):
@@ -1662,7 +1665,6 @@ class FixedGCIMResult(Result):
         from nwqlib.evidence.energy_shift import EnergyEndpoint, _operator_payload
 
         plan = self.plan
-        self.validate_plan(plan)
         operator = plan._native["operator"]
         return EnergyEndpoint(
             plan_id=self.plan_id,
@@ -1844,14 +1846,15 @@ class FixedGCIM(Method):
             conversion.
         max_conversion_work: Default `100_000_000`. Limit on the work of an
             explicitly chosen operator conversion.
-        max_admission_steps: Default `1_000_000`. Limit on the planning work
-            of checking each circuit description that the method builds. It
-            caps both the number of stored fields of a description and the
-            work units of one structural check of it.
-            Summing a description's resource counts may use up to 24 times
-            this value. The default equals that of `QLS` and is ten times the
-            shared default of `100_000`. Raising it permits a larger check
-            and changes no quantum operation
+        max_admission_steps: Default `1_000_000`. Upper limit on the
+            planning work of checking each `Program` that the method builds
+            (NWQLib's description of a circuit as named steps). It caps the
+            number of stored fields of a `Program` and the work units of one
+            check of it. Summing a `Program`'s resource counts may use up to
+            24 times this value. A larger `Program` is refused with a
+            ValueError that names this field, the refused stage and its
+            count. Raising the limit permits a larger check and changes no
+            quantum operation
             ([planning work limit](../../development/program_checks.md#planning-work-limit)).
 
     Examples:
@@ -1934,8 +1937,8 @@ class FixedGCIM(Method):
                     f"max_analysis_work={self.max_analysis_work}. "
                     "Increase FixedGCIM.max_analysis_work or reduce the basis or operator."
                 )
-        # A sampled Plan records its QWC partition before settings expansion;
-        # the scalar-identity shortcut acquires no pencil and needs no groups.
+        # A sampled Plan records its QWC partition before settings expansion.
+        # The scalar-identity shortcut acquires no pencil and needs no groups.
         groups = sampled_groups(input_terms, q, self) if shots and nonidentity else ()
         e = ((b * b * len(groups) if shots else pair_count(b, nonidentity)) if nonidentity else 0)
         if e > self.max_experiments:
@@ -2034,13 +2037,13 @@ class FixedGCIM(Method):
         )
         if e and not shots:
             # The summed registered work of the pair reductions is recorded
-            # once in the Plan's cache; reduction_allowance admits it against
-            # max_classical_products, the Method's host-work owner, when a
+            # once in the Plan's cache. reduction_allowance admits it against
+            # max_classical_products, the Method's host-work limit, when a
             # pair is prepared, and funds each point from this ledger.
             _pair_work_total(plan)
-            return plan._bind(blocks=blocks, operator=operator, basis=basis, basis_record=basis_record,
+            return plan._bind(blocks=blocks, operator=operator, basis=basis,
                               pair_table=_pair_table(operator))
-        return plan._bind(blocks=blocks, operator=operator, basis=basis, basis_record=basis_record)
+        return plan._bind(blocks=blocks, operator=operator, basis=basis)
 
     def reduction_allowance(self, plan, point, *, observation, width, run):
         """Admit the summed pair work and a point's workspace, and return the remaining allowance.
@@ -2162,7 +2165,6 @@ class FixedGCIM(Method):
             blocks=self._host_blocks(plan, operator, basis),
             operator=operator,
             basis=basis,
-            basis_record=basis_record,
         )
 
     def _host_blocks(self, plan, operator, basis):
@@ -2355,7 +2357,7 @@ class FixedGCIM(Method):
         repeated acquisitions of one pair pool with population weights under
         ``pooled_bound``, separately for H0 and S. The deterministic Gram
         filter admits the maximum row sum of the off-diagonal overlap bounds
-        (``_exact_overlap_allowance``); when that allowance is unavailable
+        (``_exact_overlap_allowance``). When that allowance is unavailable
         it admits no input error beyond the solver's own roundoff.
         """
         import json
@@ -2385,7 +2387,7 @@ class FixedGCIM(Method):
             # the entry law uses the saved-state budget.
             delta = None if receipt is None else receipt.saved_state_error(("amplitude-derived masses",))[0]
             bounds = entry_bounds(delta, float.fromhex(parameters["c1"]), 1 << parameters["qubits"], terms,
-                                  1, terms, diagonal=pair[0] == pair[1], ordered=True)
+                                  diagonal=pair[0] == pair[1])
             pairs[pair].append((chunk.content_id, h0, overlap, bounds))
             ids.append(chunk.content_id)
         estimates, values, overlap_bounds = [], {}, {}
@@ -2462,7 +2464,7 @@ class FixedGCIM(Method):
                 unique.append(files.write_state(f"selected_basis_{len(unique)}", state))
             indices.append(positions[key])
         return dict(
-            format="fixed_gcim/5",
+            format="fixed_gcim/6",
             plan=plan.to_record(),
             problem=files.write_problem(plan.problem),
             output=files.write_output(plan.output),
@@ -2478,7 +2480,6 @@ class FixedGCIM(Method):
         from nwqlib.evidence.energy_shift import EnergyShiftOptions, verify_energy_shift
         from nwqlib.evidence.verification import verify_projected
 
-        result.validate_plan(plan)
         if type(checks) is EnergyShiftOptions:
             return verify_energy_shift(result, options=checks)
         return verify_projected(result, options=checks)
@@ -2495,8 +2496,8 @@ class FixedGCIM(Method):
         from nwqlib._choice_archive import unsupported_archive_format
         from nwqlib.blocks._archive import read_blocks
 
-        if saved.get("format") != "fixed_gcim/5":
-            raise unsupported_archive_format("FixedGCIM archive", saved.get("format"), "fixed_gcim/5")
+        if saved.get("format") != "fixed_gcim/6":
+            raise unsupported_archive_format("FixedGCIM archive", saved.get("format"), "fixed_gcim/6")
         fields = dict(saved["method"])
         fields["basis"] = tuple(files.read_state(s) for s in saved["basis"])
         method = cls(**fields)
@@ -2521,7 +2522,6 @@ class FixedGCIM(Method):
             blocks=blocks,
             operator=operator,
             basis=basis,
-            basis_record=FixedGCIMBasis(preparations=tuple(s.preparation for s in basis)),
             **({"pair_table": _pair_table(operator)}
                if plan.execution == "quantum" and plan.shots is None and plan.experiments else {}),
         )

@@ -1,10 +1,9 @@
 """Product-formula circuit for a validated Pauli summand list.
 
-Single conversion owner from dense qiskit labels (qubit 0 rightmost) to the
-compact Pauli-evolution block form, delegating the synthesis to
-``build_pauli_evolution_circuit``. This internal helper is not exported by
-``nwqlib.subroutines.hamiltonian_evolution``; call sites import it from this
-module.
+The only conversion from dense Qiskit labels (qubit 0 rightmost) to the
+compact Pauli-evolution block form. It delegates the synthesis to
+``build_pauli_evolution_circuit``. ``nwqlib.subroutines.hamiltonian_evolution``
+does not export it, so call sites import it from this module.
 """
 
 from __future__ import annotations
@@ -35,8 +34,8 @@ def build_sparse_pauli_product_circuit(
         terms: ``(dense_label, coefficient)`` summands in application order.
             Callers pass identity-free Hermitian summand lists (an identity
             summand only shifts the global phase, which the compact
-            Pauli-evolution representation cannot carry); coefficient
-            realness is enforced by the delegated rotation path.
+            Pauli-evolution representation cannot carry). The delegated
+            rotation path enforces real coefficients.
         num_qubits: Width of the dense labels.
         time_step: Total evolution time realized by the product formula.
         evolution_synthesis: Delegated synthesis name
@@ -57,7 +56,7 @@ def build_sparse_pauli_product_circuit(
             raise ValueError("explicit product-formula order requires Suzuki synthesis or Lie-Trotter order one")
     compact_terms = []
     for label, coefficient in terms:
-        # Qiskit dense labels put qubit 0 rightmost; compact labels index
+        # Qiskit dense labels put qubit 0 rightmost, and compact labels index
         # qubits explicitly, so reverse before sorting by qubit.
         ops = {
             num_qubits - 1 - position: character

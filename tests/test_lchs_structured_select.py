@@ -27,6 +27,7 @@ from nwqlib.algorithms.lchs.time_independent_terms import (
     _TrotterPauliDecomposition,
     _build_product_formula_select_plan,
     generate_lchs_product_formula_select_plan,
+    generate_lchs_quadrature,
 )
 from nwqlib.subroutines._multiplexors import (
     affine_angle_table_values,
@@ -100,10 +101,12 @@ def test_structured_and_multiplexed_select_match_independent_dense_blocks(
     order: int,
 ) -> None:
     problem = problem_factory()
+    options = _signed_options(address_qubits).revise(trotter_order=order)
     data = generate_lchs_product_formula_select_plan(
-        matrix=problem.A.dense_array(),
+        quadrature=generate_lchs_quadrature(
+            matrix=problem.A.dense_array(), final_time=problem.elapsed_time, method=options),
         final_time=problem.elapsed_time,
-        method=_signed_options(address_qubits).revise(trotter_order=order),
+        method=options,
     )
     plan = data.plan
     assert plan.structure_certificate["eligible"] is True
@@ -159,34 +162,38 @@ def test_auto_cost_comparison_tie_manual_choices_and_strict_less_than() -> None:
     """
     problem = _mixed_problem()
     tie_data = generate_lchs_product_formula_select_plan(
-        matrix=problem.A.dense_array(),
+        quadrature=generate_lchs_quadrature(
+            matrix=problem.A.dense_array(), final_time=problem.elapsed_time, method=_signed_options(2)),
         final_time=problem.elapsed_time,
         method=_signed_options(2),
     )
     tie = resolve_lcu_select_implementation(
         _signed_options(2),
-        he_backend="trotter",
-        candidate_costs=product_formula_select_resource_law(tie_data.plan),
         select_plan=tie_data.plan,
     )
-    assert tie["lcu_select_candidate_costs"] == {
-        "multiplexor_select_basis_cx_count": 14,
-        "structured_select_basis_cx_count": 14,
-    }
-    assert tie["resolved_lcu_select_implementation"] == "multiplexor"
+    # One Suzuki-2 step has three one-qubit occurrences. Two address bits
+    # cost 4 CX per UCRZ or 2*2 CX per affine rotation; the nonzero identity
+    # phase adds a common 4-2 CX diagonal. Both totals are 3*4+2 = 14.
+    assert (
+        product_formula_select_resource_law(tie_data.plan)["select_basis_cx_count"]
+        == product_formula_select_resource_law(
+            tie_data.plan, implementation="structured"
+        )["select_basis_cx_count"]
+        == 14
+    )
+    assert tie == "multiplexor"
 
     cheaper_data = generate_lchs_product_formula_select_plan(
-        matrix=problem.A.dense_array(),
+        quadrature=generate_lchs_quadrature(
+            matrix=problem.A.dense_array(), final_time=problem.elapsed_time, method=_signed_options(3)),
         final_time=problem.elapsed_time,
         method=_signed_options(3),
     )
     resolutions = {
         request: resolve_lcu_select_implementation(
             _signed_options(3, select=request),
-            he_backend="trotter",
-            candidate_costs=product_formula_select_resource_law(cheaper_data.plan),
             select_plan=cheaper_data.plan,
-        )["resolved_lcu_select_implementation"]
+        )
         for request in ("auto", "structured", "multiplexor")
     }
     assert resolutions == {
@@ -201,7 +208,8 @@ def test_resolver_uses_only_plan_metadata_and_linear_census(
 ) -> None:
     problem = _mixed_problem()
     data = generate_lchs_product_formula_select_plan(
-        matrix=problem.A.dense_array(),
+        quadrature=generate_lchs_quadrature(
+            matrix=problem.A.dense_array(), final_time=problem.elapsed_time, method=_signed_options(3)),
         final_time=problem.elapsed_time,
         method=_signed_options(3),
     )
@@ -215,11 +223,9 @@ def test_resolver_uses_only_plan_metadata_and_linear_census(
     monkeypatch.setattr(qiskit_info, "Statevector", forbidden)
     resolution = resolve_lcu_select_implementation(
         _signed_options(3),
-        he_backend="trotter",
-        candidate_costs=product_formula_select_resource_law(data.plan),
         select_plan=data.plan,
     )
-    assert resolution["resolved_lcu_select_implementation"] == "structured"
+    assert resolution == "structured"
 
 
 
@@ -280,24 +286,21 @@ def test_structured_eligibility_is_produced_before_resolution(
     if condition is None:
         resolved = resolve_lcu_select_implementation(
             _signed_options(2, select="structured"),
-            he_backend="trotter",
             select_plan=plan,
         )
-        assert resolved["resolved_lcu_select_implementation"] == "structured"
+        assert resolved == "structured"
         assert certificate["rejection_reasons"] == ()
         return
 
     assert any(condition in reason for reason in certificate["rejection_reasons"])
     resolution = resolve_lcu_select_implementation(
         _signed_options(2),
-        he_backend="trotter",
         select_plan=plan,
     )
-    assert resolution["resolved_lcu_select_implementation"] == "multiplexor"
+    assert resolution == "multiplexor"
     with pytest.raises(ValueError, match=condition):
         resolve_lcu_select_implementation(
             _signed_options(2, select="structured"),
-            he_backend="trotter",
             select_plan=plan,
         )
 
@@ -312,7 +315,8 @@ def test_actual_arbitrary_padding_pruning_and_unequal_step_fallbacks() -> None:
         approximation_tolerance=0.5,
     )
     arbitrary = generate_lchs_product_formula_select_plan(
-        matrix=problem.A.dense_array(),
+        quadrature=generate_lchs_quadrature(
+            matrix=problem.A.dense_array(), final_time=problem.elapsed_time, method=arbitrary_options),
         final_time=problem.elapsed_time,
         method=arbitrary_options,
     ).plan
@@ -320,10 +324,8 @@ def test_actual_arbitrary_padding_pruning_and_unequal_step_fallbacks() -> None:
     assert (
         resolve_lcu_select_implementation(
             arbitrary_options,
-            he_backend="trotter",
-            candidate_costs=product_formula_select_resource_law(arbitrary),
             select_plan=arbitrary,
-        )["resolved_lcu_select_implementation"]
+        )
         == "multiplexor"
     )
 
@@ -366,11 +368,9 @@ def test_actual_arbitrary_padding_pruning_and_unequal_step_fallbacks() -> None:
     ):
         resolution = resolve_lcu_select_implementation(
             _signed_options(2),
-            he_backend="trotter",
-            candidate_costs=product_formula_select_resource_law(plan),
             select_plan=plan,
         )
-        assert resolution["resolved_lcu_select_implementation"] == "multiplexor"
+        assert resolution == "multiplexor"
         realized = Operator(
             build_multiplexed_product_formula_select(plan, num_system_qubits=1)
         ).data
@@ -391,14 +391,9 @@ def test_actual_arbitrary_padding_pruning_and_unequal_step_fallbacks() -> None:
     budgeted = _signed_options(3).revise(hamiltonian_evolution_backend='trotter_error_budgeted')
     resolution = resolve_lcu_select_implementation(
         budgeted,
-        he_backend="trotter_error_budgeted",
     )
-    assert resolution["resolved_lcu_select_implementation"] == "multiplexor"
-    assert resolution["lcu_select_structure_rejection_reasons"] == [
-        "fixed-step product formula is required; trotter_error_budgeted is ineligible"
-    ]
+    assert resolution == "multiplexor"
     with pytest.raises(ValueError, match="trotter_error_budgeted is ineligible"):
         resolve_lcu_select_implementation(
             budgeted.revise(lcu_select_implementation='structured'),
-            he_backend="trotter_error_budgeted",
         )

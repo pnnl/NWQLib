@@ -115,7 +115,7 @@ def print_lchs(rows, measured):
     print("LCHS heat flow, budget at every q (shown for q = %d)" % row["q"])
     print("  kernel", coefficients.resolved_lchs_kernel.implementation,
           coefficients.resolved_lchs_kernel.parameters)
-    print("  cutoff K", f"{rule.effective_range_k:.6g}")
+    print("  cutoff K", f"{rule.range_k:.6g}")
     print("  Gauss rule", 2 * rule.interval_count_each_side, "panels x", rule.node_count, "points")
     print("  branches / address slots", row["branches"], "/", row["slots"])
     print("  coefficient 1-norm", f"{coefficients.coefficient_l1_norm:.6g}")

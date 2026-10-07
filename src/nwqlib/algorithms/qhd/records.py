@@ -88,10 +88,8 @@ class SupportValues(Record):
 
     Store the finite float64 entries of one additive support group in C
     order, with the first support variable most significant. The array and
-    its extrema are immutable selected data. Grid consumers read entries by
-    index. The cached minimum, maximum and maximum magnitude are exact
-    selections from the same array. Absolute-sum bounds, when cached,
-    identify their summation rule separately.
+    its extrema are immutable selected data. The cached minimum, maximum and
+    maximum magnitude are exact selections from the same array.
 
     Attributes:
         support: Sorted variable indices of one additive objective group.
@@ -364,10 +362,9 @@ class QHDReconstruction(Record):
         initial_amplitudes: Normalized nonnegative amplitude vector of the
             Method's initial state for each variable, K entries each, from
             the one evaluation at planning (``initial_state.evaluate``).
-            Store the initial amplitudes as one immutable float64 vector per
-            variable, preserving the selected entries and axis order. Charge
-            each distinct data buffer and its array and container headers
-            once (``method._initial_state_bytes``). The
+            Each vector is immutable float64, in the selected entries and axis
+            order. ``method._initial_state_bytes`` counts each distinct data
+            buffer and its array and container headers once. The
             native builder prepares these vectors, and the classical kernel
             forms the tensor product of them for a general product state. For
             the uniform state and the kinetic ground state on the periodic
@@ -570,7 +567,9 @@ class QHDAnalysis(Result):
     [`solve`][nwqlib.scientist.solve] returns it for a `QHD` method, and `load_result`
     reopens a saved one. The answer is `candidate`, the valid grid point with positive
     observed weight that has the least evaluated objective, and `objective`, the
-    objective there from the stored support tables, in the Problem's objective unit.
+    objective there from the stored support tables (the objective's monomials grouped
+    by the variables they contain, each group tabulated on the grid, plus a constant),
+    in the Problem's objective unit.
     `most_probable_coordinates` is the grid point where the evolution concentrated
     probability, which the augmented-Lagrangian and refinement layers read by default.
     The two points can differ. Both are None when no valid outcome was observed, and
@@ -611,7 +610,7 @@ class QHDAnalysis(Result):
             identify a unique mode.
         most_probable_tie_window: Derived bound on the error of a computed difference of
             two probabilities on this readout path, 0 for counts, or None when no bound
-            was derived. The classical `split_step` kernel derives it from the state
+            was derived. Classical `split_step` evolution derives it from the state
             budget it observed on its trajectory, at most the Plan's window.
         most_probable_tie_window_unavailable: Why no tie window was derived, for example
             a preparation record outside the roundoff derivation. The selection then
@@ -640,21 +639,22 @@ class QHDAnalysis(Result):
             `FrozenArray` whose `.array` is the read-only float64 array of shape (d, K)
             in variable order and grid order. Each row sums to `valid_mass`. Analysis
             accumulates it from the observed points, and for classical execution reads
-            it from the marginals that the kernel returns.
+            it from the marginals that classical evolution returns.
         valid_mass: Probability of outcomes that encode a grid point, one excitation per
             register for one-hot and every outcome for binary. The same as
             `valid_probability`.
         invalid_mass: Probability of all other register outcomes, zero for binary.
         observed_mass: Total observed probability.
         valid_count: For counts, the number of returned outcomes that encode a grid
-            point, summed as integers over all chunks. None for exact readout. With
+            point, summed as integers over all returned count data. None for exact
+            readout. With
             positive `returned_shots`, `valid_mass` is `valid_count/returned_shots`
             rounded once.
-        returned_shots: For counts, the shots that the chunks returned, summed as
-            integers, which can be fewer than the Plan requested. None for exact
-            readout.
+        returned_shots: For counts, the returned shots, summed as integers, which can be
+            fewer than the Plan requested. None for exact readout.
         missing: Reasons the observation is incomplete or yields no valid candidate.
-        applications: Records of the classical kernel's run, for classical execution.
+        applications: Records of the classical evolution's numerical call, with its
+            arguments and raw values, for classical execution.
         artifact: Saved final state, when `keep_state` requested it.
 
     Mode status:
@@ -676,8 +676,10 @@ class QHDAnalysis(Result):
         the deficit.
 
     Guarantee:
-        Suppose W bounds the pairwise errors of the chosen reference population,
-        `abs((q_i - q_j) - (p_i - p_j)) <= W` for every compared i, j. If exactly one
+        Suppose W bounds the pairwise errors on the points of O defined in the
+        Mode status note, with ``p_i`` the reference probability at point i and
+        ``abs((q_i - q_j) - (p_i - p_j)) <= W`` for every compared i, j in O.
+        If exactly one
         point passes the test, it is m, hence s = m, and `fl(q_m - q_t) > W` for every
         other t. Rounding is monotone and fixes the stored binary64 W, so an exact
         difference at most W would round to at most W, and the rejection implies the
@@ -897,7 +899,7 @@ class QHDAnalysis(Result):
         from a stored state, which carry no scalar for the chunk-receipt
         check. Masses decoded from a saved statevector use the receipt's
         ``saved_state_probability_window``, which includes the host
-        correction of the saved state; direct probability and count chunks
+        correction of the saved state. Direct probability and count chunks
         keep ``probability_window``. An unassessed saved-state correction
         gives no finite upper-mass budget, so the masses are then checked
         for nonnegativity only (``validate_normalized_mass`` with None).
@@ -1155,10 +1157,12 @@ class QHDVerification(Record):
 
     Build it with keyword arguments, for example
     `QHDVerification(comparisons=("grid_minimum",))`, and pass it to
-    `result.verify(checks=...)`, which returns `(receipt, facts)`. `comparisons` is the
-    only required argument. `solve` never runs these checks. Replaying the original
-    classical flavor checks consistency, not independent accuracy, and the receipt names
-    what produced the result and the reference it compares. The guide's
+    `result.verify(checks=...)`, which returns `(receipt, facts)`: a
+    `VerificationReceipt` that records the check, its raw values and the numerical calls
+    it made, and a tuple of `FramedFact` records that cite it. `comparisons` is the only
+    required argument. `solve` never runs these checks. Replaying the original classical
+    evolution checks consistency, not independent accuracy, and the receipt names what
+    produced the result and the reference it compares. The guide's
     [explicit verification](../../algorithms/qhd.md#explicit-verification) section
     describes what each comparison checks and what it does not establish. The default
     tolerances are untuned, and the
@@ -1183,7 +1187,11 @@ class QHDVerification(Record):
             evaluated table. It counts exactly the mathematical minimizers when the
             evaluations are exact and this tolerance is zero.
         max_bytes: Default 10 GB (decimal, `10_000_000_000` bytes). Positive limit on
-            the known array bytes of this check, separate from the QHD Method's limits.
+            the byte allowances charged for this check, separate from the QHD
+            Method's limits. For observed counts or probabilities without a kept
+            state, the `grid_minimum` charge omits histogram construction or
+            loading, decoding and passing-weight storage at every readout width.
+            This limit therefore does not bound the `minimum_success_mass` step.
         max_work: Default `1_000_000_000`. Positive limit on the known work of this
             check, separate from the QHD Method's limits.
 

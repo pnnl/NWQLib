@@ -235,8 +235,12 @@ class SelectedBlock:
 
         A leaf block gets a constructor that receives `(block, arguments,
         method_context)` and returns a Qiskit circuit, after the common checks of
-        `lower_qiskit`. The constructor must implement the record's promised action and work
-        rule, and must not keep the context getter or the Run. A controlled or
+        `lower_qiskit`. `method_context(factory)` returns the context object of
+        the Run, or of a standalone `lower_qiskit` call, which `factory()`
+        creates on first use, and `method_context.max_direct_amplitudes` is the
+        limit that `lower_qiskit` checked direct state preparations against.
+        The constructor must implement the record's promised action and work
+        rule, and must not keep `method_context` or the Run. A controlled or
         adjoint block gets its base instead of a constructor. Loading a
         `SelectedDefinition` from a file never recreates this binding.
 
@@ -480,11 +484,6 @@ def select_signed_pauli(name: str, operator: OperatorInput, *, max_bytes=DEFAULT
 
     `max_bytes` limits the `m*(q+16) + 32P` bytes, with `m = M` terms and
     `P = 2**a >= m`, of the label strings with their 16-byte coefficients and of the selection arrays.
-    The selection arrays stay within `32P` because the coefficients are frozen
-    before the amplitudes are built: coefficients use `8m`, amplitudes `8P`, and
-    at most two float64 temporaries `16m`, giving `24m + 8P <= 32P`. Coefficient
-    freezing peaks at `16m` before amplitudes exist, amplitude freezing at
-    `8m + 16P <= 24P`, and these phases are sequential.
 
     Args:
         name (str): Signature name of the SELECT block in the Program.
@@ -510,9 +509,14 @@ def select_signed_pauli(name: str, operator: OperatorInput, *, max_bytes=DEFAULT
     work = requirements["work"]
     if type(max_bytes) is not int or max_bytes < 0:
         raise ValueError("Pauli selection max_bytes must be a nonnegative integer")
+    # The selection arrays stay within `32P` because the coefficients are frozen
+    # before the amplitudes are built: coefficients use `8m`, amplitudes `8P`, and
+    # at most two float64 temporaries `16m`, giving `24m + 8P <= 32P`. Coefficient
+    # freezing peaks at `16m` before amplitudes exist, amplitude freezing at
+    # `8m + 16P <= 24P`, and these phases are sequential.
     if requirements["payload_bytes"] > max_bytes:
         raise ValueError("signed Pauli coefficient selection exceeds max_bytes")
-    # Frozen before the amplitudes exist; alpha and the amplitudes read it in term order.
+    # Frozen before the amplitudes exist. Alpha and the amplitudes read it in term order.
     coefficients = signed_pauli_coefficients(operator)
     try:
         alpha = fsum(np.abs(coefficients))
@@ -522,7 +526,7 @@ def select_signed_pauli(name: str, operator: OperatorInput, *, max_bytes=DEFAULT
         raise ValueError("zero Pauli operator has no positive-alpha signed encoding")
     amplitudes = np.zeros(padded, dtype=np.float64)
     amplitudes[:m] = np.sqrt(np.abs(coefficients)) / np.sqrt(alpha)
-    # Immutable native tuple; no second input hashing/normalization at lowering.
+    # Read-only array, so lowering hashes and normalizes no input again.
     amplitudes = np.frombuffer(amplitudes.tobytes(), dtype=np.float64)
     semantics = BlockSemantics(
         kind="signed_pauli_select", input=operator.manifest.reference, basis=operator.manifest.basis,
@@ -667,7 +671,7 @@ def select_zero_reflection(name: str, num_qubits: int) -> SelectedBlock:
     )
     operations = ()
     if num_qubits:
-        # The recipe remains O(q); native multi-control synthesis owns its cost.
+        # The recipe stays O(q). Native multi-control synthesis carries its own cost.
         flips = tuple(Primitive(gate="x", qubits=(j,)) for j in range(num_qubits))
         middle = Primitive(gate="z" if num_qubits == 1 else "mc_z", qubits=tuple(range(num_qubits)))
         operations = flips + (middle,) + flips + (Primitive(gate="phase", angle=float(np.pi)),)
@@ -744,8 +748,8 @@ def transform_block(name: str, block: SelectedBlock, *, control=False, adjoint=F
             # at width q+1 and added to the base's own construction work.
             work += (q + 2) * (1 << (q + 1))
         elif record.decomposition is not None:
-            # Each stored primitive gets one controlled logical operation;
-            # controlled CX and S-dagger still need native synthesis laws.
+            # Each stored primitive gets one controlled logical operation.
+            # Controlled CX and S-dagger still need native synthesis laws.
             work += len(record.decomposition)
         elif record.implementation.name == "preparation.native":
             parameters = {binding.parameter: binding.value for binding in record.cost_parameters}
@@ -810,7 +814,7 @@ def transform_block(name: str, block: SelectedBlock, *, control=False, adjoint=F
 def select_pauli_parity(name: str, label: str, *, basis: Basis) -> SelectedBlock:
     """Rotate every active site, then collect its Pauli parity on the last site.
 
-    Labels are Qiskit/MSB-first; local qubit coordinates are LSB-first. The
+    Labels are Qiskit/MSB-first, and local qubit coordinates are LSB-first. The
     caller measures the returned pivot and keeps flags outside these ports.
     """
     q = basis.dimension.bit_length() - 1
@@ -848,13 +852,11 @@ def select_pauli_group_basis(name: str, label: str, *, basis: Basis) -> Selected
     through one whole-register port ``system`` of width q. It has no CX
     parity network: measuring the whole register afterwards gives the joint
     outcome z, from which a caller decodes each member label j as
-    ``(-1)**popcount(z & M_j)`` with M_j the label's support mask. The block
-    applies exactly the same tensor product of H and S†/H primitives on
-    their physical coordinates as per-site rotations would, through one
-    whole-register port. Measuring sites outside the group's support leaves
-    the required marginal distribution unchanged: summing the outcomes on
-    the additional sites gives the original projective measurement
-    probabilities. Its identity is its own ``pauli.group_basis`` Source,
+    ``(-1)**popcount(z & M_j)`` with M_j the label's support mask. Measuring
+    sites outside the group's support leaves the required marginal
+    distribution unchanged: summing the outcomes on the additional sites
+    gives the original projective measurement probabilities. Its identity
+    is its own ``pauli.group_basis`` Source,
     distinct from ``pauli.parity``, whose relation promises a pivot parity
     rather than a local basis change. construction_work counts the
     primitives, x + 2y for x X sites and y Y sites.

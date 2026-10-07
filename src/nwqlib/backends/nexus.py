@@ -62,7 +62,7 @@ class _PreparedNexus:
     bits: tuple
     classical_layout: tuple
     metadata: dict
-    circuit: None = None  # Opaque provider reference; explicit inspection is unavailable.
+    circuit: None = None  # Opaque provider reference. Explicit inspection is unavailable.
 
 
 class NexusBackend(Record):
@@ -77,25 +77,30 @@ class NexusBackend(Record):
 
     Preparation uploads and compiles each circuit as separate remote steps, and
     execution sends one job per batch. The Run bounds the data it stores, not HTTP
-    buffering, billing or SDK memory. qnexus 0.49 has no public per-request
-    timeout, so a refresh avoids waiting in the provider queue but one HTTP
-    request can still block indefinitely. Only offline SDK and converter checks
-    qualify this backend, and live compilation and execution are unqualified. The
-    [Nexus guide](../nexus.md) gives the preparation boundary, costs and the
-    qnexus dependency conflict.
+    buffering, billing or SDK memory. `Run.resume` does not wait in the
+    provider queue, but qnexus 0.49 has no public per-request timeout, so one
+    HTTP request can still block indefinitely. NWQLib has tested this backend only
+    offline, with SDK and converter checks, and has not tested live compilation
+    or execution. The [Nexus guide](../nexus.md) gives the preparation
+    boundary, costs and the qnexus dependency conflict.
 
     Attributes:
+        kind: Fixed `"nexus"`, the backend type.
         project: Required. UUID of an existing Nexus project.
         device: Required. An H2 device name, `H2-<n>`, with suffix `E` or `LE` for
-            the emulators. Helios devices take HUGR or QIR programs, a separate
-            route that this backend does not submit.
+            the emulators. Helios devices take HUGR or QIR programs, which this
+            backend does not submit.
         target_region: Default `"us"`. Execution region, `"us"` or `"sg"`.
         credential_name: Default `None`. Name of a Nexus-linked credential, never
             a secret.
         optimization_level: Default `1`. Nexus compile level, 0 to 3. A level
-            other than 1 is recorded as the exclusion `"optimization_level"` in
-            the preparation record. The H2 target has no derived roundoff
-            constant, so `state_error()` gives no bound at any level.
+            other than 1 adds the
+            [roundoff exclusion](../glossary.md#roundoff-exclusion)
+            `"optimization_level"` to the
+            [preparation record](../glossary.md#preparation-record). The H2
+            target has no derived roundoff constant, so
+            [`PreparedArtifact.state_error()`][nwqlib.execution.PreparedArtifact.state_error]
+            gives no bound at any level.
         max_cost_hqc: Default `None`, no cap. Nonnegative. Cost cap per submitted
             program, in Hardware Quantum Credits.
         max_input_bytes: Required. Positive. Limit in bytes on the JSON encoding
@@ -156,8 +161,8 @@ class NexusBackend(Record):
         if observation.kind != "counts":
             raise ValueError("Nexus H2 CircuitRef acquisition supports counts only")
         # H2's published per-job shot limit (docs/ENGINEERING_CONSTANTS.md,
-        # "Provider and compiler policies"; revisit with a changed provider
-        # contract or target). It applies to each program's pooled request
+        # "Provider and compiler policies"), to be revisited with a changed
+        # provider contract or target. It applies to each program's pooled request
         # N_q = s*m_q, plan shots times the query's recorded multiplicity, and
         # every Experiment must satisfy it before the first preparation or
         # submission. prepare_static calls this method for every Experiment
@@ -231,12 +236,12 @@ class NexusBackend(Record):
         pytket names bits by (register, index) and the decoder requests results
         in that order. The Plan's runtime seed selects the u/cx lowering.
         """
-        if observation.kind == "trajectory":
-            observation.reject_unsupported_schedule(f"Nexus {self.device}")
+        # target_for refuses a readout other than counts, including a trajectory,
+        # and a shot count outside the per-program range before the optional
+        # pytket import, so a refusal does not depend on the nexus extra.
+        self.target_for(observation)
         from qiskit import transpile
         from pytket.extensions.qiskit import qiskit_to_tk
-        # target_for also refuses a shot count outside the per-program range.
-        self.target_for(observation)
         # Public universal-basis lowering supplies the converter's documented
         # UGate/CXGate inputs, including empty/nested selected gate definitions.
         # Bare or overlapping classical bits cannot be named unambiguously in tket.
@@ -439,8 +444,6 @@ class NexusBackend(Record):
 
     def restore_native(self, record, payload=None, *, run):
         """Restore the compiled program reference and bit order from the saved receipt alone."""
-        if record.provider_options_json is None:
-            raise ValueError("Nexus receipt needs the original compiled program reference")
         text = record.provider_options_json
         run.check_data(4 * len(text))
         options = json.loads(text)
@@ -453,8 +456,10 @@ class NexusBackend(Record):
         """Admit at most 300 distinct Nexus items with 1 to 10,000 shots each.
 
         Nexus defines an execute job as a list of program items, each with
-        its own n_shots and max_cost. The 300-program boundary comes from its
-        Jobs in Nexus guide. The H2 shot cap is applied to each item, rather
+        its own n_shots and max_cost. The 300-program limit is the documented
+        Nexus job size
+        (https://docs.quantinuum.com/nexus/user_guide/concepts/jobs.html#job-size).
+        The H2 shot cap is applied to each item, rather
         than being presented as an aggregate limit for a Nexus batch.
         """
 
@@ -540,7 +545,7 @@ class NexusBackend(Record):
         # requested shot of the largest item (docs/ENGINEERING_CONSTANTS.md).
         download_bytes = max(n.shots*(len(n.bits)+8) for n in natives)
         # launch names the job nwqlib:execute:<submission_id>, so the submission
-        # is found by its id; the locator comparison rejects a foreign name.
+        # is found by its id. The locator comparison rejects a foreign name.
         prefix = self._name("execute", "")
         name = job.annotations.name
         submission = (run._state["submissions"].get(name[len(prefix):])
@@ -576,8 +581,8 @@ class NexusBackend(Record):
                 item_status = ref.last_status_detail.status if ref.last_status_detail is not None else status
                 if item_status not in {"COMPLETED", "CANCELLED", "ERROR", "DEPLETED", "TERMINATED"}:
                     continue
-                # The program identity becomes available only after this download;
-                # admit the largest original item until that association is known.
+                # The program identity becomes available only after this download,
+                # so admit the largest original item until that association is known.
                 run.check_data(download_bytes)
 
                 program = ref.get_input()
@@ -636,7 +641,7 @@ class NexusBackend(Record):
             total += int(count)
             if total > native.shots:
                 raise ValueError("Nexus result exceeds requested shot population")
-            # pytket cbits is the explicit low-to-high global bit sequence;
+            # pytket cbits is the explicit low-to-high global bit sequence, and
             # NWQLib count labels render global high-to-low order.
             label = "".join(str(int(bit)) for bit in reversed(outcome))
             ordered[label] = int(count)

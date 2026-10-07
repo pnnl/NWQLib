@@ -1,9 +1,6 @@
 """Linear-combination-of-unitaries subroutines."""
 
-from nwqlib.subroutines.lcu.registry import (
-    LCU_PREPARATION_IMPLEMENTATIONS,
-    lcu_preparation_implementation_metadata,
-)
+from nwqlib.subroutines.lcu.registry import LCU_PREPARATION_IMPLEMENTATIONS
 
 _CORE_EXPORTS = (
     "LCUCircuit",
@@ -14,9 +11,7 @@ _CORE_EXPORTS = (
     "build_lcu_select",
     "prepare_lcu_data",
 )
-__all__ = list(_CORE_EXPORTS) + [
-    "LCU_PREPARATION_IMPLEMENTATIONS", "lcu_preparation_implementation_metadata",
-]
+__all__ = list(_CORE_EXPORTS) + ["LCU_PREPARATION_IMPLEMENTATIONS"]
 
 
 def __getattr__(name):

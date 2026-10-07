@@ -92,9 +92,9 @@ def controlled(gate: Any, num_ctrl_qubits: int, *, ctrl_state: int | str | None 
     matrix is not known and which may hold operations without one, always
     takes the gate-wise route. This function checks no limit itself.
 
-    The ``annotated`` default flips in qiskit 3.0 (the 2.x default is
-    deprecated); ``annotated=False`` preserves the current synthesized
-    controlled-gate behavior on both series.
+    Qiskit 2.x deprecates the default of ``annotated``, and Qiskit 3.0
+    changes it. ``annotated=False`` keeps the synthesized controlled gate on
+    both series.
     """
 
     if isinstance(gate, UnitaryGate):
@@ -270,7 +270,7 @@ def _controlled_unitary(gate: UnitaryGate, num_ctrl_qubits: int, ctrl_state: int
     return result
 
 
-def exact_dense_unitaries(circuit: Any, *, max_work: int | None = None, charge: Any = None,
+def exact_dense_unitaries(circuit: Any, *, charge: Any = None,
                           cache: dict[Any, QuantumCircuit] | None = None) -> Any:
     """Return ``circuit`` with every dense ``UnitaryGate``, at any depth, synthesized exactly.
 
@@ -287,8 +287,7 @@ def exact_dense_unitaries(circuit: Any, *, max_work: int | None = None, charge: 
     The work of the syntheses that this call would make,
     ``_dense_synthesis.dense_synthesis_size`` of each width that
     :func:`dense_synthesis_widths` lists, is known before any of them
-    starts. With ``max_work`` set, a sum above it raises ``ValueError``.
-    With ``charge`` set, ``charge(work, operation)`` is called with a
+    starts. With ``charge`` set, ``charge(work, operation)`` is called with a
     positive sum and a description of the syntheses, and may raise.
 
     ``cache`` maps the content of a dense matrix (:func:`dense_matrix_key`)
@@ -302,7 +301,7 @@ def exact_dense_unitaries(circuit: Any, *, max_work: int | None = None, charge: 
     which passes its ``_charge_synthesis`` and, during a preparation of the
     Run, the Run's synthesis cache.
     """
-    if max_work is not None or charge is not None:
+    if charge is not None:
         from nwqlib.subroutines._dense_synthesis import dense_synthesis_size
 
         widths = (dense_synthesis_widths(circuit) if cache is None
@@ -311,8 +310,6 @@ def exact_dense_unitaries(circuit: Any, *, max_work: int | None = None, charge: 
         work = sum(dense_synthesis_size(width)[0] for width in widths)
         operation = (f"exact synthesis of {len(widths)} dense unitaries on at most "
                      f"{max(widths, default=0)} qubits")
-        if max_work is not None and work > max_work:
-            raise ValueError(f"{operation} needs {work} work units, exceeding max_work={max_work}")
         if charge is not None and work:
             charge(work, operation)
     rewritten = _rewrite_circuit(circuit, {}, cache)
@@ -527,13 +524,13 @@ def _rewrite_circuit(circuit: Any, visited: dict[Any, tuple[Any, Any]],
 
 
 def inverse_realized_gate(gate: Gate, *, native_ucg: bool = True) -> Gate:
-    """Return the adjoint using the selected table or the realized definition.
+    """Return the adjoint of ``gate`` from its UCG table or from its reversed definition.
 
-    On the definition route, UCG synthesis is reused after the source
-    object's definition has been realized, including by copies made from
-    that realized definition, while preserving a complete UCG adjoint
-    table avoids synthesis only when subsequent consumers leave it native.
-    Copies made before definition realization can synthesize independently.
+    Reversing a definition reuses the UCG syntheses that Qiskit has already
+    built for it, also in copies made from that built definition. A copy
+    made before Qiskit built the definition synthesizes on its own. Keeping
+    the adjoint table of a complete UCG avoids synthesis only while later
+    steps leave that UCG as a native instruction.
 
     With ``native_ucg=True``, a complete, unsimplified ``UCGate`` becomes
     the UCG of its adjoint table, or a ``UnitaryGate`` for zero controls.
@@ -549,7 +546,7 @@ def inverse_realized_gate(gate: Gate, *, native_ucg: bool = True) -> Gate:
     Aer 0.17.2 applies each control address's block of the supplied table
     directly (``QubitVector::apply_multiplexer``,
     https://github.com/Qiskit/qiskit-aer/blob/0.17.2/src/simulators/statevector/qubitvector.hpp#L1306-L1342),
-    so the table reaches Aer as its native ``multiplexer``; a backend that
+    so the table reaches Aer as its native ``multiplexer``. A backend that
     decomposes the gate needs a check of its actual realization. This
     costs one two-by-two conjugate transpose and copy per table entry,
     plus the constructor's existing validation, and forms no dense
@@ -573,7 +570,7 @@ def inverse_realized_gate(gate: Gate, *, native_ucg: bool = True) -> Gate:
     no definition falls back to its own inverse.
 
     Args:
-        gate: Selected gate whose table or realized definition is adjointed.
+        gate: Gate whose table or realized definition is adjointed.
         native_ucg: Preserve eligible UCG tables for native execution. Pass
             False when the caller knows the result will be controlled or
             decomposed. This option does not inspect a backend target.
@@ -623,7 +620,9 @@ def inverse_realized_gate(gate: Gate, *, native_ucg: bool = True) -> Gate:
             label=gate.label, num_ctrl_qubits=gate.num_ctrl_qubits,
             definition=inverse_definition, ctrl_state=gate.ctrl_state, base_gate=base_inverse,
         )
-    # Plain Gate signatures are compatible; subclass payloads belong to their selected definition, whose symbolic inputs remain bindable.
+    # A plain gate keeps its parameters. A library subclass's own parameters describe its
+    # original definition, so the inverse exposes the free parameters left in the reversed
+    # definition.
     params = list(gate.params) if gate.base_class is Gate else list(inverse_definition.parameters)
     inverse = Gate(f"{gate.name}_dg", gate.num_qubits, params, label=gate.label)
     inverse.definition = inverse_definition

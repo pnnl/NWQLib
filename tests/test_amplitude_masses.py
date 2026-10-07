@@ -219,7 +219,7 @@ def test_amplitude_masses_use_the_saved_state_window(consumer):
     # A stored chunk refuses a negative mass itself, so the chunk check gets
     # the value through a stand-in with the chunk check's fields.
     negative=(SimpleNamespace(prepared_id=unassessed.content_id,point=None,values=(SimpleNamespace(value=-.25),),
-                              readout=lambda:SimpleNamespace(kind="amplitudes"))
+                              observation=SimpleNamespace(kind="amplitudes"))
               if consumer is _check_chunk else _mass_chunk(unassessed,1.))
     with pytest.raises(ValueError,match="nonnegative"):
         (ObservationChunk.validate_unit_bound(negative,unassessed) if consumer is _check_chunk
@@ -227,7 +227,6 @@ def test_amplitude_masses_use_the_saved_state_window(consumer):
     # A direct probability readout of the same receipt keeps the native window.
     direct=SimpleNamespace(prepared_id=receipt.content_id,point=None,observation=SimpleNamespace(kind="probabilities"),
                            applications=(),values=(SimpleNamespace(mass=inside),),
-                           readout=lambda:SimpleNamespace(kind="probabilities"),
                            histogram=lambda:SimpleNamespace(entries=len(_mass_chunk(receipt,1.).values)))
     check=(lambda chunk:ObservationChunk.validate_unit_bound(chunk,receipt)) if consumer is _check_chunk else (
         lambda chunk:_check_analysis(receipt,chunk,inside))

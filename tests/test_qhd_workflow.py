@@ -771,7 +771,7 @@ def test_classical_mass_window_follows_the_expm_multiply_generators(flavor):
         # The direct one-hot kernel makes no expm_multiply call and records no generator bound.
         generators = []
     r = selected.reconstruction
-    bounds = tuple(owner._generator_norms(flavor, selected.method, grid, r.support_values, r.steps, r.step_weights))
+    bounds = tuple(owner._generator_norms(flavor, selected.method, grid, r.support_values, r.step_weights))
     assert len(bounds) == len(generators)
     for (bound, rows), generator in zip(bounds, generators, strict=True):
         assert shifted_one_norm(generator) <= bound * (1 + 1e-12)
@@ -1138,10 +1138,9 @@ def test_compensated_ledger_sum_meets_its_bound_where_a_plain_sum_does_not(monke
     recorded = []
     original = QHDCompiler._record_global_phase
 
-    def recording(self, *, coefficient, evolution_time, time, source, support=None):
+    def recording(self, *, coefficient, evolution_time, source):
         recorded.append(-evolution_time * coefficient)
-        return original(self, coefficient=coefficient, evolution_time=evolution_time, time=time, source=source,
-                        support=support)
+        return original(self, coefficient=coefficient, evolution_time=evolution_time, source=source)
 
     monkeypatch.setattr(QHDCompiler, "_record_global_phase", recording)
     x = sp.Symbol("x", real=True)
@@ -1193,7 +1192,7 @@ def test_phase_ledger_compensation_recovers_what_a_plain_sum_loses():
         "per_source_coefficient_totals": {}}})
     ledger._compensated_add = lambda name, value: QHDCompiler._compensated_add(ledger, name, value)
     for angle in (1.0, 1e100, 1.0, -1e100):
-        QHDCompiler._record_global_phase(ledger, coefficient=-angle, evolution_time=1.0, time=0.0,
+        QHDCompiler._record_global_phase(ledger, coefficient=-angle, evolution_time=1.0,
                                          source="projector_identity")
     phases = ledger._metadata["dropped_global_phase"]
     assert phases["phase_angle"] == phases["per_source_total_angles"]["projector_identity"] == 2.0
@@ -1849,7 +1848,7 @@ def test_the_stencil_work_law_covers_the_raw_writes_that_the_schrodinger_admissi
     assert writes <= theory.restricted_kinetic_work(dimension, d, raw, matrix.nnz)
     upper = theory.restricted_kinetic_work(dimension, d, 3 * d * dimension, (1 + 2 * d) * dimension)
     assert theory.restricted_kinetic_work(dimension, d, raw, matrix.nnz) <= upper
-    size, _ = owner.restricted_sizes(dimension, d, 0, ((), ()), "schrodinger", iter(()), 0)
+    size, _ = owner.restricted_sizes(dimension, d, 0, (), "schrodinger", iter(()), 0)
     assert size >= upper
 
 
@@ -2194,7 +2193,7 @@ def test_the_dense_summary_fits_its_decoding_and_mean_phase_law(d, k):
     finally:
         tracemalloc.stop()
     assert actual.keys() == expected.keys()
-    admitted = owner.summary_sizes(selected, d, k, int(np.count_nonzero(weights)))[1]
+    admitted = owner.summary_sizes(selected.reconstruction, d, k, int(np.count_nonzero(weights)))[1]
     assert peak <= admitted - weights.nbytes
 
 
@@ -2267,7 +2266,7 @@ def test_classical_host_evolution_keeps_the_global_random_state(flavor):
     selected = plan(problem, method=method, execution="classical")
     r = selected.reconstruction
     norms = owner._generator_norms(flavor, selected.method, owner._grid(selected),
-                                   r.support_values, r.steps, r.step_weights)
+                                   r.support_values, r.step_weights)
     assert max(norm for norm, _ in norms) > 63.36
     np.random.seed(1)
     before = np.random.get_state()

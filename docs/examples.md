@@ -47,7 +47,7 @@ Sections 1 to 5 then ask whether the problem will run, what it costs, how accura
 
 Section 6 shows how to substitute your own input. What NWQLib adds and the method in detail, with the parameters that control accuracy and cost, follow under Go deeper. An appendix holds the full resource estimate, or the circuit counts for the eigenvalue notebook, and a saved result that is reloaded and recomputed.
 
-The notebook names start with the algorithms they cover and end with the mathematical problem, so a reader with an equivalent problem from another field can find them.
+The notebook names start with the algorithms they cover, followed by the mathematical problem, so a reader with an equivalent problem from another field can find them.
 
 | Notebook | Problem | Algorithms and choices shown |
 | --- | --- | --- |

@@ -43,12 +43,10 @@ from nwqlib._validation import integer
 from nwqlib.core.records import FrozenArray
 from nwqlib.algorithms.lchs.time_independent_common import (
     as_square_matrix,
-    is_power_of_two,
     validate_final_time,
 )
 from nwqlib.algorithms.lchs.native import (
     LCHS_TROTTER_EPSILON_FRACTION,
-    resolve_hamiltonian_evolution_backend,
 )
 from nwqlib.algorithms.lchs.solution_error_budget import (
     DEFAULT_PSD_TOLERANCE,
@@ -190,13 +188,14 @@ def _node_eigensystem(k_value: float, l_part: np.ndarray, h_part: np.ndarray):
     time. Numerical eigensystem, phase and multiplication errors are separate
     from the ideal finite-sum approximation.
 
-    The generator is formed by one multiply and one add and must be finite;
-    this replaces the matrix-exponential norm tripwire of scipy.linalg.expm,
+    The generator is formed by one multiply and one add and must be finite.
+    This replaces the matrix-exponential norm tripwire of scipy.linalg.expm,
     which this route does not use. Columns may rotate within a degenerate
     eigenspace without changing the matrix function, and no inverse
     eigenvalue gap enters its operator error (ACL arXiv:2312.03916v2,
     Eq. (70) defines the branch). A Hermitian eigensolver is normwise
-    backward stable (LAPACK Users' Guide, 3rd ed., Sec. 4.7): with
+    backward stable (LAPACK Users' Guide, 3rd ed.,
+    doi:10.1137/1.9780898719604, Sec. 4.7): with
     rho = ||A V - V Lambda||, eta = ||V†V - I|| < 1 and
     r = eta/(1 + sqrt(1 - eta)), beta = rho + r(||A|| + ||Lambda||), and
     phase and formation errors eps_phase and eps_form,
@@ -215,7 +214,7 @@ def _branch_unitary(eigensystem, elapsed: float, dimension: int) -> np.ndarray:
 
     A zero elapsed time returns the identity directly, not the rounded V V†.
     The phase products must be finite. The dense product costs D**3 per
-    branch; forming the phase and scaling the columns add 2*D**2 + 3*D.
+    branch. Forming the phase and scaling the columns add 2*D**2 + 3*D.
     """
     if elapsed == 0:
         return np.eye(dimension, dtype=complex)
@@ -230,14 +229,14 @@ def spectral_lchs_sum(l_part, h_part, nodes, coefficients, applications, counts=
     """Return sum_k c_k V_k [sum_a w_a (exp(-i t_a Lambda_k) * (V_k† v_a))], streamed over nodes.
 
     applications contains (elapsed time, already scaled weight, physical
-    vector); the weight includes psd_recovery_part, not its carried 2**e.
+    vector). The weight includes psd_recovery_part, not its carried 2**e.
     Each node's eigensystem is formed once and released before the next,
     each distinct input vector is projected once per node (a cache of at
     most the initial and source inputs, scoped to this call and keyed by the
     vector's identity), the phases of every application are accumulated in
     the eigenbasis and one final V action is made per node. The
     node-coefficient accumulation order is kept. An exactly zero L shares
-    one H eigensystem across nodes; if L and H are both zero or every
+    one H eigensystem across nodes. If L and H are both zero or every
     elapsed time is zero, every action is the identity and no eigensystem is
     formed. ``counts`` receives eigh_calls and matvecs.
 
@@ -326,7 +325,7 @@ def _spectral_branch_requirements(dimension, *, eigensystems, branches):
     the caller (W_synthesis, W_source). Explicit native branches additionally
     form a dense matrix and pay their selected synthesis cost. Bytes before
     synthesis are the matrix-expression frontier 64*D**2 + 24*D (V, the
-    scaled matrix, conjugated V, result and phase/eigenvalue vectors); the
+    scaled matrix, conjugated V, result and phase/eigenvalue vectors). The
     caller adds live inputs, cached eigensystems, synthesis working bytes and
     completed branch circuits. The queried LAPACK workspace is not charged
     (a declared known-array logical workspace). These units are admission
@@ -361,8 +360,8 @@ class _TrotterPauliDecomposition:
         """Merge the lexically ordered L and H supports once, as (label, h, l, has_l, is_identity) rows.
 
         A two-way merge of the m_L + m_H = s ordered keys makes at most s - 1
-        string comparisons of at most q characters, and the union has u rows;
-        it is charged W_align = (q+4)*s + (q+2)*u logical visits
+        string comparisons of at most q characters, and the union has u rows.
+        It is charged W_align = (q+4)*s + (q+2)*u logical visits
         (_coefficient_preparation_work). No hash or sort is repeated at a node.
         A row absent from H carries h = 0.0 and one absent from L has
         has_l False, so combine_aligned reproduces the dictionary arithmetic.
@@ -421,6 +420,11 @@ class _LCHSTrotterNodeRecord:
     exp(-i*t*(k*L+H)), before the node's LCU coefficient, the physical input
     norm and the PSD recovery are applied.
 
+    A census-backed pf_bound_value uses a coefficient evaluated with
+    scaled binary64 products and sums rounded upward, followed by exact
+    rational rescaling. bound_variant identifies the expression being
+    enclosed.
+
     Attributes:
         pf_bound_value: Commutator bound of CSTWZ doi:10.1103/PhysRevX.11.011020,
             Props. 9-10, for the kept terms at the selected step count, or None
@@ -442,7 +446,7 @@ class _LCHSTrotterNodeRecord:
             plus the pruning term, used only to check the structural bound.
         pauli_term_count: Kept Pauli terms used by an evaluated fixed-step bound.
         pair_commutation_checks: Pauli pair commutation tests newly performed
-            for that bound; the first node evaluated from a shared ordered
+            for that bound. The first node evaluated from a shared ordered
             structure carries the structure's tests and later nodes and
             applications zero.
         nested_commutation_checks: Nested commutation tests newly performed
@@ -450,8 +454,6 @@ class _LCHSTrotterNodeRecord:
         bound_variant: Pauli-triangle expression of pf_bound_value,
             "exact_census" or "relaxed_prefix", or None when no census
             produced it (no kept term, not evaluated or not applicable).
-        coefficient_arithmetic: Numerical evaluation of that coefficient,
-            "outward_float64_scaled", or None under the same conditions.
     """
 
     pf_bound_value: float | None
@@ -465,7 +467,6 @@ class _LCHSTrotterNodeRecord:
     pair_commutation_checks: int = 0
     nested_commutation_checks: int = 0
     bound_variant: str | None = None
-    coefficient_arithmetic: str | None = None
 
     @property
     def bound_method(self) -> str | None:
@@ -517,7 +518,6 @@ class _LCHSTrotterNodeRecord:
             "bound_method": self.bound_method,
             "bound_value_status": self.bound_value_status,
             "bound_variant": self.bound_variant,
-            "coefficient_arithmetic": self.coefficient_arithmetic,
             "dense_bound_value": self.dense_bound_value,
             "dense_bound_method": "dense" if self.dense_bound_value is not None else None,
             "dense_bound_status": (
@@ -569,7 +569,7 @@ def _pauli_decomposition_requirements(dimension):
 
     The law and its derivation are stated at _admit_pauli_decomposition.
     With q = log2(d), N = d**2 and h = q//2, the half-label widths are (h,)
-    for even q and (h, q-h) for odd q; the work is (34*q+28)*N + 2*H and the
+    for even q and (h, q-h) for odd q. The work is (34*q+28)*N + 2*H and the
     peak bytes (104+2*q)*N + T, with T the sum of j*4**j and H the sum of
     (j+1)*4**j over those widths. At the default max_select_work=100_000_000
     the decomposition work is 87,570,944 at d = 512 and 385,888,256 at
@@ -652,8 +652,7 @@ def _combined_trotter_terms(
     *,
     k_value: float,
 ) -> _CombinedTrotterTerms:
-    """Form H + k L, separate its identity phase and record the coefficient mass removed by
-    pruning.
+    """Form H + k L, separate its identity phase and record the coefficient mass removed by pruning.
 
     The identity coefficient c_I depends on k through k*tr(L)/2**q, so
     exp(-i*t*c_I) differs between branches. It is a relative phase inside
@@ -667,7 +666,7 @@ def _combined_trotter_terms(
     the identity is separated, so an identity coefficient it drops belongs
     in the mass. The mass is a finite binary64 upper bound on the sum of
     abs(real(c)) + abs(imag(c)) over precisely the dropped stored
-    coefficients, accumulated upward (error_budget.upper_dropped_mass); that
+    coefficients, accumulated upward (error_budget.upper_dropped_mass). That
     sum bounds the sum of their moduli. It is not the exact sum of complex
     magnitudes.
     """
@@ -681,8 +680,8 @@ def combine_aligned(rows, k, cutoff) -> _CombinedTrotterTerms:
     complex(h + k*l) when L has the label and complex(h) otherwise, the
     original operand order, so an H-only row is not multiplied by an
     artificial zero and an L-only row keeps the addition to 0.0. A value
-    whose modulus is at most the cutoff is dropped; a kept identity is the
-    real branch phase coefficient; other kept values are the traceless
+    whose modulus is at most the cutoff is dropped. A kept identity is the
+    real branch phase coefficient. Other kept values are the traceless
     terms. The kept coefficients and their order equal those of combining
     the dictionaries and sorting the union. The dropped values stream into
     error_budget.upper_dropped_mass, whose result is a certified upper bound
@@ -768,7 +767,7 @@ def _distinct_combined_nodes(
 
     Every application of a node reuses this one combined record (identity
     coefficient, kept terms, pruned labels and upper pruned mass) at its own
-    elapsed time; no pruning charge is stored under the node alone.
+    elapsed time. No pruning charge is stored under the node alone.
     """
     nodes: dict[str, _CombinedTrotterTerms] = {}
     for k_value in k_values:
@@ -783,7 +782,7 @@ def _node_cache_bytes(nodes: int, union_count: int, num_qubits: int) -> int:
 
     u is the union-label count including identity and q the system width.
     The first term is the existing LCHS per-node label/value envelope,
-    counted once per distinct node; the second reserves each node's scalar
+    counted once per distinct node. The second reserves each node's scalar
     bound coefficient and metadata. A stored W_up has at most 5376 magnitude
     bits under the finite coefficient_up reductions, and its two integer
     components take less than 1536 bytes, within that scalar allowance. This
@@ -796,11 +795,17 @@ def _node_cache_bytes(nodes: int, union_count: int, num_qubits: int) -> int:
 class LCHSProductFormulaNodes:
     """The selected product-formula coefficient table, stored once per exact k-node.
 
-    Store the selected coefficient table once per k node and the elapsed
-    time, step count and route per application. Angles are not stored:
+    Per-application elapsed times, step counts and routes are stored outside
+    this table, in host_actions["applications"] for host execution and in
+    the SELECT plan for a quantum Plan. Angles are not stored:
     they do not determine the coefficients at zero elapsed time and do not
     recover the discarded coefficients or their certified mass, so a
     fixed-step Plan keeps this table even when no certificate was requested.
+
+    The complex coefficients keep the imaginary-residue checks of the action
+    and census consumers. The identity coefficient and the upper mass are
+    the saved binary64 values, never recomputed from pruned_indices, angles
+    or rounded moduli.
 
     Attributes:
         num_qubits: System width q of every label.
@@ -819,11 +824,6 @@ class LCHSProductFormulaNodes:
             ``pruned_l1_mass`` (binary64 upper dropped mass d_up) and
             ``pruned_indices`` (read-only int64 diagnostic dropped rows,
             including the identity if it was dropped).
-
-    The complex coefficients keep the imaginary-residue checks of the action
-    and census consumers. The identity coefficient and the upper mass are
-    the saved binary64 values, never recomputed from pruned_indices, angles
-    or rounded moduli.
     """
 
     num_qubits: int
@@ -838,7 +838,7 @@ def _selected_node_table(decomposition, combined_nodes, k_values) -> LCHSProduct
 
     Each node's arrays are formed from the kept and dropped row positions
     that combine_aligned recorded, in their selected order, and made
-    read-only; the labels are the decomposition's aligned union. Every grid
+    read-only. The labels are the decomposition's aligned union. Every grid
     position must name a combined node.
     """
     labels = tuple(row[0] for row in decomposition.aligned_rows)
@@ -959,7 +959,7 @@ def _lchs_census_choice(p, q, nodes, E, N, *, order, max_work, max_bytes, census
     pairs for exact_census at order 2 and zero otherwise, and census_held
     counts the LCHS populations that coexist with the census, never the
     census's own buffers. exact_census is chosen when its complete work and
-    storage fit, otherwise relaxed_prefix at order 2; the result is
+    storage fit, otherwise relaxed_prefix at order 2. The result is
     (variant, block, need_work, census bytes). linear_and_other_work
     carries the preparation and reserved later work charged by the same
     limit, and work_used the prior noncensus work. These units are
@@ -974,7 +974,7 @@ def _lchs_census_choice(p, q, nodes, E, N, *, order, max_work, max_bytes, census
         R_row = 32pw+64p+32w+65536,  C_contract = 56p+64b+48H(b)+65536.
 
     32E+48F already funds the builders' overlapping original chunks and
-    concatenated tables; after the builders finish only 16E+24F of shared
+    concatenated tables. After the builders finish only 16E+24F of shared
     table data remains. Boolean selection of rows from a two-dimensional
     array also creates an intp index array, 8E' or 8F' bytes on the checked
     64-bit NumPy stack, in addition to the selected output. A pair-mask
@@ -997,7 +997,7 @@ def _lchs_census_choice(p, q, nodes, E, N, *, order, max_work, max_bytes, census
     Nodes are sequential, so the maximum over nodes applies, never their
     sum. The choice has only E and the cap F_cap = N before the triple
     census, so it adds 9*max(E, F_cap) to census_held at every candidate,
-    refusal candidates included; for E = F = 0 it adds zero. Position
+    refusal candidates included. For E = F = 0 it adds zero. Position
     construction, the kept mask and the magnitude arrays fit the existing
     80p input and 56p contraction allowances, and the remap's iterator
     overhead belongs to H0.
@@ -1018,7 +1018,7 @@ def _lchs_census_choice(p, q, nodes, E, N, *, order, max_work, max_bytes, census
     and 4,246,451, 22,177,139 and 178,333,379 when the first node omits the
     first label and the second node the last (CPython 3.12.14, NumPy
     2.5.2). This qualifies the selected implementation on the checked
-    CPython/NumPy stack with the shared H0 convention; it is not a
+    CPython/NumPy stack with the shared H0 convention. It is not a
     process-RSS bound or a qualification of another NumPy implementation.
 
     A refusal names the limit that governs it as ``limit_owner(work_field=...)``
@@ -1127,7 +1127,7 @@ def _node_bound_coefficients(
     census at the same block.
 
     Admission (_lchs_census_choice) happens before any packing: the
-    complete conservative candidates use E = P and N = J; if neither fits,
+    complete conservative candidates use E = P and N = J. If neither fits,
     the pair-only stage is admitted with the order-one pair law and refused
     before packing if even that fails. After the pairs exist, the actual E
     and N = nested_test_count select exact_census or relaxed_prefix before
@@ -1166,7 +1166,7 @@ def _node_bound_coefficients(
     max_structural_work=...) for fixed-step refinement). field_work_offset
     is the work of that field charged before ``max_work`` was handed here.
 
-    Work: p*q label packing plus G + K_n*V, returned as ledger["work"]; the
+    Work: p*q label packing plus G + K_n*V, returned as ledger["work"]. The
     caller adds its own preparation and application work. The first listed
     node's evaluation carries the structure's pair and nested tests, the
     others zero. These units are admission proxies, not timings or
@@ -1263,7 +1263,6 @@ def _node_bound_coefficients(
             pair_commutation_checks=pair_checks if first else 0,
             nested_commutation_checks=nested_checks if first else 0,
             bound_variant=variant,
-            coefficient_arithmetic=eb.COEFFICIENT_ARITHMETIC,
         )
         first = False
         del node_pairs, node_triples
@@ -1291,7 +1290,7 @@ def _selection_with_remaining_allowance(evaluation, *, time, remaining, order):
 
     At R = 0 only an exactly zero formula numerator (W_up = 0 or t = 0) is
     accepted, with the existing one-step convention for a zero theorem term
-    of a nonempty generator; otherwise PruningBudgetExhausted is raised. A
+    of a nonempty generator. Otherwise PruningBudgetExhausted is raised. A
     positive R uses the exact step inversion of _selection_from_evaluation.
     No commutator scan runs here.
     """
@@ -1310,7 +1309,6 @@ def _selection_with_remaining_allowance(evaluation, *, time, remaining, order):
             pair_commutation_checks=evaluation.pair_commutation_checks,
             nested_commutation_checks=evaluation.nested_commutation_checks,
             bound_variant=evaluation.bound_variant,
-            coefficient_arithmetic=evaluation.coefficient_arithmetic,
         )
     return eb._selection_from_evaluation(evaluation, time=time, error_budget=remaining, order=order)
 
@@ -1332,12 +1330,12 @@ def _budgeted_trotter_node_record(
     and ||X - Y|| <= d_up because every Pauli string has unit norm. The
     published pruning bound is P = up(|t|*d_up)
     (error_budget.upper_pruning_error). If P exceeds the allowance epsilon
-    the node is refused; otherwise R = down(epsilon - P)
+    the node is refused. Otherwise R = down(epsilon - P)
     (error_budget._remaining_budget_after_pruning), the node's cached W_up
     selects the smallest step count whose bound E_r = W_up*|t|**(o+1)/r**o
     is at most R, E = up(E_r) <= R, and the published total
     T = up(P + E) (error_budget.upper_combined_error) satisfies
-    |t|*d + E_r <= P + E <= T <= epsilon. The order argument, the Method's
+    ``|t|*d_up + E_r <= P + E <= T <= epsilon``. The order argument, the Method's
     trotter_order, selects the Lie-1 bound (CSTWZ
     doi:10.1103/PhysRevX.11.011020, Prop. 9, Eq. (120)) or the Suzuki-2
     bound (Prop. 10, Eq. (121)).
@@ -1345,7 +1343,7 @@ def _budgeted_trotter_node_record(
     Args:
         combined: The node's shared combined terms (_distinct_combined_nodes).
         evaluation: The node's admitted W_up (_node_bound_coefficients), with
-            zero checks on reuse (_first_use); None when no term is kept.
+            zero checks on reuse (_first_use). None when no term is kept.
         final_time: This application's elapsed time.
         error_budget: The per-node synthesis allowance epsilon.
         order: Product-formula order.
@@ -1399,7 +1397,6 @@ def _budgeted_trotter_node_record(
         selection=selection,
         bound_value_status=selection.bound_value_status,
         bound_variant=selection.bound_variant,
-        coefficient_arithmetic=selection.coefficient_arithmetic,
     )
 
 
@@ -1427,7 +1424,7 @@ def _fixed_trotter_certificate_records(
     k-node of the stored node table (LCHSProductFormulaNodes) is bounded
     once (_node_bound_coefficients) and each application evaluates it at its
     own (elapsed_time, step_count). Pauli commutator triangle sums bound the
-    spectral relation; optional dense evaluation checks those sums, not a
+    spectral relation. Optional dense evaluation checks those sums, not a
     new selected circuit, and its dense coefficient is also formed once per
     node.
 
@@ -1438,18 +1435,18 @@ def _fixed_trotter_certificate_records(
     costs two visits per node, W_read = sum_k (p_k + 2)
     (stored_node_read_work). There is no alignment, combination, pruning or
     upper-mass computation in a read. The table remains in the consuming
-    phase's held payload (_stored_node_table_bytes); nothing is copied.
+    phase's held payload (_stored_node_table_bytes). Nothing is copied.
 
     Each record publishes P = up(|t|*d_up), the formula bound
     E = up(W_up*|t|**(p+1)/r**p) and T = up(P + E)
-    (error_budget.upper_pruning_error, upper_combined_error); the saved
+    (error_budget.upper_pruning_error, upper_combined_error). The saved
     steps are kept, so T may exceed a requested allowance.
 
     Structural work, with p_k a node's kept count, K distinct nodes and M
     applications: W_read + p*q + G + sum_nodes(16*p_k*(q+1) + V_k)
     + 16*M*K. The 16*p_k*(q+1) term is the consumer's conservative
     preparation allowance for the census magnitudes and labels, once per
-    node; it is not a decomposition or a second stored-row acquisition.
+    node. It is not a decomposition or a second stored-row acquisition.
     Bytes: the held payload and the stored table, plus the census structure
     (_lchs_census_choice). No decomposition is charged here. These units
     are admission proxies, not timings or equal-cost CPU operations. All
@@ -1605,7 +1602,6 @@ def _fixed_trotter_certificate_records(
                     pair_commutation_checks=evaluation.pair_commutation_checks,
                     nested_commutation_checks=evaluation.nested_commutation_checks,
                     bound_variant=evaluation.bound_variant,
-                    coefficient_arithmetic=evaluation.coefficient_arithmetic,
                 )
             )
         results.append(records)
@@ -1613,7 +1609,7 @@ def _fixed_trotter_certificate_records(
 
 
 def _lchs_trotter_error_budget_per_node(method: LCHS) -> float:
-    """Return the per-node synthesis allowance, 0.1 times approximation_tolerance.
+    """Return the per-node synthesis allowance, ``LCHS_TROTTER_EPSILON_FRACTION * method.approximation_tolerance``.
 
     It bounds one node evolution in operator norm. The weighted sum over
     nodes and the physical scaling are applied later, so it is not a bound
@@ -1681,7 +1677,6 @@ def _trotter_budget_quadrature_terms(
             selection=selection,
             bound_value_status=selection.bound_value_status,
             bound_variant=selection.bound_variant,
-            coefficient_arithmetic=selection.coefficient_arithmetic,
         )
         for selection in selections
     ]
@@ -1743,7 +1738,7 @@ def _trotter_budget_quadrature_terms(
         },
         "trotter_node_records": [record.to_dict() for record in records],
     }
-    if resolve_hamiltonian_evolution_backend(method) == "trotter_error_budgeted":
+    if method.hamiltonian_evolution_backend == "trotter_error_budgeted":
         terms["trotter_error_budget_per_node"] = _lchs_trotter_error_budget_per_node(method)
     return terms
 
@@ -1823,8 +1818,8 @@ def _prepare_decomposition(
     if target_dimension > dimension:
         # A_pad=A⊕0 implies L_pad=L⊕0 and H_pad=H⊕0 (ACL arXiv:2312.03916v2,
         # Eq. (4)).
-        # Add the known zero eigenvalue to the original endpoints; no second
-        # eigensolve of the padded matrix. The PSD shift then acts on every
+        # Add the known zero eigenvalue to the original endpoints. No second
+        # eigensolve of the padded matrix runs. The PSD shift then acts on every
         # encoded coordinate, including the dummy block.
         min_l_eigenvalue = min(min_l_eigenvalue, 0.0)
         max_l_eigenvalue = max(max_l_eigenvalue, 0.0)
@@ -1890,12 +1885,13 @@ class LCHSQuadratureData:
         l_part: N-by-N Hermitian L after the selected PSD conversion and any recorded
             dimension padding, used in the node generator k*L+H.
         h_part: Matching Hermitian H used in exp(-i*T*(k*L+H)).
-        conversion: Decomposition, dimension and PSD-shift metadata; the original
+        conversion: Decomposition, dimension and PSD-shift metadata. The original
             physical propagator requires exp(shift*T) compensation when shift is positive.
         h1: Actual Gauss panel width in k, or None for a non-Gauss/unitary rule.
-        range_k: Selected finite cutoff scale recorded by the provider.
-        effective_range_k: Realized cutoff used by the provider's component bounds;
-            it need not equal the largest interior Gauss node magnitude.
+        range_k: Selected cutoff K used by the realized rule and its available
+            component bounds, or the maximum node magnitude for a signed-binary
+            grid (zero for the exact unitary reduction). In composite Gauss, K
+            specifies the panel interval [-K, K]. The Gauss nodes are interior.
         interval_count_each_side: Gauss panels per half-axis, symmetric-uniform integer
             half-range J, or zero for signed/unitary rules.
         node_count: Gauss points per panel Q, or total points for non-Gauss rules.
@@ -1904,13 +1900,14 @@ class LCHSQuadratureData:
         coefficients: Complex array of shape (M,) before physical PSD-shift compensation.
         coefficient_l1_norm: Sum of these uncompensated coefficient magnitudes.
         l_norm: Numerical spectral-norm estimate of the prepared L used to select the
-            grid; no additional eigensolve is implied by reading it.
+            grid. No additional eigensolve is implied by reading it.
         lambda_min_before_psd_conversion: Computed smallest Hermitian-L eigenvalue before
-            the selected shift, retaining the original dissipativity information.
+            the selected shift, so it carries the original dissipativity information.
         numerical_psd_premise_satisfied: Outcome of numerical PSD admission for the
             prepared matrix under its scale-aware tolerance, not a formal PSD certificate.
-        coefficient_plan: Same provider configuration, node/weight, coefficient and
-            scoped-bound owner from which these numerical arrays were obtained.
+        coefficient_plan: The LCHSCoefficientPlan from which these arrays were
+            taken, with its provider configuration, nodes, weights, coefficients
+            and component bounds.
     """
 
     l_part: np.ndarray
@@ -1918,7 +1915,6 @@ class LCHSQuadratureData:
     conversion: Mapping[str, Any]
     h1: float | None
     range_k: float
-    effective_range_k: float
     interval_count_each_side: int
     node_count: int
     total_node_count: int
@@ -1963,7 +1959,6 @@ def _quadrature_data_from_plan(
         conversion=prepared.conversion,
         h1=quadrature_plan.h1,
         range_k=quadrature_plan.range_k,
-        effective_range_k=quadrature_plan.effective_range_k,
         interval_count_each_side=quadrature_plan.interval_count_each_side,
         node_count=quadrature_plan.node_count,
         total_node_count=quadrature_plan.physical_node_count,
@@ -2004,7 +1999,7 @@ def generate_lchs_quadrature(
     # at most 48 d**2 bytes, sequential padding peaks at 48 d**2 + 16 D**2
     # and then 32 d**2 + 32 D**2, and the eigenvalues-only solve on the
     # original dimension adds its d-square working copy, so four complex
-    # D-square arrays bound the known arrays; 128*D covers the O(D) diagonal
+    # D-square arrays bound the known arrays. 128*D covers the O(D) diagonal
     # and spectral vectors. The queried eigensolver workspace Q_N(d) is not
     # charged (a declared known-array workspace, not a complete cap).
     _check_bytes(64*target_dimension**2 + 128*target_dimension, max_bytes, "LCHS Cartesian/PSD arrays")
@@ -2062,7 +2057,6 @@ def lchs_quadrature_summary(
             coefficient_plan.resolved_k_quadrature.parameters.get("truncation_multiplier")
         ),
         "K": float(quadrature_data.range_k),
-        "effective_K": quadrature_data.effective_range_k,
         "h1": quadrature_data.h1,
         "Q": int(quadrature_data.node_count),
         "M": quadrature_data.total_node_count,
@@ -2091,8 +2085,8 @@ class LCHSProductFormulaSelectData:
             including any selected PSD-shift compensation.
         plan: Actual compact product-formula occurrence tables, branch mapping and
             phases consumed by SELECT construction and its resource laws.
-        quadrature: Shared provider, conversion and per-node synthesis metadata;
-            reading these records does not construct the SELECT circuit.
+        quadrature: Shared provider, conversion and per-node synthesis metadata.
+            Reading these records does not construct the SELECT circuit.
         numerical_psd_premise_satisfied: Outcome of the shared prepared-L numerical
             PSD admission rule under its configured tolerance.
         nodes: Stored selected coefficient table once per k-node
@@ -2341,7 +2335,7 @@ def _build_product_formula_select_plan(
         product_formula_occurrence_template,
     )
 
-    he_backend = resolve_hamiltonian_evolution_backend(method)
+    he_backend = method.hamiltonian_evolution_backend
     k_table = np.asarray(k_values, dtype=float).reshape(-1)
     time_table = np.asarray(elapsed_times, dtype=float).reshape(-1)
     coefficient_table = np.asarray(coefficients, dtype=complex).reshape(-1)
@@ -2489,7 +2483,7 @@ def _build_product_formula_select_plan(
                 pruned_l1_mass=combined_nodes[key].pruned_l1_mass,
                 combined_bound_value=None,
                 # Fixed-step plans keep their common repetition schedule even
-                # when one branch generator is zero; that branch's angles are zero.
+                # when one branch generator is zero. That branch's angles are zero.
                 step_count=int(method.trotter_steps),
                 selection=None,
             )
@@ -2503,11 +2497,11 @@ def _build_product_formula_select_plan(
     node_coefficients = {key: dict(combined.traceless_terms) for key, combined in combined_nodes.items()}
     term_coefficients = [{} if key is None else node_coefficients[key] for key in node_keys]
     table_entries = len(occurrence_template)*len(block_repetitions)*padded_node_count
-    # Selection stores W*B*L angles (W template occurrences, B blocks, L
-    # slots) in one float64 array, 8 bytes per stored angle. Emitting the W*R
+    # Selection stores W*B*S angles (W template occurrences, B blocks, S
+    # padded slots) in one float64 array, 8 bytes per stored angle. Emitting the W*R
     # occurrences of all R repetitions happens later, at lowering. The table
     # is frozen by ownership transfer, so construction and storage both hold
-    # 8 bytes per angle; affine row checking adds three S-entry float64 rows.
+    # 8 bytes per angle. Affine row checking adds three S-entry float64 rows.
     angle_peak_bytes = 8 * table_entries
     if (
         table_entries
@@ -2563,7 +2557,6 @@ def _build_product_formula_select_plan(
         occurrence_angle_tables=angle_tables,
         occurrence_block_repetitions=block_repetitions,
         branch_step_counts=branch_step_counts,
-        max_step_count=max_step_count,
         identity_phases=tuple(
             float(-elapsed_time * combined.identity_coefficient) if node is not None else 0.0
             for combined, elapsed_time, node in zip(
@@ -2613,10 +2606,9 @@ def _build_product_formula_select_plan(
 
 def generate_lchs_product_formula_select_plan(
     *,
-    matrix: np.ndarray | None = None,
+    quadrature: LCHSQuadratureData,
     final_time: float,
     method: LCHS,
-    _quadrature_plan: LCHSQuadratureData | None = None,
     max_steps: int | None = None,
     max_bytes=DEFAULT_MAX_BYTES,
     max_select_work=100_000_000,
@@ -2631,78 +2623,65 @@ def generate_lchs_product_formula_select_plan(
     include exp(shift*T), divided by 2**psd_recovery_exponent(shift, T) when
     that factor exceeds binary64. The recorded synthesis bound weights each
     node's bound by the uncompensated |c_j|, because solution_error_budget
-    applies the PSD recovery once per application. ``matrix`` is needed only
-    when no selected quadrature plan is supplied; otherwise the plan's
-    encoded L and H give the dimension.
+    applies the PSD recovery once per application. The encoded L and H of
+    the selected ``quadrature`` plan give the dimension.
     """
 
-    he_backend = resolve_hamiltonian_evolution_backend(method)
+    he_backend = method.hamiltonian_evolution_backend
     # A valid dense_exact or QSP Method must not receive a product-formula plan.
     if he_backend not in ("trotter", "trotter_error_budgeted"):
         raise ValueError(
             "product-formula SELECT planning serves the product-formula "
             f"backends ('trotter', 'trotter_error_budgeted'); got {he_backend!r}"
         )
-    if matrix is None and _quadrature_plan is None:
-        raise ValueError("product-formula SELECT planning needs a matrix or a selected quadrature plan")
-    dimension = (matrix if _quadrature_plan is None else _quadrature_plan.l_part).shape[0]
-    if not is_power_of_two(dimension):
-        raise ValueError(
-            "product-formula SELECT planning requires a matrix dimension that is a power of "
-            "two (plan() pads a non-power-of-two LinearDynamics automatically)"
-        )
-    quadrature_data = _quadrature_plan or generate_lchs_quadrature(
-        matrix=matrix, final_time=final_time, method=method,
-        max_bytes=method.max_bytes, max_spectral_work=method.max_spectral_work,
-        max_quadrature_work=method.max_quadrature_work,
-    )
+    dimension = quadrature.l_part.shape[0]
     selection = {}
     remaining_work = _admit_pauli_decomposition(dimension, max_bytes=max_bytes,
                                                 max_select_work=max_select_work)
     decomposition = _trotter_pauli_decomposition(
-        quadrature_data.l_part,
-        quadrature_data.h_part,
+        quadrature.l_part,
+        quadrature.h_part,
     )
-    shift = quadrature_data.conversion["psd_shift"]
+    shift = quadrature.conversion["psd_shift"]
     operator_scale = (
         psd_recovery_part(shift, final_time, psd_recovery_exponent(shift, final_time))
         if shift > 0.0
         else 1.0
     )
     coefficients = operator_scale * np.asarray(
-        quadrature_data.coefficients,
+        quadrature.coefficients,
         dtype=complex,
     )
     plan, slot_records, node_table = _build_product_formula_select_plan(
         decomposition=decomposition,
-        k_values=np.asarray(quadrature_data.k_nodes, dtype=float),
-        elapsed_times=np.full(quadrature_data.total_node_count, final_time),
+        k_values=np.asarray(quadrature.k_nodes, dtype=float),
+        elapsed_times=np.full(quadrature.total_node_count, final_time),
         coefficients=coefficients,
-        branch_to_node=tuple(range(quadrature_data.total_node_count)),
+        branch_to_node=tuple(range(quadrature.total_node_count)),
         method=method,
-        address_structure=quadrature_data.coefficient_plan.quadrature.address_structure,
+        address_structure=quadrature.coefficient_plan.quadrature.address_structure,
         max_steps=max_steps,max_bytes=max_bytes,max_select_work=remaining_work,work_ledger=selection,
     )
     if work_ledger is not None:
         work_ledger["work"] = max_select_work-remaining_work+selection["work"]
-    quadrature = {
+    summary = {
         **lchs_quadrature_summary(
-            quadrature_data,
+            quadrature,
             method=method,
             he_backend=he_backend,
             final_time=final_time,
         ),
         **_trotter_budget_quadrature_terms(
             slot_records,
-            coefficients=quadrature_data.coefficients,
+            coefficients=quadrature.coefficients,
             method=method,
         ),
     }
     return LCHSProductFormulaSelectData(
         coefficients=coefficients,
         plan=plan,
-        quadrature=quadrature,
-        numerical_psd_premise_satisfied=(quadrature_data.numerical_psd_premise_satisfied),
+        quadrature=summary,
+        numerical_psd_premise_satisfied=(quadrature.numerical_psd_premise_satisfied),
         nodes=node_table,
     )
 

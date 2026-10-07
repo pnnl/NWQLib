@@ -4,7 +4,9 @@ from math import isfinite
 
 
 def physical_scalar(kind, *, norm_squared, scale, numerator=None, numerator_frame="physical", numerator_unavailable=None, norm_unavailable=None):
-    """Return a physical scalar and a precise unavailable reason when undefined.
+    """Return ``(value, reason)`` for ``kind`` ``"norm_squared"``, ``"quadratic_form"`` or ``"normalized_expectation"``.
+
+    Exactly one of the two is None.
 
     norm_squared is u†u, without postselection or quantum success probability.
     numerator is u†Ou in the same physical frame. The method supplies both
@@ -73,6 +75,11 @@ def physical_vector_statistics(solution, *, observable=None, numerator_frame="ph
     quotient falls below the smallest normal binary64 value 2**-1022, so
     entries smaller than the norm by more than about that factor can lose
     precision. Scaling the observable never silently removes stored entries.
+
+    Returns ``(scale, direction, statistics)``: the PhysicalScale of the
+    norm, combined with ``recovery`` when given, the unit direction or None
+    when no direction was computed, and the ``norm_squared`` and optional
+    ``numerator`` ScalarValues.
     """
     from math import frexp
     import numpy as np

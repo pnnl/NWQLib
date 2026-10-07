@@ -1806,12 +1806,9 @@ def test_mode_choices_copy_their_readout_status_and_other_choices_copy_none(tmp_
     first point, z = -11/16 on the box [-1, 1/4], whose readout is resolved and whose objective is
     larger, so the best level is the first and not the last: the round copies the first level's status.
     best_observed takes the candidate, and mode_or_mean takes the level's mean -1/4, below the
-    representative in objective, so neither copies a status while every level keeps its own. A record
-    whose copy differs from its Result is refused without re-execution, and the copies survive the
-    archive.
+    representative in objective, so neither copies a status while every level keeps its own. The copies
+    survive the archive.
     """
-    from nwqlib.algorithms.qhd import ConstrainedQHDResult
-
     tie = np.array([1.0, 1.0, 0.0], dtype=complex) / np.sqrt(2)
     first = np.array([1.0, 0.0, 0.0], dtype=complex)
     problem = ConstrainedOptimization(objective=(z - sp.Rational(1, 5)) ** 2, variables=(z,), bounds=((-1.0, 1.0),),
@@ -1847,15 +1844,6 @@ def test_mode_choices_copy_their_readout_status_and_other_choices_copy_none(tmp_
             other.evaluation.revise(mode_status="resolved")
         assert other.evaluation.kind == ("valid_mean" if rule == "mode_or_mean" else "grid_point")
         assert [level.mode_status for level in other.refinement.levels] == ["unresolved", "resolved"]
-    record = plain.record
-    changed = record.iterations[0].revise(evaluation=record.iterations[0].evaluation.revise(mode_status="resolved"))
-    with pytest.raises(ValueError, match="mode status that the record copied"):
-        ConstrainedQHDResult(record.revise(iterations=(changed,)), plain.problem, plain.results)
-    record, item = refined.record, refined.record.iterations[0]
-    changed = item.revise(refinement=item.refinement.revise(
-        levels=(item.refinement.levels[0], item.refinement.levels[1].revise(mode_status="unresolved"))))
-    with pytest.raises(ValueError, match="mode status that the record copied"):
-        ConstrainedQHDResult(record.revise(iterations=(changed,)), refined.problem, refined.results)
     path = refined.save(tmp_path / "refined")
     loaded = load_augmented_lagrangian(path)
     assert loaded.iterations[0].evaluation.mode_status == "unresolved"

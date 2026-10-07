@@ -292,7 +292,7 @@ def _estimate_qdk(request):
     entries = []
     for row in table:
         # Keep actual instruction provenance without expanding its graph into
-        # a repeated tree. Each node retains its original child indices.
+        # a repeated tree. Each node keeps its original child indices.
         provenance = dict(
             roots=row.source.roots,
             nodes=[

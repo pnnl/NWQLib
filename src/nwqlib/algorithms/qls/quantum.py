@@ -182,7 +182,7 @@ class Query:
 
     base: BaseEncoding | SelectedBlock
     control_count: int
-    route: str = "gatewise"
+    route: str
 
 
 def _query_circuit(block, arguments, method_context):
@@ -362,7 +362,7 @@ def _leaf(
     return SelectedBlock.bind(record, payload=payload, constructor=constructor)
 
 
-def _query_leaf(base, *, kind, controls, basis, reference, route="gatewise"):
+def _query_leaf(base, *, kind, controls, basis, route="gatewise"):
     """Select a parameterized base query and reuse only applicable per-query resource evidence.
 
     Only an uncontrolled query of the encoding of ``A/alpha`` carries a CX
@@ -448,7 +448,7 @@ def _observable_terms(problem, output, *, max_bytes):
     evaluates these terms on the coordinate qubits. A Hermitian
     observable has real Pauli coefficients, so a nonzero imaginary part is
     rejected. Planning uses these rows for the exact reduction's bound
-    terms and the sampled groups only; the reconstruction keeps the
+    terms and the sampled groups only. The reconstruction keeps the
     reference or table of ``_observable_fields``.
     """
     if not isinstance(output, (QuadraticForm, NormalizedExpectation)):
@@ -477,8 +477,8 @@ def _observable_terms(problem, output, *, max_bytes):
 def _observable_fields(output, terms):
     """Return the reconstruction fields that let analysis rebuild the observable rows.
 
-    A finite Pauli observable is kept by reference (``observable_input``);
-    its packed table stays with the observable input. A dense observable's
+    A finite Pauli observable is kept by reference (``observable_input``).
+    Its packed table stays with the observable input. A dense observable's
     ``pauli_coefficients`` table has distinct labels: its identity
     coefficient is stored as ``observable_identity``, and its non-identity
     labels with nonzero coefficient, in table order, as
@@ -500,8 +500,7 @@ def _observable_fields(output, terms):
 
 
 def _canonical_terms(terms, width):
-    """Return observable rows as the reduction binds them: the summed identity first, then the
-    nonzero non-identity rows in table order.
+    """Return observable rows as the reduction binds them: the summed identity first, then the nonzero non-identity rows in table order.
 
     Planning and the stored-observable rebuild both pass through this one
     form, so the reduction parameters of a Plan and of its reload agree.
@@ -542,7 +541,7 @@ def _readout(method, output, terms, rec, *, shots):
     Returns ``(settings, groups, comparisons)``. A vector output reads its
     amplitudes and Samples one counts setting. With ``shots=None`` a scalar
     output has one exact ``projected_moments`` reduction. With shots,
-    NormSquared measures its physical mass; a Pauli observable measures one
+    NormSquared measures its physical mass. A Pauli observable measures one
     counts setting per first-fit qubit-wise commuting group of its nonzero
     non-identity labels, whose label is the group's accumulated basis. A
     padded normalized output adds the unrotated ``physical_mass`` setting
@@ -649,7 +648,7 @@ def _counts_program_bytes(rec):
 
 
 def _program(method, problem, output, shots, rec, base, preparation, terms=None):
-    """Emit the one shared actual composition, including every valued projector.
+    """Build the one QLS Program and return ``(construction, experiments, blocks)``.
 
     The body prepares the input (``b`` for the inverse, ``|e_n>`` and the
     dilation basis state for the shortcuts), applies the real-part QSVT
@@ -682,13 +681,13 @@ def _program(method, problem, output, shots, rec, base, preparation, terms=None)
     acquires its physical-coordinate mass in an unrotated basis. QLS admits
     each QWC candidate tile against ``max_work``, which caps each QLS
     planning phase separately, and separately admits grouping arrays and
-    Program payloads. The shared coherent body is stored once, and
-    ``shots`` counts shots per selected group. Each group setting rotates X
-    coordinates by H and Y coordinates by S† then H, one selected one-site
-    block per coordinate and axis shared by all groups, with no parity
-    network, and measures its support and valued selectors into a compact
-    prefix of one shared classical layout. Samples, physical_mass and the
-    unrotated group supplying a padded prefix mass measure all coordinates.
+    Program payloads. The shared coherent body is stored once. Each group
+    setting rotates X coordinates by H and Y coordinates by S† then H, one
+    selected one-site block per coordinate and axis shared by all groups,
+    with no parity network, and measures its support and valued selectors
+    into a compact prefix of one shared classical layout. Samples,
+    physical_mass and the unrotated group supplying a padded prefix mass
+    measure all coordinates.
     Unmeasured suffix bits stay at their initial zero value.
     """
     from nwqlib.amplitudes import AmplitudeReadout
@@ -852,7 +851,6 @@ def _program(method, problem, output, shots, rec, base, preparation, terms=None)
                 kind=kind,
                 controls=len(controls),
                 basis=basis,
-                reference=reference if kind == "original_A" else preparation.record.semantics.input,
                 route=route if kind == "original_A" else "gatewise",
             )
         values = sum(value << i for i, (_, value) in enumerate(controls))
@@ -966,8 +964,7 @@ def _program(method, problem, output, shots, rec, base, preparation, terms=None)
         return sequence(name, tuple(reversed(parts)) if adjoint else parts)
 
     def g_query(name, *, controls=(), adjoint=False):
-        """Block-encode ``G_t = Q_b' A_t`` (Dalzell arXiv:2406.12086v2, Eq. (11),
-        App. A.4, Fig. 6), or its adjoint.
+        """Block-encode ``G_t = Q_b' A_t`` (Dalzell arXiv:2406.12086v2, Eq. (11), App. A.4, Fig. 6), or its adjoint.
         """
         action = augmented_query(name + "_A_t", controls=controls, adjoint=adjoint)
         projection = complement(name + "_projector", controls=controls)
@@ -1159,8 +1156,7 @@ def _program(method, problem, output, shots, rec, base, preparation, terms=None)
 def plan_quantum(
     method, problem, *, output, shots, rng, reconstruction, encoding, encoded_operator, rhs, svd
 ):
-    """Solve the selected QSP phases and build the matching RHS preparation, query body and
-    readout.
+    """Solve the selected QSP phases and build the matching RHS preparation, query body and readout.
 
     The phases realize ``Re P = polynomial / rescale``. Their residual norming
     bound becomes ``phase_error``, which explicit verification adds to the
@@ -1198,8 +1194,7 @@ def plan_quantum(
     )
     preparation = select_preparation("rhs", rhs, per_bit=True)
     rec = rec.revise(phase_solution=phase.phases, phase_error=phase.residual_sup_bound,
-                     phase_evaluations=phase.evaluations,
-                     preparation_id=preparation.record.content_id)
+                     phase_evaluations=phase.evaluations)
     # 1 KiB per unit of polynomial degree, circuit wire and observable term,
     # plus 32 KiB, as an allowance for the Program records that _program
     # builds below, plus the stored group bases and member labels.
@@ -1225,7 +1220,7 @@ def plan_quantum(
         construction=construction,
         experiments=experiments,
         reconstruction=rec,
-        error_model=_error_model(problem, method, output, "quantum", shots, construction, rec),
+        error_model=_error_model(problem, output, "quantum", shots, construction),
         assumptions=(
             "original spectral estimates and native oracle relations are premises, not a total solution error certificate",
         ),
@@ -1437,7 +1432,7 @@ def _selection(rec, chunk, setting, *, classical_width):
     return bits, counts, success, selected, physical
 
 
-def _counts_statistics(plan, chunks, rows=None):
+def _counts_statistics(plan, chunks, rows):
     """Reduce the counts acquisitions of a sampled Plan into its published statistics.
 
     Returns the ``QLSAnalysis`` fields of the mass acquisition, the group
@@ -1446,7 +1441,7 @@ def _counts_statistics(plan, chunks, rows=None):
     when present, otherwise for padded input the first group whose basis
     has no X or Y, otherwise the first setting. The physical-slice mass is
     not formed from a rotated coordinate outcome of padded input. ``rows``
-    are the canonical observable rows when the caller already holds them.
+    are the canonical observable rows.
 
     One group count table supplies every term parity: the parity of label j
     is ``(-1)**popcount(outcome & support_j)`` after support_j is remapped
@@ -1498,7 +1493,6 @@ def _counts_statistics(plan, chunks, rows=None):
     if not isinstance(output, (QuadraticForm, NormalizedExpectation)):
         return fields
     conditional = isinstance(output, NormalizedExpectation) and not padded
-    rows = _stored_terms(plan.reconstruction, plan.output, max_bytes=plan.method.max_bytes) if rows is None else rows
     identity = fsum(c for label, c in rows if all(axis == "I" for axis in label))
     coefficients = {}
     for label, c in rows:
@@ -1593,7 +1587,7 @@ def _published_frames(plan, scale):
     """Return a quantum result's ``(numerator_frame, physical_scale_unavailable)``.
 
     The numerator of NormalizedExpectation is in the unit frame and that of
-    QuadraticForm in the physical frame; other outputs have none. Counts
+    QuadraticForm in the physical frame. Other outputs have none. Counts
     yield an empirical success mass, not an exact numerical vector norm. A
     shortcut has no physical reconstruction scale in either case. Analysis
     calls this.
@@ -1628,8 +1622,7 @@ def _vector_publication(chunk):
 
 
 def analyze_quantum(plan, data):
-    """Reduce acquired QLS populations into the requested vector, physical scalar or conditional
-    samples.
+    """Reduce acquired QLS populations into the requested vector, physical scalar or conditional samples.
 
     Exact scalar QLS outputs use one acquisition's success mass,
     physical-slice mass and projected observable moment. Their comparison
@@ -1645,14 +1638,15 @@ def analyze_quantum(plan, data):
     dense observable. Projected and full-block Pauli sums coincide for an
     exact zero-extension representation, while rounded coefficients can
     change the cancellation of dummy-coordinate contributions. Recovery and
-    numerical reduction errors follow their separate owners. The saved
+    numerical reduction errors are handled separately and are not part of
+    this statement. The saved
     pairs are recovered by their binary exponents (``pair_ratio``,
-    ``recover_scaled_pair``) without forming Gamma² in binary64; with zero
+    ``recover_scaled_pair``) without forming Gamma² in binary64. With zero
     physical mass a normalized quantity is unavailable, and a physical
     quadratic form or norm is zero.
 
     Sampled Pauli outputs combine the group moments of
-    ``_counts_statistics`` through ``_sampled_outputs``; Samples keep the
+    ``_counts_statistics`` through ``_sampled_outputs``. Samples keep the
     selected original-coordinate indices and counts as arrays. The numerator
     frame and the scale unavailability reason come from
     ``_published_frames``.

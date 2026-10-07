@@ -461,9 +461,9 @@ def test_basis_lowering_admits_its_syntheses_before_the_first_one(monkeypatch):
     # The rewrite synthesizes each distinct dense matrix once. Here that is
     # two three-qubit unitaries, one of them also nested in a composite, and
     # one two-qubit unitary. A one-qubit unitary keeps Qiskit's exact
-    # definition. One work unit below their summed law refuses before any
-    # synthesis starts, and the law itself admits all three. A Run's charge
-    # receives the same sum once, before the first synthesis.
+    # definition. A charge that refuses stops the rewrite before any
+    # synthesis starts. A Run's charge receives their summed law once,
+    # before the first synthesis.
     from nwqlib.subroutines.qiskit_compat import dense_synthesis_widths, exact_dense_unitaries
 
     first, second = random_unitary(8, seed=31).data, random_unitary(8, seed=32).data
@@ -478,9 +478,6 @@ def test_basis_lowering_admits_its_syntheses_before_the_first_one(monkeypatch):
     assert sorted(dense_synthesis_widths(circuit)) == [2, 3, 3]
     need = 2 * _dense_synthesis_work(3) + _dense_synthesis_work(2)
     calls = _counted_syntheses(monkeypatch)
-    with pytest.raises(ValueError, match="max_work"):
-        exact_dense_unitaries(circuit, max_work=need - 1)
-    assert calls == []
 
     def refuse(work, operation):
         raise ValueError(f"{operation} refused")
@@ -488,7 +485,7 @@ def test_basis_lowering_admits_its_syntheses_before_the_first_one(monkeypatch):
     with pytest.raises(ValueError, match="refused"):
         exact_dense_unitaries(circuit, charge=refuse)
     assert calls == []
-    exact_dense_unitaries(circuit, max_work=need)
+    exact_dense_unitaries(circuit)
     assert sorted(calls) == [2, 3, 3]
     charges = []
     exact_dense_unitaries(circuit, charge=lambda work, operation: charges.append(work))

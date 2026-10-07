@@ -942,7 +942,6 @@ def test_wide_exact_readout_obeys_its_work_limit_before_acquisition():
     acquisition. The check uses the planned readout without allocating a state.
     """
     import json
-    from types import SimpleNamespace
     from nwqlib import NormalizedExpectation
     from nwqlib._quantum_readout import projected_requirements
     from nwqlib.operators import ingest_pauli
@@ -959,13 +958,12 @@ def test_wide_exact_readout_obeys_its_work_limit_before_acquisition():
                   execution="quantum", seed=7)
     observation = chosen.experiments[0].observation
     point = chosen.resolve(chosen.experiments[0].name)
-    run = SimpleNamespace(observations=SimpleNamespace(chunks=()))
     work = projected_requirements(json.loads(observation.positions[0].parameters), 20)[1]
     assert 100_000_000 < work < method.max_readout_work
-    assert method.reduction_allowance(chosen, point, observation=observation, width=20, run=run) == 2_000_000_000
+    assert method.reduction_allowance(chosen, point, observation=observation, width=20, run=None) == 2_000_000_000
     narrow = method.revise(max_readout_work=100_000_000)
     with pytest.raises(ValueError, match=r"LCHS\.max_readout_work"):
-        narrow.reduction_allowance(chosen, point, observation=observation, width=20, run=run)
+        narrow.reduction_allowance(chosen, point, observation=observation, width=20, run=None)
 
 
 def test_saved_mass_branches_disagree_on_a_near_unit_complete_norm():

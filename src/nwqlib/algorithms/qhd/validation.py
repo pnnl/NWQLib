@@ -187,11 +187,12 @@ def _kinetic_range_error(error):
 
     The lower-range omission policy covers contributions formed from
     objective data and the initial state, and the phase products of binary
-    kinetic blocks (``binary.PhaseTable.synthesize``). Kinetic coefficients,
-    energies and one-hot kinetic terms are set by the grid spacing h and the
-    kinetic schedule weight a alone, and fall outside the normal binary64
-    range only for extreme boxes, such as a spacing near 1e153, so planning
-    refuses them rather than approximating them.
+    kinetic blocks (``binary.PhaseTable.synthesize``).
+    Kinetic coefficient and energy scales depend on the grid spacing h and,
+    when weighted, the kinetic schedule weight a. One-hot kinetic angles also
+    depend on the layer duration t, and the binary kinetic exponent is dt*a.
+    Extreme spacings, weights or durations can put these quantities outside
+    the admitted binary64 range, so planning refuses them.
     """
     return ValueError(f"{error}. The grid spacing h and the kinetic schedule weight a put this kinetic term, of "
                       "scale a/h**2, outside the range that planning admits. Choose a box and grid whose spacing "

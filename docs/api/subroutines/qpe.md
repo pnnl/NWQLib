@@ -45,11 +45,11 @@ The eigenphase is `theta = 0.25`, and the two phase qubits hold the integer `2**
 
 ## Source map
 
-Code paths are relative to `nwqlib.subroutines.qpe`. The source is Cleve, Ekert, Macchiavello and Mosca, "Quantum algorithms revisited", Proc. R. Soc. Lond. A 454, 339 (1998). Section, figure, equation and page numbers refer to [arXiv:quant-ph/9708016v1](https://arxiv.org/abs/quant-ph/9708016v1). The rows assume the system register holds an eigenvector of U with eigenvalue exp(2*pi*i*theta), the paper's exp(2*pi*i*phi). The builder docstring above states the conventions that differ from the paper.
+Code paths are relative to `nwqlib.subroutines.qpe`. The source is Cleve, Ekert, Macchiavello and Mosca, "Quantum algorithms revisited", Proc. R. Soc. Lond. A 454, 339 (1998). Section, figure, equation and page numbers refer to [arXiv:quant-ph/9708016v1](https://arxiv.org/abs/quant-ph/9708016v1). The rows assume the system register holds an eigenvector of U with eigenvalue `exp(2*pi*i*theta)`, the paper's `exp(2*pi*i*phi)`. The builder docstring above states the conventions that differ from the paper.
 
-| Scientific step | Source | Location | Code |
-| --- | --- | --- | --- |
-| Hadamards and controlled powers U^(2**q) put the phase register in the state of Eq. (5.1) | Cleve et al., arXiv:quant-ph/9708016v1 | Sec. 5, Fig. 6 and Eq. (5.1), p. 10 | `coherent.build_coherent_qpe_circuit` |
-| QFT on the m-qubit phase register and its inverse | Cleve et al., arXiv:quant-ph/9708016v1, and Qiskit's `QFTGate` | Eq. (4.1), p. 8. `QFTGate` includes the output reversal that the network of Fig. 5 leaves out | `coherent.build_coherent_qpe_circuit` |
-| Readout of the basis state j when theta = j/2**m modulo 1, otherwise of an integer nearest to 2**m*theta (modulo 2**m) with probability at least 4/pi**2 | Cleve et al., arXiv:quant-ph/9708016v1 | Eqs. (5.2)–(5.4), p. 11 | `coherent.build_coherent_qpe_circuit` |
-| Little-endian phase integer, with phase qubit q controlling U^(2**q) | Qiskit bit order. The paper puts the most significant bit on its top qubit, which Fig. 6 labels U^(2^j) with j = m-1, and both orders encode the same integer | Sec. 4, p. 8, and Eq. (5.1), p. 10 | `coherent.build_coherent_qpe_circuit` |
+| Scientific step | Source and location | Code |
+| --- | --- | --- |
+| Hadamards and controlled powers `U^(2**q)` put the phase register in the state of Eq. (5.1) | Cleve et al., arXiv:quant-ph/9708016v1, Sec. 5, Fig. 6 and Eq. (5.1), p. 10 | `coherent.build_coherent_qpe_circuit` |
+| QFT on the m-qubit phase register and its inverse | Cleve et al., arXiv:quant-ph/9708016v1, Eq. (4.1), p. 8, and Qiskit's `QFTGate`. `QFTGate` includes the output reversal that the network of Fig. 5 leaves out | `coherent.build_coherent_qpe_circuit` |
+| Readout of the basis state j when `theta = j/2**m` modulo 1, otherwise of an integer nearest to `2**m*theta` (modulo `2**m`) with probability at least `4/pi**2` | Cleve et al., arXiv:quant-ph/9708016v1, Eqs. (5.2)–(5.4), p. 11 | `coherent.build_coherent_qpe_circuit` |
+| Little-endian phase integer, with phase qubit q controlling `U^(2**q)` | Qiskit bit order. The paper puts the most significant bit on its top qubit (Sec. 4, p. 8, and Eq. (5.1), p. 10), which Fig. 6 labels `U^(2^j)` with `j = m-1`, and both orders encode the same integer | `coherent.build_coherent_qpe_circuit` |

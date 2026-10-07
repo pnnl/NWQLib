@@ -6,9 +6,10 @@ doi:10.1137/090752286, with the per-value truncation rule stated in
 ``decompose_state_to_mps``. The truncation estimates of
 ``analyze_mps_state_compression`` rest on the orthogonality step in the
 proof of Theorem 2.2 (p. 2299). The work and byte limits are checked for
-the whole sweep before the first SVD. ``layered_construction_size`` bounds
-the work and bytes of the layered circuit that ``mps_circuit`` builds from
-these cores.
+the whole sweep before the first SVD. The
+[layered MPS construction law](../../ENGINEERING_CONSTANTS.md#layered-mps-construction-law)
+bounds the work and bytes of the layered circuit that ``mps_circuit``
+builds from these cores.
 """
 
 from dataclasses import dataclass
@@ -26,8 +27,8 @@ from nwqlib.operators.access import DEFAULT_INPUT_BYTES, _check_bytes, _check_pr
 from nwqlib.operators.inputs import _array_input, _digest, _freeze_array
 
 # Dense economy SVD is performed before truncation. This logical work ceiling
-# bounds sum(rows*columns*min(rows,columns)); it is not FLOPs, RSS or CPU time.
-# Raise it explicitly only when the selected dense decomposition is intended.
+# bounds sum(rows*columns*min(rows,columns)). It is not FLOPs, RSS or CPU time.
+# Raise it explicitly only for an intended larger dense decomposition.
 # Registered in docs/ENGINEERING_CONSTANTS.md.
 DEFAULT_MAX_SVD_WORK = 100_000_000
 
@@ -57,10 +58,10 @@ class MPSDecomposition:
 
     Attributes:
         cores: Immutable MSB-first TT cores with shape (left rank, physical size, 1, right rank).
-        num_qubits: Number of binary physical sites; zero represents a scalar input.
+        num_qubits: Number of binary physical sites. Zero represents a scalar input.
         original_dimension: Input length, exactly 2**num_qubits.
-        bond_dimensions: Boundary and internal TT ranks; the first and last equal one.
-        max_bond_dim: Requested retained-rank cap, or None for no explicit rank cap.
+        bond_dimensions: Boundary and internal TT ranks. The first and last equal one.
+        max_bond_dim: Requested cap on the kept rank, or None for no explicit rank cap.
         threshold: Individual singular-value truncation threshold, not a total error tolerance.
         discarded_weight: Sum of discarded squared singular values for the normalized TT-SVD input.
         input_id: Content hash of the normalized input that was compressed.
@@ -142,7 +143,7 @@ class MPSDecomposition:
         return _reconstruct_cores(self.cores, max_bytes=max_bytes, max_products=max_products)
 
     def to_dict(self):
-        """Scalar metadata only; no expansion, reference computation or copying cores."""
+        """Return the scalar metadata as a JSON-like record, without expanding the cores, computing a reference or copying the cores."""
         return dict(num_qubits=self.num_qubits, original_dimension=self.original_dimension,
                     bond_dimensions=list(self.bond_dimensions), max_bond_dim=self.max_bond_dim,
                     threshold=self.threshold, discarded_weight=self.discarded_weight,
@@ -167,7 +168,7 @@ class MPSCompressionAnalysis:
         estimated_normalized_fidelity: Estimated normalized fidelity from that relation, or None for an undefined zero tensor.
         reference_id: Content hash of the supplied comparison reference after normalization, or None without one.
         reference_matches_input: Whether that hash matches the compressed input, or None without a reference.
-        reference_norm: Norm of the supplied reference before normalization; None without one.
+        reference_norm: Norm of the supplied reference before normalization, or None without one.
         measured_raw_l2: Explicitly measured raw-tensor distance to the normalized reference, or None if not computed.
         measured_normalized_fidelity: Measured normalized fidelity to the supplied reference, clipped to [0, 1], or None if unavailable.
         raw_measured_fidelity: Computed ``|<t,r>|**2 / (<t,t> <r,r>)`` for the normalized reference t
@@ -236,6 +237,13 @@ def decompose_state_to_mps(vector, *, max_bond_dim=None, threshold=1e-14,
     Returns:
         decomposition (MPSDecomposition): The cores, bond dimensions and
             `discarded_weight`.
+
+    Raises:
+        ValueError: If `threshold` is negative or not finite, `max_bond_dim`
+            is not a positive integer, the vector is not one-dimensional, has
+            a length that is not a power of two or has zero norm, or the
+            sweep would exceed `max_svd_work` or `max_bytes`.
+        TypeError: If `vector` holds non-numeric values.
     """
     target, norm = _input(vector, max_bytes)
     return _decompose_normalized_state(target, max_bond_dim=max_bond_dim, threshold=threshold,
@@ -245,7 +253,10 @@ def decompose_state_to_mps(vector, *, max_bond_dim=None, threshold=1e-14,
 def _decompose_normalized_state(normalized_state, *, max_bond_dim, threshold,
                                 max_bytes=DEFAULT_INPUT_BYTES, max_svd_work=DEFAULT_MAX_SVD_WORK,
                                 input_norm=1.0):
-    """Consume the actual already-normalized input once; no automatic full output."""
+    """Check the work and bytes of the TT-SVD sweep and run it once on an already normalized power-of-two vector.
+
+    Return the ``MPSDecomposition``. The dense output vector is not formed.
+    """
     if max_bond_dim is not None:
         integer(max_bond_dim, "max_bond_dim", 1)
     if isinstance(threshold, (bool, np.bool_)) or not np.isfinite(threshold) or threshold < 0:

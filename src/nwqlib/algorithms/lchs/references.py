@@ -46,7 +46,9 @@ def _exponential(matrix, held_bytes, *, checks, counts):
     accurate (2.3e-13 against 3.1e-16 at ||A|| T of about 1e4). A triangular
     matrix therefore goes to scipy.sparse.linalg.expm, a lower triangular one
     through its transpose because that kernel detects only upper
-    triangularity, and every other matrix to scipy.linalg.expm.
+    triangularity, and every other matrix to scipy.linalg.expm. The
+    measurements and their inputs are in docs/dependency_issues.md, section
+    "Triangular matrix exponential".
 
     The work and bytes of either kernel are those of
     _linalg_laws.expm_requirements.
@@ -114,12 +116,7 @@ def closed_form_reference(matrix, initial, source, elapsed, *, checks, counts):
     explicitly would cancel about log10(1/(||A||*T)) significant digits when
     ||A||*T is small. The augmented exponential has no such subtraction and
     no linear solve with A, and _exponential evaluates it without the
-    cancellation of SciPy's triangular branch. In a check of 55 matrices,
-    among them diagonal A with an eigenvalue from 4 to 4000 next to one from
-    1e-4 down to 1e-16 or 0, Jordan blocks, and random or non-normal A with
-    condition numbers up to 1e18 or singular, its error against a 60-digit
-    evaluation stayed below 1.2 max(1, kappa_exp) u, with kappa_exp the
-    relative condition number of expm at M and u the unit roundoff.
+    cancellation of SciPy's triangular branch.
     """
     import numpy as np
 
@@ -163,8 +160,9 @@ def ivp_reference(matrix, initial, source, elapsed, *, checks, counts):
         counts["rhs_attempts"] += 1
         state = packed[:d] + 1j*packed[d:]
         counts["matvec_attempts"] += 1
-        # ACL arXiv:2312.03916v2, Eq. (1): du/dt=-A*u+b. Pack Re(u),Im(u), preserving the
-        # signed complex equation; no normalization or phase alignment.
+        # ACL arXiv:2312.03916v2, Eq. (1): du/dt=-A*u+b. Pack Re(u) and Im(u),
+        # preserving the signed complex equation, with no normalization or
+        # phase alignment.
         derivative = -(matrix @ state) + source
         counts["matvec_completed"] += 1
         result = np.concatenate((derivative.real, derivative.imag))

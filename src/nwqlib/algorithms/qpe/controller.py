@@ -16,10 +16,11 @@ The width needs no storage because Eq. (7b) makes it a function of the
 processed-step count (numerical.rwpe_scale). A restart reads the checkpoint
 and resumes at the saved step with the saved point and seed. It never
 replays earlier observations or reconstructs the trajectory, and a
-completed acquisition updates the mean exactly once. Choosing a point and
-applying an update each add 32 controller work units to Checkpoint.work,
-which is admitted against Method.max_work before the step runs. The
-controller state is admitted at 256 bytes.
+completed acquisition updates the mean exactly once. Starting the controller
+adds 2 work units. Choosing a point and applying an update each add 32
+controller work units to Checkpoint.work, which is admitted against
+Method.max_work before the step runs. The controller state is admitted at
+256 bytes.
 
 The loop has no consistency checks or unwinding, which the paper adds in
 Algorithm 2. numerical.rwpe_estimate states what that omission means for
@@ -223,8 +224,8 @@ def run_rwpe(plan, *, run):
     """Advance completed one-bit updates exactly once. Unresolved intent stays pending.
 
     Planning/reporting never replays the update history. Per-step Gaussian
-    work is counted before it runs and survives an interrupted update; the
-    current mean, pending seed/point and Run RNG states remain unchanged
+    work is counted before it runs and survives an interrupted update. The
+    current mean, pending seed and point, and Run RNG states stay unchanged
     until the corresponding new checkpoint has been saved.
     """
     from .method import _samples, _analysis

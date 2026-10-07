@@ -160,7 +160,7 @@ class _ScientificModel(Record):
     """Immutable user input without interchange version or ancestry arguments.
 
     The enclosing archive owns its format version. A changed scientific input
-    has its own content identity; it does not need a user-managed revision chain.
+    has its own content identity, so it needs no user-managed revision chain.
     """
 
     schema_version: ClassVar[int] = 1
@@ -203,8 +203,9 @@ class ProblemRecord(_ScientificModel):
             missing state amplitudes.
         assumptions: Default `()`. Assumptions stated with the Problem, as
             text.
-        facts: Default `()`. Evidence about the inputs (`Fact` records). No
-            reference computation is run to produce it.
+        facts: Default `()`. Evidence about the inputs, as
+            [`Fact`][nwqlib.evidence.Fact] records. No reference computation
+            is run to produce it.
 
     Raises:
         TypeError: If `unit` is neither a string, a `Unit`, a dict of `Unit`
@@ -236,7 +237,10 @@ class ProblemRecord(_ScientificModel):
         return self
 
     def to_record(self):
-        """Project descriptions on demand; actual input data stays with its owner."""
+        """Return the JSON description of the Problem.
+
+        The numerical data stay in the input handles.
+        """
         return self.model_dump(mode="json", exclude_computed_fields=True)
 
     def default_output(self):
@@ -271,16 +275,24 @@ class Eigenproblem(ProblemRecord):
     `unit`.
 
     Attributes:
+        kind: Fixed `"eigenproblem"`, the record's type name in its JSON form.
         A: Required. Finite Hermitian matrix or supported structured operator,
             in a form that [`OperatorData`][nwqlib.problems.records.OperatorData]
             accepts.
         target: Default `"smallest"`, the only accepted value. A Method
             returns its own estimate of this target.
-        subspace: Default `None`. An explicitly defined scientific subspace.
-            A Method's trial basis or initial state does not change the
-            full-space target.
-        sector: Default `None`. A scientific sector, which requires a
-            compatible state preparation.
+        subspace: Default `None`. An
+            [`InputRef`][nwqlib.core.records.InputRef] that names an
+            explicitly defined scientific subspace. A Method that works in
+            its own fixed basis, such as `FixedGCIM`, rejects the Problem
+            with `ApplicabilityError` when that basis differs from this
+            subspace. A Method's trial basis or initial state does not
+            change the full-space target.
+        sector: Default `None`. Name of a symmetry sector, as text, which
+            requires a compatible state preparation. A Method that would
+            draw its own random initial state rejects a Problem with a
+            sector with `ApplicabilityError`, so supply an initial state in
+            that sector.
 
     Raises:
         ValueError: If `A` is not exactly Hermitian. If the Hermitian part
@@ -345,6 +357,7 @@ class LinearDynamics(ProblemRecord):
     coordinates, with its magnitude and phase.
 
     Attributes:
+        kind: Fixed `"linear_dynamics"`, the record's type name in its JSON form.
         A: Required. Finite square matrix or supported structured generator,
             in a form that [`OperatorData`][nwqlib.problems.records.OperatorData]
             accepts.
@@ -431,6 +444,7 @@ class LinearSystem(ProblemRecord):
     chooses any encoding or dilation of `A`.
 
     Attributes:
+        kind: Fixed `"linear_system"`, the record's type name in its JSON form.
         A: Required. Finite square matrix or supported structured operator,
             in a form that [`OperatorData`][nwqlib.problems.records.OperatorData]
             accepts.
@@ -497,6 +511,7 @@ class Expectation(ProblemRecord):
     unnormalized `u† O u`.
 
     Attributes:
+        kind: Fixed `"expectation"`, the record's type name in its JSON form.
         state: Required. The state `u`, with its magnitude and phase, in a
             form that [`StateData`](inputs.md#nwqlib.problems.records.StateData)
             accepts.
@@ -565,9 +580,11 @@ class SpectralEstimation(ProblemRecord):
     `unitary`. The optional `unit`, `scope`, `coordinates`, `assumptions` and
     `facts` of [`ProblemRecord`][nwqlib.problems.records.ProblemRecord] are
     accepted too. Without `output=`, the requested output is
-    [`Eigenphase`][nwqlib.problems.records.Eigenphase], a phase in turns. The
-    overlaps of `initial_state` with the eigenvectors define the spectral
-    population that the measurements sample. The Method chooses its sampling
+    [`Eigenphase`][nwqlib.problems.records.Eigenphase], a phase in turns.
+    For the normalized direction `psi` of `initial_state` and an
+    orthonormal eigenbasis ``v_j`` of the supplied operator, eigenvector
+    ``v_j`` has spectral weight ``abs(<v_j|psi>)**2``. The measurements
+    probe these weights. The Method chooses its sampling
     schedule and branch convention. A unitary alone does not define an
     energy.
 
@@ -579,15 +596,17 @@ class SpectralEstimation(ProblemRecord):
     support.
 
     Attributes:
+        kind: Fixed `"spectral_estimation"`, the record's type name in its JSON form.
         hamiltonian: Default `None`. Exactly Hermitian `H`, in a form that
             [`OperatorData`][nwqlib.problems.records.OperatorData] accepts.
             Give it or `unitary`.
         unitary: Default `None`. Unitary `U`, in a form that
             [`OperatorData`][nwqlib.problems.records.OperatorData] accepts.
             Give it or `hamiltonian`. The Method checks that it is unitary.
-        initial_state: Required. State whose overlaps with the eigenvectors
-            define the sampled spectral population, in the coordinates of the
-            operator and in a form that
+        initial_state: Required. State whose normalized direction gives the
+            spectral weights probed by the measurements as the squared
+            magnitudes of its overlaps with an orthonormal eigenbasis, in
+            the coordinates of the operator and in a form that
             [`StateData`](inputs.md#nwqlib.problems.records.StateData) accepts.
 
     Raises:
@@ -702,6 +721,7 @@ class Optimization(ProblemRecord):
     optimality.
 
     Attributes:
+        kind: Fixed `"optimization"`, the record's type name in its JSON form.
         objective: Required. Scalar SymPy expression in the variables, not a
             string of source code.
         variables: Required. SymPy symbols with distinct names. Their order
@@ -826,11 +846,12 @@ class ConstrainedOptimization(ProblemRecord):
     augmented-Lagrangian layer follows that book, so a residual here enters
     its multiplier updates and stopping tests with the book's signs. A
     constraint given as a scalar SymPy expression is the residual itself.
-    Live input may also give `Eq(a, b)` as an equality, stored as `a - b`,
-    and `Le(a, b)` or `Ge(a, b)` as an inequality, stored as `a - b` or
-    `b - a`.
+    A SymPy relation may also be given: `Eq(a, b)` as an equality, stored
+    as `a - b`, and `Le(a, b)` or `Ge(a, b)` as an inequality, stored as
+    `a - b` or `b - a`.
 
     Attributes:
+        kind: Fixed `"constrained_optimization"`, the record's type name in its JSON form.
         objective: Required. Scalar SymPy expression in the variables, not a
             string of source code.
         variables: Required. SymPy symbols with distinct names. Their order
@@ -972,8 +993,9 @@ class OutputRecord(_ScientificModel):
         conditioning = "original scientific problem"
         if self.kind in {"normalized_expectation", "quadratic_form"}:
             # Expectation.unit labels the normalized observable quantity. A
-            # physical quadratic form additionally needs amplitude units, which
-            # StateInput does not declare; do not square/reuse observable units.
+            # physical quadratic form also needs amplitude units, which
+            # StateInput does not declare, so the observable unit is neither
+            # squared nor reused.
             defined = (problem.unit if self.kind == "normalized_expectation" and isinstance(problem, Expectation)
                        else None)
             conditioning = ("nonzero state norm" if self.kind == "normalized_expectation" else "physical state magnitude")
@@ -1002,6 +1024,9 @@ class Eigenvalue(OutputRecord):
     It is the default output of `Eigenproblem`, whose `target` is the
     smallest eigenvalue. Pass `Eigenvalue()` as `output=` to request it
     explicitly. Its error metric is the absolute error.
+
+    Attributes:
+        kind: Fixed `"eigenvalue"`, the record's type name in its JSON form.
     """
 
     kind: Literal["eigenvalue"] = "eigenvalue"
@@ -1021,6 +1046,9 @@ class Eigenphase(OutputRecord):
     every prepared E. The error metric of this output is the circular
     distance `min(|d|, 1 - |d|)` of the difference d between two phases in
     [0, 1), so estimates on either side of phase zero are close.
+
+    Attributes:
+        kind: Fixed `"eigenphase"`, the record's type name in its JSON form.
     """
 
     kind: Literal["eigenphase"] = "eigenphase"
@@ -1057,6 +1085,7 @@ class NormalizedExpectation(_ObservableOutput):
     without one the unit stays unspecified.
 
     Attributes:
+        kind: Fixed `"normalized_expectation"`, the record's type name in its JSON form.
         observable: Required. Exactly Hermitian observable `O`, in a form
             that [`OperatorData`][nwqlib.problems.records.OperatorData]
             accepts.
@@ -1085,6 +1114,7 @@ class QuadraticForm(_ObservableOutput):
     as it does for `LinearDynamics` and `LinearSystem`.
 
     Attributes:
+        kind: Fixed `"quadratic_form"`, the record's type name in its JSON form.
         observable: Required. Exactly Hermitian observable `O`, in a form
             that [`OperatorData`][nwqlib.problems.records.OperatorData]
             accepts.
@@ -1104,6 +1134,9 @@ class NormSquared(OutputRecord):
     Pass `NormSquared()` as `output=` with a `LinearDynamics` or
     `LinearSystem` Problem. Its unit is the square of the Problem's `unit`
     when the Problem has one.
+
+    Attributes:
+        kind: Fixed `"norm_squared"`, the record's type name in its JSON form.
     """
 
     kind: Literal["norm_squared"] = "norm_squared"
@@ -1117,6 +1150,9 @@ class Samples(OutputRecord):
     `shots` sets the number of shots, and the stored counts include only the
     shots in which that event occurred. Its unit is 1, and its error metric
     is the total variation distance between distributions.
+
+    Attributes:
+        kind: Fixed `"samples"`, the record's type name in its JSON form.
     """
 
     kind: Literal["samples"] = "samples"
@@ -1132,6 +1168,9 @@ class Solution(OutputRecord):
     It is the default output of `LinearDynamics` and `LinearSystem`. Pass
     `Solution()` as `output=` to request it explicitly. Its unit is the
     Problem's `unit`, and its error metric is the l2 norm of the difference.
+
+    Attributes:
+        kind: Fixed `"solution"`, the record's type name in its JSON form.
     """
 
     kind: Literal["solution"] = "solution"
@@ -1154,6 +1193,7 @@ class StateVector(OutputRecord):
     readout, not a hardware measurement.
 
     Attributes:
+        kind: Fixed `"state_vector"`, the record's type name in its JSON form.
         normalization: Default `"unit"`. `"physical"` or `"unit"`.
         global_phase: Default `"physical"`. `"physical"`, which compares
             phases as they are, or `"modulo_global_phase"`, which treats
@@ -1178,6 +1218,9 @@ class OptimizationCandidate(OutputRecord):
     minimum in objective units, for example the grid minimum that an
     explicit QHD check evaluates. A candidate is not an optimality
     certificate.
+
+    Attributes:
+        kind: Fixed `"optimization_candidate"`, the record's type name in its JSON form.
     """
 
     kind: Literal["optimization_candidate"] = "optimization_candidate"

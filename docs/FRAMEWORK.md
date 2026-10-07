@@ -171,15 +171,7 @@ Do not force every algorithm through one generic primitive. Each algorithm decla
 - `noise_model`: simulator or provider noise-model support.
 - `native_gate_target`: provider-specific native-gate compilation.
 
-[Choose a backend](backends.md) documents each backend and what has been checked on it:
-
-| Target | Role in NWQLib | Integration path |
-| --- | --- | --- |
-| Qiskit Aer | Local small-to-medium validation and CI. | `qiskit_aer` plus Qiskit circuits. |
-| NWQ-Sim | Simulation with NWQ-Sim when selected. | Separately built runner, typed file protocol and an explicit workflow saved to disk. See [NWQ-Sim](nwqsim.md). |
-| IBM Quantum hardware | Real-device execution for IBM systems. | Qiskit Runtime `SamplerV2` or `EstimatorV2`, chosen per algorithm. |
-| IonQ | Trapped-ion simulator and QPU execution. | `qiskit-ionq` provider and backend. Measured circuits required. |
-| Quantinuum Nexus H2 | Explicit cloud compile and execution workflow. | Optional qnexus and pytket conversion dependencies. Helios is unsupported. See [Nexus](nexus.md). |
+[Choose a backend](backends.md) documents each backend, how to connect it and what has been checked on it.
 
 Algorithm-specific primitive choices:
 
@@ -223,7 +215,6 @@ A cloud adapter checks the qubit, shot, readout and basis requirements of the Pl
 
 Supported SDK rules:
 
-- Do not use the old `qiskit.opflow`, `QuantumInstance`, `BasicAer` or `qiskit.algorithms` APIs in current code.
 - Use `qiskit_aer` for Aer imports.
 - Prefer circuit, quantum information and transpiler APIs documented as public in the supported Qiskit releases.
 - Use Qiskit Runtime primitives only where the algorithm needs the IBM Runtime execution model. Do not require all algorithms to use the same primitive.
@@ -242,7 +233,7 @@ Connect inputs, chosen parameters, observations, checks and reported quantities 
 
 A beginner example executes on the default Aer backend at a bounded size. Label resource-only, host or reference, subroutine and full-circuit paths accurately. Provider submission, costly verification and larger studies run only when the reader selects them. Up-to-date code or printed planning metadata does not show that anything executed or that a result is accurate.
 
-The percent-format sources in `examples/generators/` are the originals. `examples/generators/build_notebooks.py` generates each notebook from its source, so the notebook runs the same code with the same deterministic seeds where seeds apply. Edit the source and regenerate the notebook, as [Notebook generation](MAINTENANCE.md#notebook-generation) describes. When a change affects them, check both notebook freshness and notebook execution, because neither replaces the other. No test requires an example to name every public field or to come as an introductory and scientific pair.
+The percent-format sources in `examples/generators/` are the originals. `examples/generators/build_notebooks.py` generates each notebook from its source, so the notebook runs the same code with the same deterministic seeds where seeds apply. Edit the source and regenerate the notebook, as [Notebook generation](MAINTENANCE.md#notebook-generation) describes. When a change affects them, check both notebook freshness and notebook execution, because neither replaces the other.
 
 Update an example when the public name it imports changes, and keep no alias for an old import spelling. Keep presentation code in the example and scientific code in the library module it belongs to. Merge two examples only after each of their distinct scientific operations has a working new home. Test workload and output meaning with bounded fixtures. A list of file names does not prove coverage.
 
@@ -265,7 +256,7 @@ Reports are printable, serialize to JSON, carry a version and are stable enough 
 
 Each report declares its current format and keeps its complete scientific fields, their meanings and the content hashes through loading. The [API reference](api/workflow.md#save-and-reopen) documents the current types and the inputs that loading needs. Saved `Source` text never chooses an executable import or recreates a live binding to code. Validation of the current format remains required, and converters from development schemas are not.
 
-Static and adaptive reports keep the measurement settings and the compatible observation streams, with the controller history of adaptive Methods. Seeds alone do not prove independence. Error combinations and checks keep their error frames (the quantity, metric and unit an error refers to), assumptions and sources. A nominal interval or residual does not establish total accuracy or that the ground state was identified. [Plan, compare and solve](scientist.md) and the algorithm guides describe the reports and verification that are supported.
+Static and adaptive reports keep the measurement settings and the compatible observation streams, with the iteration history of adaptive Methods (their saved controller state). Seeds alone do not prove independence. Error combinations and checks keep their error frames (the quantity, metric and unit an error refers to), assumptions and sources. A nominal interval or residual does not establish total accuracy or that the ground state was identified. [Plan, compare and solve](scientist.md) and the algorithm guides describe the reports and verification that are supported.
 
 ## Documentation and commenting standard
 
@@ -290,7 +281,7 @@ Scientific independent verification and validation (Scientific IV&V) is the revi
 Use layered tests:
 
 - Unit tests for subroutines: state preparation, LCU, Trotterization, block encoding, QSP phase application, QPE likelihood and objective helpers, measurement post-processing and reporting.
-- Circuit tests: small circuits compare `Statevector.from_instruction()` with expected states or unitary action.
+- Circuit tests: small circuits compare `Statevector.from_instruction()` with expected states or unitary action. Small dense matrix extraction is a test oracle, not the runtime definition of a structured encoding.
 - Shot tests: measured circuits run with a fixed seed and broad statistical tolerances.
 - Scientific validation tests: compare algorithm output with classical references on small, named datasets.
 - Cross-implementation equivalence tests: when a subroutine offers more than one implementation, build the same instance through each and check statevector equivalence or the documented trade-offs (see [Choosing among subroutine implementations](#subroutine-implementation-selection)).
@@ -308,8 +299,8 @@ Every numerical test tolerance belongs to one of the following classes. Name the
 
 Two additional rules:
 
-- **Regression anchors.** Keep fixed-instance and fixed-seed reference values that detect a real unintended change, alongside independent scientific relations. Their tolerances follow the numerical problem. No per-algorithm anchor count or universal decimal threshold replaces that evidence.
-- **Mutation-probe selection.** Mutation probes are reserved for scientific equations, signs, normalizations, error compositions, resource formulas or algorithm-defining constructions that have an independent reference and could otherwise return a believable but scientifically wrong result. Defaults, metadata shape, ordinary validation branches and solver-policy literals are tested directly. There is no per-algorithm probe quota.
+- **Regression anchors.** Keep fixed-instance and fixed-seed reference values that detect a real unintended change, alongside independent scientific relations. Their tolerances follow the numerical problem.
+- **Mutation-probe selection.** Mutation probes are reserved for scientific equations, signs, normalizations, error compositions, resource formulas or algorithm-defining constructions that have an independent reference and could otherwise return a believable but scientifically wrong result. Defaults, metadata shape, ordinary validation branches and solver-policy literals are tested directly.
 
 Accepting an algorithm depends on its claimed domain and the public relations the change affects. Use a representative statevector check and a measured-shot check when those capabilities are claimed, a public example, independent scientific quantities and documented equations. When code moves, move the existing tests that can detect its defects with it, instead of adding tests to reach a count. State partial or unknown scope explicitly, and apply the mutation selection rule only where a probe adds evidence.
 

@@ -119,7 +119,6 @@ def test_low_somma_profile_bounds_remain_separate_from_uncomputed_pf_error():
     )
     assert aggregate.fact.fact.value is None
     result = solve(selected)
-    assert result.references == "not_run"
     assessment = result.assess(absolute_tolerance=0.8)
     assert (
         assessment.status == "INCONCLUSIVE" and "algorithmic_approximation" in assessment.remaining

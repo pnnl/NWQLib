@@ -81,8 +81,11 @@ def resolve_scalar_bound(
     `epsilon = 3/8` and `c = 1`, the answer is 4 for `c/n` and 16 for
     `c/sqrt(n)`.
 
-    All error quantities must share an absolute metric, unit and scope.
-    `FramedFact` inputs are checked for that, and plain numbers assume it.
+    All error quantities must share an error frame with an absolute metric.
+    For `FramedFact` inputs, `ErrorFrame.compatible` checks agreement in
+    quantity, metric, unit, scope, conditioning and domain. Plain numbers
+    assume that frame, and the absolute interpretation of the metric is a
+    caller assumption.
     Unknown quantities do not become zero. A false condition prevents a
     choice, and an unspecified condition makes the result conditional. The
     supplied bounds
@@ -119,7 +122,9 @@ def resolve_scalar_bound(
         ValueError: If `minimum`, `maximum` or `fixed` is not a positive
             integer in order, `decay` is another value, a quantity is
             negative, the framed quantities disagree in frame or parameter
-            point, or a condition is not a boolean predicate.
+            point, a condition is not a boolean predicate, an assumption is
+            not a nonempty string, or an exact intermediate value needs more
+            than `max_integer_bits` bits.
     """
     arithmetic = ExactArithmetic(max_integer_bits=max_integer_bits)
     for name, value in (("minimum", minimum), ("maximum", maximum), ("fixed", fixed)):
@@ -178,7 +183,7 @@ def resolve_scalar_bound(
             value = condition.fact.value
             if type(value) is not bool:
                 raise ValueError("a bound premise must be a boolean predicate")
-            # Received assertions and bindings remain visible; no receipt type is
+            # Received assertions and bindings stay visible. No receipt type is
             # promoted to proof or matched to a made-up Plan context here.
             conditional = True
         elif condition is None or type(condition) is bool:
@@ -204,7 +209,8 @@ def resolve_scalar_bound(
     if c == 0:
         required = minimum
     else:
-        # From c/n <= a obtain n >= c/a; from c/sqrt(n) <= a obtain
+        # For the docstring's scalar model, put a = allowance > 0.
+        # From c/n <= a obtain n >= c/a. From c/sqrt(n) <= a obtain
         # n >= (c/a)^2 for c,a>0. Exact rational ceiling has no search grid.
         ratio = arithmetic.divide(c, allowance)
         threshold = ratio if decay == "inverse" else arithmetic.multiply(ratio, ratio)
@@ -218,8 +224,9 @@ def resolve_scalar_bound(
         bound = arithmetic.add(fixed_part, arithmetic.divide(c, Fraction(n)))
     else:
         # floor(sqrt(n)) <= sqrt(n), so c/floor(sqrt(n)) bounds the
-        # irrational term above. The exact inversion also proves <= epsilon;
-        # the minimum of these two rational upper bounds remains conservative.
+        # irrational term above. The exact inversion also proves that the
+        # docstring's e(n) <= epsilon. The minimum of these two rational
+        # upper bounds remains conservative.
         coarse = arithmetic.add(fixed_part, arithmetic.divide(c, Fraction(isqrt(n))))
         bound = coarse if arithmetic.le(coarse, epsilon) else epsilon
     return result(n, "conditional" if conditional else "resolved",

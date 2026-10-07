@@ -44,8 +44,7 @@ PositiveReal = Annotated[Real, Field(gt=0)]
 # residuals 1/289, 1/1089 and 9/4225, far above both 1e-9 and 1e-6, so the
 # two values classify these grids alike.
 #
-# Measured on 2026-09-26 at revision
-# 960d9d1dd49c805c05fe6d4a821aea99dee4a914 (Python 3.12.14, NumPy 2.5.2,
+# Measured on 2026-09-26 (Python 3.12.14, NumPy 2.5.2,
 # SciPy 1.18.1, SymPy 1.14.0, macOS arm64), refined runs with the
 # ``most_probable`` point rule stopped at the same points and rounds under
 # 1e-9 and 1e-6: the unit disk f = (x - 1)**2 + (y - 1)**2,
@@ -65,9 +64,9 @@ PositiveReal = Annotated[Real, Field(gt=0)]
 # flavors. The stop under 1e-6 was read from the saved rounds of the run
 # under 1e-9, since the tolerances enter only the stopping test
 # (``constrained.solve_augmented_lagrangian``), and a direct Schrodinger run
-# under 1e-6 at revision 659fa80702e79192a27568ea4935531004d14e51, on the
-# same day in the same environment, stopped after the same 11 rounds with
-# the same violation. The guide's example (docs/algorithms/qhd.md,
+# under 1e-6, on the same day in the same environment, stopped after the
+# same 11 rounds with the same violation. The guide's example
+# (docs/algorithms/qhd.md,
 # "Constrained problems") is this run. With equality constraints there is
 # no default, because the residual that a finite grid can reach depends on
 # the grid and the constraint (docs/algorithms/qhd.md, "Constrained
@@ -149,9 +148,9 @@ class AugmentedLagrangian(Record):
             Positive rho of the first round.
         penalty_growth: Default `2.0`, from Wu et al., Sec. VI.B. The factor gamma > 1
             that increases rho.
-        reduction_ratio: Default `0.25`, from the authors' prototype, strictly between 0
-            and 1. The tau of the penalty test, Birgin and Martinez Eq. (4.9). The book
-            only requires 0 < tau < 1.
+        reduction_ratio: Default `0.25`, from the prototype code of the authors of Wu et
+            al., arXiv:2605.12066v1, strictly between 0 and 1. The tau of the penalty
+            test, Birgin and Martinez Eq. (4.9). The book only requires 0 < tau < 1.
         max_penalty: Default `1e9`, from Wu et al., Sec. VI.B. Upper bound of rho, at
             least `initial_penalty`.
         max_iterations: Default `15`, from Wu et al., Sec. VI.B. Largest positive number
@@ -246,7 +245,7 @@ class AugmentedLagrangian(Record):
         `"auto"` keeps PHR without branch tests for classical execution or a user
         GaussianState. Otherwise it applies the eligible branch tests and considers
         slack conversions in constraint order. It accepts a trial that planning accepted
-        when planned host work and CX count are both no larger and at least one is
+        when planned classical work and CX count are both no larger and at least one is
         smaller, or when the current planning is refused and the trial is accepted with
         a CX count. A missing CX count prevents the comparison. The comparison study's
         quantum quality evidence for `"auto"` covers only the QHD guide's `n = 3`,
@@ -264,6 +263,11 @@ class AugmentedLagrangian(Record):
             4.1 starts them.
     """
 
+    # The defaults of initial_penalty through max_iterations come from Wu et al.
+    # arXiv:2605.12066v1, Sec. VI.B, and that of reduction_ratio from the authors'
+    # prototype, within the 0 < tau < 1 of Birgin and Martinez Algorithm 4.1. Registered
+    # in docs/ENGINEERING_CONSTANTS.md ("QHD augmented-Lagrangian defaults"), which gives
+    # the revisit conditions.
     initial_penalty: PositiveReal = 1.0
     penalty_growth: Annotated[Real, Field(gt=1)] = 2.0
     reduction_ratio: Annotated[Real, Field(gt=0, lt=1)] = 0.25
@@ -293,8 +297,7 @@ class AugmentedLagrangian(Record):
     # mode_or_mean some runs did improve by continuing. Neither stop
     # certifies stationarity or optimality.
     #
-    # Measured on 2026-09-26 at revision
-    # 659fa80702e79192a27568ea4935531004d14e51 (Python 3.12.14, NumPy 2.5.2,
+    # Measured on 2026-09-26 (Python 3.12.14, NumPy 2.5.2,
     # SciPy 1.18.1, SymPy 1.14.0, macOS arm64), with classical Schrodinger
     # execution on the Dirichlet interior grid, QuadraticSchedule(gamma=0.3)
     # with midpoint coefficients, total time 10 and 200 steps, normalized
@@ -311,10 +314,9 @@ class AugmentedLagrangian(Record):
     # K = 7, time 6, 20 steps and mass threshold 0.5. The six sampled runs
     # drew 256 samples per level from the computed distributions of the
     # combination and Rastrigin problems, with seeds 7, 19 and 43, by
-    # composing one-level solves, since that revision had no classical
-    # sampled execution. At revision
-    # 960d9d1dd49c805c05fe6d4a821aea99dee4a914 the split-step flavor gave the
-    # same finding on exact Rastrigin at 3,200 steps, exact combination at 320
+    # composing one-level solves, since the measured code had no classical
+    # sampled execution. The split-step flavor gave the same finding on exact
+    # Rastrigin at 3,200 steps, exact combination at 320
     # steps and the three sampled Rastrigin seeds. Registered in
     # docs/ENGINEERING_CONSTANTS.md ("QHD augmented-Lagrangian defaults").
     termination: Literal["feasibility_and_complementarity", "feasibility"] = (
@@ -324,7 +326,7 @@ class AugmentedLagrangian(Record):
         "on_insufficient_decrease"
     )
     stationarity: StrictBool = False
-    # "phr" keeps the representation of NWQLib 0.99.0.
+    # "phr" adds no slack variable, so the inner problem keeps the original variables.
     # An automatic default for the quantum route awaits a comparison study of
     # the three forms. Registered in docs/ENGINEERING_CONSTANTS.md ("QHD
     # augmented-Lagrangian defaults").
@@ -473,16 +475,16 @@ class FormTrial(Record):
 
     `InnerRepresentation.trials` lists one per trial. The fields below are read-only.
     The current representation and the trial with one more slack variable are compared
-    by their planned host work, the work that QHD's symbolic and table check counts plus
+    by their planned classical work, the work that QHD's symbolic and table check counts plus
     the chosen circuit construction's work, and by the CX count of that construction.
 
     Attributes:
         inequality: Problem position of the inequality the trial converts.
-        current_work: Planned host work of the current representation, or None when its
-            planning was refused.
+        current_work: Planned classical work of the current representation, or None when
+            its planning was refused.
         current_cx: Its CX count per circuit, or None when its planning was refused or
             the construction has no CX count.
-        trial_work: Planned host work of the trial, or None when refused.
+        trial_work: Planned classical work of the trial, or None when refused.
         trial_cx: CX count of the trial, or None as for `current_cx`.
         accepted: Whether the round keeps the trial. It does when both counts are no
             larger and one is strictly smaller, or when the current planning was refused
@@ -590,7 +592,7 @@ class InnerRepresentation(Record):
 
 
 class ALResources(Record):
-    """Resources of one augmented-Lagrangian round, or of a whole run, with measurement kept apart from host work.
+    """Resources of one augmented-Lagrangian round, or of a whole run, with measurement kept apart from classical work.
 
     `ALIteration.resources` holds a round's, and `ConstrainedQHDResult.resources` the
     run's totals. The fields below are read-only. A count is None when it is unknown,
@@ -603,12 +605,12 @@ class ALResources(Record):
     (`BoxRefinementResult.resources`), and a count is unknown when the refinement's is.
 
     The counts are the work of the algorithm, each counted once as in an uninterrupted
-    run, and not the host time spent across the calls of a saved run
+    run, and not the wall time spent across the calls of a saved run
     (`resume_augmented_lagrangian`). A resumed run reads the counts of its completed
     rounds and levels from their records, and a Run that it continues keeps the counts
-    of its own run log. Host work that resume repeats, the layer's preprocessing and the
-    unscaled table stage of a reopened search-model level, is deterministic and not
-    counted again.
+    of its own run log. Resume also reads the layer's saved constraint preprocessing and
+    check counts, and the saved unscaled support tables and evaluation count of a
+    search-model level whose table stage had completed, instead of evaluating them again.
 
     Attributes:
         width: Register width of the inner Plan, `D K` one-hot or `D log2 K` binary for
@@ -635,10 +637,10 @@ class ALResources(Record):
             including discarded automatic-selection candidates and, with refinement,
             every level's planning. The Circuit counts note below gives what each round
             adds and when the count is unavailable.
-        evolution_work: Classical-kernel work that the inner Run counted before the
-            classical evolution, in QHD's work units.
-        construction_work: Circuit construction and host preparation work that the inner
-            Run counted.
+        evolution_work: Work that the inner Run counted for classical evolution before
+            running it, in QHD's work units.
+        construction_work: Construction work that the inner Run counted, for a quantum
+            circuit or for the setup of classical evolution.
         synthesis_work: Exact dense synthesis work that the inner Run set aside.
         layer_evaluations: Scalar expression evaluations by the augmented-Lagrangian
             layer itself (f, h, g, their gradients and the mean-position value), with
@@ -1139,11 +1141,11 @@ class AugmentedLagrangianRecord(Record):
         search-model or `a = 4` for physical refinement. The bound is
         `(a * M * L + t * M + 1) * qhd.max_work`. Without refinement, L = 1 and a = 4.
         An ordinary Plan has at most four category bounds: the symbolic expansion, the
-        running total of the initial state's evaluation and the table, compiled-block
-        and schedule-integral work, whose first part, the initial state, planning checks
-        alone before evaluating it, the optional kept state, and the classical evolution
-        or circuit construction. A search-model level adds the symbolic and
-        running-total bounds of its unscaled table stage. Intermediate checks of one
+        running total (the initial state's evaluation and the table, compiled-block
+        and schedule-integral work), the optional kept state, and the classical evolution
+        or circuit construction. Planning checks the first part of the running total,
+        the initial state, alone before evaluating it. A search-model level adds the
+        symbolic and running-total bounds of its unscaled table stage. Intermediate checks of one
         category are not counted separately. The trials of automatic inequality
         selection on the quantum route add `t = 6 (m + 1) - 4` bounds per round without
         refinement and `t = 6 (m + 1)` with it, for m kept inequalities, and t = 0

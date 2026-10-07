@@ -147,8 +147,6 @@ class QLSWork(Record):
             that of the dilation of ``G_t`` for ``shortcut_dilation``, and
             the original eigensystem of a Hermitian ``A`` when the
             evaluation acquires it because planning did not.
-        matrix_products: Dense matrix-matrix products. Zero, because
-            ``G_t`` is formed by a rank-one update.
         matvecs: Matrix-vector products: the two basis changes of the
             selected action, the row product ``b'† A_t`` of a shortcut and
             the coordinate matvec of the linear norm model.
@@ -175,7 +173,6 @@ class QLSWork(Record):
     target_solves: Count = 0
     svd_calls: Count = 0
     eigh_calls: Count = 0
-    matrix_products: Count = 0
     matvecs: Count = 0
     search_rows: Count = 0
     planned_trials: Count = 0
@@ -189,27 +186,39 @@ class QLSWork(Record):
 class QLSReconstruction(Record):
     """Original spectral facts and the actual selected padded/embedded relation.
 
-    kappa_be is alpha/sigma_min when numerically known, or a user premise.
-    polynomial_kappa additionally applies the explicitly named domain floor.
+    kappa_be is the selected encoded-gap parameter, computed from the
+    original singular endpoint with a minimum of one, or supplied by the
+    caller. polynomial_kappa is the parameter actually used by the
+    polynomial. It includes the domain floor and, for automatic periodic
+    selection, outward coverage of the rounded encoded gap.
     The original matrix condition number never includes that floor or padding.
 
     Attributes:
         original_operator: Identity/reference of the original A.
         original_rhs: Identity/reference of the original physical b.
-        encoding_operator: Operator represented by the selected encoding.
         original_dimension: Original equation dimension.
         padded_dimension: Coordinate dimension after admitted padding.
         system_dimension: Dimension on which the selected polynomial acts.
-        embedding: Original or Hermitian-dilation representation.
+        embedding: ``hermitian_dilation`` for the Hermitian dilation that
+            ``qsvt_inverse`` uses for a non-Hermitian A, otherwise ``none``.
         rhs_scale: Original RHS physical norm in binary-scale form.
         alpha: Actual encoding normalization, strictly positive.
         alpha_source: Source or premise selecting alpha.
-        kappa_be: Encoding alpha divided by known sigma_min, or supplied bound.
-        polynomial_kappa: Polynomial-domain parameter including its named floor.
+        kappa_be: Selected encoded-gap parameter. Automatic spectral
+            selection uses ``max(1, alpha/sigma_min)`` with the original
+            smallest singular endpoint. Automatic compact periodic
+            selection uses ``alpha/m``, where m is the positive mass.
+            Otherwise this is the accepted caller-supplied bound.
+        polynomial_kappa: Parameter actually used by the polynomial,
+            including the domain floor ``1.01``. Outside automatic compact
+            periodic selection it is ``max(kappa_be, 1.01)``. Automatic
+            compact periodic selection also uses an upward-rounded
+            inverse-gap parameter covering both the original spectrum
+            and the rounded encoding.
         kappa_source: Source or premise selecting the encoding-domain bound.
         condition_number: Original sigma_max/sigma_min, if independently known.
-        sigma_min: Existing original smallest singular endpoint, if known.
-        sigma_max: Existing original largest singular endpoint, if known.
+        sigma_min: Original smallest singular endpoint, if known.
+        sigma_max: Original largest singular endpoint, if known.
         spectral_method: Actual endpoint computation or supplied-premise scope.
         spectral_calls: Counts of spectral work already performed at selection.
         polynomial: Actual inverse/reflection coefficients and fit evidence.
@@ -218,24 +227,24 @@ class QLSReconstruction(Record):
             ``sup |Re P_phases - polynomial/rescale|`` over ``[-1, 1]``.
             None means unavailable.
         phase_evaluations: Recorded phase-solver evaluations.
-        encoding_id: Identity of the actual selected encoding, when present.
         encoding_family: Selected implementation family, if applicable.
         encoding_ancillas: Ancillas required by that encoding.
         encoding_error: Bound relative to the encoding's declared operator target.
-        preparation_id: Identity of the actual RHS preparation.
         t: Selected shortcut norm parameter, not recovered physical solution norm.
-        t_source: Explicit supplied value or selected classical norm model.
-        width: Actual selected circuit width; zero for a host-only construction.
+        t_source: ``not_applicable`` for the inverse, ``user`` for a supplied
+            numeric t, or the classical norm model ``grid``,
+            ``noisy_binary_search`` or ``linear_kappa_sequence``.
+        width: Actual selected circuit width. Zero for a host-only construction.
         coordinates: Ordered coordinate qubits.
         success: Algorithmic success predicates as bit/value pairs.
         conditions: Additional selected projection predicates as bit/value pairs.
         settings: Actual readout acquisitions. An exact scalar output has
-            the one ``projected_moments`` reduction; a sampled Pauli output
+            the one ``projected_moments`` reduction. A sampled Pauli output
             has one counts setting per qubit-wise commuting group, labeled by
             the group's accumulated basis, plus the unrotated
             ``physical_mass`` setting of a padded normalized output whose
-            group bases all contain X or Y; a sampled NormSquared output
-            has its ``physical_mass`` setting; vector and Samples outputs
+            group bases all contain X or Y. A sampled NormSquared output
+            has its ``physical_mass`` setting. Vector and Samples outputs
             have ``setting_0``.
         groups: Member Pauli labels of each group setting, in the order of
             the group settings and first-fit order within a group. Each
@@ -253,14 +262,13 @@ class QLSReconstruction(Record):
             same order, or None.
         observable_identity: Coefficient of the identity label in that dense
             table, zero when the table has none.
-        recovery: Composed physical-output scale; absent for unit-only shortcuts.
+        recovery: Composed physical-output scale. Absent for unit-only shortcuts.
         work: Operation counts and peak live-array bytes of the classical
             model (``QLSWork``). A quantum Plan records only its dimensions.
     """
 
     original_operator: InputRef
     original_rhs: InputRef
-    encoding_operator: InputRef
     original_dimension: PositiveInt
     padded_dimension: PositiveInt
     system_dimension: PositiveInt
@@ -280,11 +288,9 @@ class QLSReconstruction(Record):
     phase_solution: tuple[Real, ...] = ()
     phase_error: Nonnegative | None = None
     phase_evaluations: Count = 0
-    encoding_id: ContentID | None = None
     encoding_family: Text | None = None
     encoding_ancillas: Count = 0
     encoding_error: Nonnegative | None = None
-    preparation_id: ContentID | None = None
     t: Annotated[Real, Field(ge=1)] | None = None
     t_source: Literal[
         "not_applicable", "user", "grid", "noisy_binary_search", "linear_kappa_sequence"
@@ -309,8 +315,7 @@ class QLSReconstruction(Record):
 
     @model_validator(mode="after")
     def _relations(self):
-        """Require compatible original/padded dimensions, polynomial parity and physical readout
-        projectors.
+        """Require compatible original/padded dimensions, polynomial parity and physical readout projectors.
         """
         expected = self.padded_dimension * (2 if self.embedding == "hermitian_dilation" else 1)
         if self.original_dimension > self.padded_dimension or self.system_dimension != expected:
@@ -356,20 +361,20 @@ class QLSReconstruction(Record):
 
 
 class QLSSamples(Record):
-    """Selected original-coordinate samples as two int64 arrays.
+    """Sampled output of a QLS run: the observed original coordinates and their counts, as two int64 arrays.
 
-    Analysis adopts the fresh, C-contiguous int64 arrays returned by
-    ``reduce_sample_arrays`` through
-    ``FrozenArray._from_owned_canonical_array``. For m stored indices, the
-    adopted arrays occupy 16m data bytes and the local validation phase
-    peaks at 17m data bytes while one Boolean comparison mask is live.
-    These array-data terms exclude caller-held input data, earlier
-    reduction workspace and Python object overhead. No working-memory
-    admission is made at this construction.
+    `QLSAnalysis.samples` holds it for a `Samples` output. Analysis adopts
+    the fresh, C-contiguous int64 arrays that the sample reduction returns,
+    without copying them. For m stored indices, the adopted arrays occupy
+    16m data bytes and the local validation phase peaks at 17m data bytes
+    while one Boolean comparison mask is live. These array-data terms
+    exclude caller-held input data, earlier reduction workspace and Python
+    object overhead. Building the record does not check these bytes against
+    a memory limit.
 
     Attributes:
         indices: Distinct original-coordinate indices below the original
-            dimension, increasing; dummy coordinates are excluded.
+            dimension, increasing. Padding coordinates are excluded.
         counts: Positive returned counts of those indices, each at most
             ``MAX_COUNT``.
     """
@@ -395,30 +400,45 @@ class QLSSamples(Record):
 
 
 class QLSProjectedMoments(Record):
-    """Saved scalar statistics of the one exact projected reduction of a scalar output.
+    """Saved statistics of the exact scalar readout of a QLS run (`shots=None`): the three masses and the projected moment.
 
+    `QLSAnalysis.reduction` holds it.
     Each scalar is a canonical ``(mantissa, exponent)`` pair: zero is
     ``(0.0, 0)``, a nonzero mantissa has absolute value in [1/2, 1).
 
     Attributes:
-        kernel: Mass and moment kernel of the reduction.
-        complete_mass: Complete native norm of the saved state, over all
-            ``populations[0]`` amplitudes.
-        success_mass: Success-only mass p_alg, over the ``populations[1]``
-            amplitudes whose success selectors match; it can include
-            condition-failing branches and dummy coordinates.
+        kernel: Versioned name of the computation of the masses and the
+            moment, such as `"pow2-mass-pauli-moment/1"`.
+        complete_mass: Computed sum of squared amplitude magnitudes over the
+            full saved state, including all ``populations[0]`` amplitudes.
+        success_mass: Success-only mass ``p_alg``, computed as the sum of squared
+            magnitudes of the ``populations[1]`` amplitudes whose success
+            selectors match. This selection can include branches that fail the
+            additional conditions and coordinates added by padding.
         physical_mass: Physical-slice mass p over the ``populations[2]``
             coordinates whose success and condition selectors match and whose
             original-coordinate index is below the original dimension.
         numerator: Projected moment ``q = v^dagger O v`` of the stored Pauli
             observable on the physical slice v, not a full selected-block
-            moment; zero for a NormSquared output.
-        numerator_radius: Upward host-contraction radius of the numerator
-            against the stored observable on the computed slice.
-        lost_state_components: Framed slice components that underflowed.
-        lost_coefficients: Framed coefficients that underflowed.
-        populations: Complete, success-only and physical population sizes.
-        contribution_id: The acquisition's one point chunk.
+            moment. Zero for a NormSquared output.
+        numerator_radius: Upper bound, rounded upward, on the absolute rounding
+            error in ``numerator`` from its classical evaluation using the stored
+            observable and the computed physical slice. It assumes binary64
+            round-to-nearest arithmetic with gradual underflow and finite
+            intermediate results. Errors in the prepared state and in converting
+            the original observable to the stored one are separate.
+        lost_state_components: Number of initially nonzero real or imaginary
+            parts of physical-slice amplitudes that round to zero when rescaled
+            by a power of two for the moment calculation. Real and imaginary
+            parts are counted separately. Default ``0``.
+        lost_coefficients: Number of initially nonzero coefficients of
+            non-identity Pauli terms that round to zero when rescaled by a power
+            of two for the moment calculation. Default ``0``.
+        populations: Numbers of amplitudes in the full saved state, the
+            success-only selection and the physical slice, in that order. The
+            last is the original dimension. These counts include zero amplitudes.
+        contribution_id: Content hash of the `ObservationChunk` that holds
+            the saved reduction.
     """
 
     kernel: Text
@@ -434,11 +454,13 @@ class QLSProjectedMoments(Record):
 
 
 class QLSGroupMoments(Record):
-    """Returned population and weighted moments of one sampled counts setting.
+    """Shot counts and weighted moments of one sampled measurement setting of a QLS run.
+
+    `QLSAnalysis.groups` holds one per setting.
 
     Attributes:
         name: Setting name.
-        labels: Member Pauli labels of a group, in first-fit order; empty for
+        labels: Member Pauli labels of a group, in first-fit order. Empty for
             a mass setting.
         basis: Accumulated measurement basis, qubit zero rightmost.
         population: ``success_conditional`` (weighted values over the shots
@@ -446,15 +468,16 @@ class QLSGroupMoments(Record):
             (that selector indicator times the weighted values over all
             returned shots, the identity term assigned to the first group) or
             ``physical_prefix`` (the unrotated mass setting).
-        returned_shots: Actual returned shots.
+        returned_shots: Shots returned for the setting.
         selected_shots: Returned shots whose success and condition selectors
             match (and, for the mass setting, whose original-coordinate index
             is below the original dimension).
         mean: Weighted outcome mean, or the selected fraction of the mass
-            setting; None without a population.
+            setting. None without a population.
         second_moment: Weighted second moment, for a group.
         variance: Unbiased variance of the mean, for a group of at least two shots.
-        contribution_id: The setting's acquisition.
+        contribution_id: Content hash of the `ObservationChunk` that holds
+            the setting's counts.
     """
 
     name: Text
@@ -525,8 +548,8 @@ class QLSAnalysis(Result):
         artifact: Description of the stored solution array. Printing the
             result does not load it.
         applications: Classical model applications and their recorded work.
-        execution: `"classical"`, the polynomial model evaluated on the
-            host, or `"quantum"`, the circuits run on a backend.
+        execution: `"classical"`, the polynomial model evaluated
+            classically, or `"quantum"`, the circuits run on a backend.
         submitted_shots: Shots requested for the mass measurement, when
             sampled.
         returned_shots: Shots returned by that measurement, before either
@@ -655,7 +678,7 @@ class QLSAnalysis(Result):
         Without the producing receipt this record checks finiteness,
         nonnegativity and population identity only: the published masses of
         an exact reduction are the binary64 values of its saved pairs, of
-        nested populations, from its one acquisition; sampled masses come
+        nested populations, from its one acquisition. Sampled masses come
         from nested integer counts. The subset relation with host error and
         the complete-norm bound of the producing receipt, its qualified
         state error when available and its probability window otherwise, are
@@ -706,8 +729,7 @@ class QLSAnalysis(Result):
         return self
 
     def validate_plan(self, plan):
-        """Bind output normalization, physical mass and artifact frames to the selected QLS
-        route.
+        """Bind output normalization, physical mass and artifact frames to the selected QLS route.
 
         Identical success and physical populations share one computed mass
         on the exact and sampled routes, so the two published masses of an

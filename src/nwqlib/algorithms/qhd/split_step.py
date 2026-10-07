@@ -36,8 +36,9 @@ Strang splitting.
 
 Time accuracy has three separate parts, for a fixed grid, fixed V, fixed
 schedule parameters and coefficients a and b with four bounded continuous
-derivatives. The constants depend on operator norms, commutators and
-schedule derivatives and are not uniform as s tends to zero, the grid is
+derivatives. The constants depend on operator norms, commutators and schedule
+derivatives and are not uniform as the schedule parameter s of
+``CubicSchedule`` or ``ShiftedCubicSchedule`` tends to zero, the grid is
 refined or a penalty grows.
 
 1. Coefficient quadrature. The midpoint rule's remainder
@@ -106,8 +107,7 @@ from nwqlib._validation import GLOBAL_PHASE_STATE_ROUNDOFF, UNIT_ROUNDOFF
 # including primes and a DST-I logical length with a large prime factor,
 # with 80-digit mpmath sums on three unit inputs each. The largest error it
 # measured was 0.80 in these units, for the forward FFT at K = 2
-# (2026-09-26, revision aede9fd119563d63562c9afed4b00021920560c6, Python
-# 3.12.14, NumPy 2.5.2, mpmath 1.3.0, macOS arm64). A measurement can
+# (2026-09-26, Python 3.12.14, NumPy 2.5.2, mpmath 1.3.0, macOS arm64). A measurement can
 # falsify C but cannot prove a bound for every length. Registered in
 # docs/ENGINEERING_CONSTANTS.md. Revisit when SciPy changes its FFT backend
 # or the canary fails.
@@ -151,9 +151,8 @@ EIGENVALUE_ROUNDOFF = 13
 # about 1.6 MB of modules and caches once. The cases were three-step
 # evolutions on both boundaries and both kinetic models, with d = 1 to 3 and
 # K = 4 to 128 and with d = 4 to 8 and K = 2 and 4, at most 300000 points,
-# in two runs on 2026-09-27 at develop
-# 21d75e3c13a38c10988eb5e649a9567897751f87, whose evolve forms the scaled
-# kinetic and potential moments. The two runs differed by up to 1426 bytes
+# in two runs on 2026-09-27, with evolve forming the scaled kinetic and
+# potential moments. The two runs differed by up to 1426 bytes
 # at one d, so the traced figures vary between runs by that much.
 # SCRATCH_BYTES_PER_AXIS charges 4096 (d + 1), above every measured case.
 # Registered in docs/ENGINEERING_CONSTANTS.md. Revisit when SciPy changes
@@ -333,8 +332,8 @@ def _kinetic_axis(state, axis, angles, scale, periodic):
     Both sine and the identity satisfy ``g(x)/g(pi/2) >= 2 x/pi``, so
     ``E_m/E_max >= (K + 1)**-2``. Under the normal relative-rounding
     premises of evolve, the computed ratio differs by a relative O(u).
-    On a 64-bit array host ``K + 1 <= 2**63``, so its square is of order
-    at least ``2**-252``, far above the normal-range floor ``2**-1022``.
+    On a 64-bit array host ``K + 1 <= 2**63``, so the square of that ratio
+    is of order at least ``2**-252``, far above the normal-range floor ``2**-1022``.
     This argument does not cover underflow in the population products.
     The division and square add two roundings per mode. Including the
     population reductions over the other axes, a conservative relative
@@ -433,7 +432,7 @@ def evolve(grid, kinetic_model, reconstruction, dt, state, *, start, ceiling=Non
     """Return the final restricted state after one Strang step per stored step weight, and its observed state budget.
 
     ``state`` is the unit start vector of length ``K**d`` in lexicographic
-    grid order (``theory.restricted_basis``), and the potential is
+    grid order (``binary`` module docstring), and the potential is
     ``potential_diagonal`` of ``reconstruction``, whose ``step_weights``
     give one step each. Reshaped in C order to ``(K,) * d``, axis j is
     variable j, because the lexicographic position is
@@ -638,7 +637,7 @@ def state_error(grid, kinetic_model, tables, step_weights, dt, *, start):
     the 64-by-64 periodic spectral grid of the unit square with
     ``ShiftedCubicSchedule(s=2e-4)``, 1000 integrated steps and total time
     10, where the kinetic angles dominate for an objective of order one
-    (2026-09-26, revision aede9fd119563d63562c9afed4b00021920560c6). The
+    (2026-09-26). The
     ``expm_multiply`` budget is first order in the same way. The
     relative-roundoff charges assume round-to-nearest binary64 arithmetic
     without overflow or underflow, as in ``evolve``.
@@ -782,15 +781,14 @@ def sizes(grid, tables, num_steps, start_work):
     formed. The potential moment (``_potential_moment``) writes into the
     angle array, which holds no live data at that point, and traced 296
     bytes beyond it. The traced excess that ``SCRATCH_BYTES_PER_AXIS``
-    covers includes both (2026-09-26, revision
-    aede9fd119563d63562c9afed4b00021920560c6). The scaled potential moment
-    traced the same 296 bytes on arrays of 256 to 2**20 entries
-    (2026-09-27, develop a6db3600b682c84575c6b892005c9d3cbe427bcf with
-    this change, Python 3.12.14 and NumPy 2.5.2 on macOS arm64). The last two terms are the measured transform-scratch
-    allowance, ``SCRATCH_BYTES_PER_POINT`` for the native plans and buffers
-    of ducc0.fft with one worker and ``SCRATCH_BYTES_PER_AXIS`` for Python
-    and NumPy objects. The start vector is formed before these arrays, and
-    its explicit payload, at most ``24 D + 8 d K`` bytes
+    covers includes both (2026-09-26). The scaled potential moment traced
+    the same 296 bytes on arrays of 256 to 2**20 entries (2026-09-27,
+    Python 3.12.14 and NumPy 2.5.2 on macOS arm64). The last two terms are
+    the measured transform-scratch allowance, ``SCRATCH_BYTES_PER_POINT``
+    for the native plans and buffers of ducc0.fft with one worker and
+    ``SCRATCH_BYTES_PER_AXIS`` for Python and NumPy objects. The start
+    vector is formed before these arrays, and its explicit payload, at most
+    ``24 D + 8 d K`` bytes
     (``initial_state.restricted_state``), fits within
     ``64 D + 32 (d + 1) K`` term by term. Its complex result is the state already counted
     here. The readout of ``method._execute_theory`` runs after these arrays

@@ -33,7 +33,6 @@ from nwqlib.subroutines.trotterization import (
     evaluate_trotter_bound,
     select_trotter_step_count,
     trotter_bound_coefficient,
-    trotter_error_bound,
 )
 from nwqlib.subroutines.trotterization import error_budget
 from nwqlib.subroutines.trotterization.error_budget import (
@@ -46,7 +45,7 @@ from nwqlib.subroutines.trotterization.error_budget import (
 def test_fixed_step_bound_owner_matches_selector_and_monomial() -> None:
     operator = _anchor_two_qubit()
     time = 0.7
-    single = trotter_error_bound(operator, time=time, order=2)
+    single = evaluate_trotter_bound(operator, time=time, steps=1, order=2)
 
     for steps in (1, 2, 7):
         assert evaluate_trotter_bound(
@@ -295,8 +294,8 @@ def test_commuting_hamiltonian_has_zero_bound_and_exact_circuit() -> None:
     """
 
     hamiltonian = SparsePauliOp.from_list([("ZI", 0.5), ("IZ", 0.3), ("ZZ", 0.2)])
-    assert trotter_error_bound(hamiltonian, time=0.7, order=1) == 0.0
-    assert trotter_error_bound(hamiltonian, time=0.7, order=2) == 0.0
+    assert evaluate_trotter_bound(hamiltonian, time=0.7, steps=1, order=1) == 0.0
+    assert evaluate_trotter_bound(hamiltonian, time=0.7, steps=1, order=2) == 0.0
     selection = select_trotter_step_count(
         hamiltonian, time=0.7, error_budget=1.0e-6, order=1
     )
@@ -312,7 +311,7 @@ def test_rejects_nonpositive_inputs_and_invalid_operators() -> None:
     with pytest.raises(ValueError, match="evolution time must be positive"):
         select_trotter_step_count(hamiltonian, time=0.0, error_budget=0.1)
     with pytest.raises(ValueError, match="evolution time must be positive"):
-        trotter_error_bound(hamiltonian, time=-1.3, order=2)
+        evaluate_trotter_bound(hamiltonian, time=-1.3, steps=1, order=2)
     with pytest.raises(ValueError, match="error budget must be positive"):
         select_trotter_step_count(hamiltonian, time=1.0, error_budget=0.0)
     with pytest.raises(ValueError, match="error budget must be positive"):
@@ -328,8 +327,8 @@ def test_rejects_nonpositive_inputs_and_invalid_operators() -> None:
             error_budget=0.1,
         )
     with pytest.raises(ValueError, match="coefficients must be real"):
-        trotter_error_bound(
-            SparsePauliOp.from_list([("XX", 0.5 + 0.1j)]), time=1.0, order=1
+        evaluate_trotter_bound(
+            SparsePauliOp.from_list([("XX", 0.5 + 0.1j)]), time=1.0, steps=1, order=1
         )
 
 
@@ -386,7 +385,6 @@ def test_selection_record_round_trips_through_json() -> None:
         "bound_method": "pauli_triangle",
         "bound_value_status": "structural_upper_bound",
         "bound_variant": "exact_census",
-        "coefficient_arithmetic": "outward_float64_scaled",
         "algebraic_work_counts": {
             "pauli_terms": 3,
             "pair_commutation_checks": 3,
@@ -410,7 +408,7 @@ def test_huge_times_select_steps_and_raise_for_an_unrepresentable_fixed_bound() 
     selection = select_trotter_step_count(hamiltonian, time=1.0e200, error_budget=0.1, order=1)
     assert selection.step_count > 2**1000 and 0.0 < selection.bound_value <= 0.1
     with pytest.raises(ValueError, match="overflows at evolution time"):
-        trotter_error_bound(hamiltonian, time=1.0e155, order=1)
+        evaluate_trotter_bound(hamiltonian, time=1.0e155, steps=1, order=1)
 
 
 def test_machine_precision_imaginary_residues_are_accepted() -> None:
@@ -425,11 +423,11 @@ def test_machine_precision_imaginary_residues_are_accepted() -> None:
     dressed = SparsePauliOp(
         ["ZZ", "XI"], coeffs=np.array([0.5 + 1.0e-17j, 0.25 - 5.0e-18j])
     )
-    bound = trotter_error_bound(dressed, time=0.5, order=1)
+    bound = evaluate_trotter_bound(dressed, time=0.5, steps=1, order=1)
     assert np.isfinite(bound) and bound > 0.0
     complex_op = SparsePauliOp(["ZZ", "XI"], coeffs=np.array([0.5 + 0.1j, 0.25]))
     with pytest.raises(ValueError, match="must be real"):
-        trotter_error_bound(complex_op, time=0.5, order=1)
+        evaluate_trotter_bound(complex_op, time=0.5, steps=1, order=1)
 
 
 @pytest.mark.parametrize("order", [1, 2])
@@ -611,7 +609,6 @@ def test_relaxed_prefix_step_relation_on_the_xyz_witness() -> None:
     )
     assert (full.step_count, loose.step_count) == (1, 2)
     assert (full.bound_variant, loose.bound_variant) == ("exact_census", "relaxed_prefix")
-    assert full.coefficient_arithmetic == loose.coefficient_arithmetic == "outward_float64_scaled"
     w_full = error_budget._bound_coefficient_evaluation(operator, order=2).coefficient
     w_loose = error_budget._bound_coefficient_evaluation(
         operator, order=2, bound_variant="relaxed_prefix"
@@ -642,7 +639,9 @@ def test_common_steps_and_emitted_subtotal_on_the_worked_values() -> None:
 
 
 def _census_of(terms):
-    return error_budget._pauli_bound_coefficient_from_terms(tuple(terms), 2)
+    return error_budget._pauli_bound_coefficient_from_terms(
+        tuple(terms), 2, choose=lambda E, N: ("exact_census", 65536)
+    )
 
 
 def test_common_step_acceptance_branches() -> None:
@@ -804,7 +803,7 @@ def test_controlled_suzuki_step_is_the_symmetric_product_of_its_terms() -> None:
     np.testing.assert_allclose(unitary[1::2, 1::2], expected, rtol=0.0, atol=1e-12)
     np.testing.assert_allclose(unitary[0::2, 0::2], np.eye(4), rtol=0.0, atol=1e-12)
     exact = expm(-1j * step_time * operator.to_matrix())
-    certified = trotter_error_bound(operator, time=step_time, order=2)
+    certified = evaluate_trotter_bound(operator, time=step_time, steps=1, order=2)
     assert np.linalg.norm(expected - exact, 2) <= certified
 
 
@@ -868,7 +867,6 @@ def test_public_census_admits_its_triple_table_before_building_it(monkeypatch) -
     for helper, arguments in (
         (select_trotter_step_count, {"time": 1.0, "error_budget": 0.1}),
         (evaluate_trotter_bound, {"time": 1.0, "steps": 3}),
-        (trotter_error_bound, {"time": 1.0}),
     ):
         with pytest.raises(ValueError, match="requested expression stage needs work="):
             helper(operator, order=2, max_bytes=limit, **arguments)
@@ -882,7 +880,8 @@ def test_public_census_admits_its_triple_table_before_building_it(monkeypatch) -
         trotter_bound_coefficient(operator, order=2, max_work=0)
     monkeypatch.undo()
     terms = tuple(error_budget._validated_terms(operator))
-    unadmitted = error_budget._upward_float(error_budget._pauli_bound_coefficient_from_terms(terms, 2).coefficient)
+    unadmitted = error_budget._upward_float(error_budget._pauli_bound_coefficient_from_terms(
+        terms, 2, choose=lambda E, N: ("exact_census", 65536)).coefficient)
     assert trotter_bound_coefficient(operator, order=2) == unadmitted
 
 

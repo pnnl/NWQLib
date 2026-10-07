@@ -24,10 +24,12 @@ class LCHSRefinement(Record):
     `result.verify(checks=...)`, for example
     `result.verify(checks=LCHSRefinement(components=("duhamel",)))`.
     `components` is the only required argument. The call returns
-    `(receipt, facts)`. `facts` holds the refined physical L2 components and
+    `(receipt, facts)`: a `VerificationReceipt` that records the check, its
+    raw values and the numerical calls it made, and a tuple of `FramedFact`
+    records that cite the receipt. `facts` holds the refined physical L2 components and
     their sum carried into the requested output, `algorithmic_approximation`,
     which `result.assess` can use. A request for `"spectral_norms"` alone
-    leaves `facts` empty. The receipt holds every computed value.
+    leaves `facts` empty.
     Refinement defines no pass or fail check.
 
     Planning leaves two components unknown for a dense A, the Duhamel
@@ -130,9 +132,10 @@ def _component_values(plan, result, payload):
     Only listed_only error terms are read, and each must keep its planned
     physical frame, so a refined value cannot enter the wrong output frame.
     """
-    # Result facts contain actual host application sums. Quantum construction
-    # facts already belong to its selected numerical recipe. Never recompute
-    # either owner merely to obtain a component for this later propagation.
+    # Classical Result facts are the host application sums, and
+    # selected_grid.host_applications checks their receipts against the Plan
+    # first. Quantum facts come from the selected numerical recipe. Neither
+    # is recomputed to obtain a component for this propagation.
     if plan.execution == "classical" and payload is not None:
         from .selected_grid import host_applications
         host_applications(plan, result, payload)
@@ -175,7 +178,7 @@ def _fixed_pf(plan, grid, checks, counts):
     raw = {"psd_shift":grid.shift}
     # The saved node table is read once per distinct node, before the
     # application loop, and evaluated at each application's saved
-    # (elapsed_time, step_count); no Pauli decomposition runs. The grid's
+    # (elapsed_time, step_count). No Pauli decomposition runs. The grid's
     # dense L and H (32*d**2 bytes) stay live beside it.
     selected = [app for app, on in zip(grid.applications, active, strict=True) if on]
     certified = iter(_fixed_trotter_certificate_records(nodes=stored_pf_nodes(grid.payload),
@@ -259,7 +262,8 @@ def refine(plan, result, *, checks):
                 None, "selected physical bound or complete output propagation is unavailable") for name in exported]
     from nwqlib.problems.records import UNSPECIFIED_UNIT
     # In du/dt=-A*u+b, A*T is dimensionless. A supplied time unit therefore
-    # fixes the reciprocal generator unit; absent time units stay unspecified.
+    # fixes the reciprocal generator unit. Without a time unit the generator
+    # unit stays unspecified.
     generator_unit = UNSPECIFIED_UNIT if problem.time_unit is None else (
         problem.time_unit if problem.time_unit.dimension == "dimensionless" else
         Unit(symbol=f"1/({problem.time_unit.symbol})", dimension="custom"))
@@ -336,6 +340,8 @@ def refine(plan, result, *, checks):
                 final_time=problem.elapsed_time, node_count=len(rec.source_nodes),
                 lambda_min_before_psd_conversion=minimum, matrix_norm=matrix_norm,
                 max_bytes=checks.max_bytes, max_dense_work=checks.max_dense_work-counts["dense_work"])
+            # Match inhomogeneous_theory's charge with matrix_norm supplied:
+            # 8*d for the stable source norm and 32 for the scalar log formula.
             counts["dense_work"] += 8*problem.dimension+32
             counts["duhamel_bound_completed"] += 1
             bound = None if evaluated.unusable_nonzero or not isfinite(evaluated.value) else evaluated.value

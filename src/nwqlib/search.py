@@ -1,4 +1,8 @@
-"""Finite ranking of explicitly selected science and its original resource evidence."""
+"""Pareto ranking of candidate Plans of one Problem.
+
+The objectives are requested shots, logical width or predicted time, read from
+the candidates' stored resource estimates and forecasts.
+"""
 
 from dataclasses import dataclass, field
 from hashlib import sha256
@@ -43,7 +47,7 @@ class Candidate:
         plan: Required, positional. A Plan from [`plan`][nwqlib.scientist.plan].
         allocation: The devices granted to a run of this Plan
             (`Allocation`), needed for device forecasts.
-        facts: Accuracy evidence (`FramedFact` records) to assess with this
+        facts: Error evidence (`FramedFact` records) to assess with this
             candidate's forecast.
         reference: Target reference (`TargetReference`) to assess with it.
             No reference value is computed.
@@ -70,8 +74,10 @@ class Objective(Record):
 
     - `requested_shots` sums the shots that the Plan's readouts request.
     - `logical_width` is the largest width, in qubits, of one execution at
-      one location. It is not a sum over executions that run at the same
-      time.
+      one location. A location is a name assigned to a Program register,
+      such as `logical_device` ([resource
+      locations](../resources.md#choose-the-location-of-a-count)). It is not
+      a sum over executions that run at the same time.
     - `predicted_seconds` sums the predictions of one device timing model
       and scope over the Plan's executions, under a serial schedule declared
       with `ResourceContext(batch_schedule="serial")`. The sum stays a
@@ -84,7 +90,9 @@ class Objective(Record):
             predictions are summed, required for `predicted_seconds`.
         scope: Default `None`. Timing scope of those predictions:
             `"selected_acquisition"`, `"acquisition_overhead"` or
-            `"native_call_wall"`. Required for `predicted_seconds`.
+            `"native_call_wall"`. [Check device fit and run
+            time](../profiles.md) says what each scope covers. Required for
+            `predicted_seconds`.
 
     Raises:
         ValueError: If `predicted_seconds` lacks `model_id` or `scope`, or
@@ -120,7 +128,8 @@ class ObjectiveValue(Record):
             this value answers.
         value: Exact nonnegative rational value (`Rational`), or `None` when
             unavailable.
-        unit: `count` for shots and width, `s` for predicted seconds.
+        unit: `Unit(symbol="count", dimension="count")` for shots and width,
+            `Unit(symbol="s", dimension="time")` for predicted seconds.
         status: `"exact"`, `"conditional"` or `"unavailable"`.
         sources: Content hashes of the stored resource quantities, experiments
             or predictions that the value is computed from. Nonempty for an
@@ -211,10 +220,12 @@ class SearchSelection(Record):
         objectives: The minimized objectives, in the order given.
         values: One [`ObjectiveValue`][nwqlib.search.ObjectiveValue] per row
             and objective, in row order.
-        nondominated: Indices of the rows on the Pareto front, recomputed on
-            validation.
-        incomparable: Indices of the rows with an unavailable objective,
-            recomputed on validation.
+        nondominated: Default `None`. Indices of the rows on the Pareto front.
+            Validation recomputes them from `values` and replaces any value
+            given.
+        incomparable: Default `None`. Indices of the rows with an unavailable
+            objective. Validation recomputes them from `values` and replaces
+            any value given.
         prior_work: The supplied records of earlier work of each row, each
             record kept as often as it was supplied.
         work: The [`SearchWork`][nwqlib.search.SearchWork] of the scan that
@@ -363,7 +374,7 @@ class SearchResult:
 
 
 def _comparison_identity(comparison):
-    """Hash existing immutable identifiers; no Plan serialization or hydration.
+    """Hash the existing immutable identifiers, without Plan serialization or hydration.
 
     The Comparison and its rows are frozen, so the identity is stored on the
     Comparison object at the first call (outside its dataclass fields, so
@@ -477,8 +488,8 @@ def _objective_value(row, objective, arithmetic, profile_points):
                 reason="direct readouts do not specify the complete adaptive acquisition population"
             )
         # The construction fold deliberately counts MeasurementBatch work only.
-        # Direct Experiment readouts are separate actual Plan declarations;
-        # their population must not disappear into that fold's structural zero.
+        # Direct Experiment readouts are separate actual Plan declarations.
+        # Their population must not disappear into that fold's structural zero.
         for experiment in direct:
             if experiment.observation.kind == "estimated_observable":
                 return result(reason="provider-managed estimation has no selected raw shot count")
@@ -671,7 +682,7 @@ def scan(
         raise ValueError("finite candidate count exceeds max_candidates")
     _frontier_size(count, len(objectives), max_pair_comparisons, max_values)
     arithmetic = ExactArithmetic(max_integer_bits=max_integer_bits)
-    # One _profile_points evaluation per Plan object for this scan; the rows
+    # One _profile_points evaluation per Plan object for this scan. The rows
     # keep their Plans alive, so the object id stays unique during the call.
     profiled = {}
 

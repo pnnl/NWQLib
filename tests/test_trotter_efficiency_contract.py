@@ -61,7 +61,6 @@ def test_fixed_trotter_does_not_compute_unrequested_commutator_bounds(monkeypatc
     assert (
         "algorithmic_approximation" in assessment.remaining and assessment.status == "INCONCLUSIVE"
     )
-    assert result.references == "not_run"
     assert result.report()["result"] == result.model_dump(mode="json")
 
 

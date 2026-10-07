@@ -214,7 +214,7 @@ def test_integrated_rule_is_exact_when_the_hamiltonians_commute(schedule, steps)
             dt = total_time / steps
             r = result.plan.reconstruction
             norms = [norm for norm, _rows in owner._generator_norms(
-                method.theory_flavor, method, owner._grid(result.plan), r.support_values, r.steps, r.step_weights)]
+                method.theory_flavor, method, owner._grid(result.plan), r.support_values, r.step_weights)]
             for k, norm in enumerate(norms):
                 part = _integral(a, k * dt, (k + 1) * dt, scale)
                 assert abs(norm - part) <= 64 * U * part

@@ -1,4 +1,4 @@
-"""Save the actual selected walk, never replan or regenerate acquisitions."""
+"""Save and reload a bound Lanczos Plan without replanning or rerunning its circuits."""
 
 from nwqlib._choice_archive import unsupported_archive_format
 from nwqlib.blocks._archive import read_blocks, write_blocks
@@ -18,7 +18,7 @@ def save(plan, files):
     derives it again from the saved operator.
     """
     return dict(
-        format="lanczos/6",
+        format="lanczos/7",
         plan=plan.to_record(),
         problem=files.write_problem(plan.problem),
         output=files.write_output(plan.output),
@@ -46,8 +46,8 @@ def load(saved, files):
     """
     from .method import Lanczos, _plan_readout
 
-    if saved.get("format") != "lanczos/6":
-        raise unsupported_archive_format("Lanczos archive", saved.get("format"), "lanczos/6")
+    if saved.get("format") != "lanczos/7":
+        raise unsupported_archive_format("Lanczos archive", saved.get("format"), "lanczos/7")
     fields = dict(saved["method"])
     fields["initial_state"] = (
         None if saved["initial"] is None else files.read_state(saved["initial"])

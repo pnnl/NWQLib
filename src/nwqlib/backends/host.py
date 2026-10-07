@@ -1,4 +1,7 @@
-"""Actual local in-process numerical target, distinct from selected method code."""
+"""Target of host kernels, the classical routines a Method selects.
+
+They run synchronously in this Python process and return the ``host_scalars`` readout.
+"""
 
 from .capabilities import BackendCapability, BackendTarget
 

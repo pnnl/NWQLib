@@ -10,10 +10,10 @@ paper-scale circuit:
   stored blocks and preparation (``rotation_population``), which planning
   publishes for the one-hot encoding as a ``ResourceLaw`` with metric
   ``arbitrary_rotations``, and the same classification of the computed
-  angles of a binary circuit (``_binary_population``);
+  angles of a binary circuit (``_binary_population``).
 - for an explicit total synthesis budget, the Clifford replacements that the
   budget pays for, the per-rotation allowance and a leading-order T estimate
-  (``synthesis_projection``);
+  (``synthesis_projection``).
 - the error sources of one circuit, each named separately with its own status
   (``circuit_resources``), and the totals of an augmented-Lagrangian run or a
   box refinement over its circuits and shots (``run_resources``).
@@ -74,8 +74,8 @@ from .validation import _normal_range
 # compiled by NWQEC 0.1.2 at a total budget of 1e-4 gave 348 T against the
 # estimate 392.9 (docs/algorithms/qhd.md, "Fault-tolerant resources", gives
 # the instance), a model discrepancy, not an error bar. That comparison ran
-# on 2026-09-26 at revision 418f9907ec4d629011486c14eb23cf4fdbdd1d3e with
-# Python 3.12.14, Qiskit 2.5.2 and NWQEC 0.1.2 on macOS arm64. Registered in
+# on 2026-09-26 with Python 3.12.14, Qiskit 2.5.2 and NWQEC 0.1.2 on macOS
+# arm64. Registered in
 # docs/ENGINEERING_CONSTANTS.md. Revisit with a qualified synthesis law.
 T_PER_PRECISION_BIT = 3
 
@@ -114,7 +114,9 @@ def _mcx_rotations(controls):
 
 
 def _normal_scaling(magnitude, s, name):
-    """Raise unless ``magnitude 2**-s`` is finite and at least ``2**-1022``, compared by exponents without scaling.
+    """For positive ``magnitude``, raise unless ``magnitude * 2**-s`` is finite
+    and at least ``2**-1022``, compared by exponents without scaling.
+    Zero is admitted only when ``s <= 1021``.
 
     With ``magnitude = m 2**e``, ``0.5 <= m < 1`` (``frexp``),
     ``magnitude >= 2**(s - 1022)`` holds exactly when ``e - 1 >= s - 1022``.
@@ -124,7 +126,7 @@ def _normal_scaling(magnitude, s, name):
                          "census and the error ledger assume")
 
 
-def _projector_slots(block, wraps=None):
+def _projector_slots(block, wraps):
     """Return ``(slots, fixed_arbitrary, fixed_t)`` of one emitted number-projector block.
 
     The block applies ``exp(-i a (prod n - I/2**s))`` on s qubits as the
@@ -156,9 +158,10 @@ def _projector_slots(block, wraps=None):
     multi-controlled X gates, the ``+-pi/8`` phases and the T gates.
 
     Range admission (``validation._normal_range``). The nonzero angle a
-    needs ``a 2**-s >= 2**-1022``, which also covers the smallest
-    parameter-dependent rotation of each lowering, ``a/2**(s - 1)`` from
-    s = 3 and a and ``a/2`` below, and the native compensation ``a/2**s``.
+    needs ``|a| 2**-s >= 2**-1022``, which also covers the smallest
+    parameter-dependent rotation magnitude of the P, CP or MCPhase lowering,
+    ``|a|/2**(s - 1)`` for s >= 3, ``|a|`` for s = 1 and ``|a|/2``
+    for s = 2, and the native compensation magnitude ``|a|/2**s``.
     A nonzero wrapped phase lambda of the phase-diagonal provider needs
     ``|lambda| 2**-s >= 2**-1022`` for its repeated means and final child
     phase. Every scaling is then an exact power-of-two scaling of a normal
@@ -328,7 +331,7 @@ def merge_angles(slots, angles, occurrences=1):
     is O(N log N) comparisons in the general case, and its arrays are charged
     (``_admit_inspection``). ``_binary_population`` sorts the final
     magnitudes, so insertion order has no effect on its
-    ``RotationPopulation``, and the counts and angle magnitudes are unchanged.
+    ``RotationPopulation``.
     """
     magnitudes, counts = np.unique(np.abs(np.asarray(angles, dtype=np.float64)), return_counts=True)
     for magnitude, count in zip(magnitudes.tolist(), counts.tolist(), strict=True):
@@ -355,10 +358,9 @@ def _distinct_blocks(steps):
 def _unique_work(entries):
     """Return ``W_unique(N) = 2N ceil(log2 max(2, N)) + 8N``, the comparison-visit charge of grouping N angles.
 
-    A conservative comparison-visit charge for a qualified
-    introsort/merge-sort owner of ``np.unique``, an O(N log N) accounting
-    envelope with an explicit sort premise, not a claim that unique is
-    universally linear (``_census_sizes``).
+    A conservative comparison-visit charge for a qualified introsort or
+    merge-sort owner of ``np.unique``, an O(N log N) accounting envelope with
+    an explicit sort premise (``_census_sizes``).
     """
     entries = int(entries)
     return 2 * entries * (max(2, entries) - 1).bit_length() + 8 * entries
@@ -367,7 +369,7 @@ def _unique_work(entries):
 def _dense_census_bytes(entries):
     """Return ``D_dense(E) = H0 + 112E + (16 + L(n)) floor(E/2)`` for a dense phase table of ``E = 2**n`` entries.
 
-    A sufficient envelope for the current ``_dense_diagonal_angles``,
+    A sufficient envelope for ``_dense_diagonal_angles``,
     including its returned Python list, excluding the input phase array
     already held by the construction:
 
@@ -375,12 +377,12 @@ def _dense_census_bytes(entries):
        admitted float64 array. A dtype conversion or a Python-list input
        would add its conversion buffer.
     2. In ``np.angle(np.exp(1j*values))`` the complex multiplication and
-       exponential can overlap at 32E; the exponential and real argument
+       exponential can overlap at 32E. The exponential and real argument
        array overlap at 24E.
     3. At a recursion level with m real entries, ``q = m/2``. The enclosing
        real array, difference input, copied transform array, two copied
        butterfly halves, arithmetic intermediates, index conversion and
-       gathered result fit a 32E numerical envelope; the final gather can
+       gathered result fit a 32E numerical envelope. The final gather can
        have ``8m + 40q = 28m`` numerical bytes. The wrapping and recursion
        numerical phases are successive.
     4. The Gray-code helper (``subroutines._multiplexors.gray_code_rotation_angles``)
@@ -392,17 +394,19 @@ def _dense_census_bytes(entries):
        most 24E, old and replacement destination slots during growth 32E,
        the ``.tolist()`` and filtered-comprehension slots at most
        ``24q <= 12E``. ``72E`` covers these, rounded up from 68E.
-    6. Steps 3 and 5 give 104E; 112E is a conservative whole-level envelope.
+    6. Steps 3 and 5 give 104E. 112E is a conservative whole-level envelope.
 
     This is a length-E law even when the block reports zero rotations: the
     helper still examines its dense phase array. For ``E < 2`` the helper
     returns immediately and H0 suffices. The array and Python-object
     allowances are qualified for 64-bit CPython 3.12.14, NumPy 2.5.2, SymPy
-    1.14.0 and Pydantic 2.13.5; they are not process-RSS bounds and exclude
+    1.14.0 and Pydantic 2.13.5. They are not process-RSS bounds and exclude
     allocator fragmentation, module import/code initialization and
     independently owned native-library memory.
     """
     entries = int(entries)
+    # H0 = 65536 bytes is the bookkeeping allowance BOOKKEEPING_BYTES of nwqlib.evidence._work
+    # (docs/ENGINEERING_CONSTANTS.md). The other 65536 terms of this module are the same H0.
     if entries < 2:
         return 65536
     n = entries.bit_length() - 1
@@ -462,7 +466,7 @@ def _census_sizes(rows, *, cp_pair, kinetic_occurrences, grouping_bytes, qft_gat
     scalar conversions need at most a further ``4L(b_C)`` at one merge
     operation, with ``b_C = bit_length(max(1, C_cap))``. A returned dense
     list is input to grouping and stays live there, 40N for its floats and
-    slots; Walsh angles are the construction's array and belong to the
+    slots. Walsh angles are the construction's array and belong to the
     model and cache charge. The block-local envelope is
 
     ``B_group(N) = H0 + 64N + B_merge_lists(N) + 4L(b_C)``,
@@ -503,8 +507,6 @@ def _census_sizes(rows, *, cp_pair, kinetic_occurrences, grouping_bytes, qft_gat
     largest = previous_list = dense_work = merge_visits = 0
     grouping_work = int(grouping_work) + int(cp_pair)
     for entries, n, multiplicity, dense in rows:
-        if entries < 1 or n < 0 or multiplicity < 1:
-            raise ValueError("invalid census metadata")
         lists = (56 + _integer_storage(max(1, n).bit_length())) * n
         group = 65536 + 64 * n + lists + 4 * count_bytes
         local = group
@@ -523,7 +525,7 @@ def _census_sizes(rows, *, cp_pair, kinetic_occurrences, grouping_bytes, qft_gat
 
 
 def _admit_inspection(plan, held_bytes=0):
-    """Admit the binary rotation census of a Plan (``_admit_census``); None for a one-hot Plan."""
+    """Admit the binary rotation census of a Plan (``_admit_census``), or return None for a one-hot Plan."""
     if plan.method.encoding != "binary":
         return None
     r = plan.reconstruction
@@ -534,13 +536,15 @@ def _admit_inspection(plan, held_bytes=0):
     source, _ = _binary_source_reservation(
         len(plan.problem.variables), method.num_grid_points, specs,
         method.num_steps, method.trotter_order)
+    # The source reservation already includes the table payload, which _admit_census adds again, so it
+    # is subtracted here to count it once.
     payload = 8 * sum(e for e, _ in specs)
     return _admit_census(method, r.steps, r.support_values,
                          held_bytes=int(held_bytes) + source - payload)
 
 
 def _admit_census(method, steps, support_values, held_bytes=0):
-    """Admit the binary rotation census of ``circuit_resources`` or ``run_resources``; return its grouping and bytes.
+    """Admit the binary rotation census of ``circuit_resources`` or ``run_resources`` and return its grouping and bytes.
 
     Resource inspection admits distinct-block grouping, the full dense-table
     angle-formation workspace, NumPy unique/grouping arrays, Python
@@ -548,9 +552,9 @@ def _admit_census(method, steps, support_values, held_bytes=0):
     against the Plan's QHD limits. Dense formation is charged by the
     phase-table length even when no rotation survives. Count integers are
     sized from the total occurrence bound. The model, its admitted
-    construction cache and the caller's retained data share the same byte
+    construction cache and the caller's live data share the same byte
     limit with the census. The array and Python-object allowances describe
-    the qualified runtime's named allocations; module initialization and
+    the qualified runtime's named allocations. Module initialization and
     process RSS have separate scope.
 
     The grouping bytes (``_inspection_group_sizes``) are checked before the
@@ -558,8 +562,8 @@ def _admit_census(method, steps, support_values, held_bytes=0):
     (``_binary_population``). The census work of ``_census_sizes`` is the
     named inspection ``QHD.max_work`` charge, checked before any dense
     formation or sort. The returned bytes are ``held_bytes`` (the caller's
-    retained data), the Plan's support tables, 8 bytes per entry, and
-    ``B_census``; the caller passes them to ``binary.BinaryModel`` as its
+    live data), the Plan's support tables, 8 bytes per entry, and
+    ``B_census``. The caller passes them to ``binary.BinaryModel`` as its
     held bytes, whose baseline admission (``BinaryModel.__init__``,
     documented under ``construction``) adds the model, one current
     construction per table and the largest synthesis or use workspace
@@ -606,7 +610,7 @@ def _admit_census(method, steps, support_values, held_bytes=0):
     return distinct, kinetic, held + workspace
 
 
-def _binary_population(reconstruction, model, distinct, kinetic):
+def _binary_population(model, distinct, kinetic):
     """Classify every single-axis rotation of the emitted binary circuit from its stored blocks.
 
     ``model`` is the Plan's ``binary.BinaryModel``, whose ``construction``
@@ -665,7 +669,10 @@ def _onehot_wrap_census_bytes(method, reconstruction):
     """Return (source, local) for a one-hot census that can call the wrap.
 
     Source tables, initial vectors, step/block records and support positions
-    follow the existing table and record inventories. The local population
+    follow the inventories that planning charges (the table metadata of
+    ``method._support_table_bytes``, the stored initial vectors of
+    ``method._initial_state_bytes``, ``_STEP_BYTES`` and ``_BLOCK_BYTES``, as
+    in ``method._binary_source_reservation``). The local population
     uses the qualified census rate 1024+4*L(bit_length(C)) per possible
     magnitude, with C bounding total rotation multiplicity. It prices
     Counter keys/counts, sorting and RotationPopulation construction.
@@ -683,10 +690,10 @@ def _onehot_wrap_census_bytes(method, reconstruction):
     ``_projector_slots`` has at most ``4s - 5`` parameter rotations at s >= 3,
     and for each ``controls`` value the two copies on each half contribute
     at most ``16 controls`` fixed rotations or T gates, since
-    ``_mcx_rotations(h)`` totals at most ``8h``; summing controls from 2 to
+    ``_mcx_rotations(h)`` totals at most ``8h``. Summing controls from 2 to
     s-1 gives less than ``8 s**2`` with the parameter rotations, and
     ``16 s**2`` also covers s = 1 and 2. Structured preparation adds at most
-    ``d(K-1)`` magnitudes and ``2d(K-1)`` rotations; the ``"none"``
+    ``d(K-1)`` magnitudes and ``2d(K-1)`` rotations. The ``"none"``
     preparation adds none. ``L(b) = 32 + 4 ceil(max(1,b)/30)`` is
     ``binary._integer_storage``. The source inventory charges the table
     payload once, the table metadata ``65536 + 6144T + (24 + L(b_d))M +
@@ -761,7 +768,7 @@ def _plan_population(plan, held_bytes=0):
     """Return the ``RotationPopulation`` of a native QHD Plan's circuit, for either encoding.
 
     A binary census is admitted first (``_admit_inspection``) with the
-    caller's retained data ``held_bytes``, and its model is built under that
+    caller's live data ``held_bytes``, and its model is built under that
     reservation. A one-hot census whose stored blocks use the diagonal
     provider admits its wrapped-phase cache beside its source records and
     the same ``held_bytes`` (``_admitted_onehot_population``).
@@ -772,7 +779,7 @@ def _plan_population(plan, held_bytes=0):
     if method.encoding != "binary":
         return _admitted_onehot_population(method, r, held_bytes)
     distinct, kinetic, held = _admit_inspection(plan, held_bytes)
-    return _binary_population(r, _inspection_model(_grid(plan), method, r.support_values, held), distinct, kinetic)
+    return _binary_population(_inspection_model(_grid(plan), method, r.support_values, held), distinct, kinetic)
 
 
 def _inspection_model(grid, method, support_values, held_bytes):
@@ -834,8 +841,7 @@ def _distance_bound(angle):
     155,063 distinct magnitudes, ``synthesis_projection`` took 0.85 s
     against 1.83 s, next to 11.9 s of planning, each projection time the
     best of three runs at the budget ``E = 1e-4``. These timings ran on
-    2026-09-26 at revision ef056ac9ac9be97ec234e5bcd7e8f5d1b8d68c9f with
-    Python 3.12.14 and Qiskit 2.5.2 on an Apple M3 Max. On this instance the
+    2026-09-26 with Python 3.12.14 and Qiskit 2.5.2 on an Apple M3 Max. On this instance the
     Taylor bound added about 0.98 s to projection beside 11.9 s of planning,
     and both bounds made zero replacements. The Taylor bound is used for
     its tighter error charge, which can admit more replacements on other
@@ -1018,7 +1024,7 @@ def synthesis_projection(population, epsilon):
             replaced += count
             charge += count * distance
     rotations = candidates - replaced
-    # Publish Cbar first, then allocate down64(E - Cbar) so the stored fields compose within E.
+    # Publish E_C = up64(C) first, then allocate down64(E - E_C) so the stored fields compose within E.
     replacement_error = _upward(charge)
     remaining = _downward(Fraction(epsilon) - Fraction(replacement_error))
     rotation_epsilon = _downward(Fraction(remaining) / rotations) if rotations else None
@@ -1246,8 +1252,11 @@ def circuit_resources(plan, *, synthesis_epsilon=None):
     product formula and every error source against the finite model, each with its
     status. With a synthesis budget E it also replaces by Clifford gates the rotations
     that the budget pays for and estimates the T count of the rest, the leading term
-    `T_exact + 3 M log2(1/epsilon_rot)` of the typical Ross-Selinger count
-    (arXiv:1403.2975v3). The guide's
+    ``T_exact + 3 M log2(1/epsilon_rot)`` of the typical Ross-Selinger count
+    (arXiv:1403.2975v3). Here ``T_exact``, M and ``epsilon_rot`` are the `exact_t`,
+    `rotations` and `rotation_epsilon` fields of
+    [`QHDSynthesisProjection`][nwqlib.algorithms.qhd.resources.QHDSynthesisProjection].
+    The guide's
     [fault-tolerant resources](../../algorithms/qhd.md#fault-tolerant-resources) section
     gives the replacement rule, the budget split and a comparison with a compiled count.
 
@@ -1389,7 +1398,7 @@ def circuit_resources(plan, *, synthesis_epsilon=None):
     grid = _grid(plan)
     binary = method.encoding == "binary"
     model = _inspection_model(grid, method, r.support_values, census[2]) if binary else None
-    population = (_binary_population(r, model, *census[:2]) if binary
+    population = (_binary_population(model, *census[:2]) if binary
                   else _admitted_onehot_population(method, r))
     projection = None if synthesis_epsilon is None else synthesis_projection(population, synthesis_epsilon)
     bound = evolution_bound(plan)
@@ -1531,7 +1540,7 @@ class QHDRunResources(Record):
 def _run_entry(label, plan_id, resources, result, epsilon, held_bytes=0):
     """Return the ``QHDRunEntry`` of one round or level from its record, its resources and its inner result, if any.
 
-    ``held_bytes`` prices the retained inner Results that stay live while
+    ``held_bytes`` prices the inner Results that the run result holds while
     this entry's Plan is inspected (``_plan_population``).
 
     The rotation count is the per-circuit law value that the round's or
@@ -1641,9 +1650,10 @@ def run_resources(result, *, synthesis_epsilon=None):
     if execution != "quantum":
         raise ValueError("run_resources describes the circuits of a run with execution='quantum'")
     epsilon = None if synthesis_epsilon is None else float(synthesis_epsilon)
-    # The retained inner Results stay live while each Plan is inspected; their kept states, 16 bytes per
-    # entry, and the tables of the other distinct Plans, 8 bytes per entry, are the caller's retained data
-    # of the census admission (_admit_inspection), which reserves the inspected Plan's own tables once.
+    # The inner Results that the run result holds stay live while each Plan is inspected. Their
+    # kept states, 16 bytes per entry, and the tables of the other distinct Plans, 8 bytes per
+    # entry, are the caller's live data of the census admission (_admit_inspection), which
+    # reserves the inspected Plan's own tables once.
     states = sum(16 * inner.data.artifact(inner.artifact).array.size
                  for *_, inner in rows if inner is not None and inner.artifact is not None)
     plans = {id(inner.plan): inner.plan for *_, inner in rows if inner is not None}

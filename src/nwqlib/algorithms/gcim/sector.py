@@ -29,16 +29,17 @@ def sector_expectations(
     value equal to a sector's eigenvalue does not prove membership in that
     sector, and the result is marked `"validation_gate": False`.
 
-    For the computed probability vector p, `m_j = sum_(x: x_j = 1) p_x`
-    gives `<N> = sum_j m_j` and `<S_z> = (1/2) sum_j (-1)**j m_j` by
-    exchanging two finite sums. At most q marginal scalars are stored, and
-    `fsum` then forms the two weighted sums. Multiplication by one half is
-    exact when it does not underflow. With `P = sum p_x`, `M = N/2`,
-    `gamma(r) = r*u/(1 - r*u)` and unit roundoff u, each marginal error is
-    at most `gamma(M - 1)*m_j` for normal arithmetic. The difference from
+    For the computed probability vector p of a q-qubit state,
+    ``m_j = sum_(x: x_j = 1) p_x`` gives ``<N> = sum_j m_j`` and
+    ``<S_z> = (1/2) sum_j (-1)**j m_j`` by exchanging two finite sums.
+    At most q marginal scalars are stored, and `fsum` then forms the two
+    weighted sums. Multiplication by one half is exact when it does not
+    underflow. With ``N = 2**q`` entries in p, ``P = sum p_x``, ``M = N/2``,
+    ``gamma(r) = r*u/(1 - r*u)`` and unit roundoff u, each marginal error is
+    at most ``gamma(M - 1)*m_j`` for normal arithmetic. The difference from
     the occupation-diagonal dot products on the same p is
-    `T_N <= q*P*[gamma(N) + gamma(M - 1) + u*(1 + gamma(M - 1))]` for `<N>`
-    and `T_{S_z} <= T_N/2` (Higham, Accuracy and Stability of Numerical
+    ``T_N <= q*P*[gamma(N) + gamma(M - 1) + u*(1 + gamma(M - 1))]`` for `<N>`
+    and ``T_{S_z} <= T_N/2`` (Higham, Accuracy and Stability of Numerical
     Algorithms, 2nd ed., Lemma 3.1 and Chapter 3,
     doi:10.1137/1.9780898718027). Absolute underflow terms are added if
     reached.

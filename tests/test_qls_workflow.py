@@ -149,7 +149,7 @@ def test_real_pass_right_singular_semantics_on_non_normal_blocks() -> None:
 def test_auto_kappa_resolves_small_magnitudes_without_squaring() -> None:
     values = np.concatenate([np.geomspace(1.0e-5, 1.0, 64), -np.geomspace(1.0e-5, 1.0, 64)])
     matrix = np.diag(values).astype(complex)
-    sigma_min, sigma_max, method = qls_numerical._extreme_singular_values(matrix, hermitian=True)
+    sigma_min, sigma_max, method = qls_numerical._extreme_singular_values(matrix, hermitian=True, events={"eigvalsh_calls": 0})
     # Full magnitudes retain the small eigenvalues of an indefinite matrix.
     np.testing.assert_allclose(
         (sigma_min, sigma_max),

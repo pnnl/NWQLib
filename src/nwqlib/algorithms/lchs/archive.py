@@ -1,4 +1,4 @@
-"""LCHS numerical records, arrays and known bindings at an execution frontier.
+"""Save and load the numerical records, arrays and block bindings of an LCHS Plan.
 
 The record list belongs to this method's actual selected payload. It contains
 data only: no provider functions, arbitrary Python objects or SDK gate schema.
@@ -20,7 +20,7 @@ from .method import LCHS
 from .primary_records import LCHSReconstruction
 
 # Layout of the saved LCHS manifest: Method, Plan, Problem, output, native data and selected blocks.
-FORMAT = "lchs/9"
+FORMAT = "lchs/10"
 
 
 _RECORD_MODULES = {name: "nwqlib." + module for module, names in (

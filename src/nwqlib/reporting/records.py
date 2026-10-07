@@ -12,8 +12,10 @@ class ReportSection(FieldSerializedRecord):
 
     Build it with keyword arguments, for example
     `ReportSection(title="Reference", lines=("E_ref = -1.0",), data={"E_ref": -1.0})`.
-    `title` is required. The [GCiM guide](../algorithms/gcim.md) builds one
-    to show a stored reference panel next to an obtained energy.
+    `title` is required. In the [GCiM guide](../algorithms/gcim.md),
+    `chemistry_reference_report_section` returns one to show a stored
+    reference panel next to an obtained energy. `Result.report()` does not
+    include such a section, so print or store it beside the report.
 
     Args:
         title: Section title.

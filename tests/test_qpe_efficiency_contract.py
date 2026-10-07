@@ -278,7 +278,7 @@ def test_census_preselection_selects_full_relaxed_or_refuses_before_structure(mo
     # (error_budget.census_work). In bytes (error_budget.census_bytes) the relaxed envelope needs
     # 67912 at its largest fitting block and the full one at least 69768 at every checked block.
     full = census(max_work=22)
-    assert (full.bound_variant, full.coefficient_arithmetic) == ("exact_census", "outward_float64_scaled")
+    assert full.bound_variant == "exact_census"
     assert (full.pair_commutation_checks, full.nested_commutation_checks) == (3, 5)
     # p = 8 commuting terms on q = 4 qubits: before the pair structure the full envelope (E = P = 28,
     # N = F = J = 140) charges 400 and the relaxed one 156. The built structure has E = N = 0, and the
@@ -601,8 +601,7 @@ def test_shared_reductions_equal_the_per_prefix_subtotal_at_scalar_boundaries(
 
     evaluation = eb._BoundCoefficientEvaluation(
         coefficient=Fraction(W), pauli_term_count=len(coefficients), pair_commutation_checks=0,
-        nested_commutation_checks=0, bound_variant="exact_census",
-        coefficient_arithmetic=eb.COEFFICIENT_ARITHMETIC)
+        nested_commutation_checks=0, bound_variant="exact_census")
     kw = dict(coefficients=coefficients, identity=identity, tau=tau,
               allowances=dict.fromkeys(ps, budget), dropped_mass=loss, max_steps=max_steps)
     if outcome != "ok":
@@ -818,7 +817,8 @@ def test_census_reserves_the_common_step_before_choosing_its_variant(monkeypatch
         plan(problem, method=method.revise(max_work=63_857, max_bytes=125_871), seed=7)
     labels, coefficients = zip(*_six_qubit_ring())
     with pytest.raises(ValueError, match="^QPE census admission"):
-        powers._census(labels, coefficients, 6, RWPE(initial_state=np.eye(64)[5], tau=0.1, max_work=1))
+        powers._census(labels, coefficients, 6, RWPE(initial_state=np.eye(64)[5], tau=0.1, max_work=1),
+                       reservation=(0, 0))
 
 
 def test_pre_census_reservation_covers_every_census_coefficient_and_block():
@@ -849,7 +849,7 @@ def test_pre_census_reservation_covers_every_census_coefficient_and_block():
         reservation = powers._common_recheck_law(None, *law)
         for variant, block in product(("exact_census", "relaxed_prefix"), (1, 2, 65536)):
             W = eb._pauli_bound_coefficient_from_terms(
-                tuple(zip(labels, coefficients)), 2, variant=variant, block=block).coefficient
+                tuple(zip(labels, coefficients)), 2, choose=lambda E, N: (variant, block)).coefficient
             assert powers._rational_bits(W) <= bound
             assert all(a <= b for a, b in zip(powers._common_recheck_law(W, *law), reservation))
 

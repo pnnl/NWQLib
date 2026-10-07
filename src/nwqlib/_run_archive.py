@@ -33,8 +33,9 @@ A failed commit deletes the new files, refunds their byte charge and restores th
 previous dictionary values.
 
 Loading restores these rows as they are, registering a prepared handle's
-circuit file and decoding it at the handle's first native use. It does not plan, lower, transpile,
-simulate or analyze. Published arrays are read once from the journal.
+circuit file and decoding it at the handle's first native use. It does not plan,
+lower, transpile, simulate or analyze. Published arrays are read from the journal
+at their first use, once per payload.
 """
 
 from contextlib import closing
@@ -133,7 +134,11 @@ class _CacheEntries(dict):
 
 
 def bind_caches(run):
-    """Attach dirty keys to the actual finite Run cache owners."""
+    """Initialize the Run's cache bookkeeping and wrap its caches in ``_CacheEntries``.
+
+    The definition, handle and backend caches are wrapped so that later
+    mutations are recorded for the next checkpoint.
+    """
     state = run._state
     changes = state["cache_changes"] = {}
     state["cache_rows"], state["cache_file_refs"], state["cache_keys"] = {}, {}, {}
@@ -254,7 +259,7 @@ def _copy_cache_files(run, files):
     rows of the journal copy stay valid unchanged. A row that names a file
     outside the cache namespace needs that file among the ones the new
     folder's selection wrote. Returns False, having copied nothing, when a
-    change is uncommitted or such a file is absent; the caller then writes
+    change is uncommitted or such a file is absent. The caller then writes
     the caches again.
     """
     from nwqlib._choice_archive import CACHE_FILE_PREFIX
@@ -278,8 +283,14 @@ def _copy_cache_files(run, files):
     return True
 
 
-def _save_caches(run, plan, files):
-    """An explicit full snapshot visits existing entries once."""
+def _save_caches(run, files):
+    """Serialize the Run's caches once each as cache rows of a Run copy.
+
+    The rows hold the frontier, the method context, the definition and Aer
+    caches, and for an Aer backend its handles. ``save`` uses it for an
+    in-memory Run, or when the cache files cannot be copied as they are
+    (``_copy_cache_files``).
+    """
     rows = [("frontier", _frontier(run, files)), ("method", _method_frontier(run, files))]
     for group, cache in enumerate(run._state["definitions"]):
         for key, value in cache.items():
@@ -320,7 +331,7 @@ def _load_noise_model(data):
     The model starts from the saved basis gates (``_noise_model_data``). Adding
     an error also adds its gate to the basis, as it did when the original
     model received that error, so the rebuilt basis equals the saved one.
-    Gate constructors consume the saved parameters; converting just a gate name
+    Gate constructors consume the saved parameters. Converting just a gate name
     to a fixed unitary would discard parameterized rotations. No new channel or
     full-system matrix is constructed beyond QuantumError's own admission.
     """
@@ -375,7 +386,7 @@ def _load_noise_model(data):
     return model
 
 
-def _load_caches(run, plan, rows, files):
+def _load_caches(run, rows, files):
     """Restore every saved cache row as saved, with no recomputation.
 
     Definitions, lowered Aer sources, the active frontier and the method
@@ -392,7 +403,7 @@ def _load_caches(run, plan, rows, files):
     change records are cleared at the end, so the next checkpoint writes only
     later changes.
     """
-    state = run._state
+    state, plan = run._state, run.plan
     from nwqlib._prepared_execution import PreparedHandle, _admit_readout
     lazy = []
     for key, data, _ in rows:
@@ -439,8 +450,9 @@ def _load_caches(run, plan, rows, files):
             # The circuit file is registered now and decoded at the handle's
             # first native use (PreparedHandle._restore_native).
             files.read_path(data["circuit"])
-            # The held Experiment and construction resolve the readout, so the
-            # point is selected once.
+            # Select the receipt's construction once and resolve the readout
+            # from that Experiment and construction, because
+            # ``Realization.resolved_observation`` would select it again.
             experiment, construction = record.realization._selected_construction(plan)
             if experiment.batch is None:
                 setting, spec = experiment.setting, experiment.observation
@@ -600,7 +612,7 @@ def restore_caches(run, files, selection):
     state["archive_files"], state["archive_selection"] = files, selection
     rows = list(state["journal"].rows("cache"))
     if rows:
-        _load_caches(run, run.plan, rows, files)
+        _load_caches(run, rows, files)
     _initialize_file_refs(run, files)
     for path in files.path.iterdir():
         if path.is_file() and path.name.startswith(CACHE_FILE_PREFIX) and path.name not in files._written_files:
@@ -627,8 +639,8 @@ def cache_record(run):
     New files are written here, before the journal commit, under names that no
     committed row uses. An in-memory Run has no archive files and returns the
     tracked changes only, so ``finish_caches`` can clear or undo them. If
-    serialization fails, the new files are deleted and the dictionaries restored
-    before the error propagates.
+    serialization fails, ``finish_caches`` deletes the new files and restores
+    the dictionaries before the error propagates.
     """
     state, files = run._state, run._state.get("archive_files")
     changes = tuple(state["cache_changes"].items())
@@ -667,17 +679,7 @@ def cache_record(run):
         refs = tuple((key, _references(row, files)) for _, key, row in records)
         return _CacheDelta(tuple(records), tuple(deleted), changes, tuple(newkeys), refs, method, frontier)
     except BaseException:
-        _, size = files._finish_cache_files(committed=False)
-        state["external_bytes"] -= size
-        for _, (cache, key) in reversed(changes):
-            previous = cache.previous.pop(key, _ABSENT)
-            if previous is _ABSENT:
-                dict.pop(cache, key, None)
-            else:
-                dict.__setitem__(cache, key, previous)
-        state["cache_changes"].clear()
-        if "cache_previous_specializations" in state:
-            state["specializations"] = state.pop("cache_previous_specializations")
+        finish_caches(run, _CacheDelta(changes=changes), committed=False)
         raise
 
 
@@ -732,7 +734,7 @@ def finish_caches(run, delta, *, committed):
         state["cache_frontier_dirty"] = False
     state.pop("cache_previous_specializations", None)
     # Visit only files touched by this delta. A zero-reference cache file is
-    # deleted after its new row pointers committed; immutable input files stay.
+    # deleted after its new row pointers committed. Immutable input files stay.
     for name in candidates:
         if refs.get(name, 0) or name in state["cache_permanent_files"]:
             continue
@@ -759,7 +761,7 @@ def write_caches(run, records=(), *, deleted=(), **kwargs):
 
 
 def release_native(run):
-    """Keep the current frontier; release only saved, fully collected handles."""
+    """Keep the current frontier. Release only saved, fully collected handles."""
     state = run._state
     files = state.get("archive_files")
     released, kept = [], []
@@ -805,7 +807,12 @@ def release_native(run):
 
 
 def result_record(result, run):
-    """Keep the captured cap prefix and byte counter, without another full trace."""
+    """Return the saved row of a Run's Result.
+
+    The row holds the Result, the number of limit amendments its trace holds
+    and its stored-data byte count. The trace's amendments and limits must be
+    the first amendments of the Run and the limits they produce.
+    """
     trace = result.data.trace
     count = len(trace.limit_amendments)
     history = run.limit_amendments
@@ -829,11 +836,11 @@ def save(run, *, path):
     object is decoded or encoded again (``_copy_cache_files``). Otherwise the
     copy's cache rows are rewritten to point to newly written files, and
     released native handles are loaded again so that they can be written. An
-    in-memory Run writes its
-    header, limits, amendments, RNG, receipts, events, observations with their
-    collection order, checkpoint, arrays and Result into the new journal in one
-    transaction. On any failure the new folder is removed. The live Run's journal,
-    files and counters are unchanged either way.
+    in-memory Run writes its header, limits, amendments, RNG, receipts, events,
+    observations with their collection order, checkpoint, arrays and Result into
+    the new journal in one transaction. On any failure the new folder is
+    removed. The live Run's journal, files and counters are unchanged either
+    way.
 
     Every file of the new folder is charged to a file-byte allowance of
     ``max_data_bytes``. The files that ``ArchiveFiles`` writes are charged before
@@ -859,10 +866,10 @@ def save(run, *, path):
             _write_manifest(run, files)
             journal = state["journal"]
             # A durable Run whose cache rows are committed copies the files
-            # they name; its journal copy keeps those rows unchanged.
+            # they name. Its journal copy keeps those rows unchanged.
             copied = journal is not None and _copy_cache_files(run, files)
             files._begin_cache_files()
-            caches = () if copied else _save_caches(run, run.plan, files)
+            caches = () if copied else _save_caches(run, files)
             files._finish_cache_files(committed=True)
             # A durable run copies its existing journal. An in-memory run writes its
             # current frontier once, including the original limit and every amendment.
@@ -936,16 +943,16 @@ def load(path, *, backend, method=None, progress=None):
     The Plan is restored through the Method's archive hook and must reproduce the
     saved Plan identity. The journal is then opened by ``Run._restore``, cache rows
     are restored as saved (a prepared handle's circuit is decoded at its first
-    native use), published arrays are read once from the journal, and a
-    saved Result is attached to the journal's trace with the cap prefix and byte
-    counter it captured. The Result keeps its own identity and observations, but
-    events and submissions that the Run revised after the Result, for example
-    through a later cancellation and its refresh, appear in that trace with their
-    later status. Nothing is planned, lowered, acquired or analyzed. The folder is
-    opened without a file-byte allowance, because every file in it was charged
-    when it was written. After
-    loading, each file write is charged to the Run's stored-data total
-    (``_bind_capacity``). ``progress`` is the reopened Run's progress callback.
+    native use), published arrays are read from the journal at their first use,
+    and a saved Result is attached to the journal's trace with the cap prefix
+    and byte counter it captured. The Result keeps its own identity and
+    observations, but events and submissions that the Run revised after the
+    Result, for example through a later cancellation and its refresh, appear in
+    that trace with their later status. Nothing is planned, lowered, acquired or
+    analyzed. The folder is opened without a file-byte allowance, because every
+    file in it was charged when it was written. After loading, each file write
+    is charged to the Run's stored-data total (``_bind_capacity``).
+    ``progress`` is the reopened Run's progress callback.
     """
     from nwqlib._choice_archive import load_plan
     from nwqlib._run_journal import RUN_FORMAT, unsupported_run_format
@@ -975,7 +982,7 @@ def load(path, *, backend, method=None, progress=None):
                            saved_limits=ExecutionLimits.model_validate(header["limits"]), progress=progress)
         # Published numerical outputs have one durable payload in SQLite. The
         # Run's store registers each manifest and reads its payload on first
-        # use (ArtifactStore.get), once per payload digest; an array read
+        # use (ArtifactStore.get), once per payload digest. An array read
         # before the Run closes stays available after it closes.
         results = list(run._state["journal"].rows("result"))
         if results:

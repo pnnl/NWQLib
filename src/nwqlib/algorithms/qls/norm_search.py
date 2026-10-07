@@ -35,7 +35,7 @@ def _success_window(center: float, eta: float) -> tuple[float, float]:
     """Return the Dalzell arXiv:2406.12086v2 Eq. 17 lower/upper success-probability bounds.
 
     ``center (1-eta)^2/(1+eta)^2 <= p_succ <= center + 4 eta^2/(1+eta)^2``
-    for Algorithm 1 with KR parameter ``eta``.
+    for Algorithm 1 with kernel-reflection (KR) parameter ``eta``.
     """
 
     return (
@@ -82,13 +82,14 @@ def _noisy_binary_search_norm(
 ) -> tuple[float, str, dict[str, Any]]:
     """Run the Dalzell arXiv:2406.12086v2 Sec. 5.2 noisy binary search on the log ladder.
 
-    Validation-scale probability evaluations stand in for the sampled KP
-    estimates (Eqs. 26-27: success probability ``t^2/(t^2 + ||x||^2)``,
-    equal to 1/2 exactly at ``t = ||x||``); the recorded repetition counts
-    are planned accounting, not executed batches. The elimination step
-    keeps the half of the active set containing the KP threshold crossing,
-    which is the kept-approximation invariant the reference's
-    correctness argument relies on. Because ``cos^2(theta_t)`` increases
+    Validation-scale probability evaluations stand in for the sampled kernel
+    projection (KP) estimates (Eqs. 26-27: success probability
+    ``t^2/(t^2 + ||x||^2)``, equal to 1/2 exactly at ``t = ||x||``). The
+    recorded repetition counts are planned accounting, not executed
+    batches. The elimination step keeps the half of the active set
+    containing the KP threshold crossing, which is the kept-approximation
+    invariant the paper's correctness argument relies on. Because
+    ``cos^2(theta_t)`` increases
     with ``t`` (Eq. (44), p. 10), a probe with success probability above 1/2
     lies above ``||x||``, so candidates above the probe are eliminated. The
     Sec. 5.2 text (p. 7) states the opposite direction ("eliminate all
@@ -136,39 +137,20 @@ def _noisy_binary_search_norm(
         )
     if len(active) == 1:
         chosen = float(candidates[active[0]])
-        chosen_rule = "single_element"
     else:
         chosen = float(exp(0.5 * (ladder[active[0]] + ladder[active[-1]])))
-        chosen_rule = "active_span_geometric_midpoint"
     return (
         chosen,
         "noisy_binary_search",
         {
-            "strategy": "noisy_binary_search",
-            "paper_section": "Dalzell arXiv:2406.12086v2 Sec. 5.2 noisy binary search in log space",
             "candidate_ladder": candidates,
-            "search_eta": search_eta,
-            "search_eta_source": "eta = sqrt(1/8) [Dalzell arXiv:2406.12086v2 Sec. 5.2]",
-            "kp_success_model": (
-                "cos^2(theta_t) = t^2/(t^2 + ||x||^2) [Dalzell arXiv:2406.12086v2 Eqs. 26-27, 44]"
-            ),
             "search_rounds": search_rounds,
-            "search_rounds_formula": "ceil(log_1.5(|T|)) [Dalzell arXiv:2406.12086v2 Sec. 5.2]",
             "repetitions_per_estimate": repetitions,
-            "repetitions_formula": (
-                "ceil(72*ln(40*ceil(log_1.5(|T|)))) [Dalzell arXiv:2406.12086v2 Eq. 28]"
-            ),
             "queries_per_trial": queries_per_trial,
             "rounds": rounds,
             "final_active_t": [float(candidates[index]) for index in active],
-            "chosen_rule": chosen_rule,
-            "chosen_t": chosen,
             "planned_trials_total": repetitions * search_rounds,
             "planned_queries_total": (2 * repetitions * search_rounds * queries_per_trial),
-            "planned_queries_formula": (
-                "2*k*ceil(log_1.5(|T|))*ceil(kappa_be*ln(2/eta)/2) "
-                "[Dalzell arXiv:2406.12086v2 Eq. 29]"
-            ),
         },
     )
 
@@ -197,8 +179,8 @@ def _linear_kappa_sequence_norm(
     Dalzell states that overhead as ``O(1 + log2(kappa) - j)`` (p. 9). The
     model takes its constant as one. The per-trial query count uses the
     step's condition number ``2^j`` (property 1, p. 9) in place of
-    ``kappa``. Recorded counts are planned accounting, not executed batches;
-    the sequence terminates at the first sigma with ``f(sigma) = 0``
+    ``kappa``. Recorded counts are planned accounting, not executed batches.
+    The sequence terminates at the first sigma with ``f(sigma) = 0``
     (``sigma = 1/kappa_rounded``, the exact-norm system).
     """
 
@@ -295,29 +277,9 @@ def _linear_kappa_sequence_norm(
         final_t,
         "linear_kappa_sequence",
         {
-            "strategy": "linear_kappa_sequence",
-            "paper_section": "Dalzell arXiv:2406.12086v2 Sec. 5.3 linear-in-kappa sequence",
-            "kappa_rounded": kappa_rounded,
             "sequence_length": sequence_length,
             "visited_sigmas": visited_sigmas,
-            "detector_threshold": threshold,
-            "detector_eta": detector_eta,
-            "detector_eta_source": "eta = 0.025 [Dalzell arXiv:2406.12086v2 Sec. 5.1]",
-            "trials_per_candidate_formula": (
-                "ceil(100*ln(20*|T_step|))*(1 + log2(kappa_rounded) - j) "
-                "[Dalzell arXiv:2406.12086v2 Eq. 24 with |T_step| = 4; Sec. 5.3 log-log overhead]"
-            ),
-            "planned_queries_formula": (
-                "sum_j 2*k_j*|T_step|*ceil(2^j*ln(2/eta)/2) "
-                "[Dalzell arXiv:2406.12086v2 Eq. 25 with kappa -> 2^j; Sec. 5.3, Eqs. 41-42]"
-            ),
-            "early_stop_rule": (
-                "stop at the first sigma with f(sigma) = 0 (sigma = "
-                "1/kappa_rounded, the exact-norm system); within each step "
-                "the detector accepts the first threshold crossing"
-            ),
             "steps": steps,
-            "chosen_t": final_t,
             "planned_trials_total": planned_trials_total,
             "planned_queries_total": planned_queries_total,
         },
@@ -329,7 +291,6 @@ def _resolve_shortcut_norm(
     *,
     kappa_be: float,
     encoded_norm: float | None,
-    eta: float,
     factors=None,
     alpha: float | None = None,
     rhs: np.ndarray | None = None,
@@ -349,11 +310,11 @@ def _resolve_shortcut_norm(
     Args:
         requested: Numeric ``t`` or one of ``"grid"``,
             ``"noisy_binary_search"`` and ``"linear_kappa_sequence"``.
-        kappa_be: Polynomial-domain condition parameter bounding ``t``.
+        kappa_be: The reconstruction's ``polynomial_kappa`` (``method._realize``
+            passes ``r.polynomial_kappa``), which bounds ``t``. It is not the
+            encoded gap parameter ``kappa_be`` of ``QLSReconstruction``.
         encoded_norm: ``||(A/alpha)^{-1} b_hat||`` from the model's one
             reference solve, needed by the grid and noisy-search models.
-        eta: Kernel-reflection parameter of the selected polynomial, used
-            for the Eq. (17) window rows of the grid model.
         factors: Original ``OriginalSVD`` or ``OriginalEigensystem`` of
             ``A``, needed by the linear sequence.
         alpha: Selected encoding normalization, needed by the linear
@@ -412,13 +373,10 @@ def _resolve_shortcut_norm(
     first_detected = None
     for candidate in candidates:
         center = _success_center(encoded_norm, candidate)
-        lower, upper = _success_window(center, eta)
         rows.append(
             {
                 "t": float(candidate),
                 "predicted_success_probability": center,
-                "eq17_lower": lower,
-                "eq17_upper": upper,
                 "detected": center >= threshold,
             }
         )
@@ -431,13 +389,7 @@ def _resolve_shortcut_norm(
         chosen,
         "grid",
         {
-            "grid": candidates,
-            "trials_per_candidate": trials_per_candidate,
             "total_trials": trials_per_candidate * len(candidates),
-            "threshold": threshold,
             "rows": rows,
-            "chosen_t": chosen,
-            "best_t": float(best),
-            "paper_section": "Dalzell arXiv:2406.12086v2 Sec. 5.1 log-grid exhaustive search",
         },
     )

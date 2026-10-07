@@ -232,6 +232,28 @@ def test_supplied_complex_global_phase_survives_control_inverse_and_archive(
     assert loaded.plan.method.encoding._payload.circuit == encoding._payload.circuit
 
 
+def test_supplied_encodings_stay_distinct_and_the_default_quantum_plan_id_is_reproducible():
+    """Two supplied circuits with equal metadata get distinct selected identities, while the
+    default quantum QLS Plan, whose encoding the Method selects, gets one identity per input.
+    """
+    from qiskit import QuantumCircuit
+
+    operator = ingest_dense(np.eye(2))
+
+    def supplied(angle):
+        circuit = QuantumCircuit(1)
+        circuit.ry(angle, 0)
+        return select_block_encoding("supplied", BlockEncoding(
+            circuit=circuit, alpha=1.0, num_ancillas=0, system_qubits=1, error_bound=0.0,
+            implementation="supplied", metadata={}), operator=operator)
+
+    def default_plan():
+        return nwqlib.plan(LinearSystem(A=MATRIX, b=RHS), method=QLS(), output=Solution(), seed=7)
+
+    assert supplied(0.4).record.content_id != supplied(0.7).record.content_id
+    assert default_plan().content_id == default_plan().content_id
+
+
 @pytest.mark.parametrize(
     "output",
     [
@@ -936,7 +958,7 @@ def test_uncontrolled_adjoint_query_keeps_its_native_multiplexers_in_either_quer
                                       operator=ingest_dense(matrix))
         shared = {}
         queries = {controls: quantum._query_leaf(block, kind="test", controls=controls,
-                                                 basis=block.record.semantics.basis, reference=None)
+                                                 basis=block.record.semantics.basis)
                    for controls in (0, 1)}
         for controls in order:
             circuit = quantum._query_circuit(queries[controls], dict(adjoint=1, control_state=0),

@@ -11,7 +11,9 @@ from nwqlib.ir import (
 )
 ```
 
-A new Method ships a `case()` function that returns a `MethodCase`, and `check_method` runs it. With the reference Hadamard Method of `tests/_hadamard_method.py` on the import path:
+The Program records and expressions import from `nwqlib.ir`, the block functions and records from `nwqlib.blocks`, and `Experiment`, `ObservationSpec`, `ReadoutDetails`, `ObservationPoint`, `ObservableEstimateSpec`, `ReductionContext`, `Reducer`, `registered_reducer`, `Realization` and `RandomStreams` from `nwqlib.core.planning`. `PreparedHandle`, `ObservationChunk`, `Histogram`, `PreparedArtifact` and `ReducedValues` import from `nwqlib.execution`, `AmplitudeReadout` from `nwqlib.amplitudes`, `InputRef` from `nwqlib.core.records`, `MethodCase` and `check_method` from `nwqlib.algorithms.authoring`, and the registry entries from `nwqlib.algorithms`.
+
+A new Method ships a `case()` function that returns a `MethodCase`, and `check_method` runs it. The reference Hadamard Method lives in the repository's test suite, `tests/_hadamard_method.py`, and is not part of the installed package. In a source checkout with `tests/` on the import path, its case passes the check:
 
 ```python
 from nwqlib.algorithms.authoring import check_method
@@ -53,6 +55,10 @@ Subclass `Method`, give it a `descriptor`, and implement `plan` and `analyze`. T
         - error_model
         - verify
         - recover_analysis
+        - before_submit
+        - validate_point
+        - specialize_experiment
+        - selected_kernels
 
 ::: nwqlib.algorithms.protocol.AlgorithmDescriptor
     options:
@@ -62,33 +68,50 @@ Subclass `Method`, give it a `descriptor`, and implement `plan` and `analyze`. T
     options:
       heading_level: 3
 
+::: nwqlib.core.planning.RandomStreams
+    options:
+      heading_level: 3
+      members: false
+
 ::: nwqlib.problems.records.ProblemRecord.default_output
     options:
       heading_level: 3
+      show_root_full_path: true
 
 ::: nwqlib.core.planning.Plan._bind
     options:
       heading_level: 3
+      show_root_full_path: true
 
 ::: nwqlib.core.planning.Plan.resolve
     options:
       heading_level: 3
+      show_root_full_path: true
+
+::: nwqlib.core.planning.Realization
+    options:
+      heading_level: 3
+      members: false
 
 ::: nwqlib.core.analysis.Result._attach
     options:
       heading_level: 3
+      show_root_full_path: true
 
 ::: nwqlib.core.analysis.Result.validate_plan
     options:
       heading_level: 3
+      show_root_full_path: true
 
 ::: nwqlib.core.analysis.Result._validate_common_plan
     options:
       heading_level: 3
+      show_root_full_path: true
 
 ::: nwqlib.core.analysis.Result._summary_lines
     options:
       heading_level: 3
+      show_root_full_path: true
 
 ::: nwqlib._prepared_execution.PreparedHandle
     options:
@@ -321,7 +344,7 @@ A `Program` lists named nodes: register allocation, block calls, measurements, r
       heading_level: 4
       members: false
 
-## Select and lower blocks
+## Select blocks and build the Qiskit circuit {#select-and-lower-blocks}
 
 A Program calls blocks by signature name. Each `select_*` function returns a `SelectedBlock` whose record states the block's promised action, recipe and cost rules, and `lower_qiskit` builds the Qiskit circuit from the Program and its blocks. [Compose blocks](../blocks.md) composes a Pauli block encoding from these functions.
 
@@ -383,6 +406,16 @@ A Program calls blocks by signature name. Each `select_*` function returns a `Se
       heading_level: 3
       members: false
 
+::: nwqlib.blocks.records.BlockSemantics
+    options:
+      heading_level: 3
+      members: false
+
+::: nwqlib.blocks.records.SelectedKernel
+    options:
+      heading_level: 3
+      members: false
+
 ::: nwqlib.blocks.records.Primitive
     options:
       heading_level: 3
@@ -416,6 +449,26 @@ A Plan's experiments name the readout each circuit returns. Reducers that turn a
         - reject_unsupported_schedule
         - unsupported_schedule
 
+::: nwqlib.core.planning.ReadoutDetails
+    options:
+      heading_level: 3
+      members: false
+
+::: nwqlib.core.planning.ObservationPoint
+    options:
+      heading_level: 3
+      members: false
+
+::: nwqlib.amplitudes.AmplitudeReadout
+    options:
+      heading_level: 3
+      members: false
+
+::: nwqlib.core.planning.ObservableEstimateSpec
+    options:
+      heading_level: 3
+      members: false
+
 ::: nwqlib.core.planning.ReductionContext
     options:
       heading_level: 3
@@ -425,6 +478,16 @@ A Plan's experiments name the readout each circuit returns. Reducers that turn a
     options:
       heading_level: 3
 
+::: nwqlib.core.planning.Reducer
+    options:
+      heading_level: 3
+      members: false
+
+::: nwqlib.execution.ReducedValues
+    options:
+      heading_level: 3
+      members: false
+
 ::: nwqlib.execution.ObservationChunk
     options:
       heading_level: 3
@@ -433,7 +496,6 @@ A Plan's experiments name the readout each circuit returns. Reducers that turn a
         - declares_readout_of
         - from_histogram
         - histogram
-        - readout
         - validate_unit_bound
 
 ::: nwqlib.execution.Histogram
@@ -455,22 +517,27 @@ A Plan's experiments name the readout each circuit returns. Reducers that turn a
 
 ## Save and restore a method's data
 
-A Method whose Runs or Results are saved implements `save_archive(plan, files)` and `load_archive(saved, files)` and names its Result class in `result_type`. Both hooks receive an `ArchiveFiles` object, `save_archive` reads the bound blocks from `plan.blocks`, and [When the archive hooks are required](../own_circuit.md#when-the-archive-hooks-are-required) shows them for a small Method.
+A Method whose Runs or Results are saved implements `save_archive(plan, files)` and `load_archive(saved, files)` and names its Result class in `result_type`. Both hooks receive an `ArchiveFiles` object, `save_archive` reads the bound blocks from `plan.blocks`, and [When the archive hooks are required](../own_circuit.md#when-the-archive-hooks-are-required) shows them for a small Method. Import `write_blocks` and `read_blocks` from `nwqlib.blocks._archive`, a protected module that is a supported hook for Method authors ([supported protected extension hooks](../algorithm_protocol.md#supported-protected-extension-hooks)).
 
 ::: nwqlib._choice_archive.ArchiveFiles
     options:
       heading_level: 3
       members:
         - read_plan
+        - write_problem
         - read_problem
+        - write_output
         - read_output
         - write_state
+        - read_state
         - write_operator
+        - read_operator
         - read_path
 
 ::: nwqlib.core.planning.Plan.blocks
     options:
       heading_level: 3
+      show_root_full_path: true
 
 ::: nwqlib.blocks._archive.write_blocks
     options:

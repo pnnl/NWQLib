@@ -17,7 +17,7 @@ prerequisite. This comparison is NWQLib's own design.
 
 import math
 from itertools import repeat
-from typing import Literal
+from typing import ClassVar, Literal
 
 from pydantic import model_validator
 
@@ -106,9 +106,12 @@ class EnergyEndpoint(Record):
 
 
 def _operator_payload(operator, *, max_bytes):
-    """Explicit endpoint evidence, never run or cached by ordinary solve/analysis.
+    """Return the endpoint's operator table, ``terms`` for Pauli input or ``matrix_entries`` for a dense or compressed matrix, after a byte check.
 
-    Dense scans visit stored entries; CSR/CSC visit only nnz. The record stores
+    It is explicit endpoint evidence, never run or cached by ordinary solve
+    or analysis.
+
+    Dense scans visit stored entries, and CSR/CSC scans visit only nnz. The record stores
     one nonzero table under a known scalar/index envelope, not a Python RSS bound.
     No operator realization, Pauli transform or reference solve is performed.
 
@@ -145,7 +148,7 @@ def _operator_payload(operator, *, max_bytes):
     compressed rows still contribute index preparation, explicit zeros are
     priced before filtering, and dense zero matrices scan D^2 entries. No
     flattened row*D+column key is formed. Dense nonzero coordinates keep
-    row-major order; compressed extraction keeps its compressed-major order,
+    row-major order. Compressed extraction keeps its compressed-major order,
     including CSC. The extraction arrays are released before the table's
     JSON is serialized. The 32 per tuple is a logical field charge, not
     Python object storage. H0 is ``BOOKKEEPING_BYTES``.
@@ -203,7 +206,7 @@ def _operator_payload(operator, *, max_bytes):
         dense = operator.dense_array()
         rows, columns = np.nonzero(dense)
         values = dense[rows, columns]
-    # A real array's .imag would allocate a zero copy; its imaginary parts are 0.0.
+    # A real array's .imag would allocate a zero copy. Its imaginary parts are 0.0.
     imag = values.imag.tolist() if values.dtype.kind == "c" else repeat(0.0, values.size)
     entries = tuple(zip(rows.tolist(), columns.tolist(), values.real.tolist(), imag))
     return dict(matrix_entries=entries)
@@ -281,14 +284,12 @@ class EnergyShiftOptions(Record):
     tolerance: Nonnegative
     relation: Literal["pauli_table", "matrix_entries", "asserted"] = "pauli_table"
     assertion: Text | None = None
-    source: Source = _SOURCE
+    source: ClassVar[Source] = _SOURCE
 
     @model_validator(mode="after")
     def _relation(self):
         if (self.relation == "asserted") != (self.assertion is not None):
             raise ValueError("an asserted energy relation needs its explicit premise")
-        if self.source != _SOURCE:
-            raise ValueError("energy shift requires its actual comparison source")
         return self
 
     @classmethod
@@ -395,15 +396,16 @@ def _matched_coordinates(baseline, target):
 # For two finite binary64 values, float equality is equality of their
 # represented real values, and signed zeros represent the same real number.
 # Every finite binary64 number is an integer multiple of eta = 2**-1074 with
-# magnitude below 2**1024. For three such numbers the exact S = t-b-c is an
-# integer multiple of eta, so if S is nonzero then |S| >= eta; the
-# round-to-nearest basin of zero extends only to eta/2, so correctly rounding
-# S cannot give zero, and if S is zero its rounded value is zero. This holds
-# under gradual underflow, including subnormal operands and residuals, and
-# fails under flush-to-zero. CPython 3.12's fsum keeps exact nonoverlapping
-# partials and rounds their total under IEEE round-to-nearest-even
+# magnitude below 2**1024. For three such numbers t, b and c, the exact
+# S = t-b-c is an integer multiple of eta, so if S is nonzero then |S| >= eta.
+# The round-to-nearest basin of zero extends only to eta/2, so correctly
+# rounding S cannot give zero, and if S is zero its rounded value is zero.
+# This holds under gradual underflow, including subnormal operands and
+# residuals, and fails under flush-to-zero. CPython 3.12's fsum keeps exact
+# nonoverlapping partials and rounds their total under IEEE
+# round-to-nearest-even
 # (https://github.com/python/cpython/blob/v3.12.14/Modules/mathmodule.c#L1165-L1362,
-# https://docs.python.org/3.12/library/math.html#math.fsum); these
+# https://docs.python.org/3.12/library/math.html#math.fsum). These
 # implementation premises, not a small test, support the predicate.
 # Rounding each side first loses it: t == b+c accepts t = b = 1, c = eta,
 # whose exact residual is -eta.
@@ -434,33 +436,37 @@ def _relation_bytes(base_count, target_count, *, pauli_width=None):
     counted without materializing them. Existing endpoint
     objects belong to B_held and are not charged here.
 
-    Matrix relations, U = N_base + N_target: ``B_matrix = 192U + H0 +
-    B_coord_objects``. The 160U logical envelope covers converted
-    coordinates and values (32U), concatenated coordinates (16U), sorted
-    coordinates (16U), the returned permutation (8U), starts and group maps
-    (17U), base and target union arrays (at most 32U) and masks and gathered
-    comparison operands (at most 39U); 32U more covers sorting scratch and
-    buffer growth. NumPy 2.5.2 PyArray_LexSort sorts its two keys
-    sequentially by stable indirect sort; its copy branch uses 8U value
-    bytes and 8U index bytes, and the int64/intp and object indirect Timsort
-    keep a merge buffer of at most U/2 indices whose realloc can overlap old
-    and new buffers (8U), so 16U copy buffers plus 8U merge buffers fit the
-    extra 32U; fixed run stacks and headers belong to H0, and there is no
-    U*log(U) auxiliary array
+    Matrix relations, ``U = N_base + N_target``, where ``N_base`` and
+    ``N_target`` count the stored entries of the two endpoints:
+    ``B_matrix = 192U + H0 + B_coord_objects``. Here H0 is
+    ``BOOKKEEPING_BYTES`` and ``B_coord_objects`` charges newly boxed coordinate
+    integers. The 160U logical envelope covers converted coordinates and
+    values (32U), concatenated coordinates (16U), sorted coordinates (16U),
+    the returned permutation (8U), starts and group maps (17U), base and
+    target union arrays (at most 32U) and masks and gathered comparison
+    operands (at most 39U). 32U more covers sorting scratch and buffer
+    growth. NumPy 2.5.2 PyArray_LexSort sorts its two keys sequentially by
+    stable indirect sort. Its copy branch uses 8U value bytes and 8U index
+    bytes, and the int64/intp and object indirect Timsort keep a merge
+    buffer of at most U/2 indices whose realloc can overlap old and new
+    buffers (8U), so 16U copy buffers plus 8U merge buffers fit the extra
+    32U. Fixed run stacks and headers belong to H0, and there is no
+    ``U*log(U)`` auxiliary array
     (https://github.com/numpy/numpy/blob/v2.5.2/numpy/_core/src/multiarray/item_selection.c,
     https://github.com/numpy/numpy/blob/v2.5.2/numpy/_core/src/npysort/npysort_methods.cpp,
     https://github.com/numpy/numpy/blob/v2.5.2/numpy/_core/src/npysort/timsort.hpp,
     https://github.com/numpy/numpy/blob/v2.5.2/numpy/_core/src/npysort/timsort_generic.cpp).
     Coordinates beyond int64 use eight-byte object pointers to the
     endpoint's existing Python integers, which are borrowed, so this
-    implementation boxes no coordinate objects and ``B_coord_objects = 0``;
-    a conversion that boxed them would add ``2U*L(bit_length(D-1))``.
+    implementation boxes no coordinate objects and ``B_coord_objects = 0``.
+    A conversion that boxed them would add ``2U*L(bit_length(D-1))``, where
+    D is the matrix dimension and L is ``integer_object_bytes``.
 
     Pauli relations, N = N_base + N_target + 1 including the identity-shift
     contribution and q the label width: ``B_Pauli = [16 max(1,q) + 256]N +
     H0``. Four Unicode populations (original labels, unique's flattened
     copy, the permuted copy and the returned unique labels) take at most
-    4*max(1,q)*N bytes each; 256N covers values, inverse, count, group and
+    4*max(1,q)*N bytes each. 256N covers values, inverse, count, group and
     index arrays, temporary list references, grouped values, masks, gathers
     and sort workspace
     (https://github.com/numpy/numpy/blob/v2.5.2/numpy/lib/_arraysetops_impl.py).
@@ -475,8 +481,7 @@ def _relation_bytes(base_count, target_count, *, pauli_width=None):
 def _pauli_relation(baseline, target, shift, *, max_bytes):
     """Establish ``H_target - H_baseline = shift * I`` exactly from the two Pauli tables.
 
-    Establish the exact relation between the represented binary64
-    operators. Missing entries denote zero.
+    Missing entries denote zero.
 
     Every public Pauli ``OperatorInput`` is coalesced by
     ``operators/inputs.py::_coalesced_input``, which merges identical
@@ -485,31 +490,25 @@ def _pauli_relation(baseline, target, shift, *, max_bytes):
     coalesced tables. Thus each endpoint has at most one coefficient per
     word.
 
-    Each endpoint contains one coefficient per Pauli word. The relation
-    groups the baseline coefficient with a minus sign, the target
-    coefficient and the negative identity shift. A nonidentity group has at
-    most two contributions and the identity group at most three. Singletons
-    are compared with zero, pairs with exact negation, and triples with
-    ``_triple_zero`` under its stated CPython and IEEE premises. These tests
-    decide equality of the represented binary64 operators without a
-    tolerance. The Pauli workspace is
+    The relation groups the baseline coefficient with a minus sign, the
+    target coefficient and the negative identity shift. A nonidentity
+    group has at most two contributions and the identity group at most
+    three. Singletons are compared with zero, pairs with exact negation,
+    and triples with ``_triple_zero`` under its stated CPython and IEEE
+    premises. These tests decide equality of the represented binary64
+    operators without a tolerance. Pauli words are linearly independent,
+    so these conditions are equivalent to
+    ``H_target - H_baseline = shift * I``, where ``H_target`` and ``H_baseline``
+    are the two operators and I is the identity. With q the label width
+    and ``N_base`` and ``N_target`` the two stored term counts, the Pauli
+    workspace is
     ``[16*max(1,q)+256]*(N_base+N_target+1)+BOOKKEEPING_BYTES`` bytes.
 
-    For each nonidentity word, the merged signed contributions are at most
-    ``(-b, t)``. A singleton must equal zero. A pair must satisfy
-    ``a == -b``, exactly for represented finite binary64 values, including
-    signed zero. The identity receives at most ``(-b, t, -shift)``. Its zero
-    test is ``_triple_zero(t, b, shift)``, with the signs rearranged for the
-    signed array. Pauli words are linearly independent, so these conditions
-    are equivalent to ``H_target - H_baseline = shift * I``. Finite binary64
-    values are integer multiples of ``eta = 2**-1074``. A nonzero exact
-    three-term sum has magnitude at least eta, so rounding the exact total
-    to nearest cannot turn it into zero under gradual underflow.
-    ``_triple_zero`` also treats intermediate overflow as false: exactly
-    three finite operands with zero sum cannot require an overflowing
-    same-sign partial. This uses the CPython ``fsum`` and IEEE premises
-    stated above ``_triple_zero``. The contributions are grouped by label
-    with ``np.unique(..., return_inverse=True, return_counts=True)`` and a
+    The comment above ``_triple_zero`` gives the exact-zero argument under
+    the stated CPython and IEEE premises. Its docstring explains why an
+    intermediate overflow implies a nonzero exact three-term sum. The
+    contributions are grouped by label with
+    ``np.unique(..., return_inverse=True, return_counts=True)`` and a
     stable argsort. The exact relation concerns the coalesced binary64
     operators, not exact sums of the user's original decimal or duplicate
     coefficient stream before ingestion rounded it.
@@ -557,26 +556,30 @@ def _coordinates(entries, position, dimension):
 def _matrix_relation(baseline, target, shift, *, max_bytes):
     """Establish ``H_target - H_baseline = shift * I`` exactly from the two entry tables.
 
-    Establish the exact relation between the represented binary64
-    operators. Missing entries denote zero. Equal nonidentity and
+    Missing entries denote zero. Equal nonidentity and
     off-diagonal entries are compared directly, while each diagonal or
     identity shift is checked by an exact-zero sum under the supported IEEE
     arithmetic model. Matrix coordinates are merged without materializing
     missing diagonal entries. The comparison uses no tolerance.
 
     The union of stored coordinates is merged with ``np.lexsort((column,
-    row))``; no flattened ``row*D+column`` key is formed, since it can
-    overflow for a very large sparse dimension. The absent side of a union
-    key is zero. Imaginary parts must be equal on every union key and real
-    parts equal off the diagonal; each diagonal key must satisfy
-    ``_triple_zero(target_real, base_real, shift)``. If shift is zero these
+    row))``, where column and row are the coordinate vectors. No flattened
+    ``row*D+column`` key is formed, since it can overflow for a very large
+    sparse dimension D. The absent side of a union key is zero. Imaginary
+    parts must be equal on every union key and real parts equal off the
+    diagonal. Each diagonal key must satisfy
+    ``_triple_zero(target_real, base_real, shift)``, where ``target_real`` and
+    ``base_real`` are the real entries at that key. If shift is zero these
     real tests reduce to vector equality. If shift is nonzero and the union
     holds fewer than D distinct diagonal coordinates, some diagonal is
-    absent on both sides with difference zero, so the relation fails; this
+    absent on both sides with difference zero, so the relation fails. This
     counts missing diagonals without allocating D entries. Empty tables
-    establish only shift zero. The merge costs O(U log U) sorting and O(U)
-    working storage for U = N_base + N_target, independent of D except for
-    the count comparison; the workspace law is ``_relation_bytes``.
+    establish only shift zero. For ``U = N_base + N_target``, where ``N_base``
+    and ``N_target`` count the two endpoints' stored entries, the merge uses
+    O(U log U) coordinate comparisons and O(U) array entries of working
+    storage. These counts do not grow with D. Python-integer coordinate
+    comparisons can depend on coordinate bit length. The workspace law is
+    ``_relation_bytes``.
     Under the supported IEEE arithmetic model, every decision equals that of
     exact rational arithmetic on the recorded binary64 values, and its only
     resource refusal is the workspace law.
@@ -650,8 +653,9 @@ def verify_energy_shift(
         TypeError: If `options` is not an `EnergyShiftOptions`, or the
             Result has no saved energy endpoint.
         ValueError: If the Results differ in frame or sector, basis, unit,
-            preparations or subspace rule, or the stored tables do not
-            establish the relation exactly.
+            preparations or subspace rule, the stored tables do not
+            establish the relation exactly, or an exact intermediate value
+            needs more than `max_integer_bits` bits.
     """
     if type(options) is not EnergyShiftOptions:
         raise TypeError("energy comparison requires concrete selected options")

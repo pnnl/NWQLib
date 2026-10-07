@@ -1,4 +1,4 @@
-"""Selected QPE methods and actual numerical evidence."""
+"""QPE estimators QCELS, SPE, RFE and RWPE, with their analysis and verification records."""
 
 from importlib import import_module
 

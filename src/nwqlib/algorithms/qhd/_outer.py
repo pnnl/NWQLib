@@ -22,7 +22,7 @@ USED_COUNTS = ("circuit_preparations", "circuit_attempts", "shots", "data_bytes"
 
 
 def check_arguments(qhd, execution, shots, seed, limits, *, executed=True):
-    """Check the arguments that a layer shares with ``nwqlib.solve``, and QHD's type.
+    """Check the arguments that a layer shares with ``nwqlib.solve``.
 
     ``execution`` None means ``"quantum"``, and ``limits`` None the
     ExecutionLimits defaults. A QHD with ``initial_state_preparation="none"``
@@ -36,10 +36,7 @@ def check_arguments(qhd, execution, shots, seed, limits, *, executed=True):
     from nwqlib.algorithms.protocol import ApplicabilityError
     from nwqlib.execution import ExecutionLimits
     from nwqlib.scientist import _check_shots
-    from .method import QHD
 
-    if type(qhd) is not QHD:
-        raise TypeError("qhd must be a configured QHD Method")
     execution = "quantum" if execution is None else execution
     if execution not in ("quantum", "classical"):
         raise ValueError("execution must be 'quantum' or 'classical'")
@@ -47,8 +44,6 @@ def check_arguments(qhd, execution, shots, seed, limits, *, executed=True):
     if seed is not None and (type(seed) is not int or seed < 0):
         raise ValueError("seed must be a nonnegative integer or None")
     limits = ExecutionLimits() if limits is None else limits
-    if type(limits) is not ExecutionLimits:
-        raise TypeError("limits must be ExecutionLimits")
     if executed and qhd.initial_state_preparation == "none":
         raise ApplicabilityError("initial_state_preparation='none' plans a resource-only QHD construction, "
                                  "which no round can execute")
@@ -75,7 +70,7 @@ def plan_round(problem, qhd, execution, shots, child):
                               RandomStreams.from_sequence(child))
 
 
-def round_limits(limits, used, execution, shots):
+def round_limits(limits, used, shots):
     """Return ``(ExecutionLimits, None)`` for the next round's Run, or ``(None, reason)`` when none is funded.
 
     ``limits`` caps the whole run cumulatively, and ``used`` holds the
@@ -84,11 +79,13 @@ def round_limits(limits, used, execution, shots):
     remainder subtracts the larger of the two totals. Shots, data bytes and
     synthesis work subtract their totals. The per-Run caps (qubits,
     simulator memory, completion metadata, direct amplitudes) pass through
-    unchanged. A quantum round needs at least one circuit and its shots, and
-    every cap of ExecutionLimits is positive, so every round needs a
-    positive remainder of each capped quantity. A remainder that passes this
-    test can still be too small for the Run's own reservations, which the
-    Run then refuses.
+    unchanged.
+    For either quantum or classical execution, this check requires a remaining
+    circuit allowance of at least one, a remaining shot allowance of at least
+    ``shots`` (one when ``shots is None``), and remaining data-byte and
+    synthesis-work allowances of at least one each.
+    A remainder that passes this test can still be too small for the Run's
+    own reservations, which the Run then refuses.
 
     A refusal of the first round can end in two ways. When this test refuses
     it, for example because ``shots`` exceeds ``max_total_shots``, the layer
@@ -139,7 +136,7 @@ def inner_failure(error, completed):
 
     Serialization can wrap a KeyboardInterrupt in an Exception. A real
     interrupt in its cause or context is re-raised before classifying the
-    failure, even after completed work; exception text alone is not an
+    failure, even after completed work. Exception text alone is not an
     interruption. The visited set also handles cyclic exception chains.
 
     The augmented-Lagrangian layer applies the same rule when f, h or g is

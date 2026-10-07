@@ -101,7 +101,9 @@ def export_qasm(
         if format == "qasm3":
             qasm3.dump(circuit, sink)
         else:
-            # Qiskit qasm2.dump also calls dumps; no streaming claim here.
+            # qasm2.dump builds the whole text with dumps as well, so the QASM 2 path
+            # does not stream. The whole text exists in memory before the sink
+            # checks max_text_bytes.
             sink.write(qasm2.dumps(circuit))
 
     if path is None:

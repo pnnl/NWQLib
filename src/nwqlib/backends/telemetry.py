@@ -1,4 +1,4 @@
-"""Bounded projection of existing forecasts and execution records; no acquisition.
+"""Bounded projection of existing forecasts and execution records, with no acquisition.
 
 The execution trace is the event owner. This module neither appends events nor
 replays assessment, folds resources, fits models, or interprets scientific output.
@@ -39,12 +39,14 @@ class AttemptTiming(Record):
 
     Attributes:
         run_id: Required. ID of the Run.
-        attempt: Required. ID of the attempt in the Run's execution record.
+        attempt: Required. ID of the attempt, the `attempt` of one event in
+            `run.data.trace.events`.
         prepared_id: Required. Content hash of the preparation record the attempt
-            used.
-        timing: Required. The `TimingObservation`: scope, nonnegative seconds,
-            `"exact"` or `"right_censored"`, and source. A right-censored timing
-            needs the reason for its cutoff.
+            used, the `prepared_id` of that event.
+        timing: Required. A `nwqlib.execution.TimingObservation` with `scope` (a
+            `TimeModel` scope), `seconds` (nonnegative), `censoring` (`"exact"`,
+            the default, or `"right_censored"`), `source` (a `Source`) and
+            `reason` (required for `"right_censored"`, the reason for the cutoff).
     """
 
     run_id: Text
@@ -78,7 +80,7 @@ class TelemetryRow(Record):
 
     event keeps reservations, exposure and terminal outcome unchanged. timings
     combines its native measurement with supplied scoped measurements. collected
-    IDs name actual supplied chunks; contribution IDs name their use by the
+    IDs name actual supplied chunks. Contribution IDs name their use by the
     separately supplied result. Neither population proves output completeness.
     comparisons keep predictions even when timing cannot support a residual.
     """
@@ -128,8 +130,8 @@ class PredictionLedger(Record):
     `residual_seconds` is the signed `observed - predicted` seconds or `None`
     with the reasons. Collected observations and the contributions of the
     Result stay separate lists. Use `revise` to record a new version of supplied
-    data. It never fits coefficients or changes the original
-    assessments, model domains, calibration status or coverage. A forecast is
+    data. Neither `PredictionLedger` nor `revise` fits coefficients or changes the
+    original assessments, model domains, calibration status or coverage. A forecast is
     valid at its original assessment time, and a historical residual does not
     establish that calibration was valid when the job ran.
 
@@ -141,7 +143,12 @@ class PredictionLedger(Record):
         predictions: The original
             [`TimePrediction`][nwqlib.backends.assessment.TimePrediction] records.
         rows: One row per attempt, failures, partial collections and
-            right-censored timings included.
+            right-censored timings included. Each row has `event` (the
+            attempt's execution event), `timings`, `collected_observation_ids`,
+            `contribution_ids` (the collected observations that the Result used),
+            `comparisons` and `reasons`. Each comparison has `prediction_id`,
+            `timing_id`, `residual_seconds` (observed minus predicted seconds,
+            or `None`) and `reasons`.
         result_id: Content hash of the analysis Result, or `None`. It does not
             imply that the Result is scientifically valid.
     """
@@ -192,9 +199,9 @@ class PredictionLedger(Record):
         """Check that a saved `PredictionLedger` still matches its execution record and forecasts, without recomputing anything.
 
         Args:
-            trace (ExecutionTrace): The Run's execution record.
+            trace (ExecutionTrace): The Run's execution record, `run.data.trace`.
             assessments (tuple[ProfileAssessment, ...]): The forecasts the record
-                used.
+                used, for example `run.data.forecast.assessments`.
 
         Returns:
             record (PredictionLedger): This record.
@@ -276,8 +283,8 @@ def align_telemetry(
         timings (tuple[AttemptTiming, ...]): Additional supplied timings. Each
             must belong to an attempt of this run. Identical timings of one
             attempt count once, and different attempts stay distinct.
-        result (Record | None): The analysis Result whose contributions are
-            recorded, when no Run or Result is given.
+        result (Record | None): The analysis Result, when no Run or Result is
+            given. Each row records which collected observations the Result used.
         max_comparisons (int): Positive limit on the forecast
             and timing pairs formed.
 
@@ -363,7 +370,7 @@ def align_telemetry(
         receipt = receipt_map.get(chunks[0].prepared_id)
         if receipt is None:
             # Without the receipt the schedule order is unknown, so the points
-            # are not joined; the row keeps its missing-receipt reason.
+            # are not joined, and the row keeps its missing-receipt reason.
             continue
         ordered = [None] * len(receipt.observation.positions)
         for chunk in chunks:

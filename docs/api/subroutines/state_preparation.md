@@ -1,6 +1,6 @@
 # State preparation {#state-preparation-api}
 
-Build a circuit that prepares a given state vector from `|0...0>`: exactly, with the magnitude tree and phase diagonal of Mottonen et al. (quant-ph/0407010v1), or approximately, with the layered MPS disentangling circuit of Ran (arXiv:1908.07958v2) after a TT-SVD compression (Oseledets, doi:10.1137/090752286). Import the functions from `nwqlib.subroutines.state_preparation`. Inside a Program, [`select_preparation`](../extending.md#nwqlib.blocks.selection.select_preparation) chooses the preparation of a state input.
+Build a circuit that prepares a given state vector from `|0...0>`: exactly, with the magnitude tree and phase diagonal of Mottonen et al. (quant-ph/0407010v1), or approximately, with the layered MPS disentangling circuit of Ran (arXiv:1908.07958v2) after a TT-SVD compression (Oseledets, doi:10.1137/090752286). Import the functions from `nwqlib.subroutines.state_preparation`, except `mps_to_circuit`, which imports from `nwqlib.subroutines.state_preparation.mps_circuit`. Inside a Program, [`select_preparation`](../extending.md#nwqlib.blocks.selection.select_preparation) chooses the preparation of a state input.
 
 ```python
 import numpy as np
@@ -59,22 +59,22 @@ Exact preparation:
 MPS compression and layered circuits:
 
 - `build_mps_circuit_state_preparation` runs one TT-SVD sweep, or reuses a matching decomposition that NWQLib's planning passes to it. The core metadata includes the ranks, the content hash of the normalized input and the discarded singular-value weight. The full input and the economy SVDs still have their dimension-dependent storage and computation costs.
-- The layered-construction check of `build_mps_circuit_state_preparation` uses `layered_construction_size`, which follows the sweeps that scikit_tt repeats after every extracted gate. Contraction of the cores has its separate scalar-product and byte limits.
+- The layered-construction check of `build_mps_circuit_state_preparation` uses the [layered MPS construction formula](../../ENGINEERING_CONSTANTS.md#layered-mps-construction-law), which follows the sweeps that scikit_tt repeats after every extracted gate. Contraction of the cores has its separate scalar-product and byte limits.
 - The one-qubit gates of the MPS circuit include their global phase, so controlled preparations keep the relative phase as well as the state populations.
-- The `DEFAULT_MAX_SVD_WORK` paragraph of the [constants registry](../../ENGINEERING_CONSTANTS.md#state-preparation) gives the default of 100,000,000 and the measurements behind the cost formula of the layered construction, and its [layered MPS construction law](../../ENGINEERING_CONSTANTS.md#layered-mps-construction-law) gives the formula.
+- The `DEFAULT_MAX_SVD_WORK` paragraph of the [constants registry](../../ENGINEERING_CONSTANTS.md#state-preparation) gives the default of 100,000,000 and the measurements behind the cost formula of the layered construction.
 
 ## Source map
 
 Code paths are relative to `nwqlib.subroutines`. Equation and section numbers refer to the listed arXiv or journal versions.
 
-| Scientific step | Source | Location | Code |
-| --- | --- | --- | --- |
-| Magnitude-tree RY angles | Mottonen et al., quant-ph/0407010v1 | Sec. III, Eq. (8) | `state_preparation.direct._build_normalized_state_preparation` |
-| Uniformly controlled RY and RZ lowering by Walsh transform and Gray code | Mottonen et al., quant-ph/0407010v1, and Shende, Bullock and Markov, quant-ph/0406176v5 | Sec. II, Fig. 2 and Eq. (3), and Theorem 8 | `_multiplexors._rotation_multiplexor` |
-| Phase diagonal as one RZ multiplexor per qubit | Shende, Bullock and Markov, quant-ph/0406176v5 | Theorem 7 | `_multiplexors.append_control_diagonal_phases` |
-| CX counts `2**k` per multiplexor and `2**n - 2` per tree or diagonal | Shende, Bullock and Markov, quant-ph/0406176v5, summed over the tree by NWQLib | Theorem 8 and Fig. 2 | `_multiplexors.multiplexor_resource_law` |
-| TT-SVD sweep and truncation estimates | Oseledets, SIAM J. Sci. Comput. 33(5) (2011), doi:10.1137/090752286 | Algorithm 1 (p. 2301) for the sweep. Proof of Theorem 2.2 and Eq. (2.5) (p. 2299) for the error estimate, with NWQLib's inner-product step for the norm and fidelity estimates | `state_preparation.mps.decompose_state_to_mps`, `state_preparation.mps.analyze_mps_state_compression` |
-| Layered disentangling circuit | Ran, arXiv:1908.07958v2 | Sec. III steps 1-4, Eqs. (6)-(9) | `state_preparation.mps_circuit.mps_to_circuit` |
+| Scientific step | Source and location | Code |
+| --- | --- | --- |
+| Magnitude-tree RY angles | Mottonen et al., quant-ph/0407010v1, Sec. III, Eq. (8) | `state_preparation.direct._build_normalized_state_preparation` |
+| Uniformly controlled RY and RZ lowering by Walsh transform and Gray code | Mottonen et al., quant-ph/0407010v1, Sec. II, Fig. 2 and Eq. (3), and Shende, Bullock and Markov, quant-ph/0406176v5, Theorem 8 | `_multiplexors._rotation_multiplexor` |
+| Phase diagonal as one RZ multiplexor per qubit | Shende, Bullock and Markov, quant-ph/0406176v5, Theorem 7 | `_multiplexors.append_control_diagonal_phases` |
+| CX counts `2**k` per multiplexor and `2**n - 2` per tree or diagonal | Shende, Bullock and Markov, quant-ph/0406176v5, Theorem 8 and Fig. 2, summed over the tree by NWQLib | `_multiplexors.multiplexor_resource_law` |
+| TT-SVD sweep and truncation estimates | Oseledets, SIAM J. Sci. Comput. 33(5) (2011), doi:10.1137/090752286, Algorithm 1 (p. 2301) for the sweep. Proof of Theorem 2.2 and Eq. (2.5) (p. 2299) for the error estimate, with NWQLib's inner-product step for the norm and fidelity estimates | `state_preparation.mps.decompose_state_to_mps`, `state_preparation.mps.analyze_mps_state_compression` |
+| Layered disentangling circuit | Ran, arXiv:1908.07958v2, Sec. III steps 1-4, Eqs. (6)-(9) | `state_preparation.mps_circuit.mps_to_circuit` |
 
 ## Entries on other pages
 

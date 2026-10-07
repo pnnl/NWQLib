@@ -6,41 +6,13 @@ from nwqlib._limits import DEFAULT_MAX_BYTES
 
 from dataclasses import dataclass
 from math import exp, isfinite, lgamma, log
-from typing import TYPE_CHECKING, Any, Mapping
 
 import numpy as np
 
 from nwqlib._linalg_laws import singular_values_work
 from nwqlib._validation import integer
-from nwqlib.algorithms.lchs.native import (
-    resolve_hamiltonian_evolution_backend,
-)
 from nwqlib.algorithms.lchs.time_independent_common import validate_final_time
-from nwqlib.algorithms.lchs.time_independent_terms import (
-    LCHSQuadratureData,
-    generate_lchs_quadrature,
-    lchs_quadrature_summary,
-)
-from nwqlib.algorithms.lchs.providers import (
-    LCHS_PROVIDER_RECORD_KEYS,
-)
 from nwqlib._numerics import componentwise_exact_zero, stable_vector_norm
-
-if TYPE_CHECKING:
-    from nwqlib.algorithms.lchs.method import LCHS
-
-
-@dataclass(frozen=True, kw_only=True)
-class _KernelContext:
-    """Prepared k-kernel quadrature data for elapsed-time propagators.
-
-    Attributes:
-        final_time: Final time T for which the k-grid was selected.
-        quadrature: Shared quadrature summary, including psd_shift.
-    """
-
-    final_time: float
-    quadrature: Mapping[str, Any]
 
 
 @dataclass(frozen=True, kw_only=True)
@@ -117,20 +89,25 @@ def _duhamel_quadrature_error_bound(
 ) -> _DuhamelBoundEvaluation:
     """Evaluate the constant-source Gauss-Legendre remainder in log form.
 
-    DLMF 3.5.19 gives the m-point Gauss remainder gamma_m*f**(2m)(xi)/(2m)!,
-    and DLMF 3.5.21 gives gamma_m = 2**(2m+1)*(m!)**4/((2m+1)*((2m)!)**2) for
-    Legendre on [-1,1]. The map s = T*(x+1)/2 multiplies the remainder by
-    (T/2)**(2m+1). Together they give
-    T**(2m+1)*(m!)**4/((2m+1)*((2m)!)**3) times sup||f**(2m)||.
-    For ACL arXiv:2312.03916v2 Eq.(2), f(s)=exp(-A*(T-s))*b.
-    ||f**(2m)|| <= ||A||**(2m)*exp(max(0,-lambda_min(L))*T)*||b||, because
-    ||exp(-A*t)|| <= ||exp(-L*t)|| (ACL Lemma 21, Eq. (162)). lambda_min is
-    taken before the PSD shift, so the bound describes the physical growth.
-    For complex vector error E, choose v=E/||E|| and the real scalar function
-    Re(v†f). Its scalar remainder equals ||E||, with derivatives bounded by
-    ||f**(2m)||; no dimension factor or common complex mean-value point is
-    assumed. This is a numerical
-    evaluation of the ideal bound, not an outward-rounded interval.
+    Write ``f_2m`` for the derivative of order 2m of f. DLMF 3.5.19 gives
+    the m-point Gauss remainder ``gamma_m*f_2m(xi)/(2m)!``, with xi in the
+    integration interval, and DLMF 3.5.21 gives
+    ``gamma_m = 2**(2m+1)*(m!)**4/((2m+1)*((2m)!)**2)`` for Legendre on
+    [-1,1]. The map ``s = T*(x+1)/2`` multiplies the remainder by
+    ``(T/2)**(2m+1)``. Together they give
+    ``T**(2m+1)*(m!)**4/((2m+1)*((2m)!)**3)`` times ``sup||f_2m||``.
+    Here m is node_count, T is final_time, A is matrix, b is source_term,
+    and ``L=(A+A†)/2``. For ACL arXiv:2312.03916v2 Eq.(2),
+    ``f(s)=exp(-A*(T-s))*b`` and
+    ``||f_2m|| <= ||A||**(2m)*exp(max(0,-lambda_min(L))*T)*||b||``, because
+    ``||exp(-A*t)|| <= ||exp(-L*t)||`` (ACL Lemma 21, Eq. (162)). The
+    smallest eigenvalue lambda_min is taken before the PSD shift, so the
+    bound describes the physical growth. For nonzero complex vector error E,
+    choose ``v=E/||E||`` and the real scalar function ``Re(v†f)``. Its scalar
+    remainder equals ``||E||``, with derivatives bounded by ``||f_2m||``.
+    No dimension factor or common complex mean-value point is assumed.
+    This is a numerical evaluation of the ideal bound, not an
+    outward-rounded interval.
     """
 
     from nwqlib.operators.access import _check_bytes
@@ -180,77 +157,6 @@ def _duhamel_quadrature_error_bound(
         value=value,
         unusable_nonzero=not isfinite(value) or value == 0.0,
     )
-
-
-def _kernel_context(
-    *,
-    matrix: np.ndarray | None = None,
-    final_time: float,
-    method: LCHS,
-    _quadrature_plan: LCHSQuadratureData | None = None,
-) -> _KernelContext:
-    """Reuse one selected k-kernel quadrature for all host elapsed-time actions.
-
-    The grid is selected for the full time T. The tail bounds do not depend
-    on time, and the quadrature conditions (the ATAP ISBN 978-1-61197-239-9
-    ellipse bound and the Low-Somma arXiv:2508.19238v2 step condition) only
-    relax as T*||L|| decreases, so the same grid keeps its recorded bounds
-    for every shorter Duhamel elapsed time T-s. ``matrix`` is needed only
-    when no selected quadrature plan is supplied.
-    """
-
-    he_backend = resolve_hamiltonian_evolution_backend(method)
-    if matrix is None and _quadrature_plan is None:
-        raise ValueError("the kernel context needs a matrix or a selected quadrature plan")
-    quadrature_data = _quadrature_plan or generate_lchs_quadrature(
-        matrix=matrix, final_time=final_time, method=method,
-        max_bytes=method.max_bytes, max_spectral_work=method.max_spectral_work,
-        max_quadrature_work=method.max_quadrature_work,
-    )
-    shared_quadrature = lchs_quadrature_summary(
-        quadrature_data,
-        method=method,
-        he_backend=he_backend,
-        final_time=final_time,
-    )
-    quadrature: dict[str, Any] = {
-        "beta": shared_quadrature["beta"],
-        "epsilon": shared_quadrature["epsilon"],
-        "truncation_multiplier": shared_quadrature["truncation_multiplier"],
-        "K": shared_quadrature["K"],
-        "effective_K": shared_quadrature["effective_K"],
-        "h1": shared_quadrature["h1"],
-        "Q": shared_quadrature["Q"],
-        "M": shared_quadrature["M"],
-        "interval_count_each_side": shared_quadrature["interval_count_each_side"],
-        "coefficient_l1_norm": shared_quadrature["coefficient_l1_norm"],
-        "max_lcu_coefficient_l1_norm": shared_quadrature["lcu_coefficient_l1_norm"],
-        "matrix_norm": shared_quadrature["matrix_norm"],
-        "prepared_matrix_norm": shared_quadrature["prepared_matrix_norm"],
-        "l_norm": shared_quadrature["l_norm"],
-        "h_norm": shared_quadrature["h_norm"],
-        "hamiltonian_evolution_backend": shared_quadrature["hamiltonian_evolution_backend"],
-        "trotter_steps": shared_quadrature["trotter_steps"],
-        "max_operator_scale": shared_quadrature["operator_scale"],
-        "min_l_eigenvalue_before_psd_conversion": shared_quadrature[
-            "min_l_eigenvalue_before_psd_conversion"
-        ],
-        "min_l_eigenvalue_after_psd_conversion": shared_quadrature[
-            "min_l_eigenvalue_after_psd_conversion"
-        ],
-        "psd_correction_applied": shared_quadrature["psd_correction_applied"],
-        "psd_shift": shared_quadrature["psd_shift"],
-        "make_l_psd": shared_quadrature["make_l_psd"],
-        "psd_tolerance": shared_quadrature["psd_tolerance"],
-        "approximate_lchs_error_bound": shared_quadrature["approximate_lchs_error_bound"],
-        "quadrature_error_bound": shared_quadrature["quadrature_error_bound"],
-        **{
-            key: shared_quadrature[key]
-            for key in LCHS_PROVIDER_RECORD_KEYS
-            if key != "quadrature_error_bound"
-        },
-    }
-    return _KernelContext(final_time=final_time, quadrature=quadrature)
 
 
 __all__ = ["duhamel_quadrature"]

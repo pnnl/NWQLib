@@ -136,7 +136,7 @@ class LogicalCompilation(Record):
 
 
 def _source(source, index):
-    """Read the existing selected native owner without copying or preparing it.
+    """Return the Qiskit circuit of ``source`` and its source metadata, without copying or preparing it.
 
     A Prepared source uses the circuit index order of ``Prepared.circuits``
     (``Prepared._circuit_handles``). A handle that ``Run.release_native``
@@ -266,8 +266,8 @@ def _static_body(circuit, *, max_operations, max_bytes):
         else:
             body.append(op, qubits, copy=False)
     # Reuse native intake for bounded copies, nested-definition admission and
-    # custom primitive-name collision handling. It reads stored definitions;
-    # it does not synthesize a new native realization or apply an operator.
+    # custom primitive-name collision handling. It reads stored definitions.
+    # It does not synthesize a new native realization or apply an operator.
     from nwqlib.blocks._qiskit_intake import snapshot_circuit
 
     body, _ = snapshot_circuit(body, max_bytes=max_bytes)
@@ -275,7 +275,7 @@ def _static_body(circuit, *, max_operations, max_bytes):
         qasm = export_qasm(body, format="qasm2")
     except Exception as error:
         raise ValueError(f"selected static body cannot be exported as QASM2: {error}") from error
-    # Encoded once; the caller reuses these bytes for its size checks, its
+    # Encoded once. The caller reuses these bytes for its size checks, its
     # digest and the compiler's body.qasm.
     data = qasm.encode("utf-8")
     del qasm
@@ -350,8 +350,8 @@ def compile_logical(
         circuit, max_operations=max_operations, max_bytes=max_bytes
     )
     # Admit the source/readout metadata before spending a compiler invocation.
-    # Core records contain portable values; this streams a size check without
-    # retaining another complete serialized source alongside the final receipt.
+    # Core records contain portable values. This streams a size check without
+    # keeping another complete serialized source alongside the final receipt.
     # qasm holds the UTF-8 bytes of the QASM2 body, encoded once.
     metadata_bytes = len(qasm)
     encoder = json.JSONEncoder(default=lambda value: value.model_dump(mode="json"), allow_nan=False)

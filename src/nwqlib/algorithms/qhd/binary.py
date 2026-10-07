@@ -7,10 +7,10 @@ Every one of the ``2**(d*b) = K**d`` register states is a grid point, so the
 encoding has no invalid outcomes and its valid mass is 1. Qiskit's
 statevector index of a grid tuple is ``z = sum_j n_j K**j`` (variable 0 in the
 low-order qubits), whereas NWQLib's restricted arrays use the lexicographic
-index ``i = sum_j n_j K**(d-1-j)`` (variable 0 most significant, as in
-``theory.restricted_basis``). The permutation ``P|i> = |z>`` reverses the order
-of the variable axes and keeps the bits within each variable. A comparison of
-a circuit U with a lexicographic operator uses ``P^dagger U P``.
+index ``i = sum_j n_j K**(d-1-j)`` (variable 0 most significant). The
+permutation ``P|i> = |z>`` reverses the order of the variable axes and keeps
+the bits within each variable. A comparison of a circuit U with a
+lexicographic operator uses ``P^dagger U P``.
 
 Kinetic term. On the periodic grid ``x_i = lower + i h``, ``h = L/K``, the
 kinetic operator of variable j is diagonal in the discrete Fourier basis. The
@@ -140,55 +140,37 @@ def decode_register_index(index, num_variables, bits):
 def lexicographic_register_array(register, num_variables, bits):
     """Return a full binary-register array in lexicographic grid order, by reversing its variable axes.
 
-    Convert a full binary-register array to lexicographic grid order by
-    reversing its variable axes. Variable j is the base-K digit of weight
-    ``K**j`` in the register and of weight ``K**(d-1-j)`` in the output. The
-    transformation preserves the local bit order within each variable.
+    For ``d = num_variables``, ``b = bits``, ``K = 2**b`` and
+    ``D = K**d``, a full binary-register array in the documented qubit
+    order gives ``output[i] = register[z]`` for each grid tuple
+    ``(n_0, ..., n_(d-1))``, where ``0 <= n_j < K`` and
 
-    Derivation. The full-register index is
-    ``z = sum_j n_j*K**j``, since variable j occupies qubits
-    ``j*b..j*b+b-1``. The restricted flat index is
-    ``i = sum_j n_j*K**(d-1-j)``. Viewing a register array in C order gives
-    its axes as ``(n_(d-1),...,n_0)``. Reversing those variable axes gives
-    ``(n_0,...,n_(d-1))``, with the internal b-bit order of each n_j
-    unchanged, so the result equals
-    ``register[lexicographic_register_indices(d, b)]`` entry by entry. For
-    d = 1 it is the identity. K = 2 has one bit per axis and the same proof.
-    Reversing all individual bits for K > 2 would be a different
-    permutation. The proof applies to real probabilities, complex states and
-    integer counts. Use an array in the documented full-register qubit
-    order, after any backend bit-layout conversion, and only once per
-    readout. The final reshape generally makes one contiguous output copy,
-    8D bytes for float64 probabilities and 16D for complex128 states. It
-    need not copy at d = 1. It replaces three D-length integer buffers and
-    the gather.
+        i = sum_(j=0)^(d-1) n_j * K**(d-1-j),
+        z = sum_(j=0)^(d-1) n_j * K**j.
+
+    The conversion reverses the variable axes, placing variable 0 first
+    in lexicographic grid order, while preserving every stored value and
+    each variable's little-endian bit order: bit l of ``n_j`` is qubit
+    ``j*b+l`` and has local weight ``2**l``.
+
+    For a flat contiguous input with ``d > 1`` and ``K >= 2``, the final
+    reshape copies D entries into a contiguous buffer, 8D bytes for
+    float64 probabilities or 16D bytes for complex128 states. For d = 1
+    the conversion is the identity and can share the input storage.
+
+    Use an array in the documented full-register qubit order, after any
+    backend bit-layout conversion, and only once per readout.
     """
     k = 1 << bits
     d = num_variables
     return np.asarray(register).reshape((k,) * d).transpose(tuple(reversed(range(d)))).reshape(-1)
 
 
-def lexicographic_register_indices(num_variables, bits):
-    """Return z for each lexicographic position i, the permutation ``P|i> = |z>`` as an integer array.
-
-    Position ``i = sum_j n_j K**(d-1-j)`` has digit ``n_j = (i // K**(d-1-j)) mod K``,
-    and ``z = sum_j n_j 2**(j b)``. ``state[result]`` is the lexicographic
-    restriction of a full-register state.
-    """
-    k = 1 << bits
-    positions = np.arange(k**num_variables, dtype=np.int64)
-    indices = np.zeros_like(positions)
-    for j in range(num_variables):
-        digit = (positions // k ** (num_variables - 1 - j)) % k
-        indices |= digit << (j * bits)
-    return indices
-
-
 def bit_reversal(bits):
     """Return ``rev_b(k)`` for k = 0..2**b - 1, the reversal of the b bits of k.
 
     b shift/OR passes over the int64 indices move bit l to bit b-1-l, exact
-    integer operations; b = 0 gives the identity ``[0]``.
+    integer operations. b = 0 gives the identity ``[0]``.
     """
     indices = np.arange(1 << bits, dtype=np.int64)
     reversed_indices = np.zeros_like(indices)
@@ -518,11 +500,11 @@ def _kinetic_walsh(model, bits, spacing):
 def checked_product_level(previous, factors, masks):
     """Return one level of the finite-difference partial products, admitting each exact product.
 
-    One elementwise multiplication executes the same binary64 operation for
-    every mask as the scalar loop. The normal-range check is on the exact
-    product of the stored previous partial and factor. Min/max of the
-    rounded output certify an open normal interval only, so an entry at or
-    beyond nu or Omega, or nonfinite, calls the exact boundary test. A zero
+    One elementwise multiplication executes for every mask the same binary64
+    operation that a per-mask scalar loop would. The normal-range check is
+    on the exact product of the stored previous partial and factor. Min/max
+    of the rounded output certify an open normal interval only, so an entry
+    at or beyond nu or Omega, or nonfinite, calls the exact boundary test. A zero
     output on these structurally nonzero masks is a refusal, as it is in
     ``_normal_product``.
     """
@@ -541,14 +523,15 @@ def checked_product_level(previous, factors, masks):
 def kinetic_finite_difference_array(bits, spacing):
     """Return the finite-difference kinetic Walsh coefficients of ``kinetic_walsh`` by array levels.
 
-    The finite-difference coefficients use the source's scalar
-    trigonometric factors and multiply them in increasing level order. Each
+    The finite-difference coefficients use scalar ``math.sin`` and
+    ``math.cos`` factors and multiply them in increasing level order. Each
     entry therefore follows the scalar binary64 product sequence. Range
     admission checks exact products at the normal-range endpoints. The
-    summary reuses one analytic enclosure per distinct trigonometric factor
-    and propagates interval products outward. Its radii enclose the exact
-    analytic coefficients under the stated one-ulp premise and can exceed
-    the exact-rational enclosure's radii.
+    summary of ``circuit_errors.kinetic_fd_summary_up`` reuses one analytic
+    enclosure per distinct trigonometric factor and propagates interval
+    products outward. Its radii enclose the exact analytic coefficients
+    under the stated one-ulp premise and can exceed the exact-rational
+    enclosure's radii.
 
     For top-bit masks, ``s_w = cos(pi/K), -sin(pi/K), -cos(pi/K), sin(pi/K)``
     by popcount modulo four, then at levels 0 through b-2 a multiplication
@@ -556,11 +539,12 @@ def kinetic_finite_difference_array(bits, spacing):
     ``math.pi*(1<<level)/K``, followed by division by the already formed
     ``spacing**2``. Calling NumPy sine on an angle array would not prove the
     same coefficients, so the scalar values are reused. One elementwise
-    multiplication at each level executes the same binary64 operation for
-    every mask as the scalar loop, and induction on the level proves bit
-    equality of each partial product; ``np.prod`` or reordered levels would
-    not. At b = 1 the level loop is empty and the sole top mask uses the same
-    ``-sin(pi/2)``. All other nonidentity masks stay exactly zero.
+    multiplication at each level executes for every mask the same binary64
+    operation that a per-mask scalar loop would, and induction on the level
+    proves bit equality of each partial product. ``np.prod`` or reordered
+    levels would not. At b = 1 the level loop is empty and the sole top mask
+    uses the same ``-sin(pi/2)``. All other nonidentity masks stay exactly
+    zero.
     """
     k, top = 1 << bits, bits - 1
     masks = np.arange(1 << top, k, dtype=np.int64)
@@ -952,7 +936,7 @@ def all_scaled_normal(factor, nonzero_min, maximum):
     ``|2x| c_max <= Omega`` for the admitted ``2x``, with ``(c_min, c_max)``
     the minimum nonzero and maximum magnitudes, ``nu = 2**-1022`` and
     ``Omega`` the largest finite binary64 number. These comparisons concern
-    exact products of stored operands; the test ``|x| c_max <= Omega`` would be
+    exact products of stored operands. The test ``|x| c_max <= Omega`` would be
     insufficient (x = 2, ``c_max = Omega/2`` passes while ``2 x c_max``
     overflows). Only two extremal products are checked, as exact Fraction
     comparisons that avoid every boundary ambiguity. None means there are no
@@ -983,7 +967,7 @@ def _require_bytes(limit, *, held, local, stage, later=False):
 
     ``held`` prices the data that stay live through the phase and ``local``
     the phase's own workspace. The refusal names the phase and the smallest
-    ``max_bytes`` that admits it; with ``later`` it says that the phases
+    ``max_bytes`` that admits it. With ``later`` it says that the phases
     admitted after this one need more, so that value is a lower bound.
 
     Raises:
@@ -1007,18 +991,18 @@ def _construction_entry_cap(entries, support_size):
     Walsh one. For h use a qualified fixed-object allowance plus support
     slots and exact scalar widths. A conservative width for the current
     construction integers is ``b = 4200 + ceil(log2(E))``: finite binary64
-    magnitudes expressed in units of ``2**-1074`` have at most 2098 bits; a
-    sum of at most E such values adds at most ``ceil(log2 E)`` bits;
-    multiplying two dyadic binary64 operands gives a numerator of at most
+    magnitudes expressed in units of ``2**-1074`` have at most 2098 bits. A
+    sum of at most E such values adds at most ``ceil(log2 E)`` bits.
+    Multiplying two dyadic binary64 operands gives a numerator of at most
     ``4196 + ceil(log2 E)`` bits and a denominator of at most 2149 bits. This
     covers the dropped-unit sum and range-charge numerator/denominator, as
     well as the much smaller counts. The allowance is
 
-    ``h = 4096 + 16*len(variables) + 8L(4200 + ceil(log2(E)))``.
+    ``h = 4096 + 16*support_size + 8L(4200 + ceil(log2(E)))``.
 
     The 4096 covers the construction, arrays' headers, key tuple/hex string,
     mapping-entry resize storage and fixed scalars on this stack. The
-    support-index objects already belong to the source/model; the slot
+    support-index objects already belong to the source/model. The slot
     charge is conservative. Eight L-width slots also cover count/cx/scalar
     integers. The same h serves the baseline and the optional-entry
     accounting (``BinaryModel.construction``). This intentionally avoids a
@@ -1065,7 +1049,11 @@ def _construction_entry_bytes(built, *, entries, support_size):
 
 
 def _model_metadata(d, bits, table_specs, *, cutoff=None, swaps=False):
-    """Qualified headers and containers, separate from all numerical payloads."""
+    """Return ``H_model``, the qualified header and container bytes of a binary model.
+
+    It is the metadata allowance stated in ``_model_reservation`` (``H_model`` in
+    docs/ENGINEERING_CONSTANTS.md), separate from all numerical payloads.
+    """
     specs = [(1 << bits, 1)] * d + [(int(e), int(s)) for e, s in table_specs]
     widths = {e.bit_length() - 1 for e, _ in specs}
     m = bits - 1 if cutoff is None else min(int(cutoff), bits - 1)
@@ -1139,11 +1127,6 @@ def _model_reservation(d, bits, table_specs, *, cutoff=None, swaps=False, potent
 def kinetic_setup_work(bits):
     """Bound explicit numerical value operations for one periodic kinetic table.
 
-    Count one unit per scalar or array element for arithmetic, absolute
-    value, square, sine or cosine. Range tests, index bookkeeping and data
-    movement are excluded. Elementary functions count as calls, not as
-    the arithmetic internal to their implementations.
-
     Derivation. It applies to the current periodic ``kinetic_table``
     implementation, ``b >= 1``, ``K = 2**b``, either admitted kinetic model,
     and one invocation on one variable. Count each explicit scalar or
@@ -1176,14 +1159,16 @@ def kinetic_setup_work(bits):
        adds ``2K``. The larger, convenient upper bound
        ``2K + b**2 + 6b + 8`` therefore covers the coefficient computation
        for every b>=1.
-    4. For finite-difference Walsh coefficients, the four entries of
-       ``signs`` use four divisions, four trigonometric calls and two sign
-       changes. The spacing square and identity division add two, giving 12
-       scalar units. There are K/2 masks. Each mask has b-1 levels, each
-       with an angle multiplication, an angle division, a sine or cosine,
-       and a product, followed by one final division for the mask. Its loop
-       charge is ``(4(b-1)+1)K/2=(4b-3)K/2 <= 2bK``. The total coefficient
-       charge is at most ``2bK+12``.
+    4. For finite-difference Walsh coefficients, the base angle uses one
+       division, and the four entries of ``signs`` use four trigonometric
+       calls and two sign changes. The spacing square and identity division
+       add two, giving nine scalar units, bounded by 12. There are K/2
+       masks. Each of the b-1 levels forms its angle with two operations
+       and evaluates both trigonometric values once, then performs K/2
+       products and at most K/2 absolute values. The final divisions and
+       absolute values add K operations. The loop charge is at most
+       ``bK + 4(b-1) <= 2bK``. The total coefficient charge is at most
+       ``2bK+12``.
     5. Including spacing, the spectral total is at most
        ``10K+b**2+6b+12``. The finite-difference total is at most
        ``8K+2bK+16``. Both are bounded by ``C(b)=10K+2bK+b**2+6b+16``.
@@ -1272,7 +1257,7 @@ class BinaryModel:
     def __init__(self, grid, method, support_values, *, held_bytes=0):
         self.bits = register_bits(grid.num_grid_points)
         # The caller's residents, the model, one current construction per table and the largest
-        # synthesis or use workspace are admitted before any array is built; the rest funds the
+        # synthesis or use workspace are admitted before any array is built. The rest funds the
         # optional whole-model cache (_construction_cache_capacity).
         self._cache_capacity = _construction_cache_capacity(
             method.max_bytes, held_bytes=held_bytes, **dict(zip(
@@ -1306,7 +1291,7 @@ class BinaryModel:
         tables = (*self.kinetic, *self.potential.values())
         for table in tables:
             table._popcounts = popcounts
-        # Optional whole-model entries only; the baseline above funds the model and current constructions.
+        # Optional whole-model entries only. The baseline above funds the model and current constructions.
         self._cache_bytes = 0
         self._cache = {}
         self._latest = {}
@@ -1324,25 +1309,26 @@ class BinaryModel:
 
         Within this immutable model, which fixes table content, grid spacing,
         kinetic model and bit-reversal choice, the key is
-        ``(kind, variables, exponent.hex(), requested_synthesis, threshold)``;
-        the requested synthesis distinguishes a ``min_cx`` trial from a
+        ``(kind, variables, exponent.hex(), requested_synthesis, threshold)``.
+        The requested synthesis distinguishes a ``min_cx`` trial from a
         forced choice. At equal keys every computed
         array and count is identical, so both second-order halves reuse one
         construction, and each occurrence still counts its CX, rotations,
-        omissions and phase charges; the caller forms each occurrence's
+        omissions and phase charges. The caller forms each occurrence's
         formation allowance.
 
-        Admission. The caller first admits its live data, the model's arrays
-        and metadata, one current construction per table, and the largest
-        synthesis or use workspace against QHD.max_bytes. For host evolution
-        the reservation includes the state buffers and retained complex phase
-        tables; for inspection it includes the rotation census. The remaining
-        bytes fund optional whole-model cache entries. A miss is built within
-        the admitted current-construction envelope and retained globally only
+        Admission. The constructor first admits the caller's live data
+        (``held_bytes``), the model's arrays and metadata, one current
+        construction per table, and the largest synthesis or use workspace
+        against QHD.max_bytes. For host evolution the reservation includes the
+        state buffers and the complex phase tables that stay live. For
+        inspection it includes the rotation census. The remaining bytes fund
+        optional whole-model cache entries. A miss is built within the admitted
+        current-construction envelope and kept in the whole-model cache only
         when its phase or mask/angle payload and key/scalar metadata fit that
         remainder. A fallback still uses admitted bytes and repeats synthesis
-        work, which construction_counts records. Every block occurrence
-        retains its original execution and error-ledger multiplicity.
+        work, which construction_counts records. Every block occurrence keeps
+        its original execution and error-ledger multiplicity.
 
         The baseline is ``_model_reservation`` plus the caller's
         ``held_bytes``, checked by ``_construction_cache_capacity`` in
@@ -1360,8 +1346,8 @@ class BinaryModel:
         if built is not None:
             self.construction_counts["hits"] += 1
             return built
-        # The caller has already admitted model + latest + build/use + held bytes.
-        # Thus synthesize is funded even if this result cannot be retained globally.
+        # __init__ has already admitted model + latest + build/use + held bytes, so synthesize is funded
+        # even when this result does not fit the whole-model cache.
         built = table.synthesize(exponent, choice, self.threshold)
         charge = _construction_entry_bytes(
             built, entries=int(table.values.size), support_size=len(variables))

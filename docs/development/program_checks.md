@@ -2,7 +2,7 @@
 
 This page is for contributors. It states the rules that the structural check of a `Program` applies, the limits on that check's own work, and where each rule is implemented. Method authors who build a Program start from [Describe a circuit as a Program](../ir.md), which lists the nodes and the limits a refused Program names.
 
-Two terms recur. Admission is the structural check that accepts or rejects a Program, run when the Program is built and again when a Run prepares or lowers it (builds its Qiskit circuit). Kept definitions and kept fields are the ones stored in the Program record.
+Two terms recur. Admission is the structural check that accepts or rejects a Program, run when the Program is built and again when a Run prepares or lowers it (builds its Qiskit circuit). Kept definitions and kept fields are the ones stored in the Program record. The number of kept field slots is the count of record fields and tuple entries stored in it.
 
 ## What the check covers {#what-the-check-covers}
 
@@ -183,7 +183,7 @@ AdaptiveLoop represents zero to `max_rounds` iterations. It checks the body and 
 
 MeasurementBatch references one shared body, kept settings and optional compact RangeAxes. Setting identity covers its label, bindings and MetadataRef. `repetitions` declares independent body invocations, uniformly for terminal and outer batches.
 
-Terminal `observation_kind` uses the shared SDK-free `ObservationKind`. `counts` requests sampled shots. `pauli_expectation`, `probabilities` and `trajectory` request exact-statistic evaluations with zero statistical shots. A `trajectory` evaluates the selected body once, and its ordered observation points belong to the selected Experiment's readout details (`ReadoutDetails.positions`), never to settings. An outer batch has kind `None` and repeats descendants. The structural check rejects a nonterminal kind. Unknown kind or repetitions remain valid planning metadata.
+Terminal `observation_kind` uses the shared SDK-free `ObservationKind`. `counts` requests sampled shots. `estimated_observable` requests a provider estimate, whose shots the provider chooses. `pauli_expectation`, `probabilities` and `trajectory` request exact-statistic evaluations with zero statistical shots. A `trajectory` evaluates the selected body once, and its ordered observation points belong to the selected Experiment's readout details (`ReadoutDetails.positions`), never to settings. An outer batch has kind `None` and repeats descendants. The structural check rejects a nonterminal kind. Unknown kind or repetitions remain valid planning metadata.
 
 The logical lowerer materializes one selected body regardless of these measurement declarations. IR Repeat keeps its in-circuit meaning. Native measurement must separately reject missing requirements before preparation. MetadataRef carries both a versioned format Source and immutable declared data InputRef. An analyzer can therefore distinguish Lanczos degree, parity and readout formats from GCiM matrix, pair, Pauli and quadrature formats without the IR importing either algorithm. Metadata payloads are not decoded or fetched here.
 

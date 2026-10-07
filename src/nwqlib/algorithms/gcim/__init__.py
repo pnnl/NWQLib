@@ -1,4 +1,4 @@
-"""Fixed GCiM production method and directly owned ADAPT/chemistry functionality.
+"""GCiM methods (FixedGCIM and ADAPT) and their chemistry and sector helpers, imported on first access.
 
 Discovery and fixed planning do not import native providers or chemistry.
 """

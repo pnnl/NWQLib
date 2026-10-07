@@ -9,7 +9,7 @@ def select_experiment(admission, batch_id, setting_index, axis_values, *, bindin
     """Keep selected dependencies and all global constraints and register layouts.
 
     The caller owns the admitted immutable source index. Plan reuses that index
-    across experiments; direct Program selection creates one for its operation.
+    across experiments, and direct Program selection creates one for its operation.
     New composite nodes have enclosing Program ancestry rather than hashing the
     whole original batch's setting table for every selected point.
 
@@ -58,7 +58,7 @@ def select_experiment(admission, batch_id, setting_index, axis_values, *, bindin
         bindings = tuple(bound[key] for key in sorted(bound))
 
     # Follow edges, not an O(all definitions) filter per experiment. Declaration
-    # order is immaterial to execution; deterministic root-first traversal keeps
+    # order is immaterial to execution. Deterministic root-first traversal keeps
     # direct and loaded selection identical without another global position map.
     definitions = {}
     stack = [batch_id]

@@ -901,6 +901,8 @@ def test_trajectory_receipt_lists_amplitude_derived_masses_only_with_a_reduction
     from test_observation_schedule import pauli, reduction, three_call_plan, trajectory
 
     monkeypatch.setattr(ExpectationMethod, "save_archive", lambda self, plan, files: {"format": "unreopened"})
+    monkeypatch.setattr(ExpectationMethod, "reduction_allowance",
+                        lambda self, plan, point, *, observation, width, run: 1, raising=False)
     factor, queries = (0.7443505388340905, 0.6677890949524401), []
     monkeypatch.setattr(nwqsim.subprocess, "run", lambda argv, **kwargs: _phase_factor_reply(argv, factor, queries))
     monkeypatch.setitem(planning.READOUT_REDUCERS, "norm_first", Reducer(
@@ -910,7 +912,7 @@ def test_trajectory_receipt_lists_amplitude_derived_masses_only_with_a_reduction
     plan = three_call_plan(trajectory(pauli("first", 1, "ZZ"), end))
     config = configured(tmp_path, optimization_level=level)
     with Run(plan, backend=config, directory=tmp_path / "run", progress=False) as run:
-        handle = prepare(plan.resolve("trajectory"), run=run, runtime=RuntimeOptions(seed=7), reduction_allowance=1)
+        handle = prepare(plan.resolve("trajectory"), run=run, runtime=RuntimeOptions(seed=7))
     receipt, request = handle.record, json.loads(handle._native.payload)
     # One query, sent with the lowered circuit's finite global phase, and its
     # pair on the final-boundary reduction state only.

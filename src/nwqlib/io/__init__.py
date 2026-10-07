@@ -1,4 +1,7 @@
-"""File readers and writers; SDK imports occur only at native consumption."""
+"""File readers and writers.
+
+An SDK is imported only where native output is consumed.
+"""
 
 from nwqlib.io.materialization import QasmMaterialization, QasmMaterializationBudget, materialize_qasm3_file
 from nwqlib.io.qasm import export_qasm

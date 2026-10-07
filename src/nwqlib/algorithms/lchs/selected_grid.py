@@ -147,7 +147,7 @@ def host_applications(plan, result, data):
 
 
 def selected_grid(plan, result, *, checks):
-    """Use stored L/H, nodes and coefficients; no spectral/quadrature selection."""
+    """Return the stored L, H, nodes and coefficients with the Result's application schedule, without spectral or quadrature selection."""
     from .selection import LCHSData
     data = selected_payload(plan)
     if type(data) is not LCHSData:
@@ -412,8 +412,8 @@ def grid_reference(plan, grid, *, checks, counts, held_inputs=()):
     The route's work (host_pf._route_requirements), the phase path (D + 4:
     negation and the identity-coefficient product, the imaginary argument
     and its exponential, and D products) and the weighted accumulation
-    (2*D + 1; host_pf.host_phase_and_accumulation_work) are admitted under
-    this invocation's limits before it runs; a saved route that does not fit
+    (2*D + 1, host_pf.host_phase_and_accumulation_work) are admitted under
+    this invocation's limits before it runs. A saved route that does not fit
     is refused, never reselected.
 
     The classical product-formula reference holds the selected numerical
@@ -422,9 +422,8 @@ def grid_reference(plan, grid, *, checks, counts, held_inputs=()):
     and index tables, application records and input vectors. Shared array
     buffers are counted once. Each action adds its rotation buffer, saved
     route scratch and weighted-accumulation reserve to those held bytes.
-    Setup and the one-time metadata inventory have separate phase peaks.
-    The saved route and step count are replayed without re-selection
-    (pf_reference_held_payload).
+    Setup and the one-time metadata inventory (pf_reference_held_payload)
+    have separate phase peaks.
 
     The selected-grid quantum reference applies each selected decomposed
     product-formula branch directly to its application vector. Admission

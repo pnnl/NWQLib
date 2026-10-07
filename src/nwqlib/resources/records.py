@@ -1,4 +1,4 @@
-"""Portable resource facts and scoped declarations; no SDK or executable laws."""
+"""Portable resource facts and scoped declarations, without SDK objects or executable laws."""
 
 import math
 from typing import Literal
@@ -63,7 +63,9 @@ Metric = Literal[
     "materialization_bytes",
     "stored_bytes",
 ]
-# Count metrics that the fold carries through every step of the Program traversal.
+# GATES are the gate-count and depth metrics that a recipe or a per-call law
+# supplies. COUNTS adds the other count metrics, and the fold carries every
+# COUNTS metric through each step of the Program traversal.
 GATES = ("operations", "single_qubit", "two_qubit", "controlled", "global_phases", "clifford",
          "t", "toffoli", "ccz", "arbitrary_rotations", "cx", "logical_depth", "t_depth", "non_clifford_depth")
 COUNTS = GATES + ("calls", "measurements", "resets", "settings", "shots", "exact_evaluations", "adaptive_rounds",
@@ -111,13 +113,16 @@ class ResourceContext(Record):
     basis.
 
     Attributes:
-        basis: Default `"selected_logical"`. Basis in which gate metrics are
+        basis: Default `"selected_logical"`, which counts the planned
+            construction's own operations. Basis in which gate metrics are
             counted: `"selected_logical"`, `"cx"`, `"clifford_t"` or
             `"toffoli"`. Counts in different bases answer different
             questions and are never converted into or added to each other.
-        precision: Default `None`. Positive rotation synthesis precision. An
-            arbitrary rotation gets a T count only when the precision and the
-            synthesis are known.
+        precision: Default `None`. Positive rotation synthesis precision, in
+            the sense that `synthesis` defines. An arbitrary rotation gets a T
+            count only when the precision and the synthesis are known, and a
+            block's `ResourceLaw` applies only when its `precision` equals
+            this value.
         synthesis: Default `None`. Source naming the synthesis method. A
             block's [`ResourceLaw`][nwqlib.resources.records.ResourceLaw]
             applies only under the same choice.
@@ -289,6 +294,7 @@ class ResourceQuantity(Record):
             if independent circuit batches run one at a time, otherwise
             `None`. Follow it before comparing the peak with a device
             capacity.
+        schema_version: Format version of the record, 2.
 
     Raises:
         ValueError: When a record is loaded whose label disagrees with its
@@ -413,6 +419,7 @@ class WorkloadEstimate(Record):
         limits: The size limits of the planned circuit description.
         assumptions: Conditions of the whole estimate, such as
             `"logical dependency schedule; no physical QEC/routing/factory projection"`.
+        schema_version: Format version of the record, 2.
 
     Examples:
         A two-dimensional Lanczos Plan, estimated in the CX basis, has an

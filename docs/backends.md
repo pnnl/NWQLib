@@ -6,14 +6,14 @@ A backend is where NWQLib runs the circuits of a `Plan` (the method and construc
 
 | Task | Backend and connection | What has been checked |
 | --- | --- | --- |
-| Small exact simulation on your machine | [Aer](aer.md), `AerBackend()`, the default | Runs locally. Exact simulation stores the full state, so memory limits its width. The noiseless exact simulator can also read several points of one evolution in one simulation ([trajectory readout](#trajectory-readout)): Pauli values, probabilities, and reductions whose registered functions supply both their work count and their execution. |
-| Noisy counts | [Aer](aer.md) with a noise model, `AerBackend.from_noise_model(noise)` | A noise model applies to sampled counts only. |
-| Larger simulation, on one machine or with MPI or a GPU | [NWQ-Sim](nwqsim.md), `NWQSimBackend` | CPU/SV builds are qualified, and a local run can be continued after the Python process exits. Each backend/method pair has its own build and readouts. CPU/SV also supports [trajectory readout](#trajectory-readout) of Pauli values, probabilities and registered reductions in one evolution. Its trajectory route has native checks on macOS arm64 only. |
-| NWQ-Sim on an HPC cluster | [Slurm](slurm.md), `NWQSimSlurmBackend` | Checked offline against scheduler and site-profile responses. Site allocation, MPI and GPU execution need a qualified build and a live check at the site. |
-| IBM quantum hardware | [IBM Runtime](ibm.md), `IBMRuntimeBackend` | Checked offline: SDK, transport and result decoding. Live credentials, queues and QPUs are not qualified. |
-| IonQ quantum hardware | [IonQ](ionq.md), `IonQBackend` | Checked offline: circuit conversion and v0.4 histograms. No live QPU is qualified. |
-| Quantinuum H2 hardware | [Quantinuum Nexus](nexus.md), `NexusBackend` | Checked offline: conversion, remote-job protocol and results. Its page describes a dependency exception and an HTTP wait without a timeout. |
-| An OpenQASM file for another tool | [Export OpenQASM](qasm-streaming.md), `export_qasm` or `write_qasm3_file` | Writes text only. Nothing is executed. |
+| Small exact simulation on your machine | [Aer](aer.md), `AerBackend()`, the default. Install `nwqlib[aer]` | Runs locally. Exact simulation stores the full state, so memory limits its width. The noiseless exact simulator can also read several points of one evolution in one simulation ([trajectory readout](#trajectory-readout)): Pauli values, probabilities, and reductions whose registered functions supply both their work count and their execution. |
+| Noisy counts | [Aer](aer.md) with a noise model, `AerBackend.from_noise_model(noise)`. Install `nwqlib[aer]` | A noise model applies to sampled counts only. |
+| Larger simulation, on one machine or with MPI or a GPU | [NWQ-Sim](nwqsim.md), `NWQSimBackend`. Install `nwqlib[qiskit]` | CPU/SV runners built from a revision that [Qualified NWQ-Sim revisions](nwqsim.md#qualified-nwq-sim-revisions) lists as qualified or checked are supported, and a local run can be continued after the Python process exits. Each backend/method pair has its own build and readouts. CPU/SV also supports [trajectory readout](#trajectory-readout) of Pauli values, probabilities and registered reductions in one evolution. Its trajectory readout has been checked with a built runner on macOS arm64 only. |
+| NWQ-Sim on an HPC cluster | [Slurm](slurm.md), `NWQSimSlurmBackend`. Install `nwqlib[qiskit]` | Checked offline against scheduler and site-profile responses. Site allocation, MPI and GPU execution need a [qualified build](nwqsim.md#qualified-nwq-sim-revisions) and a live check at the site. |
+| IBM quantum hardware | [IBM Runtime](ibm.md), `IBMRuntimeBackend`. Install `nwqlib[ibm]` | Checked offline: SDK, transport and result decoding. Live credentials, queues and QPUs are not checked. |
+| IonQ quantum hardware | [IonQ](ionq.md), `IonQBackend`. Install `nwqlib[ionq]` | Checked offline: circuit conversion and v0.4 histograms. No live QPU is checked. |
+| Quantinuum H2 hardware | [Quantinuum Nexus](nexus.md), `NexusBackend`. Install `nwqlib[nexus]` | Checked offline: conversion, remote-job protocol and results. Its page describes a dependency exception and an HTTP wait without a timeout. |
+| An OpenQASM file for another tool | [Export OpenQASM](qasm-streaming.md), `export_qasm` or `write_qasm3_file`. Install `nwqlib[qiskit]` for `export_qasm` | Writes text only. Nothing is executed. |
 
 Two operations are not backends: [resource estimation](resources.md), which submits no job, and [fault-tolerant compilation and physical projection](fault-tolerant-resources.md) with NWQEC and QDK.
 
@@ -40,7 +40,7 @@ with nwqlib.load_run("my-run", backend=backend) as run:
     print(run.wait().value)
 ```
 
-`prepare` builds the circuits for the backend and saves them, with the Plan, in the new folder `directory`. `submit` sends them. `run.wait()` returns the Result. `load_run` reopens the folder. Here the run has finished, so `wait()` returns the saved Result without measuring again.
+`prepare` builds the circuit of the first setting for the backend, or the circuits of every setting with `settings="all"` (local Aer, local NWQ-Sim and classical runs only), and saves them with the Plan in the new folder `directory`. `submit` sends the circuits and builds each later one when it reaches it. `run.wait()` returns the Result. `load_run` reopens the folder. Here the run has finished, so `wait()` returns the saved Result without measuring again.
 
 For a provider, replace the connection and expect the job to stay pending. The template below is not run here. It needs the provider's credentials:
 
@@ -97,7 +97,7 @@ Trajectory readout evaluates the declared points of one deterministic, noiseless
 
 ### Continue, cancel and recover {#provider-rules}
 
-A saved run continues with its original `Run.resume()` and `Run.wait()`, which read the original job. A failed retrieval keeps the job's locator and does not cause a replacement submission. `run.cancel()` stops new work in the run, and the next refresh requests cancellation of the remote job. Cloud and Slurm runs issue their qualification warning once per run, also after reopening. A local detached NWQ-Sim run names its host and result directory before launch, and that computer or VM must keep running after Python exits.
+A saved run continues with its original `Run.resume()` and `Run.wait()`, which read the original job. A failed retrieval keeps the job's locator and does not cause a replacement submission. `run.cancel()` stops new work in the run, and the next refresh requests cancellation of the remote job. IBM Runtime, IonQ, Nexus and Slurm runs warn once per run that the backend has been checked only offline. A run reopened after it has saved its state does not repeat the warning. A local detached NWQ-Sim run names its host and result directory before launch, and that computer or VM must keep running after Python exits.
 
 Interrupted submissions follow these rules on every provider:
 
@@ -111,8 +111,8 @@ Interrupted submissions follow these rules on every provider:
 | IBM Runtime | Job tag `nwqlib:<submission>` |
 | Quantinuum Nexus | Job name `nwqlib:execute:<submission>`, with its program and shot description |
 | Slurm | Job name `nwqlib-<submission>` |
-| NWQ-Sim, local | Result directory `<spool>/<submission>` |
-| IonQ | None. No exact job lookup is qualified for the IonQ v0.4 API, so a lost IonQ acknowledgement stays uncertain |
+| NWQ-Sim, local | Result directory `<spool>/<submission>`, inside the `spool` directory of `NWQSimBackend` |
+| IonQ | None. No exact job lookup has been checked for the IonQ v0.4 API, so a lost IonQ acknowledgement stays uncertain |
 
 The rules that each backend connection implements are listed in [Backend adapter contract](development/execution.md#backend-adapter-contract).
 

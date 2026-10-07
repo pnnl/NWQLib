@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from functools import cache
 from importlib.metadata import PackageNotFoundError, version
-from typing import Any, Callable, Mapping
+from typing import Any, Mapping
 
 
 @cache
@@ -49,22 +49,4 @@ def implementation_metadata(
     return metadata
 
 
-def registry_metadata_function(
-    registry: Mapping[str, Mapping[str, Any]],
-    *,
-    slot: str,
-) -> Callable[[str], dict[str, Any]]:
-    """Return the standard ``name -> metadata`` accessor for one registry.
-
-    Every implementation registry pairs its dict with an identical accessor
-    wrapper; this factory is that wrapper's single source.
-    """
-
-    def registry_metadata(name: str) -> dict[str, Any]:
-        return implementation_metadata(registry, name, slot=slot)
-
-    registry_metadata.__doc__ = f"Return metadata for a {slot} implementation name."
-    return registry_metadata
-
-
-__all__ = ["implementation_metadata", "package_versions", "registry_metadata_function"]
+__all__ = ["implementation_metadata", "package_versions"]

@@ -70,7 +70,7 @@ def block_encoding_per_query_cx(
     of Shende, Bullock and Markov's optimized quantum Shannon decomposition
     that routing uses, an estimate that NWQLib's exact synthesis can exceed
     (:func:`dense_unitary_cx_qsd_upper_bound`). Other implementations have
-    unknown synthesis cost; an arbitrary supplied circuit has no width-only
+    unknown synthesis cost. An arbitrary supplied circuit has no width-only
     bound on its length.
     """
 

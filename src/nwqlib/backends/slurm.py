@@ -141,27 +141,27 @@ class SlurmProfile(Record):
         ranks_per_node: Required. Positive. MPI ranks per node.
         threads: Required. Positive. Threads per rank.
         gpus_per_task: Default `None`. Positive. GPUs per task, given together
-            with `gpu_bind`. The `"NVGPU"` and `"AMDGPU"` routes require exactly 1,
-            and the CPU and MPI routes require `None`.
+            with `gpu_bind`. The `"NVGPU"` and `"AMDGPU"` backends require
+            exactly 1, and the `"CPU"` and `"MPI"` backends require `None`.
         gpu_bind: Default `None`. Slurm GPU binding, given together with
             `gpus_per_task`.
         cpu_bind: Default `"cores"`. Slurm CPU binding.
         modules: Default `()`. Environment modules to load before the run.
         executable: Required. Absolute path of the runner on the compute nodes.
         build_identity: Required. Source commit of the runner's NWQ-Sim build. It
-            records which build ran and does not qualify a GPU or distributed
-            implementation.
+            records which build ran and does not show that a GPU or distributed
+            build works.
         spool: Required. Absolute path of a directory shared with the compute
             nodes.
-        backend: Default `"CPU"`. NWQ-Sim route, as in
-            [`NWQSimBackend`][nwqlib.backends.nwqsim.NWQSimBackend].
+        backend: Default `"CPU"`. NWQ-Sim backend, with the values and
+            restrictions of [`NWQSimBackend`][nwqlib.backends.nwqsim.NWQSimBackend].
         method: Default `"SV"`. `"SV"` or `"DM"`, as in `NWQSimBackend`.
 
     Raises:
-        ValueError: If the route is not supported, `cluster` is not one name, an
-            option value is not one token, `walltime` is malformed or zero,
-            `gpus_per_task` and `gpu_bind` are not given together, or a path is
-            not absolute.
+        ValueError: If the `backend` and `method` combination is not supported,
+            `cluster` is not one name, an option value is not one token,
+            `walltime` is malformed or zero, `gpus_per_task` and `gpu_bind` are
+            not given together, or a path is not absolute.
     """
 
     cluster: Text
@@ -238,7 +238,7 @@ class SlurmProfile(Record):
         """Return the Slurm batch script for one submission, without running it.
 
         Use it to inspect what a submission would send to `sbatch`. Rendering a
-        script does not qualify a site. The job name `nwqlib-<submission UUID>` is
+        script does not test the site. The job name `nwqlib-<submission UUID>` is
         what a lost submission acknowledgement is searched for. `--no-requeue` keeps
         Slurm from running the same request a second time after a node failure or
         preemption, and `srun --kill-on-bad-exit` stops all ranks when one fails.
@@ -285,13 +285,13 @@ class SlurmProfile(Record):
 
 @dataclass(frozen=True)
 class SlurmStatus:
-    """One scheduler observation; result_path alone makes no scientific claim.
+    """One scheduler observation. result_path alone makes no scientific claim.
 
     Attributes:
         state: Scheduler state observed for the original job.
         exit_code: Scheduler-reported process exit code, or None before it is known.
         result_path: Original expected output path, or None if no result path is available.
-        failure: Recorded scheduler/output failure context; None when absent.
+        failure: Recorded scheduler/output failure context. None when absent.
     """
 
     state: str
@@ -303,13 +303,16 @@ class SlurmStatus:
 class SlurmLauncher:
     """One submission or refresh per explicit call, with bounded CLI transport.
 
-    Locator.instance holds the NWQLib submission UUID; locator.cluster/account
-    keep scheduler routing. The serialized profile owns the original spool.
-    Reserve each script/input write and scheduler response through run.
-    max_response_bytes bounds admitted stdout; transport must enforce this cap
-    during capture and bound stderr separately. No transport retry is permitted.
-    Transport must remove inherited SBATCH_* overrides from the sbatch environment;
-    those otherwise supersede script directives (including allocation/arrays).
+    ``locator.instance`` holds the NWQLib submission UUID, and
+    ``locator.cluster`` and ``locator.account`` route scheduler commands. The
+    serialized profile names the original spool. Each script and input write
+    and each scheduler response is admitted through ``run``.
+    ``max_response_bytes`` caps the combined stdout and stderr of each command.
+    An injected transport must enforce that cap during capture, must not retry,
+    and must remove inherited ``SBATCH_*`` variables, which otherwise override
+    the script's directives, including allocation and array options. The
+    default ``SlurmTransport`` does all three and also removes ``SRUN_*``
+    variables.
     """
 
     def __init__(self, profile, *, max_response_bytes, timeout_seconds=None, transport=None):
@@ -422,7 +425,7 @@ class SlurmLauncher:
         """Write the spool files and call sbatch once for a payload that ``admit`` accepted."""
         script = self.profile.script(submission_id, max_input_bytes=max_input_bytes).encode()
         # One payload write plus one read per native rank. The script is written
-        # once; scheduler internals are outside this explicit file-work inventory.
+        # once. Scheduler internals are outside this explicit file-work inventory.
         ranks = self.profile.nodes * self.profile.ranks_per_node
         payload_bytes = (1 + ranks) * len(payload) + len(script)
         run.check_data(payload_bytes)
@@ -470,7 +473,7 @@ class SlurmLauncher:
         return SlurmStatus(state, code, result, failure)
 
     def reconcile(self, submission_id, *, since, until, run):
-        """One bounded accounting query; absence/ambiguity never launches work.
+        """One bounded accounting query. Absence or ambiguity never launches work.
 
         since/until are the saved submission search window, in the site's local
         time. They are explicit because sacct's default date window can omit jobs.
@@ -494,58 +497,6 @@ class SlurmLauncher:
         self._command(["scancel", f"--clusters={locator.cluster}", locator.job_id], run)
 
 
-def slurm_success_storage_bounds(*, cluster, account, response_bytes, max_bytes,
-                                  event_already_revised=False):
-    """Bound fresh successful Slurm row growth by transaction, in JSON bytes.
-
-    Cluster and account are the validated profile values. Each scheduler
-    response has at most response_bytes UTF-8 bytes. A plain positive job
-    ID has 1..response_bytes digits. Successful status text needs at most
-    6*response_bytes + 13 JSON bytes, including quotes and ExitCode text.
-    The outcome transaction credits the already committed status row.
-    These bounds exclude failure and recovery histories and are not all
-    charged against the completion-metadata reservation.
-
-    With ``L`` and ``P`` the JSON sizes of the locator and the provider
-    status, acknowledgement grows by ``L + 71`` bytes (submission parent
-    +69, status ``intent -> acknowledged`` +6, locator ``L - 4``), the
-    completed status row by ``P + 13`` to ``P + 20`` (status -3, finish
-    time +23..30, status text ``P - 4``, simulation count ``None -> 1``
-    -3), and the outcome transaction by ``detached_completion_growth``.
-    The locator's lower prototype has a one-digit job ID, and the upper
-    bound adds ``response_bytes - 1`` digits; ``3 <= P <= 6*response_bytes
-    + 13``. These are conservative bounds, not a claim that their locator
-    and status endpoints are attained simultaneously. Source: the NWQLib
-    completion-admission derivation. The helper has no caller yet. Its
-    intended caller is the pre-launch check that reserves the
-    acknowledgement and status growth in the Run's cumulative data
-    capacity, which is not implemented.
-    """
-    from nwqlib._prepared_execution import detached_completion_growth
-    from nwqlib._run_journal import _json_bound
-    from nwqlib.execution import JobLocator
-
-    if type(response_bytes) is not int or response_bytes < 1:
-        raise ValueError("response_bytes must be a positive integer")
-    locator = JobLocator(
-        provider="slurm", job_id="1", cluster=cluster, account=account,
-        instance="00000000-0000-0000-0000-000000000000")
-    low_locator = _json_bound(locator, max_bytes)
-    high_locator = low_locator + response_bytes - 1
-    low_status = 3
-    high_status = 2 + 6 * response_bytes + len("; ExitCode=")
-    low_outcome, high_outcome = detached_completion_growth(
-        max_bytes=max_bytes, event_already_revised=event_already_revised)
-    return {
-        "ack": (low_locator + 71, high_locator + 71),
-        "status": (low_status + 13, high_status + 20),
-        "outcomes": (low_outcome, high_outcome),
-        "intent_to_consumed": (
-            low_locator + 71 + low_status + 13 + low_outcome,
-            high_locator + 71 + high_status + 20 + high_outcome),
-    }
-
-
 class NWQSimSlurmBackend(Record):
     """NWQ-Sim run as a Slurm batch job on a cluster.
 
@@ -555,14 +506,16 @@ class NWQSimSlurmBackend(Record):
     argument except `optimization_level` is required. The profile holds the
     runner, its build and the pending-job directory (`spool`). Submission calls `sbatch` once,
     and a job whose acknowledgement was lost is found again by its job name in
-    Slurm accounting within the configured time window. Only offline scheduler
-    and protocol checks qualify this backend, and the site allocation, runner and
-    hardware have no live qualification. The [Slurm guide](../slurm.md) shows a
-    complete run.
+    Slurm accounting within the configured time window. NWQLib has tested this
+    backend only offline, with scheduler and protocol checks, and has not tested
+    a live site allocation, runner or hardware. The [Slurm guide](../slurm.md)
+    shows a complete run.
 
     Attributes:
+        kind: Fixed `"slurm"`, the backend type.
         profile: Required. The [`SlurmProfile`][nwqlib.backends.slurm.SlurmProfile].
-            Its total rank count and GPU request are checked against its route.
+            Its total rank count and GPU request are checked against its
+            `backend` and `method`.
         accounting_since: Required. Start of the accounting search window, an ISO
             time without a time zone, read in the site's local time. Choose a
             window that covers the intended submission period.
@@ -579,13 +532,15 @@ class NWQSimSlurmBackend(Record):
         timeout_seconds: Required. Positive deadline in seconds for each scheduler
             command.
         optimization_level: Default `0`. Qiskit transpiler level of the translation to
-            U and CX gates, as in `NWQSimBackend`, with the same exclusion
-            `"optimization_level"` at any other level.
+            U and CX gates, as in `NWQSimBackend`. A level other than 0 adds the
+            same [roundoff exclusion](../glossary.md#roundoff-exclusion)
+            `"optimization_level"` to the
+            [preparation record](../glossary.md#preparation-record).
 
     Raises:
-        ValueError: If the rank or GPU request does not fit the route, the
-            accounting window has a time zone or is not increasing, or
-            `timeout_seconds` is not positive.
+        ValueError: If the rank or GPU request does not fit the profile's
+            `backend` and `method`, the accounting window has a time zone or is
+            not increasing, or `timeout_seconds` is not positive.
     """
 
     kind: Literal["slurm"] = "slurm"
@@ -661,9 +616,7 @@ class NWQSimSlurmBackend(Record):
             source_definitions=source_definitions, run=run, snapshot=snapshot, views=views)
 
     def restore_native(self, record, payload=None, *, run):
-        """Restore through the NWQ-Sim adapter, rejecting a receipt from another build."""
-        if record.target.version != self.profile.build_identity:
-            raise ValueError("prepared NWQ-Sim build differs from the original Slurm profile")
+        """Restore through the NWQ-Sim adapter."""
         return self._runner().restore_native(record, payload, run=run)
 
     def admit_batch(self, natives):
@@ -726,7 +679,7 @@ class NWQSimSlurmBackend(Record):
         if status.state == "uncertain":
             return BackendRefresh("uncertain", provider_status=provider_status, failure=status.failure)
         run.check_data(self.max_output_bytes)
-        # Any nonzero exit value OR signal must reach the native failure owner.
+        # A nonzero exit value or a signal reaches the NWQ-Sim result decoder as a failure.
         returncode = int(status.exit_code is not None and status.exit_code != "0:0")
         try:
             result = self._runner()._result(status.result_path, native=native,

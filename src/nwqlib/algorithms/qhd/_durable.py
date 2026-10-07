@@ -15,9 +15,9 @@ from it. The directory holds
     levels/<z>/run/                  the Run of level z of a standalone refinement
     levels/<z>/tables.json                 table-stage data of standalone refinement level z
 
-Each refinement level also keeps `tables.json` beside its `run/` directory, containing its table-evaluation
-count, the refinement's constant C when it is rational and, for the search model, the unscaled support tables;
-this applies both to `levels/<z>/` and to `iterations/<k>/levels/<z>/`.
+Each refinement level also keeps ``tables.json`` beside its ``run/`` directory, containing its table-evaluation
+count, the refinement's constant C when it is rational and, for the search model, the unscaled support tables.
+This applies both to ``levels/<z>/`` and to ``iterations/<k>/levels/<z>/``.
 
 The outer record keeps the run's arguments, which never change, and its committed state. The arguments
 include the configuration of the one backend of every inner Run. For the augmented-Lagrangian layer they also include the
@@ -53,10 +53,11 @@ number of JSON values grows linearly with the completed rounds and levels
 (``docs/ENGINEERING_CONSTANTS.md``, "Augmented-Lagrangian record size"). It is rewritten after each completed
 round or level, so the bytes written over a run grow with the square of their number, while the directory
 keeps one copy.
-The per-level `tables.json` files contain generated table-stage data. Their total stored size is the sum of
-their UTF-8 file lengths and grows with the retained levels and their table sizes. They are outer files and
-are excluded from the inner Runs' `max_data_bytes`; their save and load memory is admitted against the level
-Method's `max_bytes`. There is no cumulative outer-directory disk limit in these fields.
+
+``tables.json`` of each refinement level holds generated table-stage data. Its stored size is its UTF-8 file
+length, so the total grows with the number of levels and their table sizes. These are outer files, outside
+the inner Runs' ``max_data_bytes``. Their save and load memory is checked against the level Method's
+``max_bytes``. No limit caps the total size of the outer directory.
 """
 
 from contextlib import closing, contextmanager
@@ -72,7 +73,7 @@ from ._outer import HeaderlessRun
 RECORD = "controller.json"
 PROBLEM = "problem.pickle"
 NOISE = "noise-model.json"
-# One format per layer, changing with the outer record's fields
+# One format per layer, bumped when a current reader could misread an older directory
 # (docs/FRAMEWORK.md, "API stability").
 FORMATS = {"constrained": "qhd.constrained_run/5", "refinement": "qhd.refinement_run/6"}
 RESUME = {"constrained": "resume_augmented_lagrangian", "refinement": "resume_box_refinement"}
@@ -215,9 +216,7 @@ class Directory:
         with _controller(path):
             saved = ArchiveFiles(path, None).read_json(RECORD)
             if saved.get("format") != FORMATS[kind]:
-                other = [name for name, fmt in FORMATS.items() if fmt == saved.get("format")]
-                hint = f", continue it with {RESUME[other[0]]}" if other else ""
-                raise ValueError(f"{path} holds format {saved.get('format')!r}, not {FORMATS[kind]!r}{hint}")
+                raise ValueError(f"{path} holds format {saved.get('format')!r}, not {FORMATS[kind]!r}")
             yield cls(path, kind, saved["settings"], saved)
 
     def bind(self, backend):
@@ -227,7 +226,7 @@ class Directory:
         ``AerBackend()`` under quantum execution. Its configuration must equal ``settings["backend"]``, the
         configuration that every inner Run of the directory records, or ValueError names both before
         anything is reopened, planned or committed. A Run that resume creates on another backend would
-        otherwise mix two populations in one run, which the outer record could not show. A noisy
+        otherwise put Runs of two backends in one run, which the outer record could not show. A noisy
         ``AerBackend`` that still holds its bound model, the original backend in the original process, is
         used as it is. For an unbound one, such as ``AerBackend(noise_model_id=...)`` with the original
         identity in a new process, the model saved by ``create`` is rebuilt with its errors and basis gates
@@ -284,7 +283,7 @@ class Directory:
         if representation is not None:
             self._representation = _dump(representation)
         final = record is not None
-        data = dict(format=FORMATS[self.kind], problem=PROBLEM, settings=self.settings)
+        data = dict(format=FORMATS[self.kind], settings=self.settings)
         if self.kind == "constrained":
             data["iterations"] = [] if final else _dump(self._iterations)
             data["representation"] = None if final else self._representation

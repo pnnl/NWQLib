@@ -1,4 +1,7 @@
-"""ADAPT-GCiM's actual finite pool, selected query arguments and controller."""
+"""The ADAPT Method: pool admission, the parameterized construction that every query reuses, and the generator compiler plans.
+
+The controller is ``adapt_acquisition.drive_adapt``.
+"""
 
 from nwqlib._limits import DEFAULT_MAX_BYTES
 
@@ -316,12 +319,15 @@ def _construction(inputs, reference, method, length, compiler_plans, slot_bound,
         # adapt_acquisition.bind_classical (8L + 12 complex128 state vectors),
         # the Plan's packed action tables (adapt_actions.build_action_tables),
         # the largest shared action remainder max_A(B_A - 32d) beside the
-        # input and output vectors the frontier already holds, and the
-        # processed Hamiltonian's payload.
-        # With optimization, an energy-and-gradient query on a chain of at
-        # most L generators reserves 16 (C_cache + 2k + 12) d + 24k on top of
-        # the named non-vector terms; with the old caches C_cache <= 8L and
-        # k <= L that is 16 (10L + 12) d + 24L
+        # input and output vectors the frontier already holds,
+        # and the processed Hamiltonian's payload plus the additional bytes for
+        # removing its mean diagonal (inputs.offset_free_requirements[0]). This
+        # additional byte charge is zero for dense or Pauli input and for a zero shift.
+        # With optimization, an energy-and-gradient query with k <= L generators
+        # has a vector and scalar-array allowance of 16 (C_cache + 2k + 12) d + 24k,
+        # where C_cache counts the vectors already held by the Run's caches.
+        # Using C_cache <= 8L and k <= L, the Plan reserves
+        # 16 (10L + 12) d + 24L on top of the named non-vector terms
         # (adapt_acquisition._classical_energy_gradient).
         tables = inputs.cache["action_tables"]
         vectors = (
@@ -675,13 +681,14 @@ class ADAPT(Method):
         t_user: Default `10`. Cap `T_usr` on consecutive flat rounds in the
             rule `min(T_auto, T_usr)`. A fractional round count is rounded up.
         max_iterations: Default `8`. Largest number of selection rounds. The
-            basis holds at most `2*min(max_iterations, pool size)` states, so
+            basis holds at most ``2*min(max_iterations, pool size)`` states, so
             `max_basis_size=64` allows at most 32 selections for a pool of
             more than 32 members. The default is a cost cap. With exact
             evaluation and the spin-adapted pool, the H4 chain of the eigenvalue example reaches
             FCI at the eighth selection, and 10-qubit LiH is then 0.46 mHa
-            above its FCI energy. The flat counter would stop them only at
-            selections 18 and 19
+            above its FCI energy. With `max_iterations=32`, the largest that
+            `max_basis_size=64` admits for these pools, the flat counter stops
+            them at selections 18 and 19
             ([Engineering constants](../../ENGINEERING_CONSTANTS.md)).
         overlap_cutoff: Default `1e-12`, positive. Overlap eigenvalue cutoff
             that defines the kept Gram subspace.
@@ -1089,13 +1096,12 @@ class ADAPT(Method):
         return load(data, files)
 
     def save_run_context(self, context, files):
-        """Save the state and action caches; the Run or Result owns the collected observations.
+        """Save the state and action caches, without the collected observations, which the Run or Result holds.
 
         A live Run's journal and a saved Result's RunData hold every collected
-        chunk and its order, so the context marks ``observations_in_run`` and
-        refers to them instead of storing a second copy of each chunk. Array
-        and gate files are written once per object and shared by later
-        checkpoints (``ArchiveFiles.write_array``).
+        chunk and its order, so the context refers to them instead of storing
+        a second copy of each chunk. Array and gate files are written once per
+        object and shared by later checkpoints (``ArchiveFiles.write_array``).
         """
         from .adapt_archive import save_context
 
@@ -1118,7 +1124,7 @@ class ADAPT(Method):
 
     @staticmethod
     def snapshot_result_context(context):
-        """Share immutable scientific data; keep mutable native caches private.
+        """Share immutable scientific data and keep mutable native caches private.
 
         The observation index is left out: the Result's RunData owns the
         collected chunks and their order, and a saved Result refers to them
@@ -1145,8 +1151,7 @@ class ADAPT(Method):
 
         return MappingProxyType(
             {
-                field.name: None if field.name == "result"
-                else freeze(_compiler_entries(context.compiler_plans)) if field.name == "compiler_plans"
+                field.name: freeze(_compiler_entries(context.compiler_plans)) if field.name == "compiler_plans"
                 else freeze(getattr(context, field.name))
                 for field in fields(AdaptContext)
                 if field.name not in {"gates", "preparations", "reference_gates", "matrix_data", "pair_values",
@@ -1263,7 +1268,7 @@ class ADAPT(Method):
 
         An empty label set would be a zero-work query, so the controller must
         skip it before preparation rather than submit it. An exact quantum
-        pair query reads one weighted-pencil reduction instead of labels; its
+        pair query reads one weighted-pencil reduction instead of labels. Its
         layout is the diagonal system state when both chains are equal and
         the ancilla-bit-0 joint state otherwise.
         """
@@ -1299,7 +1304,7 @@ class ADAPT(Method):
         (``adapt_actions.query_work``) covers the reference, generator,
         Hamiltonian and scalar work of the invocation before it starts, so
         every actual query term is bounded by its nonnegative outer charge
-        and no constituent can exceed the cap; the inner matvec gate may
+        and no constituent can exceed the cap. The inner matvec gate may
         still receive the whole cap. Every later invocation is checked
         afresh. Resolution, analysis and repeated preparation checks do not
         consume an execution budget, so this method keeps no Run-wide

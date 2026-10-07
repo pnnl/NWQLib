@@ -40,14 +40,9 @@ def test_options_uses_actual_required_scientific_configuration_without_instantia
     assert "basis" in json.loads(capsys.readouterr().out)["required"]
 
 
-def test_cli_module_entry_agrees_with_package_inventory_and_help(monkeypatch, capsys):
+def test_card_and_options_help_print_without_discovering_methods(monkeypatch, capsys):
     from nwqlib import cli as module
 
-    package = cli("algorithms", "--json")
-    direct = subprocess.run([sys.executable, "-m", "nwqlib.cli", "algorithms", "--json"],
-                            cwd=ROOT, text=True, capture_output=True)
-    assert package.returncode == direct.returncode == 0
-    assert json.loads(package.stdout) == json.loads(direct.stdout)
     monkeypatch.setattr(module, "_registrations", lambda *args: pytest.fail("help discovered methods"))
     for command, description in (("card", "declared scope"), ("options", "configuration schema")):
         with pytest.raises(SystemExit) as stopped:

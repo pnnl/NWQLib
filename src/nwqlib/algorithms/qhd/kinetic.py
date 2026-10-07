@@ -96,10 +96,10 @@ class KineticCompiler:
         zero weight a, which emits nothing, and any other zero would be range
         loss, which is refused with its remedy
         (``validation._kinetic_range_error``), since it depends only on the
-        grid and the schedule. With ``total_time = 1e308`` the doubled
-        duration already overflows, although its exact product with a small
-        coefficient is moderate, and its refusal names a shorter
-        ``total_time``. This evaluation order is the one the native
+        grid and the schedule. With ``dt = 1e308``, the full-duration hopping
+        layer overflows at ``fl(2 t)`` even when the exact product ``2 t c_h``
+        with a small normal coefficient is moderate, so the refusal requests a
+        shorter ``total_time``. This evaluation order is the one the native
         parameter repeats (``pauli_evolution._hopping_parameter``), whose
         equality with the stored angle makes the hopping-parameter entry of
         the error ledger zero.
@@ -130,8 +130,6 @@ class KineticCompiler:
             except ValueError as error:
                 raise _kinetic_range_error(error) from error
             for layer, duration in segments:
-                # ell = fl(fl(2 t) c_h), checked before pruning, and the native parameter 2 ell must stay finite
-                # (pauli_evolution._hopping_parameter). t > 0, so ell is zero only for a zero weight a.
                 # The doubled duration depends on total_time and num_steps alone, so its refusal names
                 # total_time instead of the kinetic-scale remedy. The duration is normal (schedules.step_weights),
                 # so only its upper end can fail.

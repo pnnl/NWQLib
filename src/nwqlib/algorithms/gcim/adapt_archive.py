@@ -1,4 +1,7 @@
-"""Actual ADAPT input, compiler and cache snapshots; loading never replans."""
+"""ADAPT input, compiler and cache snapshots.
+
+Loading never replans.
+"""
 
 from nwqlib._choice_archive import unsupported_archive_format
 from nwqlib.blocks.selection import SelectedBlock
@@ -108,17 +111,17 @@ def save(plan, files):
     selected (``adapt.CompilerPlans``), so only those plans are saved, by pool
     index. Shared-index compiler blocks are the generator's matrices on its
     active occupation states. Storing them lets a reopened Plan bind the same
-    compiler data without repeating the block construction; a generator
+    compiler data without repeating the block construction. A generator
     first selected after reopening builds its plan then. A durable Run
     writes this archive before any selection, so the plans it builds later
     are saved with its checkpoints (``save_context``).
 
-    The archive format is ``adapt/6``. Its saved reconstruction carries the
+    The archive format is ``adapt/7``. Its saved reconstruction carries the
     Hamiltonian action allowance (``hamiltonian_action_work``) computed at
     planning under this format's law, and loading reuses it without
     recomputing it, so an archive of an earlier format, whose query and
     action laws differ, is refused. A classical Plan's packed action tables
-    are not saved; loading packs them again under their own admission
+    are not saved. Loading packs them again under their own admission
     (``adapt_actions.build_action_tables``).
     """
     method = plan.method
@@ -134,7 +137,7 @@ def save(plan, files):
         ]
     )
     return dict(
-        format="adapt/6",
+        format="adapt/7",
         plan=plan.to_record(),
         problem=files.write_problem(plan.problem),
         output=files.write_output(plan.output),
@@ -155,13 +158,11 @@ def save(plan, files):
 
 
 def load(saved, files):
-    """Reopen saved generator data and bind the original query construction without rerunning
-    selection.
-    """
+    """Reopen saved generator data and bind the saved query construction without rerunning selection."""
     from .adapt import ADAPT, CompilerPlans
 
-    if saved.get("format") != "adapt/6":
-        raise unsupported_archive_format("ADAPT archive", saved.get("format"), "adapt/6")
+    if saved.get("format") != "adapt/7":
+        raise unsupported_archive_format("ADAPT archive", saved.get("format"), "adapt/7")
     fields = dict(saved["method"])
     original = saved["original_pool"]
     fields["pool"] = (
@@ -293,7 +294,6 @@ def save_context(context, files):
         else context.pencil.model_dump(mode="json", exclude_computed_fields=True),
         pencil_parameters=context.pencil_parameters,
         pencil_attempt=context.pencil_attempt,
-        observations_in_run=True,
     )
 
 
@@ -301,19 +301,15 @@ def load_context(data, files):
     """Restore a saved ``AdaptContext`` without acquisition, analysis or circuit rebuilding.
 
     Chain keys return as tuples so cache lookups match live keys. The Run or
-    the Result owns the observations (``observations_in_run``): a reopened
+    the Result owns the observations, and the context stores none: a reopened
     Run rebuilds the observation index from its own chunks
     (``ADAPT._load_live_run_context``), and a Result keeps them in its
-    RunData. A context that holds inline observations is refused.
+    RunData.
     Saved compiler plans return as ``(pool index, kind, active modes,
     occupation blocks)`` entries, which the reopened Run's
     controller adopts into its Plan's map (``adapt_acquisition.drive_adapt``)
     through ``adapt.CompilerPlans.restore`` at the saved pool indices.
     """
-    if not data.get("observations_in_run", False):
-        # A chunk rebuilt from archive JSON would have no payload source for
-        # its arrays; the Run or Result owns the chunks.
-        raise ValueError("saved ADAPT context holds inline observations; its Run or Result owns the chunks")
     from .adapt_acquisition import AdaptContext
     from .fixed_basis import ProjectedPencil
 

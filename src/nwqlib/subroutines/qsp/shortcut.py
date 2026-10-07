@@ -11,8 +11,8 @@ states ``-1 <= K(x) <= -1 + 4 eta/(1 + eta)`` for ``1/kappa <= x <= 1``.
 Lemma 3, item 2, prints this upper bound for ``|K(x)|``, which cannot hold
 for ``eta < 1/3`` because the bound is then negative. The proof, through
 Eq. (63), bounds ``K(x)`` itself. That signed bound is the statement of
-p. 4 and the one behind Eqs. (5) and (17). The circuit and host-model
-users are the QLS Method's circuit and its numerical model.
+p. 4 and the one behind Eqs. (5) and (17). The QLS Method's circuit and its
+classical numerical model use this polynomial.
 """
 
 from __future__ import annotations
@@ -42,11 +42,12 @@ class KernelReflectionPolynomial:
     """Kernel-reflection polynomial `K` of Dalzell arXiv:2406.12086v2, App. B.3, Eq. (62).
 
     [`plan_kernel_reflection`][nwqlib.subroutines.qsp.shortcut.plan_kernel_reflection]
-    returns a coefficient-free plan, and QLS fills in the coefficients. The
-    domain gap is `Delta = 1/kappa_be`. The fields below are read-only.
+    returns a coefficient-free plan, and the QLS Method's planning fills in
+    the coefficients. The domain gap is `Delta = 1/kappa_be`. The fields below are read-only.
 
     Attributes:
-        coefficients: Chebyshev coefficients of the even kernel-reflection polynomial; empty for a coefficient-free sizing plan.
+        coefficients: Chebyshev coefficients of the even kernel-reflection
+            polynomial, or empty for a coefficient-free sizing plan.
         kr_ell: Integer half-degree from Dalzell arXiv:2406.12086v2, Eq. 6.
         kappa_be: Reciprocal of the gap `Delta = 1/kappa_be`, a lower
             bound on the nonzero singular values of the normalized input.
@@ -140,11 +141,11 @@ def kernel_reflection_cost(plan) -> _FitCost:
       recurrence vectors of ``chebval``.
     - ``4 (d + 1)``: coefficient vectors.
 
-    ``work`` is NWQLib's work formula for ``numpy.linalg.lstsq`` for an
-    ``n x (d + 1)`` matrix for the dense
-    least squares and ``8 n (d + 1)`` for the Vandermonde matrix, the
-    degree-``ell`` filter evaluation and the scaling. LAPACK workspace is
-    excluded.
+    With d and n as defined above and ``ell = plan.kr_ell``, ``work`` adds
+    ``least_squares_work(n, d + 1)``, NWQLib's work formula for
+    ``numpy.linalg.lstsq`` on the ``n x (d + 1)`` design matrix, and
+    ``8 n (d + 1)`` for the Vandermonde matrix, the degree-``ell`` filter
+    evaluation and the scaling. LAPACK workspace is excluded.
     """
     d = plan.degree
     n = max(_KR_CONSTRUCTION_GRID_POINTS, 8 * (d + 1))
@@ -161,9 +162,12 @@ def _realize_kernel_reflection(
 ) -> KernelReflectionPolynomial:
     """Realize the synthesis coefficients of a sizing plan.
 
-    The selected polynomial's integer degree parameter is
-    ``ell = ceil(kappa * ln(2/eta) / 2)``. The values are Dalzell
-    arXiv:2406.12086v2, App. B.3:
+    The selected polynomial's integer half-degree is
+    ``ell = ceil(kappa_be * ln(2/eta) / 2)``, where
+    ``kappa_be = plan.kappa_be`` is the reciprocal of the polynomial-domain
+    gap ``Delta = 1/kappa_be`` and ``eta = plan.kr_eta`` is the
+    kernel-reflection approximation parameter.
+    The values are Dalzell arXiv:2406.12086v2, App. B.3:
     start from the Chebyshev filter
     ``F(x) = T_ell((1 + Delta^2 - 2x^2)/(1 - Delta^2)) / T_ell((1 + Delta^2)/(1 - Delta^2))``
     of Eq. (52) and map it affinely into
@@ -224,7 +228,7 @@ def _realize_kernel_reflection(
     coefficients = np.polynomial.chebyshev.chebfit(x_values, target_values, degree)
     # K is even in x, so the fitted odd coefficients are rounding residue.
     coefficients[1::2] = 0.0
-    # Keep the exact kernel anchor after the numerical coefficient recovery.
+    # Rescale the even coefficients so that K(0) = 1 after the least-squares fit.
     coefficients[0::2] /= np.polynomial.chebyshev.chebval(0.0, coefficients)
 
     return KernelReflectionPolynomial(

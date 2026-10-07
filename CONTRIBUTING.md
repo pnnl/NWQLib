@@ -7,7 +7,7 @@
 - Its user-facing behavior is visible in typed records, validation results, reports and focused tests.
 - It passes the checks in [Maintenance](https://pnnl.github.io/NWQLib/MAINTENANCE/) that apply to it.
 
-The package root `nwqlib` exposes the workflow and finite-search operations. Import other public classes and functions from the subpackage that defines them. A Method that submits your own circuit and returns its counts needs a `descriptor` and two hooks, `plan` and `analyze`, as [Run your own circuit](https://pnnl.github.io/NWQLib/own_circuit/) shows.
+The package root `nwqlib` exposes the workflow and finite-search operations and the Problem and output records, such as `LinearDynamics` and `Eigenvalue`. Import other public classes and functions from the subpackage that defines them. A Method that submits your own circuit and returns its counts needs a `descriptor` and two hooks, `plan` and `analyze`, as [Run your own circuit](https://pnnl.github.io/NWQLib/own_circuit/) shows.
 
 ## Set up, test and open a pull request
 

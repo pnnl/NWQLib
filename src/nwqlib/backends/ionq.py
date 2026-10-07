@@ -17,7 +17,7 @@ import os
 from typing import Annotated, ClassVar, Literal
 from urllib.parse import quote
 
-from pydantic import Field, StrictBool
+from pydantic import Field
 
 from nwqlib.core.records import PositiveInt, Real, Record, Source, Text
 from nwqlib.execution import CountsSampling
@@ -95,24 +95,22 @@ class IonQBackend(Record):
     is submitted or retrieved, and it is never stored.
 
     Each operation is one HTTP request, so no SDK retry can create a second job.
-    IonQ's v0.4 API offers no qualified way to find a job by name, so a lost
+    IonQ's v0.4 API offers no job lookup by name that NWQLib has tested, so a lost
     submission acknowledgement leaves the outcome uncertain, and `Run.wait` raises
     `RunFailed` without submitting a replacement. Only raw histograms are read, because
     IonQ's probability results are not counts of shots. The Run bounds decoded
-    data and stored observations. Only offline SDK and API checks qualify this
-    backend, and live QPU behavior is unqualified. The [IonQ guide](../ionq.md)
-    gives the API sources, batch limits and histogram decoding.
+    data and stored observations. NWQLib has tested this backend only offline,
+    with SDK and API checks, and has not tested live QPU behavior. The
+    [IonQ guide](../ionq.md) gives the API sources, batch limits and histogram
+    decoding.
 
     Attributes:
+        kind: Fixed `"ionq"`, the backend type.
         device: Required. A v0.4 QPU name starting with `qpu.`. The ideal
             simulator is rejected because it ignores the requested shots.
         gateset: Default `"qis"`. `"qis"` translates circuits with Qiskit to Rx, Ry,
             Rz and CX, with angles in radians. `"native"` passes IonQ native gates
             unchanged, with angles in turns.
-        debiasing: Default `False`, the only supported value. A debiased job
-            returns separate variant populations whose qubit-map direction the v0.4
-            job schema does not define, so they cannot be read as one set of
-            counts.
         token_env: Default `"NWQLIB_IONQ_API_KEY"`. Environment variable that holds
             the API key.
         max_input_bytes: Required. Positive. Limit in bytes on the serialized
@@ -126,10 +124,23 @@ class IonQBackend(Record):
         optimization_level: Default `0`. Qiskit transpiler level, 0 to 3, of the
             `"qis"` translation. The `"native"` gateset accepts only 0. Levels 2 and 3
             resynthesize two-qubit blocks with Qiskit's own synthesis. A level
-            other than 0 is recorded as the exclusion `"optimization_level"` in
-            the preparation record, and the operation count describes the compiled
-            circuit. The IonQ target has no derived roundoff constant, so
-            `state_error()` gives no bound at any level.
+            other than 0 adds the
+            [roundoff exclusion](../glossary.md#roundoff-exclusion)
+            `"optimization_level"` to the
+            [preparation record](../glossary.md#preparation-record), and the
+            operation count describes the compiled circuit. The IonQ target has
+            no derived roundoff constant, so
+            [`PreparedArtifact.state_error()`][nwqlib.execution.PreparedArtifact.state_error]
+            gives no bound at any level.
+
+    Raises:
+        ValueError: At preparation, before any request, if `device` does not
+            start with `qpu.` or is the ideal simulator, the readout is not
+            counts, the shot count is outside 1 to 1,000,000, the `"native"`
+            gateset has an `optimization_level` other than 0, or the circuit
+            has unbound parameters, no measurements, a measurement followed by
+            another operation on its qubit, or two measurements into one
+            classical bit.
     """
 
     qualification_notice: ClassVar[str] = (
@@ -139,7 +150,6 @@ class IonQBackend(Record):
     supports_synchronous: ClassVar[bool] = False
     device: Text
     gateset: Literal["qis", "native"] = "qis"
-    debiasing: StrictBool = False
     token_env: Text = "NWQLIB_IONQ_API_KEY"
     max_input_bytes: PositiveInt
     max_response_bytes: PositiveInt
@@ -162,8 +172,6 @@ class IonQBackend(Record):
             raise ValueError("IonQ supports raw sampled counts only")
         if self.device == "simulator":
             raise ValueError("IonQ ideal simulator ignores shots; raw-count execution is unavailable")
-        if self.debiasing:
-            raise ValueError("IonQ debiasing requires separate variant acquisitions; current counts path is unsupported")
         if not self.device.startswith("qpu."):
             raise ValueError("IonQ requires an explicit v0.4 qpu.* device")
         # The shots range of the v0.4 create-job schema for the single-circuit
@@ -250,8 +258,6 @@ class IonQBackend(Record):
         unchanged, keeping its angles in turns. The measurement map returned by
         the converter is the translation the decoder later applies.
         """
-        if observation.kind == "trajectory":
-            observation.reject_unsupported_schedule(f"IonQ {self.device}")
         context = run._state["backend_context"]
         from qiskit import qpy, transpile
         from nwqlib.backends.connection import NativePreparation, circuit_layout, environment
@@ -284,8 +290,7 @@ class IonQBackend(Record):
         ionq_input, mapping = self._convert(native)
         if not any(bit is not None for bit in mapping):
             raise ValueError("IonQ requires final classical measurements")
-        options = dict(gateset=self.gateset, debiasing=self.debiasing,
-                       measurement_map=mapping, num_qubits=native.num_qubits)
+        options = dict(gateset=self.gateset, measurement_map=mapping, num_qubits=native.num_qubits)
         options_json = self._json_bytes(options, run).decode("utf-8")
         payload = None
         if context.get("persist_prepared", False):
@@ -341,7 +346,7 @@ class IonQBackend(Record):
         as entries of each circuit's IonQ JSON gate list. The reference gives no
         gate limit for a single-circuit job, and this adapter applies the same
         gate total to one as its own cap (docs/ENGINEERING_CONSTANTS.md,
-        "Provider and compiler policies", provider boundary table). A v0.4
+        "Provider and compiler policies", row "IonQ multi-circuit job"). A v0.4
         job has a single shots field, so its circuits must request equal
         shots.
         """
@@ -516,8 +521,8 @@ class IonQBackend(Record):
     def refresh(self, locator, natives, *, run):
         """Read the original job once and download completed raw histograms.
 
-        A batch parent is read once. While it is pending no child is read;
-        otherwise each unconsumed child is read once. Every child
+        A batch parent is read once. While it is pending no child is read.
+        Otherwise each unconsumed child is read once. Every child
         must name its parent and carry an original item name. Children are
         joined to items by that name, and new child and artifact IDs are
         returned as associations for the common owner to persist. All

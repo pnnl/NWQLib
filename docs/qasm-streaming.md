@@ -4,6 +4,8 @@
 
 ## Export a built circuit
 
+`export_qasm` needs Qiskit, for example from `pip install "nwqlib[qiskit]"`.
+
 ```python
 from qiskit import QuantumCircuit
 from nwqlib.io import export_qasm
@@ -84,7 +86,7 @@ The writer version `nwqlib.direct-qasm3.v1` emits OpenQASM 3.0 with `stdgates.in
 | Opaque recipes, including generic or prefix PREP, SELECT and label readout | Rejected before output | Unavailable |
 | Parallel, nested batches, dynamic, host or timing nodes, non-bit classical values, unbound or parameterized calls | Rejected before output | Unavailable |
 
-Direct writing performs no outer native translation, native leaf synthesis, backend call or Qiskit `dumps`. The subset of `write_qasm3` implies no compatibility with Lanczos, GCiM, full LCHS or QLS constructions, or with NWQ-Sim.
+Direct writing does not translate the circuit to a backend's gates, synthesize any block's circuit, call a backend or call Qiskit's `dumps`. The subset of `write_qasm3` implies no compatibility with Lanczos, GCiM, full LCHS or QLS constructions, or with NWQ-Sim.
 
 ### Bounds and completion {#bounds-and-completion}
 
@@ -112,10 +114,10 @@ materialized = materialize_qasm3_file(
 print(materialized.output_nodes)  # 1
 ```
 
-Use the unchanged file, construction and write record from the same writer call. This optional step derives dynamic work from that construction and checks its qubit, bit, operation and node-visit counts before opening the file. It checks the file’s actual size against `max_bytes`, reads the text and passes it to Qiskit’s OpenQASM 3 importer and `UnrollForLoops`. A required bound on native bytes or peak memory is refused before import because the importer does not supply one.
+Use the unchanged file, construction and write record from the same writer call. Before opening the file, this optional step derives dynamic work from the construction, compares the write record’s `construction_id` with the construction’s `content_id` and refuses a mismatch, then checks its qubit, bit, operation and node-visit counts. The comparison pairs the write record with the construction and does not compare either with the file’s text. The step checks the file’s actual size against `max_bytes`, reads the text and passes it to Qiskit’s OpenQASM 3 importer and `UnrollForLoops`. The importer supplies no bound on native bytes or peak memory.
 
 Install `nwqlib[qasm]` to enable it, for example with `pip install "nwqlib[qasm]"`. Select `dev,qasm` together to run its tests. Importing `nwqlib.io` and writing directly remain SDK-free. The `qasm` extra includes Qiskit and both the parser and the importer, and the base install does not include Qiskit.
 
 The checked dependency combination is the OpenQASM parser 1.0.1, qiskit-qasm3-import 0.6.0 and Qiskit 2.5.2. Small text, syntax-tree, import and unroll checks cover user gates, `ctrl`, `inv`, global phase, controlled phase and nested fixed loops. The parser accepts a larger grammar than this writer subset. The importer can eagerly synthesize Z with more than two controls, so that construct is rejected before SDK allocation while remaining valid writer output. User definitions stay logical, and no explicit gate decomposition, device transpilation, simulation or backend execution is requested. `materialized.output_nodes` is the number of top-level instructions after loops are removed, which can differ from the source's expanded primitive count. Dependency failures propagate. These checks do not prove that physical execution is equivalent or that native memory is bounded in general.
 
-A check in a fresh Python process writes OpenQASM directly while imports of Qiskit, Aer, the OpenQASM importer and NWQLib's backends are blocked, and a negative control confirms that a blocked import swallowed inside the writer still fails that check.
+A check in a fresh Python process writes OpenQASM directly while imports of Qiskit, Aer, the OpenQASM importer and NWQLib's backends are blocked.

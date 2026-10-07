@@ -4,8 +4,6 @@ from __future__ import annotations
 
 from typing import Any
 
-from nwqlib.subroutines._registry_utils import registry_metadata_function
-
 
 BLOCK_ENCODING_IMPLEMENTATIONS: dict[str, dict[str, Any]] = {
     "multiplexed_pauli": {
@@ -54,12 +52,6 @@ BLOCK_ENCODING_IMPLEMENTATIONS: dict[str, dict[str, Any]] = {
 }
 
 
-block_encoding_implementation_metadata = registry_metadata_function(
-    BLOCK_ENCODING_IMPLEMENTATIONS, slot="block encoding"
-)
-
-
 __all__ = [
     "BLOCK_ENCODING_IMPLEMENTATIONS",
-    "block_encoding_implementation_metadata",
 ]

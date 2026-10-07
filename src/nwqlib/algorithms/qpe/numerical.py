@@ -166,12 +166,10 @@ def qcels_schedule_size(options, tau):
     the objective there keeps most of the depth of the minimum at theta.
     With a mixed spectrum, finite shots or evolution error, such a replica
     minimum can win the fit and move the energy by 2*pi/(gbar*tau). Nothing
-    in the Result reports this. On the H4 problem of the eigenvalue example
-    notebook (Hartree-Fock reference, tau = 0.2/Ha, num_times = 32),
-    max_time = 38/Ha gives P = 190, gbar = 6.10 and an energy 5.156 Ha above
-    the ground energy, next to the replica spacing 2*pi/(gbar*tau) =
-    5.153 Ha, while 36 and 40/Ha stay within 7 mHa. Consecutive powers 0..P,
-    which planned_power_schedule uses when num_times >= P, have no such near
+    in the Result reports this. The QPE guide's measured evidence
+    (docs/algorithms/qpe.md, "Measured evidence", row "QCELS replica on H4")
+    shows such a replica, with its inputs and environment. Consecutive powers
+    0..P, which planned_power_schedule uses when num_times >= P, have no such near
     period.
     """
     if options.max_time is None:

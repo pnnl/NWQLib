@@ -138,14 +138,14 @@ Each `ProfileAssessment` answers five independent questions:
 | Field | Question |
 | --- | --- |
 | `applicability` | Is there explicit evidence that the method's mathematical assumptions hold for this problem? A method name or successful planning alone is no such evidence. |
-| `capability` | Does the target support this circuit, its `Program` steps, readout, instructions, host kernel and controlled or adjoint operations? |
+| `capability` | Does the target support this circuit, its `Program` steps, readout, instructions, classical computation steps and controlled or adjoint operations? |
 | `capacity` | Do the simultaneous memory peaks, and known lower requirements such as the state itself, fit what the allocation grants at each location? |
 | `time` | What do the supplied time models predict, and do the predictions meet matching time limits? |
 | `accuracy` | Does the plan's error model meet the accuracy criterion? `error` holds the complete `ClaimAssessment`. |
 
-Each result has the status `feasible`, `infeasible`, `conditional` or `unknown`, and keeps its individual checks in `details`, each with a status, a reason and, where one applies, the value and the limit it was compared with. One infeasible check makes its result infeasible. Otherwise any conditional check makes it conditional, then any unknown check makes it unknown, and only complete support gives feasible. The five results do not affect each other, so a memory failure does not hide a supported error bound. An error bound that is sufficient but larger than the criterion gives `INCONCLUSIVE`, not proof that the error is too large.
+Each result has the status `feasible`, `infeasible`, `conditional` or `unknown`, and keeps its individual checks in `details`, each with a status, a reason and, where one applies, the value and the limit it was compared with. One infeasible check makes its result infeasible. Otherwise any conditional check makes it conditional, then any unknown check makes it unknown, and only complete support gives feasible. The five results do not affect each other, so a memory failure does not hide a supported error bound. A valid upper bound on the error that is larger than the criterion gives `INCONCLUSIVE`, not proof that the error is too large.
 
-Applicability without evidence, or with ambiguous evidence, is unknown. The plan's `requirements` and assumptions stay explicit conditions. A bare `scientific_applicability=True` flag states no mathematical condition, and passing the method's input checks does not produce one. The built-in methods record no applicability statement, so their applicability is unknown, or conditional when the plan lists assumptions or requirements. An explicit statement (`FramedFact`) counts only when its problem, output frame (the quantity and unit the statement refers to), method source, construction and parameter restrictions all match. The identity of a source does not strengthen asserted, empirical or numerical evidence.
+Applicability without evidence, or with ambiguous evidence, is unknown. The plan's `requirements` and assumptions stay explicit conditions. Passing the method's input checks does not produce an applicability statement. The built-in methods record no applicability statement, so their applicability is unknown, or conditional when the plan lists assumptions or requirements. An explicit statement (`FramedFact`) counts only when its problem, output frame (the quantity and unit the statement refers to), method source, construction and parameter restrictions all match. The identity of a source does not strengthen asserted, empirical or numerical evidence.
 
 The accuracy criterion is `plan.selection_accuracy` when the plan has one. Without one, accuracy is unknown and `error` is `None`. `assess(..., accuracy=...)` changes only that assessment. In particular, a sampling component and its confidence never become a promise about total error, and assessing a new criterion never changes the plan's shots or choices.
 
@@ -161,15 +161,15 @@ The capacity check compares memory location by location:
 - A complete declared 5 GiB workspace used in sequence fits an 8 GiB grant at that location, while the same calls in parallel can need 10 GiB.
 - Unknown extra workspace keeps the known subtotals but prevents a complete-fit conclusion.
 - An upper bound above the grant is conditional, while an exact lower requirement above it proves failure.
-- Data that stay resident (inputs, analysis, I/O, materialization and stored bytes) count at the same time as everything else.
+- Data that stay in memory for the whole workload (`input_bytes`, `analysis_bytes`, `io_bytes`, `materialization_bytes` and `stored_bytes`) count at the same time as everything else.
 - A stored-byte limit is distinct from total memory, so five known stored bytes exceed a four-byte stored grant even when total workspace is unknown.
-- A peak that needs a serial schedule (`required_schedule="serial_acquisitions"`) fits only under the supplied serial schedule, and the assessment does not change the schedule to make it fit. Subtotals made only of resident data do not need that schedule.
+- A peak that needs a serial schedule (`required_schedule="serial_acquisitions"`) fits only under the supplied serial schedule, and the assessment does not change the schedule to make it fit. Subtotals made only of such whole-workload data do not need that schedule.
 
 The readout size uses all quantum registers of the circuit, whatever its peak width. Pauli label widths, probability positions and the classical layout of counts are checked before any prediction. An unresolved width stays unknown, and the readout size is bounded before any power is formed. Limits on the measurement itself are checked at execution.
 
 ## Finite time models {#finite-time-models}
 
-The supported time model, `acquisition_linear/1`, is
+The time model is
 
 ```text
 seconds = c_invocation * invocations + c_shot * sampled_shots
@@ -180,13 +180,13 @@ The coefficient units are `s/invocation`, `s/shot`, `s/exact_evaluation` and `s/
 
 A model applies only inside its `ModelDomain`. The domain fixes the configuration and allocation, the gate basis, precision, synthesis and schedule, direct or batch measurement, readout and population, parameter values, width, operations, output size and the mix of gates, kernels and transformations. Separate maxima cover resets, measurements, classical work and adaptive rounds, so a model calibrated for zero resets does not apply once resets are added, even when the gate counts match. The width and the logical operation count must be exact. A plan whose operation count is unavailable, such as the QLS example of [Estimate resources](resources.md), gets an unavailable prediction with that reason.
 
-The counts come from the resource estimate. A plan without a measurement batch counts one invocation and one grouped exact evaluation, or the requested shots, even though its estimate reports zero batch counts. Several Pauli labels returned together are statistics of one evaluation, not several evaluations. A batch takes its counts from its estimate, and unknown orchestration is not taken as one job or a guessed number of trajectories.
+The counts come from the resource estimate. A plan without a measurement batch counts one invocation and one grouped exact evaluation, or the requested shots, even though its estimate reports zero batch counts. Several Pauli labels returned together are statistics of one evaluation, not several evaluations. A batch takes its counts from its estimate. When the estimate does not say how the batch is split into jobs or simulator runs, the model assumes neither one job nor a guessed number of runs.
 
 For example, a direct exact measurement (no batch) of the one-qubit HZH preparation has one invocation, one exact evaluation and three logical operations. Synthetic engineering coefficients of 0.25 s/invocation, 0.5 s/exact_evaluation and 0.125 s/logical_operation give `0.25 + 0.5 + 3 * 0.125 = 1.125` seconds. Synthetic calibration coefficients of 1, 2 and 0.5 in the same units, with residuals from -0.25 to 0.5 seconds, give 4.5 seconds with interval [4.25, 5]. These are not measured timings of any machine.
 
 `kind="engineering"` coefficients give conditional numbers under their stated assumptions and carry numerical-estimate evidence. `kind="calibrated"` coefficients also keep the supplied training, validation and error sources (`CalibrationReference`) and an uncertainty, with empirical-prediction evidence. Neither kind collects calibration data. An expired, future-dated, foreign or unsupported model leaves its prediction unavailable with reasons, and the other results keep theirs.
 
-The `scope` of a model is `selected_acquisition`, `acquisition_overhead` or `native_call_wall`. The first two exclude planning, compilation, queue delay, analysis and the cost of the whole run. `native_call_wall` covers the synchronous backend call, including waiting and result extraction, and excludes preparation, saving results and the cost of the whole run. Scopes overlap and cannot be summed into a whole-run prediction, a cost in currency or a CPU time that holds everywhere. A time limit is compared only with a prediction of the same metric, unit and population.
+The `scope` of a model is `selected_acquisition`, `acquisition_overhead` or `native_call_wall`. The timings that a Run records carry only `native_call_wall`. The first two are scopes that a supplied profile declares for its coefficients, and they exclude planning, compilation, queue delay, analysis and the cost of the whole run. `native_call_wall` covers the synchronous backend call, including waiting and result extraction, and excludes preparation, saving results and the cost of the whole run. Scopes overlap and cannot be summed into a whole-run prediction, a cost in currency or a CPU time that holds everywhere. A time limit is compared only with a prediction of the same metric, unit and population.
 
 `ModelUncertainty` adds residuals in seconds to the prediction and keeps their meaning. `future_run_prediction` concerns one future measurement, `sample_mean_confidence` concerns a mean and does not bound one run, and `model_error_envelope` claims no probabilistic coverage. The interval is `[max(0, s + lower), s + upper]` around the prediction s, and cutting it at zero does not change its kind. No interval becomes a guarantee about execution.
 
@@ -228,7 +228,7 @@ from nwqlib.backends import align_telemetry
 timing = align_telemetry(run)
 ```
 
-`align_telemetry` returns a `PredictionLedger` of every attempt, including failures and partial collections. It also accepts explicit `trace=`, `assessments=`, `receipts=` (preparation records), `observations=` and `AttemptTiming` inputs. It estimates nothing, runs nothing, refreshes no provider, copies no histogram and fits no model. The IDs of collected observations and of the observations a `Result` used stay distinct.
+`align_telemetry` returns a `PredictionLedger` of every attempt, including failures and partial collections. It also accepts explicit `trace=`, `assessments=`, `receipts=` (preparation records), `observations=`, `timings=` (`AttemptTiming` records) and `result=` inputs. It estimates nothing, runs nothing, refreshes no provider, copies no histogram and fits no model. The IDs of collected observations and of the observations a `Result` used stay distinct.
 
 A residual `observed_seconds - predicted_seconds` needs all of the following, and otherwise the comparison keeps its reason and no residual:
 

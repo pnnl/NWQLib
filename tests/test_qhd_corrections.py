@@ -126,10 +126,10 @@ def test_actual_second_order_occurrence_resource_increment():
     # Each stored block occurrence is one direct action of the one-hot ir_product host law
     # (theory.onehot_product_sizes), so the added occurrences add work and not workspace.
     shape_a = owner.restricted_sizes(
-        3, 1, 0, (first.reconstruction.step_weights, first.reconstruction.steps), "ir_product", (), 3
+        3, 1, 0, first.reconstruction.steps, "ir_product", (), 3
     )
     shape_b = owner.restricted_sizes(
-        3, 1, 0, (second.reconstruction.step_weights, second.reconstruction.steps), "ir_product", (), 3
+        3, 1, 0, second.reconstruction.steps, "ir_product", (), 3
     )
     assert shape_b[0] > shape_a[0] and shape_b[1] == shape_a[1]
 

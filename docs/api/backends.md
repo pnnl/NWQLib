@@ -1,6 +1,6 @@
 # Backends, profiles and export
 
-This page covers the backends that run a Plan's circuits, the device profiles that forecast time and memory before a run, and the functions that export circuits as OpenQASM.
+Choose the backend that runs a Plan's circuits, forecast run time and memory on a device profile before a run, and export circuits as OpenQASM. Import the OpenQASM functions and records from `nwqlib.io`, `TimingObservation` from `nwqlib.execution`, and every other entry on this page from `nwqlib.backends`, except the forecast records `AxisAssessment`, `AssessmentDetail` and `TimePrediction`, which are defined in `nwqlib.backends.assessment`.
 
 ```python
 from nwqlib.backends import AerBackend, Allocation, DeviceProfile, assess
@@ -22,16 +22,16 @@ print(result.value)  # 1.0
 
 ## Choose a backend
 
-| Backend | Class | Readouts | Needs | Guide |
-| --- | --- | --- | --- | --- |
-| Qiskit Aer, local | `AerBackend` | Counts, and exact Pauli expectations, probabilities and amplitudes | `nwqlib[aer]` | [Aer](../aer.md) |
-| NWQ-Sim, local | `NWQSimBackend` | Counts. CPU statevector also gives exact Pauli expectations, probabilities and amplitudes | A runner built for one backend and method | [NWQ-Sim](../nwqsim.md) |
-| NWQ-Sim on a Slurm cluster | `NWQSimSlurmBackend` with `SlurmProfile` | As NWQ-Sim | A runner built at the site and a Slurm account | [Slurm](../slurm.md) |
-| IBM Quantum | `IBMRuntimeBackend` | Counts and provider expectation estimates | `nwqlib[ibm]` and a saved IBM account or a token in `NWQLIB_IBM_RUNTIME_TOKEN` | [IBM Runtime](../ibm.md) |
-| IonQ QPU | `IonQBackend` | Raw counts | `nwqlib[ionq]` and an API key in `NWQLIB_IONQ_API_KEY` | [IonQ](../ionq.md) |
-| Quantinuum H2 through Nexus | `NexusBackend` | Counts | `nwqlib[nexus]` and an existing qnexus login | [Nexus](../nexus.md) |
+| Backend and class | Readouts | Needs |
+| --- | --- | --- |
+| [Qiskit Aer](../aer.md), local: `AerBackend` | Counts, and exact Pauli expectations, probabilities and amplitudes | `nwqlib[aer]` |
+| [NWQ-Sim](../nwqsim.md), local: `NWQSimBackend` | Counts. CPU statevector also gives exact Pauli expectations, probabilities and amplitudes | A runner built for one backend and method |
+| [NWQ-Sim on a Slurm cluster](../slurm.md): `NWQSimSlurmBackend` with `SlurmProfile` | As NWQ-Sim | A runner built at the site and a Slurm account |
+| [IBM Quantum](../ibm.md): `IBMRuntimeBackend` | Counts and provider expectation estimates | `nwqlib[ibm]` and a saved IBM account or a token in `NWQLIB_IBM_RUNTIME_TOKEN` |
+| [IonQ QPU](../ionq.md): `IonQBackend` | Raw counts | `nwqlib[ionq]` and an API key in `NWQLIB_IONQ_API_KEY` |
+| [Quantinuum H2 through Nexus](../nexus.md): `NexusBackend` | Counts | `nwqlib[nexus]` and an existing qnexus login |
 
-Every backend except Aer runs jobs that continue after Python exits. Save the Run to a directory and reopen it with `load_run`, as [Continue an interrupted run](../run_archives.md) describes. The cloud and Slurm backends have offline checks only, and each Run states its qualification once. [Choose a backend](../backends.md) compares them, and [Backend adapter contract](../development/execution.md#backend-adapter-contract) states the rules every backend implements.
+Every backend except Aer runs jobs that continue after Python exits. Save the Run to a directory and reopen it with `load_run`, as [Continue an interrupted run](../run_archives.md) describes. NWQLib has checked the cloud and Slurm backends only offline, without a live account, queue or device, and each Run on one of them issues a warning that says so once. [Choose a backend](../backends.md) compares them, and [Backend adapter contract](../development/execution.md#backend-adapter-contract) states the rules every backend implements.
 
 ::: nwqlib.backends.connection.AerBackend
     options:
@@ -72,7 +72,7 @@ Every backend except Aer runs jobs that continue after Python exits. Save the Ru
 
 ## Forecast cost and feasibility
 
-A `DeviceProfile` describes a machine and its time models, and an `Allocation` the resources granted to a workload. `nwqlib.estimate(plan, profile=profile, allocation=allocation)` forecasts every point of the Plan and returns a `PlanEstimate`. `assess` forecasts one point. Nothing runs, and the numbers below are synthetic, not measurements of a machine. The one-qubit Plan prepares `|1>` as H, Z, H and reads `<Z>` exactly, which counts one invocation, one exact evaluation and three logical operations, so the engineering model predicts 0.25 + 0.5 + 3 × 0.125 = 1.125 seconds:
+A `DeviceProfile` describes a machine and its time models, and an `Allocation` the resources granted to a workload. `nwqlib.estimate(plan, profile=profile, allocation=allocation)` forecasts every planned execution of the Plan whose parameters are already fixed and returns a `PlanEstimate`. `assess` forecasts one such execution, for example the one that `selected.resolve("expectation")` returns in the example below. Nothing runs, and the numbers below are synthetic, not measurements of a machine. The one-qubit Plan prepares `|1>` as H, Z, H and reads `<Z>` exactly, which counts one invocation, one exact evaluation and three logical operations, so the engineering model predicts 0.25 + 0.5 + 3 × 0.125 = 1.125 seconds:
 
 ```python
 from datetime import datetime, timezone
@@ -164,6 +164,11 @@ The machine's `target` is a [`BackendTarget`][nwqlib.backends.capabilities.Backe
       heading_level: 3
       members: false
 
+::: nwqlib.backends.capabilities.InstructionSupport
+    options:
+      heading_level: 3
+      members: false
+
 ::: nwqlib.backends.targets.AER_STATEVECTOR_TARGET
     options:
       heading_level: 3
@@ -234,7 +239,7 @@ The machine's `target` is a [`BackendTarget`][nwqlib.backends.capabilities.Backe
 
 ## Compare forecasts with observed timings
 
-After a Run prepared with a `PlanEstimate` finishes, `align_telemetry(run)` pairs each attempt's forecast with its observed timing.
+A Run carries a forecast when `prepare` receives a `ComparisonRow` whose estimate is a `PlanEstimate`, for example a row of `compare(problem, methods=..., profile=..., allocation=...)`. After such a Run finishes, `align_telemetry(run)` pairs each attempt's forecast with its observed timing.
 
 ::: nwqlib.backends.telemetry.align_telemetry
     options:
@@ -247,6 +252,11 @@ After a Run prepared with a `PlanEstimate` finishes, `align_telemetry(run)` pair
         - validate_context
 
 ::: nwqlib.backends.telemetry.AttemptTiming
+    options:
+      heading_level: 3
+      members: false
+
+::: nwqlib.execution.TimingObservation
     options:
       heading_level: 3
       members: false

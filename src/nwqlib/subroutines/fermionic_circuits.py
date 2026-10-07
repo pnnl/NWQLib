@@ -180,11 +180,10 @@ def build_generator_circuit(
     Evangelista, arXiv:2511.13485v2, Eq. (27), because
     ``exp(theta*A)^dagger = exp(-theta*A)`` for anti-Hermitian ``A``. The
     multi-controlled gates are therefore never passed through a generic
-    circuit inverse, which
-    ``test_compact_inverse_evaluates_full_map_without_reinverting_controls``
-    checks. Custom commuting Pauli sums are supported. A
-    noncommuting custom operator has no exact compact decomposition here and
-    is rejected. Construction never expands a problem state.
+    circuit inverse, and NWQLib's tests check this. Custom commuting Pauli
+    sums are supported. A noncommuting custom operator has no exact compact
+    decomposition here and is rejected. Construction never forms a state
+    vector.
 
     For the commuting route ``A = sum_k i c_k P_k`` with real ``c_k``, so
     ``exp(theta*A) = prod_k exp(i theta c_k P_k)``.
@@ -196,21 +195,36 @@ def build_generator_circuit(
     Args:
         generator (FermionicGenerator): Anti-Hermitian pool generator of a
             supported family, or a custom commuting Pauli sum.
-        theta (float): Finite rotation angle in radians. On the
-            ``shared_index`` route, ``theta`` times each occupation block
-            must have a 1-norm of at most `2**37`, the limit of the matrix
-            exponential.
+        theta (float): Finite rotation angle in radians. For a noncommuting
+            default double-excitation generator whose creation and annihilation
+            orbital pairs share an index, the ``shared_index`` construction
+            groups connected occupation-basis states of the active modes
+            into matrix blocks ``B`` of the generator. Each matrix
+            ``theta * B`` must have induced 1-norm
+            ``max_j sum_i abs(theta * B[i, j]) <= 2**37``, the implementation's
+            limit before calling the matrix exponential.
         controlled (bool): Default `False`. Add one control qubit. The
             control is qubit 0 and system qubit ``j`` becomes qubit ``j + 1``.
         inverse (bool): Default `False`. Build ``exp(-theta*A)``.
-        _plan: Internal reuse of a precomputed plan across angles. Leave it
-            unset.
+        _plan: Default `None`. Construction plan that ADAPT's planning
+            computes once for this generator and supplies for every angle.
+            A caller leaves it at its default.
         max_bytes (int): Default 10 GB (decimal, `10_000_000_000` bytes).
             Byte limit for choosing the construction.
 
     Returns:
         circuit (QuantumCircuit): Circuit on
             ``generator.num_qubits + int(controlled)`` qubits.
+
+    Raises:
+        ValueError: If `theta` is not finite or `theta * B` exceeds the
+            limit given for `theta`, if a custom generator's Pauli terms do
+            not commute, if the generator's coefficients, indices or terms
+            do not match a supported family, if `_plan` was built for
+            another generator, or if choosing the construction exceeds
+            `max_bytes`.
+        TypeError: If `generator` is not a `FermionicGenerator` or one of its
+            fields has the wrong type.
     """
 
     theta = float(theta)
@@ -282,8 +296,9 @@ def _require_default_double(generator: FermionicGenerator, *, max_bytes=DEFAULT_
         if generator.family == "double_singlet"
         else _double_triplet_base_terms
     )
-    # Default four-operator normalization is bounded locally; each reached map
-    # still pays its full-register raw frontier and label construction below.
+    # Normalizing the default four-operator terms is bounded locally. The Jordan-Wigner
+    # mapping below is checked separately for the full register and its labels
+    # (mapping_requirements).
     # The fixed 8192 bytes and 4096 work are an untuned charge for normalizing
     # at most six base terms of four ladder operators, checked against the
     # caller's limits (docs/ENGINEERING_CONSTANTS.md).
@@ -409,7 +424,7 @@ def _append_excitation(
 
 
 def _append_multiplexed_ry(circuit, target, controls, angles):
-    """Apply the shared non-pruning synthesis to integer-indexed excitation qubits."""
+    """Append ``append_uniformly_controlled_ry`` on qubits given by circuit index."""
     from nwqlib.subroutines._multiplexors import append_uniformly_controlled_ry
     append_uniformly_controlled_ry(
         circuit, circuit.qubits[target], [circuit.qubits[index] for index in controls], angles

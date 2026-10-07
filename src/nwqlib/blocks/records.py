@@ -53,19 +53,26 @@ class Primitive(Record):
 
 
 class BlockSemantics(Record):
-    """Action, projectors, normalization and phase of one selected block kind.
+    """The action a circuit block promises: its relation, projectors, normalization, error and phase convention.
 
-    epsilon is algorithmic error only; floating synthesis roundoff is unbounded.
+    `SelectedDefinition.semantics` holds it, and
+    `SelectedConstruction.encoding_semantics` derives it for a Pauli
+    encoding.
+    `epsilon` is algorithmic error only. This record gives no bound on
+    floating-point roundoff of the synthesis.
     No QSP, evolution, or hardware accuracy is implied by this record.
 
-    This is the contract a native constructor must implement and the one a
-    consumer may rely on. Keeping it beside the selection lets a Method
-    derive, for example, an encoding's ``A/alpha`` relation from the selected
-    SELECT instead of storing a second copy that could disagree.
+    It states what the block's circuit must do and what code that uses the
+    block may rely on. Keeping it with the block's selection lets a Method
+    derive, for example, an encoding's ``A/alpha`` relation from the chosen
+    SELECT block instead of storing a second copy that could disagree.
 
     Attributes:
-        kind: Block kind. ``unknown`` keeps an unsupported contract representable.
-        input: Identity of the admitted input the block encodes, or None.
+        kind: Block kind: `"preparation"`, `"signed_pauli_select"`,
+            `"pauli_readout"`, `"zero_reflection"`, `"block_encoding"`,
+            `"unitary_transform"` (a control or adjoint of another block), or
+            `"unknown"` for a promise of none of these kinds.
+        input: Reference (`InputRef`) to the input the block encodes, or None.
         basis: System basis, dimension and bit ordering of the action.
         relation: The promised mathematical relation, as text.
         alpha: Positive physical normalization for Pauli SELECT and block encodings.
@@ -81,8 +88,12 @@ class BlockSemantics(Record):
         inverse_legal: Whether an adjoint may be selected.
         control_legal: Whether one coherent control may be added.
         phase: Global-phase convention, which becomes observable under control.
-        preparation: Admitted specification of the input state the block prepares, its whole action for a preparation block or the first step of a composite native block such as an ADAPT query.
-        base_semantics: Contract of the untransformed block for a control or adjoint.
+        preparation: Specification (`StatePreparationSpec`) of the input
+            state the block prepares: the whole action of a preparation
+            block, required for that kind, or the first step of a composite
+            block such as an ADAPT query.
+        base_semantics: For a `"unitary_transform"`, and only for it, the
+            promised action of the block before the control or adjoint.
     """
 
     kind: Literal["preparation", "signed_pauli_select", "pauli_readout", "zero_reflection", "block_encoding", "unitary_transform", "unknown"]
@@ -188,7 +199,7 @@ class SelectedDefinition(Record):
             raise ValueError("resource law coverage requires declared formal parameters")
         widths = tuple(port.width for port in self.signature.quantum)
         if self.decomposition is not None and all(type(width) is int for width in widths):
-            # Transforms keep the base recipe's target numbering; their outer
+            # Transforms keep the base recipe's target numbering. Their outer
             # control is represented by controlled, not by rewriting primitives.
             width = sum(widths) - int(self.controlled)
             if any(index >= width for operation in self.decomposition for index in operation.qubits):
@@ -224,30 +235,47 @@ class PauliEncoding(Record):
 
 
 class SelectedKernel(Record):
-    """Selected host algorithm declaration. Native input access is bound by the Method's factory.
+    """Declaration of a classical computation that a Program runs on this computer: its inputs, outputs, work and dependencies.
 
-    A host kernel is a classical computation that a Program runs at a host
-    ClassicalStage. Its declaration is portable, while the callable is bound
-    separately by ``BoundKernel`` from the Method's live factory.
-    construction_work and invocation_work are declared size
-    units charged to the Run, not CPU instructions. Resource laws state
-    whether these bound the total numerical work. Absent laws leave the total
-    unknown. Workspace declarations keep known bytes and unknown components
-    separately.
+    `SelectedConstruction.kernels` holds the declarations, and a
+    `ClassicalStage` with `boundary="host"` names one to run it. The
+    declaration is saved with the Plan. The callable that reads the input
+    data is not saved: the Method attaches it to the Plan as a
+    ``BoundKernel`` with `Plan._bind`.
+    ``construction_work`` and ``invocation_work`` are declared size units
+    counted against the Run, not CPU-instruction counts. The ``resource_laws``
+    entries specify the numerical work covered, its assumptions and whether
+    the count is exact, an upper bound or an estimate. Without an applicable
+    entry, the total numerical work is unknown. Workspace declarations keep
+    known bytes and unknown components separately.
 
     Attributes:
-        name: Kernel name, referenced by the Program's host ClassicalStage.
-        implementation: Versioned Source of the host algorithm.
-        inputs: Identities of the admitted inputs the kernel reads.
+        name: Name of the computation, referenced by the Program's
+            `ClassicalStage` with `boundary="host"`.
+        implementation: Versioned `Source` of the classical algorithm.
+        inputs: References (`InputRef`) to the inputs the computation reads.
         scalars: Ordered labels of the scalar statistics it returns.
         scalar_frames: Frame of each scalar, ``physical`` for physical units, ``unit`` for a normalized direction, or ``encoded_branch`` for a branch mass or norm in the encoded frame that the Method declares.
         outputs: Declared named arrays it may return.
-        resource_laws: Fixed ``classical_work`` laws of the untransformed kernel.
-        workspace: Per-invocation host workspace declarations. An entry with unknown bytes keeps that component unknown.
-        construction_work: Size units charged when the kernel is bound at preparation.
-        invocation_work: Size units charged for each invocation.
-        dependencies: Distribution names, such as ``numpy``, whose installed versions each host preparation records.
-        application_bytes: JSON size bound, from the run journal's size owner, of the application receipts that every invocation returns when the Method fixes them at selection. The Run reserves it with the declared outputs. Completion admission subtracts the smaller of this value and the returned receipts' bound before checking the variable metadata allowance, so undeclared receipt bytes still spend that allowance. Zero declares none.
+        resource_laws: Fixed ``classical_work`` formulas (`ResourceLaw`) of
+            the computation, without parameter bindings, control or adjoint.
+        workspace: Per-invocation memory declarations (`Workspace`). An
+            entry with unknown bytes keeps that component unknown.
+        construction_work: Size units counted against the Run when the
+            computation is bound at preparation.
+        invocation_work: Size units counted against the Run for each
+            invocation.
+        dependencies: Distribution names, such as ``numpy``, whose installed
+            versions each preparation of the computation records.
+        application_bytes: Upper bound, using the Run's JSON byte accounting, on
+            the stored size of the sequence of ``KernelApplication`` records
+            returned by each invocation when the Method fixes them at selection.
+            The Run sets aside this many bytes along with the declared outputs.
+            At completion, the smaller of this value and the returned sequence's
+            JSON byte bound is deducted from the metadata byte count before it is
+            compared with ``ExecutionLimits.max_completion_metadata_bytes``.
+            Bytes beyond the declared bound count toward that metadata allowance.
+            The default, ``0``, leaves all these bytes to the metadata allowance.
     """
 
     schema_version: Literal[3] = 3
@@ -294,7 +322,8 @@ class SelectedConstruction(Record):
     exact record when the circuit is built, never from saved code.
     The checks require exactly one selected definition per Program signature,
     with an identical signature, so every block call resolves to one selection,
-    and every host stage names its exact selected kernel. A Pauli encoding with
+    and every stage that names a kernel is a `"host"` stage that names its
+    exact selected kernel. A Pauli encoding with
     a label register must be the ordered PREP, SELECT, PREP-adjoint Sequence on
     that register, where the PREP was selected from this SELECT's coefficients
     and the adjoint is of that same PREP. A single-term encoding has no label
@@ -309,12 +338,13 @@ class SelectedConstruction(Record):
             Program signature.
         encodings: Default `()`. [`PauliEncoding`][nwqlib.blocks.records.PauliEncoding]
             subgraphs, checked as PREP, SELECT and PREP-adjoint.
-        kernels: Default `()`. Host kernel declarations, each named by one host
-            `ClassicalStage`.
+        kernels: Default `()`. Classical kernel declarations, each named by
+            at least one `ClassicalStage` with `boundary="host"`.
+        schema_version: Fixed `2`. Version of the saved record format.
 
     Raises:
-        ValueError: If a signature lacks exactly one matching selection, a host
-            stage and kernel do not match, or an encoding breaks the
+        ValueError: If a signature lacks exactly one matching selection, a
+            `"host"` stage and its kernel do not match, or an encoding breaks the
             PREP, SELECT, PREP-adjoint structure.
     """
 
@@ -326,9 +356,7 @@ class SelectedConstruction(Record):
 
     @model_validator(mode="after")
     def _selection_bindings(self):
-        """Require exact Program bindings and the ordered PREP/SELECT/inverse
-        coefficient-register relation.
-        """
+        """Require one exact selection per Program signature, exact kernel references and the PREP, SELECT and inverse order of each Pauli encoding."""
         signatures = {signature.name: signature for signature in self.program.signatures}
         selected = {item.signature.name: item for item in self.selections}
         if len(selected) != len(self.selections) or selected.keys() != signatures.keys():

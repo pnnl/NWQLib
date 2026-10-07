@@ -76,8 +76,17 @@ def _encoding_record(name, *, operator, alpha, error, ancillas, system_qubits,
             "supplied native oracle assertion; no operator extraction" if snapshot_bytes is not None else
             "selected block-encoding constructor error in the original-A frame",
         inverse_legal=True, control_legal=True, phase="selected native global phase kept under control and inverse")
+    # A planned encoding is built from the content-hashed operator by the
+    # Method's deterministic selection, so the family label and the other fields
+    # give identical inputs one content id in every process. A supplied circuit
+    # has no content identity here and keeps a fresh label, as a supplied
+    # preparation does, so an encoding with equal metadata cannot attach another
+    # circuit to a selected Program.
+    # ponytail: a supplied-encoding Plan gets a new id per selection; a canonical
+    # digest of the snapshot circuit would make that id reproducible.
+    choice = str(uuid4()) if implementation == "encoding.native" else family
     fields = dict(signature=_signature(name, implementation, (("ancillas",ancillas),("system",system_qubits))),
-        semantics=semantics, implementation=source, choice=str(uuid4()), decomposition=None, cost_law=None,
+        semantics=semantics, implementation=source, choice=choice, decomposition=None, cost_law=None,
         cost_parameters=(Binding(parameter="system_qubits",value=system_qubits),
             Binding(parameter="encoding_ancillas",value=ancillas)),
         cost_context="selected native definition assembly; synthesis/control expansion and native object memory are separate",
@@ -229,7 +238,10 @@ def _encoding_circuit(block, arguments, method_context):
 
 
 def _select_planned_encoding(name, plan, *, operator, dense_svd_selected=False):
-    """Bind the method's privately selected plan; no native circuit is built."""
+    """Bind the plan that the Method selected to a block.
+
+    No native circuit is built.
+    """
     _validate_encoding(operator, plan.alpha, plan.error_bound, plan.num_ancillas, plan.system_qubits)
     n, a = plan.system_qubits, plan.num_ancillas
     size = (2 << n)**2 if plan.implementation=="dense_dilation" else (1 << a)*max(1,n)

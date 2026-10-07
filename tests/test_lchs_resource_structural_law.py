@@ -6,7 +6,7 @@ import pytest
 from nwqlib import LinearDynamics
 from nwqlib.algorithms.lchs import LCHS,ProviderConfig
 from nwqlib.algorithms.lchs.select_synthesis import build_multiplexed_product_formula_select
-from nwqlib.algorithms.lchs.time_independent_terms import generate_lchs_product_formula_select_plan
+from nwqlib.algorithms.lchs.time_independent_terms import generate_lchs_product_formula_select_plan,generate_lchs_quadrature
 from nwqlib.subroutines._multiplexors import product_formula_select_resource_law
 TRANSPILE_OPTIONS=dict(basis_gates=['cx','u'],optimization_level=0,seed_transpiler=7)
 def _mixed_two_problem() -> LinearDynamics:
@@ -75,7 +75,8 @@ def test_product_formula_law_matches_recursive_built_select(case: str, phase) ->
         truncation_multiplier=multiplier,
     )
     data = generate_lchs_product_formula_select_plan(
-        matrix=problem.A.dense_array(),
+        quadrature=generate_lchs_quadrature(
+            matrix=problem.A.dense_array(), final_time=problem.elapsed_time, method=options),
         final_time=problem.elapsed_time,
         method=options,
     )
@@ -137,12 +138,12 @@ def test_branch_controlled_phase_law_prices_only_nonzero_physical_branches(
     )
 
     problem = _mixed_two_problem()
+    options = _pf_options(tier="analytic", order=1, steps=1, epsilon=0.5, truncation_multiplier=1.0)
     data = generate_lchs_product_formula_select_plan(
-        matrix=problem.A.dense_array(),
+        quadrature=generate_lchs_quadrature(
+            matrix=problem.A.dense_array(), final_time=problem.elapsed_time, method=options),
         final_time=problem.elapsed_time,
-        method=_pf_options(
-            tier="analytic", order=1, steps=1, epsilon=0.5, truncation_multiplier=1.0
-        ),
+        method=options,
     )
     # Three physical branches: cancellation, a full turn, and a phase added after
     # a full turn. Circuit assignment normalizes the identity phase first, so

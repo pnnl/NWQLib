@@ -1,4 +1,7 @@
-"""Scientific Method configurations and their current result operations."""
+"""Public names of the built-in Methods, their records and helper functions, the Method protocol and the registry, imported on first access.
+
+`_METHOD_OWNERS` is also the list that `registry.builtin_registrations` reads.
+"""
 
 from importlib import import_module
 

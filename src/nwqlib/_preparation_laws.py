@@ -1,4 +1,4 @@
-"""SDK-free size laws of the existing direct state-preparation kernels."""
+"""SDK-free size laws of the direct state-preparation kernels."""
 
 def direct_preparation_cx_bound(num_qubits: int, *, complex_phases: bool = True) -> int:
     """Return the generic magnitude-tree and optional phase-diagonal CX slot bound.
@@ -15,10 +15,9 @@ def direct_preparation_cx_bound(num_qubits: int, *, complex_phases: bool = True)
     tree has sum(2**k, k=1..n-1) CX. The phase diagonal has the same count by
     Shende, Bullock and Markov, arXiv:quant-ph/0406176v5, Theorems 7 and 8
     (pp. 10-11). Mottonen et al., arXiv:quant-ph/0407010v1, also cancel one
-    CX in each uniformly
-    controlled rotation with at least one control, two per level, by
-    mirroring (Sec. III, pp. 3-4), and state that preparation from a basis
-    state needs half of their total (Sec. IV, p. 4). That gives
+    CX in each uniformly controlled rotation with at least one control, two
+    per level, by mirroring (Sec. III, pp. 3-4), and state that preparation
+    from a basis state needs half of their total (Sec. IV, p. 4). That gives
     ``2**(n+1) - 2n - 2`` CX. This law does not assume the cancellation, so
     its complex-case value ``2*max(0, 2**n - 2)`` is never smaller.
     """

@@ -81,7 +81,7 @@ required failure probability is unsupported
 PASS
 ```
 
-The reference comparison measured a discrepancy of about .000821, but the bounds do not prove a total error of at most .01. No bound is available for native floating-point error, and the method's algorithmic approximation bound, about .00931, is a numerical estimate rather than a proof, so it is listed in `unverified`. The sampling component passes because this run used exact readout ([sampling error by method](#sampling-error-by-method)).
+The reference comparison measured a discrepancy of about .000821, but the bounds do not prove a total error of at most .01. No bound is available for the `native_floating_point` error source, and the method's algorithmic approximation bound, about .00931, is a numerical estimate rather than a proof, so it is listed in `unverified`. The sampling component passes because this run used exact readout ([sampling error by method](#sampling-error-by-method)).
 
 `assess` works on the saved experiment and data. It does not measure data, change shots or rerun the method. A Result does not store an accuracy assessment. Each `ClaimAssessment` stores its own `accuracy`, the experiment and data it assessed and the evidence it used, and a later stricter criterion is a new assessment of the same experiment. The default confidence is .95.
 
@@ -209,7 +209,7 @@ INCONCLUSIVE
 | `NOT_RUN` | No fact was supplied |
 | `NOT_APPLICABLE` | The fact states that the check does not apply |
 
-A check PASS concerns only its own scalar threshold. The aggregate accuracy assessment can independently remain INCONCLUSIVE, as it does here. Attaching facts does not rerun verification, change the experiment or turn numerical evidence into a theorem. A negative value of an error or norm quantity is rejected by its domain. A roundoff adjustment needs its own justification, keeps the raw value and is disclosed. See the [Accuracy and verification API](api/evidence.md).
+A check PASS concerns only its own scalar threshold. The aggregate accuracy assessment can independently remain INCONCLUSIVE, as it does here. Attaching facts does not rerun verification, change the experiment or turn numerical evidence into a theorem. A negative value of an error or norm quantity is rejected by its domain. A roundoff adjustment of a value is made only with an explicit, scale-aware tolerance, keeps the raw value and is disclosed. See the [Accuracy and verification API](api/evidence.md).
 
 ### Facts belong to the options that produced them
 
@@ -371,4 +371,4 @@ Checks run only when you call `result.verify` or one of the `verify_*` functions
 
 Method-specific state, circuit, spectrum and reference checks have their own size limits in their options. Missing required data produces a limitation that names it, and no measurement is repeated to supply it.
 
-All exact scalar comparisons use the finite `ExactArithmetic.max_integer_bits` guard. This is an arithmetic representation boundary, not an execution permission or a process-memory limit. Extra simulation, reference decompositions and large state operations run only for a check you select.
+All exact scalar comparisons use the finite `ExactArithmetic.max_integer_bits` guard. It limits the size of integers in exact arithmetic, not process memory. Extra simulation, reference decompositions and large state operations run only for a check you select.

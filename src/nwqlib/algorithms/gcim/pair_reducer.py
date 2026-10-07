@@ -16,8 +16,9 @@ assembly uses unit diagonal overlap under the normalized-basis convention,
 while the raw acquired scalars and selected padded coordinates remain
 associated with the acquisition.
 
-Joint state (Zheng et al., Phys. Rev. Research 5, 023200 (2023), Eqs. (14)-(15),
-with a phase-faithful controlled preparation): starting from ``|0>|0>``, H on
+Joint state (Zheng et al., Phys. Rev. Research 5, 023200 (2023), Eqs. (14)-(15)
+in the numbering of arXiv:2212.09205v1, with a phase-faithful controlled
+preparation): starting from ``|0>|0>``, H on
 the ancilla, X on the ancilla, controlled ``U_i``, X on the ancilla and
 controlled ``U_j`` give ``|chi_ij> = (|0>|phi_i> + |1>|phi_j>)/sqrt(2)``. The
 ancilla is native bit 0, so the two branches are the strided views
@@ -45,6 +46,7 @@ from fractions import Fraction as F
 
 import numpy as np
 
+from nwqlib._quantum_readout import ETA, UNIT as U, gamma, ordered_action_constants, sqrt_up
 from nwqlib.core.planning import READOUT_REDUCERS, Reducer, ReducerOutput
 
 REDUCER = "block_matrix_elements"
@@ -54,8 +56,9 @@ LAYOUT_DIAGONAL = "system state, ancilla |0> at bit 0"
 # A shared full-chain query saves the system register alone.
 LAYOUT_SYSTEM = "system state, no ancilla"
 
-# Coordinate tile of the Pauli action scratch allowance, the shared kernel's
-# tile length. An engineering choice, not a scientific threshold.
+# Copy of ``operators._pauli._PAULI_TILE``, the coordinate tile of the Pauli
+# action, used for its scratch allowance. Change both together. An
+# engineering choice, not a scientific threshold.
 TILE = 1024
 
 # Stored Pauli tables of bound Plans, by admitted content identity. Every
@@ -126,17 +129,19 @@ def pair_work(parameters, width=None):
 def pair_bytes(parameters):
     """Return the private reduction workspace ``B_pair`` beyond the saved state, admitted before acquisition.
 
-    With ``beta = 1`` on the diagonal and 2 off it, ``N = 2**n``, F the
-    flip-group bound and ``t = min(N, tile)``, packed group metadata is
-    ``B_groups = 24L + 16F + 8`` and a sufficient numerical reducer byte law
-    is ``B_pair = 16*beta*N + 17N + 96t + B_groups + B_wrapper + B_operator +
-    H0``. The 17N covers one action output and a finite mask. Group
+    With ``N = 2**parameters["qubits"]``, ``L = parameters["terms"]``,
+    ``F = parameters["flips"]`` the flip-group bound, and
+    ``t = min(N, TILE)``, where ``TILE = 1024``, the logical group metadata is
+    ``B_groups = 24L + 16F + 8``. For L > 0 the numerical reducer byte law is
+    ``B_pair = 17N + max(9L, 96t) + B_groups + H0``.
+    The 17N covers one action output and a finite mask. Group
     construction's 9L frontier shares a maximum with the 96t tile scratch.
     The strided branches are views, and ``np.vdot`` reduces them without a
-    contiguous copy. The saved joint input
-    ``16*beta*N`` is the simulator's saved state, admitted by the trajectory
-    memory check, and ``B_operator`` is the Plan's resident table, so neither
-    is counted again here. ``H0 = 65536`` is the fixed heap allowance.
+    contiguous copy. The saved input is admitted by the trajectory memory
+    check, and the operator table is resident in the Plan, so neither is
+    counted again here. ``H0 = 65536`` is the fixed heap allowance.
+    For L = 0 the action and Hamiltonian contraction are skipped, and
+    ``B_pair = H0``.
     """
     n = 1 << parameters["qubits"]
     terms, flips = parameters["terms"], parameters["flips"]
@@ -191,24 +196,8 @@ READOUT_REDUCERS[REDUCER] = Reducer(
 )
 
 
-U = F(1, 2**53)
-ETA = F(1, 2**1074)
-
-
-def sqrt_up(value, bits=128):
-    value = F(value)
-    if value < 0:
-        raise ValueError("a squared norm must be nonnegative")
-    scale = 1 << bits
-    n = value.numerator * scale * scale
-    d = value.denominator
-    root = math.isqrt(n // d)
-    if root * root * d < n:
-        root += 1
-    return F(root, scale)
-
-
 def upward(value):
+    """Return the smallest binary64 value at or above ``value``, or inf when no finite one is."""
     value = F(value)
     try:
         result = float(value)
@@ -219,41 +208,18 @@ def upward(value):
     return result
 
 
-def gamma(count):
-    if type(count) is not int or count < 0 or count*U >= 1:
-        raise ValueError("invalid gamma domain")
-    return count*U/(1-count*U)
-
-
 def dot_underflow(n):
+    """Return ``U_dot = 8n*eta/(1 - (2n+4)u)`` of ``entry_bounds`` for one length-n complex dot.
+
+    ``eta = 2**-1074`` and ``u = 2**-53``. Raises ValueError when
+    ``(2n+4)u >= 1``.
+    """
     if (2*n+4)*U >= 1:
         raise ValueError("invalid underflow domain")
     return 8*n*ETA/(1-(2*n+4)*U)
 
 
-def action_constants(n, terms, groups, largest, *, ordered=False):
-    if not terms:
-        return F(0), F(0)
-    if not (1 <= groups <= terms and 1 <= largest <= terms):
-        raise ValueError("invalid action census")
-    mu = sqrt_up(2)*gamma(2)
-    if ordered:
-        a = gamma(terms-1)
-        error = mu+a+mu*a
-        r = 2*terms+4
-        numerator = 8*terms*ETA*sqrt_up(n)
-    else:
-        a, b = gamma(largest-1), gamma(groups-1)
-        error = a+mu+b+a*mu+a*b+mu*b+a*mu*b
-        r = terms+groups+4
-        numerator = 4*(terms+groups)*ETA*sqrt_up(n)
-    if r*U >= 1:
-        raise ValueError("invalid action underflow domain")
-    return error, numerator/(1-r*U)
-
-
-def entry_bounds(delta, c1, n, terms, groups, largest, *, diagonal=False,
-                 ordered=False):
+def entry_bounds(delta, c1, n, terms, *, diagonal=False):
     """Return outward ``(E_S, E_H)`` of one pair entry, or None when ``delta`` is unavailable.
 
     With ``D(delta) = 2*delta + delta**2``, ``g_N = sqrt(2)*gamma(2N)``,
@@ -264,18 +230,17 @@ def entry_bounds(delta, c1, n, terms, groups, largest, *, diagonal=False,
         E_H = C{D(delta) + [e + (1+e)g_N](1+delta)**2}
               + (sqrt(beta) + beta*delta)(1+g_N)U_A + beta*U_dot.
 
-    ``E_H = 0`` when L = 0 and H0 is returned algebraically zero. The pair
-    reducer uses the ordered-action error envelope for either successful
-    Pauli action path. This envelope also bounds grouped action because its
-    largest-group and group-count contributions sum to at most the termwise
-    reduction length. The allowance includes gradual underflow and both
-    complex contractions. An unavailable state receipt leaves the derived
-    entry bound unavailable. Callers pass ``ordered=True`` with
-    ``groups=1, largest=L``, valid bound inputs whose grouped values are
-    unused in the ordered branch. Exact rational arithmetic evaluates the
-    expanded products and a dyadic square-root upper bound, and a strictly
-    positive rational below half a subnormal publishes as the minimum
-    positive subnormal.
+    ``E_H = 0`` when L = 0 and H0 is returned algebraically zero.
+
+    The action constants (e, U_A) come from
+    ``nwqlib._quantum_readout.ordered_action_constants``. Its docstring
+    gives the common envelope for the ordered and grouped action paths.
+    The entry allowance includes gradual underflow and both complex
+    contractions. An unavailable state receipt leaves it unavailable.
+    Exact rational arithmetic evaluates the expanded products using
+    dyadic square-root upper bounds. Final nonnegative bounds round
+    upward to binary64, so a strictly positive rational below half a
+    subnormal publishes as the minimum positive subnormal.
 
     For a preparation synthesized from a supplied matrix, the comparison uses
     the exact-to-rounding construction convention of subroutines._dense_synthesis.
@@ -293,7 +258,7 @@ def entry_bounds(delta, c1, n, terms, groups, largest, *, diagonal=False,
     delta, c1 = F(delta), F(c1)
     if delta < 0 or c1 < 0 or n < 1:
         raise ValueError("invalid bound inputs")
-    e, underflow = action_constants(n, terms, groups, largest, ordered=ordered)
+    e, underflow = ordered_action_constants(n, terms)
     beta = 1 if diagonal else 2
     dot = sqrt_up(2)*gamma(2*n)
     d = 2*delta+delta*delta

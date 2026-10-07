@@ -18,7 +18,9 @@ class WorkProvenance(Record):
     `Evidence.work` holds these records. The fields below are read-only.
 
     Attributes:
-        stage: Workflow stage in which the work ran.
+        stage: Workflow stage in which the work ran: `"planning"`,
+            `"preparation"`, `"execution"`, `"analysis"` or
+            `"verification"`.
         description: What was computed and its size, for example entries
             scanned and scalar operations.
         artifact: Identifier of the record that holds the output of the work.
@@ -76,6 +78,7 @@ class Evidence(Record):
             that produced the value, set exactly for a verification record.
         check_id: Default `None`. Content hash of the `CheckSpec` the value
             answers.
+        schema_version: Format version of the record, 4.
 
     Raises:
         ValueError: If the witnessed fields are not all set exactly when

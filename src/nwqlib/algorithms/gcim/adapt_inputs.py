@@ -152,7 +152,7 @@ class AdaptInputs:
 
     ``nonidentity`` holds the ``(label, coefficient)`` rows of the nonidentity
     Hamiltonian terms, formed once here for every pair circuit and pair
-    action. ``cache`` holds labels decoded from the member records; neither
+    action. ``cache`` holds labels decoded from the member records. Neither
     is saved.
     """
 
@@ -187,8 +187,8 @@ def array_record_bytes(raw_lengths, header_bounds, *, fixed_json,
     """Admit the live array payloads, immutable snapshots, group indices and the selected identity encoding of the ADAPT reconstruction.
 
     Each array contributes its dtype-dependent byte length and dtype/shape
-    header, including empty arrays. Fields that still store individual Pauli
-    records keep their existing record charge.
+    header, including empty arrays. Fields stored as individual Pauli records
+    are charged separately and enter here as other live bytes.
 
     Let ``R_j`` be the rows of array table j and ``b_j`` its raw bytes per
     row, ``B_j = R_j*b_j`` and ``B = sum_j B_j``. With binary arrays encoded
@@ -272,7 +272,7 @@ def _commutator_array_charges(tables, num_qubits):
 
 
 def label_cache_bytes(q, row_counts, pool_size, energy_count, max_selections,
-                      *, sampled, distinct_cap=None):
+                      *, sampled):
     """Return the qualified object-memory allowance of one Plan's decoded ADAPT label cache.
 
     The cache (``adapt_records.label_cache``) holds the rows decoded by
@@ -288,30 +288,28 @@ def label_cache_bytes(q, row_counts, pool_size, energy_count, max_selections,
     or process RSS.
 
     Dimensions: q Pauli characters, K = ``pool_size`` members, R and r_max
-    the sum and maximum of ``row_counts``, J = min(max_selections, K), L =
-    ``energy_count`` nonidentity Hamiltonian labels, U an upper bound on the
-    distinct commutator labels (R unless an admitted operation established
-    a smaller ``distinct_cap``) and A the reachable active-cache capacity,
-    J + 1 for exact plans and K + 1 for sampled plans (the sampled screen
-    passes the pool size as the cache limit, and ``store.clear()`` before
-    insertion permits ``limit + 1`` entries).
+    the sum and maximum of ``row_counts``, J = min(max_selections, K), and
+    L = ``energy_count`` nonidentity Hamiltonian labels. R bounds the
+    distinct commutator labels even when several rows share a label. The
+    active-cache capacity A is J + 1 for exact plans and K + 1 for sampled
+    plans: clearing before insertion only when the stored count exceeds
+    the limit permits limit + 1 entries.
 
-    Engineering envelopes: a compact ASCII label ``q + 64``, a float 32, a
-    two-item row tuple 64, a tuple of n references ``T(n) = 64 + 8n``, a set,
-    frozenset or the active dictionary with n entries ``H(n) = 256 + 128n``
-    (including vacant hash capacity), a selected pool index
-    ``I_K = 32 + 4 ceil(max(1, bit_length(K))/30)`` and 4096 for fixed keys
-    and bookkeeping. A decoded row costs ``q + 168`` with its member-tuple
-    slot. Then
+    Engineering envelopes are ``T(n) = 64 + 8n`` for a tuple,
+    ``H(n) = 256 + 128n`` for a set, frozenset or active dictionary, and
+    ``I_K = 32 + 4 ceil(max(1, bit_length(K))/30)`` for a selected pool
+    index. A decoded row costs q + 168 bytes, including its label, float,
+    row tuple and member-tuple slot. The kept cache and construction
+    allowances are
 
-        B_kept = 4096 + T(K) + 64K + (q + 168)R + T(U) + T(L) + H(A)
-                 + A[T(U) + H(U) + H(J) + T(2) + J I_K],
+        B_kept = 4096 + T(K) + 64K + (q + 168)R + T(R) + T(L) + H(A)
+                 + A[T(R) + H(R) + H(J) + T(2) + J I_K],
         X_decode = r_max(8q + 128) + 16q,
-        X_build = 320U + 32L + (160 + I_K)J + 128A,
+        X_build = 320R + 32L + (160 + I_K)J + 128A,
         B_cache = B_kept + 65536 + max(X_decode, X_build).
 
     ``X_decode`` prices ``PauliArrays.rows()``'s member-sized ``tolist``
-    lists, builder capacity and a label join; ``X_build`` prices set
+    lists, builder capacity and a label join. ``X_build`` prices set
     formation, sorting, tuple and frozenset construction, key construction
     and dictionary growth. The 65,536 bytes cover fixed Python and NumPy
     call and iterator bookkeeping. docs/ENGINEERING_CONSTANTS.md lists this
@@ -321,19 +319,17 @@ def label_cache_bytes(q, row_counts, pool_size, energy_count, max_selections,
     K, R, rmax = pool_size, sum(counts), max(counts, default=0)
     J = min(max_selections, K)
     A = (K if sampled else J) + 1
-    U = R if distinct_cap is None else distinct_cap
-    if (min(q, K, energy_count, max_selections, U, *counts) < 0
-            or q < 1 or len(counts) > K or not 0 <= U <= R):
+    if min(q, K, energy_count, max_selections, *counts) < 0 or q < 1 or len(counts) > K:
         raise ValueError("invalid cache dimensions")
     # CPython 3.12, 64-bit engineering envelopes, including variable headers.
     integer = 32 + 4 * ((max(1, K.bit_length()) + 29) // 30)
     tup = lambda n: 64 + 8 * n  # noqa: E731
     hashed = lambda n: 256 + 128 * n  # noqa: E731
     kept = (4096 + tup(K) + 64 * K + (q + 168) * R
-            + tup(U) + tup(energy_count) + hashed(A)
-            + A * (tup(U) + hashed(U) + hashed(J) + tup(2) + J * integer))
+            + tup(R) + tup(energy_count) + hashed(A)
+            + A * (tup(R) + hashed(R) + hashed(J) + tup(2) + J * integer))
     decode = rmax * (8 * q + 128) + 16 * q
-    build = 320 * U + 32 * energy_count + (160 + integer) * J + 128 * A
+    build = 320 * R + 32 * energy_count + (160 + integer) * J + 128 * A
     return kept + 65536 + max(decode, build)
 
 
@@ -404,7 +400,7 @@ def _reconstruction_fixed_json(fields, *, pool_size, term_count):
 
 
 # Candidate Pauli pairs tested per commutator tile. An engineering choice of
-# tile length, not a scientific threshold; changing it changes storage, not
+# tile length, not a scientific threshold. Changing it changes storage, not
 # rows, order or coefficients.
 _COMMUTATOR_TILE = 1 << 14
 
@@ -412,6 +408,8 @@ _COMMUTATOR_TILE = 1 << 14
 def pauli_array_conversion_requirements(rows, q, *, tile=1024):
     """Return ``(work, peak bytes, raw bytes)`` of converting J coalesced packed rows to ``PauliArrays``.
 
+    Here J = ``rows``, q is the number of qubits, W = ceil(q/64) is the
+    number of 64-bit words per mask, and C = ``tile``.
     With ``P = (16W+16)J``, ``B = 8J(q+1)``, ``t = min(J, C)`` and
     ``h = ceil(log2 max(1, J))``, the live phases are decoding (packed input
     P, code and coefficient outputs B, two uint64 tile vectors 16t), sorting
@@ -486,7 +484,7 @@ def _packed_to_pauli_arrays(x, z, coefficients, q, *, tile=1024):
                        coefficients=FrozenArray(sorted_coefficients))
 
 
-def _commutator_arrays(h, a, *, cutoff, ledger, held, max_bytes, max_products, admit_rows=None):
+def _commutator_arrays(h, a, *, cutoff, ledger, held, max_bytes, max_products, admit_rows):
     """Return ``[H, A]`` as ``PauliArrays`` and its dropped coefficient mass, from packed tables.
 
     For canonical Pauli strings ``P_a P_h = (-1)**s_ha P_h P_a``, hence
@@ -534,7 +532,7 @@ def _commutator_arrays(h, a, *, cutoff, ledger, held, max_bytes, max_products, a
     complex coefficients, their gathered and output copies, sort, inverse
     and first-position indices, head masks and group order. ``ledger`` is
     the one running work total shared by all pool members, a one-element
-    list. ``admit_rows(J)``, when given, runs the caller's record admission
+    list. ``admit_rows(J)`` runs the caller's record admission
     for the J published rows before their conversion. Each pair tile is
     admitted before it is tested, each tile's
     worst-case survivors are reserved before they are appended, and the sort
@@ -542,13 +540,7 @@ def _commutator_arrays(h, a, *, cutoff, ledger, held, max_bytes, max_products, a
     count already live, including earlier published tables ``8J_i(q+1)``.
     The packed survivors then convert to the published int64 code table
     (``pauli_array_conversion_requirements``), with the conversion peak
-    ``B_conv`` added under the same maximum. Commutator construction
-    coalesces packed keys before converting the surviving rows to int64
-    I/X/Y/Z codes. The published rows are sorted lexicographically with
-    their coefficients. Admission includes earlier published tables, the
-    packed conversion input, sorting and validation workspace, immutable
-    snapshots and the actual record encoding. The direct conversion
-    materializes no label strings.
+    ``B_conv`` added under the same maximum.
     """
     from nwqlib.operators._pauli import anticommutes, product_words
 
@@ -629,8 +621,7 @@ def _commutator_arrays(h, a, *, cutoff, ledger, held, max_bytes, max_products, a
     kept = np.abs(real) > cutoff
     x, z, real = x[starts][kept], z[starts][kept], real[kept]
     del c, starts, ends, values, kept
-    if admit_rows is not None:
-        admit_rows(len(real))
+    admit_rows(len(real))
     work, peak, _ = pauli_array_conversion_requirements(len(real), q)
     charge(work)
     reserve(peak)
@@ -672,6 +663,18 @@ def _pool_enumeration_requirements(candidates, num_qubits):
     _, mapping_bytes, mapping_work = mapping_requirements((4,) * 12, num_modes=q, labels=True)
     member_bytes = 48 * (q + 64) + 12 * 240 + 206
     return candidates * member_bytes + mapping_bytes, candidates * (mapping_work + 168)
+
+
+def _generator_record_bytes(generators):
+    """Return the generator-record term of the ADAPT reconstruction record law.
+
+    Planning (``prepare_adapt_inputs``) and the classical archive reload
+    (``adapt_actions.restored_record_allowance``) both charge this term.
+    """
+    return 3 * sum(2048 + 128 * len(generator.fermion_terms)
+                   + 16 * sum(len(ops) for _, ops in generator.fermion_terms)
+                   + 16 * (len(generator.spatial_indices) + len(generator.spin_orbital_indices or ()))
+                   for generator in generators)
 
 
 def prepare_adapt_inputs(hamiltonian, reference, method, *, execution, shots,
@@ -836,8 +839,7 @@ def prepare_adapt_inputs(hamiltonian, reference, method, *, execution, shots,
     # array_record_bytes with these Pauli-row charges as its other live
     # bytes and the reconstruction and table records' own fields as fixed JSON
     # (_reconstruction_fixed_json and _commutator_record_fixed_json), each table before its
-    # record is built. The a priori count |H| |A_i| per commutator exceeds
-    # the kept count about fivefold for the spin-adapted pools of H4 and LiH.
+    # record is built.
     def reconstruction_json(processed, term_count, work, dropped, notes, symmetry,
                             *, shift=0.0, offset=(0, 0)):
         return _reconstruction_fixed_json(
@@ -865,10 +867,7 @@ def prepare_adapt_inputs(hamiltonian, reference, method, *, execution, shots,
 
     from nwqlib.operators.inputs import _pauli_identity_bytes
     share = _pauli_identity_bytes(q)
-    fixed = 3 * sum(2048 + 128 * len(generator.fermion_terms)
-                    + 16 * sum(len(ops) for _, ops in generator.fermion_terms)
-                    + 16 * (len(generator.spatial_indices) + len(generator.spin_orbital_indices or ()))
-                    for generator in generators)
+    fixed = _generator_record_bytes(generators)
     records = sum(len(generator.pauli_terms) for generator in generators)
     _check_bytes(fixed + records * share, method.max_bytes, "ADAPT reconstruction records")
     # The classical matrix route can apply the original Hermitian operator

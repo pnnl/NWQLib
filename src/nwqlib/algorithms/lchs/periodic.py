@@ -277,9 +277,9 @@ def _select_periodic_leaf(name,payload,*,basis,phase_only):
     a = len(payload.amplitudes).bit_length()-1
     p = 1<<a
     one = _construction_law(q,a,1)
-    # Factor the complete one-step law of _construction_law into PREP pair,
-    # phase and one step. Repeat supplies the actual step population at the
-    # shared fold owner.
+    # Factor the complete one-step law of _construction_law into the PREP
+    # pair, the phase and one step. The Program's Repeat node supplies the
+    # step count when the Program's resource counts are summed.
     phase_cx,phase_controlled = max(0,p-2),6*max(0,p-2)+2*(p-1)
     cx = phase_cx if phase_only else one['projected_cx']-2*direct_preparation_cx_bound(a,complex_phases=False)-phase_cx
     controlled_cx = phase_controlled if phase_only else one['projected_controlled_cx']-2*direct_preparation_controlled_cx_bound(a)-phase_controlled

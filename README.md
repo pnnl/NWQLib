@@ -14,7 +14,9 @@ NWQLib requires Python 3.12 or later. Install the package with the local Aer sim
 python -m pip install "nwqlib[aer]"
 ```
 
-The base package, `python -m pip install nwqlib`, describes the methods, accepts inputs, plans LCHS with its default settings and runs the classical methods. Building and running circuits needs the extra of the chosen backend (`aer`, `ibm`, `ionq`, `nexus`), each of which includes Qiskit. [Install and first result](https://pnnl.github.io/NWQLib/quickstart/#install) lists every extra, and [Choose a backend](https://pnnl.github.io/NWQLib/backends/) explains what each backend supports. To work on NWQLib itself, see [Set up, test and build](https://pnnl.github.io/NWQLib/development/setup/).
+The base package depends on NumPy 2.5.2 or later, SciPy 1.18.1 or later, SymPy 1.14.0 or later and Pydantic 2.13.5 or later, below 3. The extras `aer`, `qiskit`, `ibm`, `ionq`, `nexus`, `chemistry`, `tensor`, `qasm` and `nwqec` require Qiskit 2.5.2 or later. The validated CI environment in [`docs/ENVIRONMENT_LOCK.txt`](https://github.com/pnnl/NWQLib/blob/main/docs/ENVIRONMENT_LOCK.txt) uses Python 3.12.14, Qiskit 2.5.2 and Qiskit Aer 0.17.2.
+
+The base package, `python -m pip install nwqlib`, describes the methods, accepts numerical inputs, plans LCHS with its default settings and supports classical evaluation with `execution="classical"` for LCHS, QLS, QCELS, SPE, RFE, RWPE, QHD, Expectation, Lanczos, FixedGCIM and ADAPT within their supported numerical-input and method-option domains. Classical evaluation that expands a circuit-defined initial or trial state also requires Qiskit. Building circuits needs the `qiskit` extra, and running them needs the extra of the chosen backend (`aer`, `ibm`, `ionq`, `nexus`), each of which includes Qiskit. For example, `python -m pip install "nwqlib[aer,notebook,chemistry]"` adds the example notebooks and the molecular Hamiltonian builder, and `python -m pip install "nwqlib[ibm]"` adds IBM Runtime. [Install and first result](https://pnnl.github.io/NWQLib/quickstart/#install) lists every extra, and [Choose a backend](https://pnnl.github.io/NWQLib/backends/) explains what each backend supports. To work on NWQLib itself, see [Set up, test and build](https://pnnl.github.io/NWQLib/development/setup/).
 
 ## First result
 
@@ -61,21 +63,23 @@ The [example notebooks](https://github.com/pnnl/NWQLib/tree/main/examples) solve
 | Check known defects in Qiskit and other dependencies, and how NWQLib handles them | [Dependency issues](https://pnnl.github.io/NWQLib/dependency_issues/) |
 | Trace code to its paper, equation and reason | [Code tour](https://pnnl.github.io/NWQLib/CODE_TOUR/#find-the-source-and-reason-for-a-line-of-code), [references](https://pnnl.github.io/NWQLib/references/) |
 | Find the bound, resource formula or error budget behind a result, its proof or source, and its code | [Mathematics](https://pnnl.github.io/NWQLib/mathematics/) |
-| Maintain NWQLib | [Set up, test and build](https://pnnl.github.io/NWQLib/development/setup/), [Contributing](https://github.com/pnnl/NWQLib/blob/main/CONTRIBUTING.md) |
+| Maintain NWQLib | [Set up, test and build](https://pnnl.github.io/NWQLib/development/setup/), [contribution policy](https://pnnl.github.io/NWQLib/FRAMEWORK/), [Contributing](https://github.com/pnnl/NWQLib/blob/main/CONTRIBUTING.md) |
+
+Each method's tests are in `tests/`, in files named after the method, such as `tests/test_lchs_*.py` and `tests/test_qls_*.py`. The [examples guide](https://pnnl.github.io/NWQLib/examples/) lists the notebook of each method.
 
 ## Algorithms
 
 | Scientific task | Methods |
 | --- | --- |
 | Normalized expectation of a finite real Pauli sum | [Expectation](https://pnnl.github.io/NWQLib/algorithms/expectation/) |
-| Energy estimates from moments or a chosen subspace | [Chebyshev Lanczos](https://pnnl.github.io/NWQLib/algorithms/lanczos/), [fixed and adaptive GCiM](https://pnnl.github.io/NWQLib/algorithms/gcim/) |
-| Phase or energy estimation | [QPE: QCELS, RWPE, SPE and RFE](https://pnnl.github.io/NWQLib/algorithms/qpe/) |
-| Time-independent linear dynamics | [LCHS](https://pnnl.github.io/NWQLib/algorithms/lchs/) |
-| Linear systems | [QLS: QSVT inverse polynomial (`qsvt_inverse`, the default) and the Dalzell kernel shortcut (`shortcut_native_svp`, `shortcut_dilation`)](https://pnnl.github.io/NWQLib/algorithms/qls/) |
-| Box-constrained optimization | [QHD](https://pnnl.github.io/NWQLib/algorithms/qhd/) |
-| Optimization over a box with equality or inequality constraints | [QHD augmented Lagrangian](https://pnnl.github.io/NWQLib/algorithms/qhd/#constrained-problems) |
+| Energy estimates from moments or a chosen subspace | [Chebyshev Lanczos](https://pnnl.github.io/NWQLib/algorithms/lanczos/) (arXiv:2208.00567v4), [fixed and adaptive GCiM](https://pnnl.github.io/NWQLib/algorithms/gcim/) (fixed arXiv:2212.09205v1, adaptive arXiv:2312.07691v3) |
+| Phase or energy estimation | [QPE: QCELS, RWPE, SPE and RFE](https://pnnl.github.io/NWQLib/algorithms/qpe/) (QCELS arXiv:2211.11973v2, RWPE arXiv:2208.04526v1, SPE arXiv:2110.12071v2, RFE arXiv:2209.11322v3) |
+| Time-independent linear dynamics | [LCHS](https://pnnl.github.io/NWQLib/algorithms/lchs/) (arXiv:2312.03916v2) |
+| Linear systems | [QLS: QSVT inverse polynomial (`qsvt_inverse`, the default) and the Dalzell kernel shortcut (`shortcut_native_svp`, `shortcut_dilation`)](https://pnnl.github.io/NWQLib/algorithms/qls/) (QSVT arXiv:1806.01838v1, Dalzell arXiv:2406.12086v2) |
+| Box-constrained optimization | [QHD](https://pnnl.github.io/NWQLib/algorithms/qhd/) (arXiv:2303.01471v1) |
+| Optimization over a box with equality or inequality constraints | [QHD augmented Lagrangian](https://pnnl.github.io/NWQLib/algorithms/qhd/#constrained-problems) (arXiv:2605.12066v1) |
 
-Each method reports the quantity it obtained and any accuracy conditions that remain unresolved. A projected energy, a local statistical interval or a completed simulation does not by itself establish the full requested scientific claim. [Limitations and open work](https://pnnl.github.io/NWQLib/ROADMAP/) lists current limitations. State preparation, block encoding, LCU, QSP/QSVT and evolution subroutines have their own [API reference pages](https://pnnl.github.io/NWQLib/api/).
+Each method reports the quantity it obtained and any accuracy conditions that remain unresolved. Each method is checked on small cases against independent references, and [Limitations and open work](https://pnnl.github.io/NWQLib/ROADMAP/) lists what has been checked for each method and its current limitations. The resource-estimation notebook runs no circuit. A projected energy, a local statistical interval or a completed simulation does not by itself establish the full requested scientific claim. State preparation, block encoding, LCU, QSP/QSVT and evolution subroutines have their own [API reference pages](https://pnnl.github.io/NWQLib/api/).
 
 ## Backend support
 
@@ -99,7 +103,7 @@ If you use NWQLib in your work, please cite it through its Zenodo record, which 
   author  = {Zheng, Muqing and Liu, Chenxu and Song, Zhixin and Wu, Zeguan and Li, Xiangyu and Li, Mingze and Bauman, Nicholas P. and Stein, Samuel A. and M{\"u}lmenst{\"a}dt, Johannes and Chen, Yousu and Wiebe, Nathan and Li, Ang and Kowalski, Karol},
   title   = {NWQLib},
   year    = {2026},
-  version = {1.0.1.post1},
+  version = {1.0.2},
   doi     = {10.5281/zenodo.23074265},
   url     = {https://github.com/pnnl/NWQLib}
 }
@@ -131,4 +135,4 @@ Affiliations are those at the time of contribution.
 
 This work was supported by Pacific Northwest National Laboratory's Quantum Algorithms and Architecture for Domain Science (QuAADS) Laboratory Directed Research and Development (LDRD) Initiative. This material is based upon work supported by the U.S. Department of Energy, Office of Science, National Quantum Information Science Research Centers, Quantum Science Center (QSC). The Pacific Northwest National Laboratory is operated by Battelle for the U.S. Department of Energy under Contract DE-AC05-76RL01830.
 
-NWQLib is released under the BSD 2-Clause License; see [`LICENSE`](https://github.com/pnnl/NWQLib/blob/main/LICENSE). Information release number PNNL-SA-227989.
+NWQLib is released under the BSD 2-Clause License, given in [`LICENSE`](https://github.com/pnnl/NWQLib/blob/main/LICENSE). Information release number PNNL-SA-227989.

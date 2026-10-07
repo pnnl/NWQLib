@@ -1,4 +1,4 @@
-"""Registered QLS normalization constants, shared by actual method owners."""
+"""QLS normalization, spectral-premise and verification constants."""
 
 # Rescale margin over the rigorous Chebyshev norming bound. The phase solver
 # demands max|target| <= 1, and dividing a selected polynomial by its norming
@@ -14,11 +14,11 @@
 QLS_TARGET_MARGIN = 1.0e-3
 # Polynomial-domain floor, separate from actual alpha/sigma_min. A perfectly
 # conditioned input has actual condition 1, while the polynomial constructions
-# need a domain parameter strictly above 1. The 1.01 floor also avoids the KR
-# coefficient formula's cancellation near 1. This does not alter the reported
-# original spectrum, actual alpha or condition estimate. Revisit if the domain
-# requirement of either polynomial construction or the kernel-reflection
-# coefficient fit changes.
+# need a domain parameter strictly above 1. The 1.01 floor also avoids the
+# kernel-reflection (KR) coefficient formula's cancellation near 1. This does
+# not alter the reported original spectrum, actual alpha or condition
+# estimate. Revisit if the domain requirement of either polynomial
+# construction or the kernel-reflection coefficient fit changes.
 QLS_POLYNOMIAL_KAPPA_FLOOR = 1.01
 
 # Relative admission window for already computed singular endpoints, matching

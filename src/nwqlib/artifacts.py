@@ -25,7 +25,7 @@ _ARRAY_ENCODINGS = {"complex128": ("complex128-le-c", "<c16", 16), "float64": ("
 ARRAY_PAYLOAD_FORMATS = frozenset(f"nwqlib.array/{dtype}" for dtype in ("<c16", "<f8", "<u8"))
 
 # Entries per block of the finiteness check at publication, a 64 KiB Boolean
-# mask. Registered in docs/ENGINEERING_CONSTANTS.md ("Artifact publication").
+# mask. Registered in docs/ENGINEERING_CONSTANTS.md ("Local journal scalar admission").
 _FINITE_CHECK_ENTRIES = 1 << 16
 
 
@@ -144,8 +144,7 @@ class ReadoutArray(Record):
     readout stay separate arrays: a homogeneous two-column float array loses
     integer indices or counts above 2**53. The manifest records the actual
     encoding, shape, dtype, byte count, payload digest and acquisition
-    provenance of each component. Source: the NWQLib readout-array derivation
-    (representation and indexing).
+    provenance of each component.
 
     Attributes:
         component: probabilities or indices.
@@ -194,7 +193,7 @@ class ReadoutArray(Record):
 def probability_readout(values, indices=None, *, width):
     """Check one probability marginal at publication and choose its stored encoding.
 
-    Publication owns the value checks; loading checks the declared layout and
+    Publication owns the value checks. Loading checks the declared layout and
     associations without rereading the values. ``values`` is float64 and
     either dense (``indices`` None, shape ``(2**width,)``, outcome j at
     position j) or sparse with ``indices`` of shape ``(m,)`` for a width of at
@@ -209,7 +208,7 @@ def probability_readout(values, indices=None, *, width):
     - Nonnegative probabilities: blockwise ``values >= 0``, before canonical
       zero removal.
     - Unique legal keys: dense positions give uniqueness. Sparse input is
-      sorted, then ``index[1:] > index[:-1]`` and a width/domain check; this
+      sorted, then ``index[1:] > index[:-1]`` and a width/domain check. This
       is O(m) for sorted input and O(m log m) with an O(m) index workspace to
       sort unsorted input. For width 64 every uint64 index is in range, and
       for a width below 64 the indices are compared with ``np.uint64(1 <<
@@ -228,11 +227,9 @@ def probability_readout(values, indices=None, *, width):
     The total is ``math.fsum`` of the stored values, computed once here and
     saved, so the unit endpoint ``fsum(p_j) <= fl(1+w)`` of
     ``ObservationChunk.validate_unit_bound`` is the exact acceptance
-    predicate; ``np.sum`` with the same comparison could change acceptance for
+    predicate. ``np.sum`` with the same comparison could change acceptance for
     a total at the endpoint. It is O(m) scalar conversion work, and it creates
-    no per-bin records. Zero-width probabilities stay invalid. Source: the
-    NWQLib readout-array derivation (validation and its cost; dense versus
-    sparse).
+    no per-bin records. Zero-width probabilities stay invalid.
 
     Returns:
         ``(indices, values, summary)``: the stored uint64 indices (None when
@@ -277,7 +274,7 @@ def probability_readout(values, indices=None, *, width):
         if indices.dtype.kind == "i" and (indices < 0).any():
             raise ValueError("outcome indices are nonnegative")
         indices = np.ascontiguousarray(indices, dtype="<u8")
-        # The most significant word holds width - 64*(W-1) bits; set bits
+        # The most significant word holds width - 64*(W-1) bits. Set bits
         # above them are out of range (padding bits must be zero).
         top = width - 64 * (words - 1)
         high = indices[:, -1] if packed else indices
@@ -318,9 +315,7 @@ class ArtifactManifest(Record):
     A Result names its arrays by their manifests, for example
     `LCHSAnalysis.artifact`, and `result.data.artifact(manifest)` returns
     the array's handle. A manifest gives no access to the array itself. The
-    manifest of a readout array names the preparation record as its
-    construction and the readout declaration in `producer_id`. The fields
-    below are read-only.
+    fields below are read-only.
 
     Attributes:
         plan_id: Content hash of the Plan.
@@ -329,21 +324,23 @@ class ArtifactManifest(Record):
         construction_id: Content hash of the construction that produced the
             output, or for a readout array the preparation record of its
             measurement.
-        producer_id: Content hash of the host computation or readout
-            declaration that produced the array.
+        producer_id: Content hash of the classical computation, or of the
+            readout description, that produced the array.
         output: The array's shape, basis and normalization and phase
             convention (`ArrayOutput`), or the component of a readout array
             (`ReadoutArray`).
-        acquisition: The `(run, attempt, measurement, slot)` that produced
-            the array.
+        acquisition: Four text labels of the measurement that produced the
+            array: the Run's `run_id`, the attempt, the job and the result or
+            chunk within that job. For a classical computation, the job label
+            repeats the attempt.
         source: The code and method that produced the array (`Source`).
         digest: Content hash of the saved numerical bytes. It does not prove
             that the values are scientifically correct.
         data_bytes: Size of the array data in bytes, which matches the
             output's shape and dtype.
-        encoding: Byte order of the saved data, `"complex128-le-c"`,
-            `"float64-le-c"` or `"uint64-le-c"`, as the output's dtype
-            selects.
+        encoding: Element type, little-endian byte order and C (row-major)
+            layout of the saved data: `"complex128-le-c"`, `"float64-le-c"`
+            or `"uint64-le-c"`, as the output's dtype selects.
     """
 
     schema_version: Literal[4] = 4
@@ -408,8 +405,10 @@ class ArtifactHandle:
     def array(self):
         """The array, as a read-only NumPy array.
 
-        Reading it copies and computes nothing. A saved array is read once
-        from the saved data, at the first access.
+        For an array in memory, reading it copies and computes nothing. For a
+        reopened Run, the array is read from the saved data once, at the first
+        access. For a loaded Result, it is a read-only memory map of the saved
+        file, so its values are read from disk as they are used.
 
         Raises:
             ValueError: If the array data is not available.
@@ -431,14 +430,15 @@ class ArtifactStore:
 
     The data-byte cap bounds stored arrays. Publication can use at most two
     array-sized temporary copies, for endian or layout conversion and for
-    immutable ownership, and none for a handed-over private array (``_publish``); that
-    finite size follows from the admitted array, not a metadata work ledger.
-    The cap does not claim to bound process RSS or all undocumented SDK workspace.
+    immutable ownership, and none for a handed-over private array
+    (``_publish``). That finite size follows from the admitted array, not a
+    metadata work ledger. The cap does not claim to bound process RSS or all
+    undocumented SDK workspace.
 
     A restored inventory is registered lazily: a manifest costs O(1)
     metadata and zero hydrated payload bytes until its array is first read
     (``get``). Hydration keeps one copy per payload digest for the store's
-    lifetime; lazy loading does not imply eviction, so with already hydrated
+    lifetime. Lazy loading does not imply eviction, so with already hydrated
     payloads totalling H the store's payload peak is H + B + C for a new
     payload of B bytes read in journal blocks of C bytes.
     """
@@ -474,7 +474,7 @@ class ArtifactStore:
     def _restore(self, manifests):
         """Restore the charged inventory without inventing missing native data.
 
-        Each manifest is registered without reading its payload; the array is
+        Each manifest is registered without reading its payload. The array is
         read on first use through ``_loader`` (``get``).
         """
         with self._lock:
@@ -492,11 +492,6 @@ class ArtifactStore:
     @property
     def data_bytes(self):
         return self._data_bytes
-
-    @property
-    def manifests(self):
-        with self._lock:
-            return tuple(handle.manifest for handle in self._handles.values())
 
     def snapshot(self):
         """Freeze the inventory as handle references, without copying any array."""
@@ -536,7 +531,7 @@ class ArtifactStore:
         """Whether the store can supply array data for ``manifest``, not only its description.
 
         A payload is accessible when the store holds it or its loader can
-        read it; answering reads no payload bytes.
+        read it. Answering reads no payload bytes.
         """
         if type(manifest) is not ArtifactManifest:
             raise TypeError("artifact access requires its full manifest")
@@ -564,9 +559,9 @@ class ArtifactStore:
         B + C for blocks of C bytes (16N + C for N complex128 entries).
         Loading is trusted: the shape, encoding, block order, block sizes and
         completeness are checked, and no value scan, digest recomputation or
-        summary recheck runs; publication checked the values and computed the
+        summary recheck runs. Publication checked the values and computed the
         summaries from the bytes that were hashed. ``manifest.data_bytes``
-        stays B; the Run charges stored bytes, not this transient workspace.
+        stays B. The Run charges stored bytes, not this transient workspace.
         The buffer is kept per payload digest for the store's lifetime, so a
         second restored manifest with the same bytes, of the same or another
         dtype and shape, gets its own typed view of that buffer without a
@@ -629,7 +624,7 @@ class ArtifactStore:
         float64 or uint64 and has had its value checks
         (``probability_readout``) before it arrives here. Shape and dtype
         are checked before any copy. Nonfinite values of an
-        ``ArrayOutput`` reject; the check reads the array in blocks of at most
+        ``ArrayOutput`` reject. The check reads the array in blocks of at most
         ``_FINITE_CHECK_ENTRIES`` entries (one operator row when a row is
         longer), so its Boolean scratch does not grow with the array. A Run
         reserves the bytes against the acquisition's output reservation before
@@ -647,12 +642,12 @@ class ArtifactStore:
         instead of copying it, and the published handle holds a view of it
         that cannot be made writeable. The kept array itself is not copied into
         immutable bytes, so code that reached it through the view's ``base``
-        could make it writeable again; publication relies on the handover
+        could make it writeable again. Publication relies on the handover
         instead. Any other array is copied into immutable bytes, after a
         conversion copy when its byte order or layout differs from the stored
         one, so later changes by the caller cannot reach the published data.
         ``reduce_amplitudes`` returns a new array that nothing else holds, and
-        amplitude publication hands it over; a probability readout hands over
+        amplitude publication hands it over. A probability readout hands over
         the arrays that ``probability_readout`` returns, the adapter's dense
         buffer included. Points of one trajectory that share one saved marginal
         hand over the same buffer, which stays read-only and is published once

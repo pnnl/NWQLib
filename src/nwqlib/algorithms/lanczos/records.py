@@ -102,9 +102,9 @@ class LanczosReconstruction(Record):
 
 
 class MomentStatistics(Record):
-    """Sample mean and second moment of one acquired Chebyshev moment, with its shots.
+    """Sample mean and second moment of one obtained Chebyshev moment, with its shots.
 
-    `LanczosResult.statistics` pairs each acquired degree with one. The
+    `LanczosResult.statistics` pairs each obtained degree with one. The
     property `variance` is the unbiased sample-mean variance
     `(second_moment - mean**2)/(shots - 1)`, an empirical value only, and
     `None` without shots or for one shot. The fields below are read-only.
@@ -112,7 +112,9 @@ class MomentStatistics(Record):
     Attributes:
         mean: Mean of the per-shot values of the moment.
         second_moment: Mean of their squares.
-        shots: Shots behind the mean, or `None` for a numerical marginal.
+        shots: Number of sampled shots behind the mean, or `None` when the
+            moment is computed without shot sampling, from an exact-probability
+            readout or classical execution.
     """
 
     mean: Real
@@ -187,7 +189,16 @@ class LanczosResult(Result):
         overlap_normalization_error: Defect in `c^dagger S c = 1` for the returned coefficients.
         overlap_spectrum: Eigenvalues of S before thresholding.
         cutoff: Overlap-eigenvalue cutoff that the analysis applied.
-        cutoff_source: Rule that set the cutoff.
+        cutoff_source: Rule that set the cutoff: `"user_fixed"`, the
+            `overlap_cutoff` that the caller set, `"deterministic_default"`,
+            the numerical floor for exact moments, `"empirical_gram_rms"`,
+            the empirical policy, `"hoeffding_gram_bound"`, the confidence
+            policy, `"scalar_operator"`, an operator that is a multiple of
+            the identity and needs no solve, and `"not_evaluated"`, missing
+            moments. `"unavailable_empirical_variance"` and
+            `"unavailable_sampling_population"` mean that the empirical or
+            the confidence policy lacked the variances or shot counts it
+            needs, so no cutoff was set.
         gram_sampling_bound: `m*e` with `e = sqrt(2*log(2*r/delta)/n_min)`,
             where m is `krylov_dimension`, r counts the sampled moments that
             enter S, n_min is the smallest of their shot counts and delta is
@@ -381,7 +392,6 @@ class LanczosResult(Result):
         from nwqlib.evidence.energy_shift import EnergyEndpoint, _operator_payload
 
         plan = self.plan
-        self.validate_plan(plan)
         operator = plan._native["operator"]
         return EnergyEndpoint(
             plan_id=self.plan_id,

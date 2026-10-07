@@ -57,7 +57,7 @@ Input format:
 
 Coefficients and the cutoff:
 
-- The default `coefficient_cutoff=0.0` keeps every nonzero accumulated coefficient. Normal ordering coalesces equivalent terms before the Jordan–Wigner expansion. Both cross-input normal-order sums and cross-monomial Pauli sums use real and imaginary `math.fsum`, to keep small residues through large cancellations. Coefficients and individual bounded products use float64, and the result is not exact real arithmetic.
+- The default `coefficient_cutoff=0.0` keeps every nonzero accumulated coefficient. Normal ordering merges equivalent terms before the Jordan–Wigner expansion. Both cross-input normal-order sums and cross-monomial Pauli sums use real and imaginary `math.fsum`, to keep small residues through large cancellations. Coefficients and individual bounded products use float64, and the result is not exact real arithmetic.
 - Overflow or a nonfinite accumulated component raises `ValueError`. `fsum` also rejects intermediate overflow even if a later term could cancel it.
 - To approximate the mapped operator deliberately, supply an absolute `coefficient_cutoff` to either entry point, for example `parse_xacc(text, num_modes=24, coefficient_cutoff=1e-12)`. It removes final Pauli coefficients with magnitude at most the cutoff, after all contributions have been combined, and does not discard individual input terms or normal-order terms.
 - The removed coefficient magnitudes sum to an upper bound on the operator-norm change, because each Pauli has norm one. The parser does not compute or certify a downstream energy-error bound. For an LCU, the kept label count `L` sets the SELECT index width `ceil(log2(L))`. Deliberate pruning can reduce this width and circuit work, and small coefficients are not automatically scientifically irrelevant.
@@ -72,7 +72,7 @@ Modes and width:
 Cost:
 
 - Parsing streams lines and keeps coefficient buckets for stable summation: `O(R)` coefficient storage for `R` raw input terms. Packed real and imaginary parts use 16 payload bytes per contribution, plus array capacity and per-key overhead, while keeping `fsum` accuracy.
-- These buckets are released before mapping, which costs `O(T n)` time and storage for `T` coalesced terms on `n` modes, with at most 16 branches per term. Pauli coefficient buckets keep at most `16 T` contributions during mapping and are released before Qiskit allocates the returned Pauli arrays. No dense matrix, statevector or backend is used.
+- These buckets are released before mapping, which costs `O(T n)` time and storage for `T` merged terms on `n` modes, with at most 16 branches per term. Pauli coefficient buckets keep at most `16 T` contributions during mapping and are released before Qiskit allocates the returned Pauli arrays. No dense matrix, statevector or backend is used.
 
 ::: nwqlib.subroutines.xacc
     options:

@@ -14,7 +14,7 @@ optimization gap. For the one-hot embedding J of the grid space into the
 ``||U_emitted J - J U_exact||``, not on invalid one-hot inputs. The binary
 encoding uses every state of its ``d b`` qubits, and a bound is on the whole
 register after the permutation between circuit and lexicographic variable
-order (``binary.lexicographic_register_indices``). Times use the library's
+order (``binary.lexicographic_register_array``). Times use the library's
 convention with hbar and mass equal to one.
 
 Step k covers the nominal interval ``[x_k, x_(k+1)]``, ``x_k = k delta``, with
@@ -35,12 +35,12 @@ doi:10.1103/PhysRevX.11.011020, for the splitting):
 
 - time ordering: the exact time-ordered step against
   ``M_k = exp(-i (A_k T + B_k V))`` with the interval integrals A_k, B_k
-  (``_schedule_terms``);
+  (``_schedule_terms``).
 - midpoint quadrature, under the ``"midpoint"`` coefficient rule: ``M_k``
   against ``F_k = exp(-i delta (a(m_k) T + b(m_k) V))`` at the midpoint
-  ``m_k = (k + 1/2) delta`` (``_schedule_terms``);
+  ``m_k = (k + 1/2) delta`` (``_schedule_terms``).
 - coefficient residual: ``M_k`` (integrated) or ``F_k`` (midpoint) against
-  ``exp(-i (alpha^_k T + beta^_k V))`` (``_coefficient_term``);
+  ``exp(-i (alpha^_k T + beta^_k V))`` (``_coefficient_term``).
 - splitting: that exponential against the compiled product of its potential
   and link factors (one-hot) or its potential and whole-kinetic factors with
   exact QFTs (binary), with the same exponents (``_splitting``).
@@ -77,8 +77,8 @@ import numpy as np
 from nwqlib.core.records import Nonnegative, Record, Text
 from nwqlib.operators.access import Count
 
-# u = 2**-53 and tau = 2**-1074, the unit roundoff and the smallest subnormal
-# of binary64, exact rationals for the coefficient residual.
+# u = 2**-53 and lambda = 2**-1074 are the unit roundoff and smallest subnormal
+# of binary64, stored as the exact rationals _U and _TAU for the coefficient residual.
 _U = Fraction(1, 2**53)
 _TAU = Fraction(1, 2**1074)
 
@@ -126,11 +126,15 @@ class QHDEvolutionBound(Record):
             of one-hot second order, None otherwise.
         odd_nested: J_O, a bound on `||[O, [O, E]]||`, None as J_E is.
         norm_methods: `(input, method)` pairs naming which bound attained each minimum:
-            `range` for the table-range bounds C_0 and D_(T,0), `neighbor` for the
-            neighbor-difference bounds C_edge and D_(V,edge), and `commutator` for
-            `2 tau C` (D_T) and `2 nu C` (D_V). mu_T and mu_V come from the kinetic
-            diagonal and the table extremes, Gamma from its closed form and J_E, J_O
-            from the K-point graph.
+            `range` for the table-range bounds ``C_0`` and ``D_(T,0)``, `neighbor`
+            for the neighbor-difference bounds ``C_edge`` and ``D_(V,edge)``,
+            and `commutator` for
+            ``2 tau C`` (``D_T``) and ``2 nu C`` (``D_V``). Here tau is the sum of the
+            per-variable centered kinetic norm bounds, and nu is the sum of the
+            half-ranges of the potential support tables, as defined in
+            [Proposition 40](../../mathematics.md#r40). ``mu_T`` and ``mu_V`` come
+            from the kinetic diagonal and the table extremes, Gamma from its
+            closed form and ``J_E``, ``J_O`` from the K-point graph.
         splitting: `min(2, sum_k s_k)`, the product-formula bound.
         time_ordering: `min(2, sum_k w_k)`, the time-ordering bound.
         midpoint_quadrature: `min(2, sum_k q_k)` under the midpoint rule, None under the
@@ -310,7 +314,7 @@ def _norm_inputs(grid, tables, constant, spectral=False):
     methods.append(("kinetic_nested", "range" if dt0 <= 2 * tau * commutator else "commutator"))
     methods.append(("potential_nested", "commutator" if potential_nested == 2 * nu * commutator else "neighbor"))
     mu_t = 2 * tau
-    # The cached exact extremum max |T_S| of each stored table (records.SupportValues.magnitude).
+    # The cached exact extremum max |f_S| of each stored table (records.SupportValues.magnitude).
     mu_v = abs(Fraction(constant)) + sum((Fraction(t.magnitude) for t in tables), Fraction(0))
     return dict(commutator=commutator, kinetic_nested=kinetic_nested, potential_nested=potential_nested,
                 kinetic_norm=mu_t, potential_norm=mu_v, weight=weight), tuple(methods)
@@ -387,8 +391,8 @@ def evolution_bound(plan):
 
     `evolution_bound(plan)` returns a
     [`QHDEvolutionBound`][nwqlib.algorithms.qhd.evolution_bounds.QHDEvolutionBound] for
-    a Plan whose step blocks were compiled, which quantum execution and the `ir_product`
-    flavor do, in either encoding. `circuit_resources` includes the same record. Its
+    a Plan whose step blocks were compiled, which quantum execution and `theory_flavor="ir_product"`
+    do, in either encoding. `circuit_resources` includes the same record. Its
     `evolution` field bounds the compiled product with the stored exponents against the
     exact time-ordered evolution, with the physical phase included, conditionally where
     the coefficient residual is an estimate. It adds four stages: time ordering,
@@ -448,11 +452,17 @@ def evolution_bound(plan):
     the same factors. An approximate QFT, pruning and the rounding of the computed
     angles are later entries of the circuit's error sources (`circuit_resources`).
 
-    Schedule and coefficients. For step k of width Delta, w_k is the time-ordering
-    budget, the smaller of the available integral bound `min(2, C A B/2)` and derivative
-    bound `Delta**3 (a* B1 + b* A1) C/12`, q_k the midpoint-quadrature bound
-    `Delta**3 (A2 mu_T + B2 mu_V)/24` under the midpoint rule, and e_coeff,k the
-    residual between the exact coefficients and the stored exponents. The guide's
+    Schedule and coefficients. For step k of width Delta, let A and B be the
+    integrals of the kinetic and potential schedule weights a(t) and b(t) over
+    that step. Let ``a*`` and ``b*`` bound their absolute values, A1 and B1 their absolute
+    first derivatives, and A2 and B2 their absolute second derivatives there.
+    With C, ``mu_T`` and ``mu_V`` the commutator and raw operator-norm bounds defined by
+    `QHDEvolutionBound`, ``w_k`` is the time-ordering budget, the smaller of the
+    available integral bound ``min(2, C A B/2)`` and derivative bound
+    ``Delta**3 (a* B1 + b* A1) C/12``, ``q_k`` the midpoint-quadrature bound
+    ``Delta**3 (A2 mu_T + B2 mu_V)/24`` under the midpoint rule, and ``e_coeff,k`` the
+    residual between the exact coefficients and the stored exponents.
+    [Proposition 39](../../mathematics.md#r39) derives these bounds, and the guide's
     [fault-tolerant resources](../../algorithms/qhd.md#fault-tolerant-resources) section
     states when each bound is available. The totals are
     ``splitting = min(2, sum_k s_k)``, ``schedule = min(2, sum_k (w_k + q_k))``,
@@ -598,28 +608,33 @@ def _schedule_terms(schedule, lower, upper, bounds, midpoint):
     ``[H(u), H(v)] = (a(u) b(v) - b(u) a(v)) [T, V]`` and
     ``|a(u) b(v) - b(u) a(v)| <= (a* B1 + b* A1) |u - v|`` for the bounds of
     ``schedule.derivative_bounds``, the double integral of ``|u - v|`` over
-    the triangle, ``delta**3/6``, gives
+    the triangle, ``delta**3/6``, gives the derivative bound on ``w_k``,
 
-    ``w_k = delta**3 (a* B1 + b* A1) C/12``,
+    ``delta**3 (a* B1 + b* A1) C/12``,
 
     whose local order agrees with the leading Magnus term
-    ``delta**3 (a b' - a' b) [T, V]/12``.
+    ``delta**3 (a b' - a' b) [T, V]/12``. Here delta is the step width,
+    C bounds ``||[T, V]||``, and ``a*``, ``b*``, A1 and B1 bound
+    ``|a|``, ``|b|``, ``|a'|`` and ``|b'|`` on the step, respectively,
+    as returned by ``schedule.derivative_bounds``. The leading Magnus
+    coefficient uses the midpoint values of a, b and their derivatives.
 
     For finite-dimensional Hermitian T,V and nonnegative integrable a,b,
     ``|a(u)b(v) - b(u)a(v)| <= a(u)b(v) + b(u)a(v)``. This latter function
     is symmetric under u,v. Its square-domain integral is ``2 A_k B_k``,
     so its triangular integral is ``A_k B_k``. Thus the alternative local
     bound is ``min(2, C A_k B_k/2)``. Both bounds concern the same exact
-    interval and finite model. Take their minimum before summing steps,
-    then combine with the existing quadrature, coefficient and splitting
-    terms. A minimum of upper bounds remains an upper bound. The
-    common-phase terms commute and do not alter C.
+    interval and finite model. The function takes their minimum for each
+    step, before the sum over steps, and the result enters the total with
+    the quadrature, coefficient and splitting terms. A minimum of upper
+    bounds remains an upper bound. The common-phase terms commute and do
+    not alter C.
 
     Certified exact integrals are available for both weights of
-    ShiftedCubicSchedule and for QuadraticSchedule(gamma=0). Keep the
-    derivative formula on the other branches: an estimated integral is
-    not an upper endpoint. The minimum applies to both coefficient rules,
-    because time ordering compares the exact interval evolution with its
+    ShiftedCubicSchedule and for QuadraticSchedule(gamma=0). The other
+    branches use the derivative formula alone, because an estimated
+    integral is not an upper endpoint. The minimum applies to both
+    coefficient rules, because time ordering compares the exact interval evolution with its
     exact first integral before midpoint quadrature is considered.
 
     Midpoint quadrature. ``||M_k - F_k|| <= |A_k - delta a(m_k)| mu_T +
@@ -660,7 +675,8 @@ def _coefficient_term(schedule, midpoint, step, delta, kinetic_weight, potential
     also changes the identity phase. The residual compares schedule stages
     only, so it does not overlap the identity-phase ledger, which compares
     the stored-weight model with its rounded phase. With ``f`` standing for a
-    or b and ``c^ = delta f^`` the exact product with the stored weight:
+    or b and ``f^`` its stored weight, ``delta f^`` is the exact product
+    with the stored step duration delta:
 
     Midpoint rule. ``eps_f = |delta f^ - delta f(m_k)|`` at the exact
     nominal midpoint ``m_k = (k + 1/2) delta``. The admitted point formulas
@@ -676,13 +692,16 @@ def _coefficient_term(schedule, midpoint, step, delta, kinetic_weight, potential
     weight. Otherwise, for the quadratic kinetic integral at gamma > 0 and
     the cubic one, the routine integrates over the rounded endpoints
     ``xbar_k = fl(k delta)`` (``schedules.step_weights``), its documented
-    error is ``|I^ - I_e| <= C u I_e + 2 tau`` to first order, the division
-    into the stored weight adds ``u |I^| + delta tau/2``, and the endpoint
+    error is ``|I^ - I_e| <= C u I_e + 2 lambda`` to first order, with
+    ``lambda = 2**-1074`` the smallest subnormal and ``u = 2**-53`` the unit
+    roundoff. Here ``I^`` is the computed integral and ``I_e`` is the exact
+    integral over the rounded endpoints. The division
+    into the stored weight adds ``u |I^| + delta lambda/2``, and the endpoint
     shift adds ``R = f* (|xbar_k - x_k| + |xbar_(k+1) - x_(k+1)|)``, with
-    f* = a at the left end of the hull of both intervals because a is
+    ``x_k = k delta`` and ``f* = a`` at the left end of the hull of both intervals because a is
     positive and nonincreasing. So
 
-    ``eps_a ~ (C + 1) u I* + 2 tau + delta tau/2 + R``, ``I* = (xbar_(k+1) - xbar_k) f*``,
+    ``eps_a ~ (C + 1) u I* + 2 lambda + delta lambda/2 + R``, ``I* = (xbar_(k+1) - xbar_k) f*``,
 
     with C = ``schedule.kinetic_integral_roundoff``, a first-order estimate
     under the platform assumptions of ``schedules.py``. The cubic constant
@@ -715,7 +734,7 @@ def _coefficient_term(schedule, midpoint, step, delta, kinetic_weight, potential
         return None, (f"the {schedule.kind} kinetic integral's roundoff constant holds for s in [{span[0]:g}, "
                       f"{span[1]:g}] and t <= {span[2]:g}")
     largest = schedule.exact_weights(min(lower, rounded[0]))[0]
-    # eps_a ~ (C + 1) u I* + 2 tau + dt tau/2 + R, with I* = (xbar_(k+1) - xbar_k) f*.
+    # eps_a ~ (C + 1) u I* + 2 lambda + dt lambda/2 + R, with I* = (xbar_(k+1) - xbar_k) f*.
     integral = (rounded[1] - rounded[0]) * largest
     shift = largest * (abs(rounded[0] - lower) + abs(rounded[1] - upper))
     kinetic_error = (schedule.kinetic_integral_roundoff + 1) * _U * integral + 2 * _TAU + dt * _TAU / 2 + shift

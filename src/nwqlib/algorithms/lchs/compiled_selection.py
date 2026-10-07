@@ -31,12 +31,16 @@ def _pad_diagonal(values: np.ndarray, padded_length: int) -> np.ndarray:
 def _qsp_outer_bytes(q: int, children) -> int:
     """Return the outer QSP planning bytes for children with the given kept term counts.
 
-    With d = 2**q, each nonempty child of m terms has P = 2**ceil(log2 m)
-    table addresses, b = min(m, d) candidate bands,
-    J = 4208 + 2q + 2 ceil(log2(b+1)) + ceil(log2(m+b+1)), V = m+b+q+1,
-    table allowance T = 64P(q+16) and active classifier allowance
-    X = [128 L(2J) + 512]V + H0, with L = ``integer_object_bytes`` and
-    H0 = ``BOOKKEEPING_BYTES`` (block_encoding/core.py::_admit_pauli_plan).
+    With q system qubits and ``d = 2**q``, each nonempty child of m terms has
+    ``P = 2**ceil(log2 m)`` table addresses and ``b = min(m, d)`` candidate
+    bands. The integer-width allowance is
+    ``J = 4208 + 2q + 2 ceil(log2(b+1)) + ceil(log2(m+b+1))``, with
+    ``4208 = 2*(1074+1024) + 12`` from the binary64 squared-mass width and
+    twelve extra bits of allowance explained in
+    ``nwqlib.subroutines.block_encoding.core._admit_pauli_plan``.
+    With ``V = m+b+q+1``, the table allowance is ``T = 64P(q+16)`` and
+    the active classifier allowance is ``X = [128 L(2J) + 512]V + H0``,
+    with L = ``integer_object_bytes`` and H0 = ``BOOKKEEPING_BYTES``.
     The outer QSP gate adds both live child tables, the shared decomposition
     payloads and matrix buffers to the larger sequential classifier
     workspace:

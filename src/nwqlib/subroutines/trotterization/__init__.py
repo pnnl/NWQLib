@@ -17,7 +17,6 @@ from nwqlib.subroutines.trotterization.error_budget import (
     evaluate_trotter_bound,
     select_trotter_step_count,
     trotter_bound_coefficient,
-    trotter_error_bound,
 )
 
 __all__ = [
@@ -28,5 +27,4 @@ __all__ = [
     "evaluate_trotter_bound",
     "select_trotter_step_count",
     "trotter_bound_coefficient",
-    "trotter_error_bound",
 ]

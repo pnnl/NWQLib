@@ -1,7 +1,8 @@
 """Shared GCiM pair, quadrature and projected-matrix mathematics.
 
-Native acquisition belongs to its actual circuit owner. These kernels neither
-prepare a state nor evaluate a Hamiltonian.
+The circuits and data collection that supply these values are in
+``fixed_basis`` and ``adapt_acquisition``. These kernels neither prepare a
+state nor evaluate a Hamiltonian.
 
 The matrix elements are ``H_ij = <phi_i|A|phi_j>`` and ``S_ij = <phi_i|phi_j>``
 of Zheng et al., Phys. Rev. Research 5, 023200 (2023), Eqs. (14)-(15), in the
@@ -129,8 +130,9 @@ def assemble_pencil(basis_size, terms, num_qubits, values):
         h = complex(fsum(real), fsum(imag))
         h0[left, right], h0[right, left] = h, h.conjugate()
         overlap[left, right], overlap[right, left] = s, s.conjugate()
-    # One stored overlap, one algebraic covariance identity. There is no
-    # independent identity-term measurement or coordinate-identity shift.
+    # The identity part c*S of H reuses the acquired overlap, so an overlap
+    # error deltaS contributes c*deltaS to H (FixedGCIMReconstruction.covariance).
+    # No identity term is measured separately.
     return h0, overlap
 
 
@@ -182,8 +184,7 @@ def pair_count(basis_size, nonidentity_terms):
     reduction returns both ``H0_ij`` and ``S_ij``. A complete b-state pencil
     with L > 0 has ``M = b(b+1)/2`` and ``D = b``, so ``b(b+1)/2``
     acquisitions, against ``b**2 L + b(b-1)`` Hadamard observations of the
-    per-element route. A logical scalar is no longer synonymous with an
-    acquisition.
+    per-element route.
     """
     pairs = basis_size * (basis_size + 1) // 2
     return (pairs - basis_size) + (basis_size if nonidentity_terms else 0)
@@ -206,7 +207,7 @@ def assemble_pair_pencil(basis_size, values):
 
     ``values[(i, j)]`` holds the complex pair entries in the requested
     ``(i, j)`` orientation. Lower triangles follow by conjugation once. The
-    normalized-basis convention sets ``S_ii = 1``; the separately acquired
+    normalized-basis convention sets ``S_ii = 1``. The separately acquired
     raw diagonal norms stay evidence and do not rescale the saved blocks.
     Imaginary diagonal parts are zero algebraically for Hermitian P, so a
     diagonal H0 keeps the real part of its acquired value, which has no

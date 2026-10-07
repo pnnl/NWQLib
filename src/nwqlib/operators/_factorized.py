@@ -33,7 +33,7 @@ class FactorizedOperatorProduct:
     manifest: ProductManifest
 
     def __init__(self, factors, *, max_bytes=DEFAULT_INPUT_BYTES):
-        """Reference the factor handles in order, without reading their data.
+        """Build the product from its factor handles, in order, without reading their data.
 
         Args:
             factors (tuple[OperatorInput, ...]): Nonempty tuple of handles
@@ -67,10 +67,12 @@ class FactorizedOperatorProduct:
     def action_requirements(self):
         """Return the size of one `matvec` call as `(D, bytes, products)`, from metadata only.
 
-        The bytes are `32*D` for the two intermediate vectors alive across a
-        step (the original input may stay referenced) plus each factor's
-        own `matvec` byte count, which for Pauli factors includes their
-        conversion and tile space. The products are the sum of the factors'
+        The bytes are ``32*D`` for the two intermediate vectors alive across a
+        step, where `D` is the operator dimension (the original input may
+        stay referenced), plus each factor's own `matvec` byte count.
+        For Pauli factors this includes conversion to complex128 and
+        workspace for bounded batches of vector coordinates, called
+        coordinate tiles. The products are the sum of the factors'
         scalar-product counts.
 
         Raises:
@@ -259,7 +261,7 @@ def _sparse_chain_requirements(factors, d, max_bytes, max_products):
     previous = factors[0]._data.nnz
     for step, factor in enumerate(factors[1:], start=1):
         right = factor._data
-        # CSC needs a row-count histogram; explicitly covered by traversal law.
+        # CSC needs a row-count histogram, which the traversal work law covers.
         row_counts = [0] * d
         if right.format == "csr":
             for row in range(d):

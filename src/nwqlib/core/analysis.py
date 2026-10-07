@@ -48,11 +48,12 @@ class AnalysisOrigin(Record):
 
 
 def capture_analysis_origin(*, analyzer, method_id=None, dependencies=(), max_dependencies=64):
-    """Read metadata at the producer after admission of all requested packages.
+    """Return an `AnalysisOrigin` with the Python version and the installed versions of nwqlib, pydantic and `dependencies`.
 
-    max_dependencies bounds the complete supplied name population, including
-    duplicates, before deduplication or any package/version metadata lookup.
-    The fixed nwqlib/pydantic entries are additional to that caller population.
+    `max_dependencies` bounds the length of `dependencies`, duplicates
+    included, before any name is validated or looked up. The entries for
+    nwqlib and pydantic are added beyond that limit. A package whose version
+    cannot be read is listed in `unavailable_versions`.
     """
     if not isinstance(analyzer, Source):
         raise TypeError("analysis analyzer must be a Source")
@@ -91,14 +92,15 @@ class RunData:
 
     Attributes:
         observations: Every observation the Run collected, as an
-            `ObservationView`. Its `chunks` hold the statistics of each
-            measurement.
+            `ObservationView`. Its `chunks` are the
+            [`ObservationChunk`][nwqlib.execution.ObservationChunk] records,
+            each holding the statistics of one measurement.
         trace: The [`ExecutionTrace`][nwqlib.execution.ExecutionTrace]: every
             attempt, its status and the work counted against the limits,
             failed and uncertain attempts included.
         receipts: The preparation records (`PreparedArtifact`) of the
             circuits and of the host computations (classical computations
-            that the Method runs on this machine) that ran. Taking the snapshot
+            that the Method runs on this machine) that ran. Reading `RunData`
             builds none of them again.
         artifacts: Handles of the saved arrays
             ([`ArtifactHandle`][nwqlib.artifacts.ArtifactHandle]). Reading a
@@ -175,14 +177,16 @@ class Result(Record):
 
     Attributes:
         plan_id: Content hash of the Plan the Result was computed from.
-        construction_id: Content hash of the construction of that Plan.
+        construction_id: Content hash of the circuit description the Result
+            was computed from, either that Plan's `construction` or the
+            construction the Plan selects for one experiment point.
         observation_id: Content hash of the observations attached to the
             Result.
         contribution_ids: Content hashes of the parts of the observations
             that this Result uses.
-        facts: Error evidence that the Method attached (`FramedFact`
-            records), each stated for its quantity, unit and scope. `assess`
-            reads it.
+        facts: Error evidence that the Method attached, as
+            [`FramedFact`][nwqlib.evidence.FramedFact] records, each stated
+            for its quantity, unit and scope. `assess` reads it.
         origin: The [`AnalysisOrigin`][nwqlib.core.analysis.AnalysisOrigin]
             of the analysis, or `None` when it was not recorded.
     """
@@ -410,8 +414,8 @@ class Result(Record):
         | QLS | [`QLSVerification`][nwqlib.algorithms.qls.verification.QLSVerification] |
         | QCELS, SPE, RFE, RWPE | [`QPEVerification`][nwqlib.algorithms.qpe.records.QPEVerification] |
 
-        Except for `LCHSRefinement`, `facts` answers the checks that the
-        options list in `verification_checks`, and
+        Except for `LCHSRefinement`, `facts` answers the checks that
+        `checks.verification_checks(result)` lists, and
         [`Certificate.with_verification`][nwqlib.evidence.Certificate.with_verification]
         attaches it with the same options. `LCHSRefinement` returns error
         components of the output for `assess` instead.
@@ -459,7 +463,11 @@ class Result(Record):
         return "[" + ", ".join(cls._scalar_text(value) for value in values) + "]"
 
     def _array_text(self, manifest):
-        """At most eight resident elements; shape alone for larger, not yet loaded or missing data."""
+        """Describe an array output.
+
+        Show up to eight elements of an array already in memory, and only its
+        shape and status for a larger, unloaded or missing array.
+        """
         shape = manifest.output.shape
         text = f"shape={shape}, {manifest.output.frame}, phase={manifest.output.global_phase}"
         if unit := self._unit_text():
@@ -566,10 +574,12 @@ class Result(Record):
         loading Method code with `nwqlib.saved_evidence.read_report`.
 
         Returns:
-            report (dict): Keys `summary`, `plan`, `result`, `trace`,
-                `observations`, `receipts`, `artifacts`, `forecast`,
-                `allocation` and `controller`. Values that need run data are
-                `None` when none is attached.
+            report (dict): Keys `summary` (the printed summary), `plan`,
+                `result`, `trace` (the attempt history), `observations`,
+                `receipts` (the preparation records), `artifacts` (the
+                manifest and availability of each saved array), `forecast`, `allocation` and
+                `controller` (the iteration state of an adaptive Method).
+                Values that need run data are `None` when none is attached.
 
         Examples:
             >>> from nwqlib import Eigenproblem, solve

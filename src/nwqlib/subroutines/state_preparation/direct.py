@@ -26,7 +26,8 @@ class DirectStatePreparation:
     """A circuit that prepares a normalized state vector exactly, with the input norm.
 
     [`build_qiskit_state_preparation`][nwqlib.subroutines.state_preparation.direct.build_qiskit_state_preparation]
-    returns it. The circuit is `circuit`. The fields below are read-only.
+    returns it. Its `circuit` field holds the result. The fields below are
+    read-only.
 
     Attributes:
         circuit: Circuit that prepares `normalized_state` from `|0...0>`.
@@ -110,7 +111,7 @@ def _build_normalized_state_preparation(
     input_norm: float,
     register_name: str,
 ) -> DirectStatePreparation:
-    """Build the shared exact-dispatch circuit for an already normalized state.
+    """Build the exact preparation circuit of an already normalized state.
 
     Fast paths apply only to exact structure. A single basis state uses X
     gates, equal amplitudes on every index use H gates, and equal amplitudes

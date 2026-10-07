@@ -31,11 +31,11 @@ The Pauli construction's `alpha` is the coefficient 1-norm `1 + 0.5`, and the de
 
 Every implementation places `A / alpha` in the all-zero ancilla block. Ancilla registers precede the system register, so they occupy the low-order bits of Qiskit's little-endian index, and `block_encoding_top_left` reads the block at stride `2**num_ancillas`.
 
-| Implementation | Encoded operator and `alpha` | Ancillas | Reason for the construction |
-| --- | --- | --- | --- |
-| `multiplexed_pauli`, requested as `pauli_lcu` | `A = sum_j c_j P_j` from a Pauli decomposition, with `alpha` the coefficient 1-norm | `ceil(log2 L)` address qubits for `L` terms | Exact for the supplied terms and applicable to any square power-of-two matrix. Each system qubit's multiplexor reads only the address bits on which its Pauli factor depends. The cost grows with the number of terms. |
-| `banded` | Circulant `A = sum_b beta_b S^b`, with `alpha` the band-coefficient 1-norm | `ceil(log2 B)` address qubits for `B` bands | Exact without forming a dense matrix. Its `alpha` never exceeds `s * max_b abs(beta_b)`, the normalization of the sparse-access circulant circuit of Camps et al. (arXiv:2203.10236v4) with `s` padded bands. |
-| `dense_dilation` | Any square power-of-two matrix, with `alpha` equal to the spectral norm unless a normalization is supplied | One ancilla, circuit qubit 0 | Exact with the smallest `alpha` that admits zero error, at the cost of synthesizing one dense unitary on `n + 1` qubits. It serves small validation instances. |
+| Implementation | Encoded operator, `alpha` and ancillas | Reason for the construction |
+| --- | --- | --- |
+| `multiplexed_pauli`, requested as `pauli_lcu` | `A = sum_j c_j P_j` from a Pauli decomposition, with `alpha` the coefficient 1-norm. Ancillas: `ceil(log2 L)` address qubits for `L` terms | Exact for the supplied terms and applicable to any square power-of-two matrix. Each system qubit's multiplexor reads only the address bits on which its Pauli factor depends. The cost grows with the number of terms. |
+| `banded` | Circulant `A = sum_b beta_b S^b`, with `alpha` the band-coefficient 1-norm. Ancillas: `ceil(log2 B)` address qubits for `B` bands | Exact without forming a dense matrix. Its `alpha` never exceeds `s * max_b abs(beta_b)`, the normalization of the sparse-access circulant circuit of Camps et al. (arXiv:2203.10236v4) with `s` padded bands. |
+| `dense_dilation` | Any square power-of-two matrix, with `alpha` equal to the spectral norm unless a normalization is supplied. Ancillas: one ancilla, circuit qubit 0 | Exact with the smallest `alpha` that admits zero error, at the cost of synthesizing one dense unitary on `n + 1` qubits. It serves small validation instances. |
 
 ## Build an encoding
 
@@ -101,21 +101,21 @@ SVDs and limits:
 
 Code paths are relative to `nwqlib.subroutines`. Equation and section numbers refer to the listed arXiv versions.
 
-| Scientific step | Source | Location | Code |
-| --- | --- | --- | --- |
-| Block-encoding definition and `alpha` bookkeeping | Gilyén et al., arXiv:1806.01838v1 | Definition 43 | `block_encoding.core.BlockEncoding` |
-| Spectral norm as the smallest zero-error `alpha` | Gilyén et al., arXiv:1806.01838v1 | Remark after Definition 43 | `block_encoding.core._dense_dilation_encoding` |
-| One-ancilla dilation `[[B, K], [K, -B]]` with `K = W sqrt(I - S^2) V^dagger` | NWQLib derivation, stated in its docstring | | `block_encoding.core._dense_dilation_encoding` |
-| LCU block with `alpha` the coefficient 1-norm | Low and Chuang, arXiv:1610.06546v3, and Gilyén et al., arXiv:1806.01838v1 | Lemma 5 and Eq. (10), and Lemma 52 | `block_encoding.core._pauli_lcu_encoding` |
-| Removing select bits on which a multiplexor does not depend | Shende, Bullock and Markov, quant-ph/0406176v5 | Sec. 3 | `_multiplexors.project_unitary_table_dependencies`; Pauli SELECT tables use the equivalent packed letter-code test `_multiplexors.local_pauli_dependencies` |
-| Uniformly controlled unitary CX count | Qiskit `UCGate` synthesis, pinned by tests | | `_multiplexors.projected_unitary_resource_law` |
-| Coefficient-phase diagonal | Shende, Bullock and Markov, quant-ph/0406176v5 | Theorem 7 | `_multiplexors.append_control_diagonal_phases` |
-| Cyclic shifts diagonalized by the QFT | NWQLib derivation, stated in the module docstring | | `block_encoding.banded.build_banded_block_encoding` |
-| Circulant normalization comparison | Camps, Lin, Van Beeumen and Yang, arXiv:2203.10236v4 | Theorem 4.1 and Sec. 4.2 | `block_encoding.banded` module docstring |
-| Circulant certificate from Pauli terms | NWQLib derivation from Pauli orthogonality, stated in its docstring | | `block_encoding.core._detect_banded_pauli_structure` |
-| Dense routing CX count | Shende, Bullock and Markov, quant-ph/0406176v5 | Eq. (19), p. 16, and Table 1, row QSD (l = 2, optimized), p. 14 | `block_encoding.core._dense_dilation_predicted_cx` |
-| Banded UCRZ tables at `2**a` CX each, and for both Pauli and banded routes an address diagonal and a positive PREP tree at `2**a - 2` CX each | Shende, Bullock and Markov, quant-ph/0406176v5, and Mottonen et al., quant-ph/0407010v1 | Theorems 7 and 8, pp. 10-11, and Sec. II, p. 2, and Sec. III, Eq. (7), p. 3 | `block_encoding.core._pauli_plan_detail`, `block_encoding.core._banded_plan` |
-| Choice of construction, limit checks and plan reuse | NWQLib, described above and in `plan_block_encoding` | | `block_encoding.core._plan_block_encoding` |
+| Scientific step | Source and location | Code |
+| --- | --- | --- |
+| Block-encoding definition and `alpha` bookkeeping | Gilyén et al., arXiv:1806.01838v1, Definition 43 | `block_encoding.core.BlockEncoding` |
+| Spectral norm as the smallest zero-error `alpha` | Gilyén et al., arXiv:1806.01838v1, Remark after Definition 43 | `block_encoding.core._explicit_dense_dilation_plan`, `block_encoding.core._plan_block_encoding` |
+| One-ancilla dilation `[[B, K], [K, -B]]` with `K = W sqrt(I - S^2) V^dagger` | NWQLib derivation, stated in its docstring | `block_encoding.core._dense_dilation_encoding` |
+| LCU block with `alpha` the coefficient 1-norm | Low and Chuang, arXiv:1610.06546v3, Lemma 5 and Eq. (10), and Gilyén et al., arXiv:1806.01838v1, Lemma 52 | `block_encoding.core._pauli_lcu_encoding` |
+| Removing select bits on which a multiplexor does not depend | Shende, Bullock and Markov, quant-ph/0406176v5, Sec. 3 | `_multiplexors.project_unitary_table_dependencies`. Pauli SELECT tables use the equivalent packed letter-code test `_multiplexors.local_pauli_dependencies` |
+| Uniformly controlled unitary CX count | Qiskit `UCGate` synthesis, pinned by tests | `_multiplexors.projected_unitary_resource_law` |
+| Coefficient-phase diagonal | Shende, Bullock and Markov, quant-ph/0406176v5, Theorem 7 | `_multiplexors.append_control_diagonal_phases` |
+| Cyclic shifts diagonalized by the QFT | NWQLib derivation, stated in the module docstring | `block_encoding.banded.build_banded_block_encoding` |
+| Circulant normalization comparison | Camps, Lin, Van Beeumen and Yang, arXiv:2203.10236v4, Theorem 4.1 and Sec. 4.2 | `block_encoding.banded` module docstring |
+| Circulant certificate from Pauli terms | NWQLib derivation from Pauli orthogonality, stated in its docstring | `block_encoding.core._detect_banded_pauli_structure` |
+| Dense routing CX count | Shende, Bullock and Markov, quant-ph/0406176v5, Eq. (19), p. 16, and Table 1, row QSD (l = 2, optimized), p. 14 | `block_encoding.core._dense_dilation_predicted_cx` |
+| Banded UCRZ tables at `2**a` CX each, and for both Pauli and banded routes an address diagonal and a positive PREP tree at `2**a - 2` CX each | Shende, Bullock and Markov, quant-ph/0406176v5, Theorems 7 and 8, pp. 10-11, and Mottonen et al., quant-ph/0407010v1, Sec. II, p. 2, and Sec. III, Eq. (7), p. 3 | `block_encoding.core._pauli_plan_detail`, `block_encoding.core._banded_plan` |
+| Choice of construction, limit checks and plan reuse | NWQLib, described above and in `plan_block_encoding` | `block_encoding.core._plan_block_encoding` |
 
 ## Entries on other pages
 

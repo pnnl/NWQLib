@@ -66,7 +66,12 @@ from .pencil import (
 
 @dataclass
 class AdaptContext:
-    """Method state; an explicit run archive keeps actual numerical/SDK data.
+    """Live state of one ADAPT controller.
+
+    A run archive (``adapt_archive.save_context``) saves the state, action
+    and gate caches, the shift rules, the compiler plans and the current
+    pencil. The observation index is rebuilt from the Run's chunks, and
+    attributes noted as excluded are rebuilt on demand.
 
     Attributes:
         vectors: Classical prefix states keyed by generator chain, read-only once stored.
@@ -99,8 +104,6 @@ class AdaptContext:
             occupation blocks)`` entries here. Result snapshots store the
             built entries (``ADAPT.snapshot_result_context``), which native
             verification adopts.
-        result: Result restored with a saved context. The live controller does
-            not set it, so it is normally None.
 
     The native caches (``gates``, ``preparations``, ``reference_gates``) hold
     mutable Qiskit objects and stay private to the live Run. Result snapshots
@@ -119,9 +122,9 @@ class AdaptContext:
     pencil: ProjectedPencil | None = None
     pencil_parameters: tuple | None = None
     pencil_attempt: int | None = None
-    matrix_data: tuple | None = None  # Current workspace only; excluded from snapshots/archives.
+    matrix_data: tuple | None = None
     # The Run's shifted sparse Hamiltonian, keyed by operator identity, exact
-    # shift, representation and dtype; rebuilt on demand, never saved.
+    # shift, representation and dtype. It is rebuilt on demand and never saved.
     shifted: dict = field(default_factory=dict)
     rules: dict = field(default_factory=dict)
     pair_values: dict = field(default_factory=dict)  # Excluded from snapshots/archives.
@@ -259,8 +262,9 @@ def _native_generator(index, theta, *, controlled, inverse, inputs, compiler_pla
 
 
 def construct_adapt(block, arguments, method_context):
-    """Finite registered native builder; arguments are already admitted scalars.
+    """Finite registered native builder.
 
+    Its arguments are already admitted scalars.
     An exact ``pair`` prepares the phase-faithful joint state: a Hadamard and an
     X gate on ancilla qubit 0, the left preparation controlled on it, a second
     X and the right preparation controlled on it, so the zero branch holds the
@@ -440,7 +444,7 @@ def stream_ritz(basis, coefficients, reference_at, evolve, normalize, counts=Non
 
     Product prefixes needed after the full-product contribution remain
     available. Native verification evolves the same independently lowered
-    circuits, and the final state uses the existing normalization routine.
+    circuits, and the final state is normalized by the ``normalize`` callback.
 
     The nodes are the distinct prefixes of the basis chains. A node has one
     use for each child that must be evolved from it and one for each
@@ -453,13 +457,13 @@ def stream_ritz(basis, coefficients, reference_at, evolve, normalize, counts=Non
     after the last single, and every other single right after its
     contribution. The addition order and the final normalization are those
     of the plain sum over ``basis`` in order, so the result is bitwise the
-    same when the callbacks return the same arrays; a zero coefficient is
+    same when the callbacks return the same arrays. A zero coefficient is
     still added. The node-set iteration order changes only the integer use
     counts, never the evolution or summation order.
 
     ``reference_at()`` returns the reference array and
     ``evolve(previous, chain)`` the array of ``chain`` from the array of
-    ``chain[:-1]``; it receives the whole chain so a classical caller can
+    ``chain[:-1]``. It receives the whole chain so a classical caller can
     return an array it already holds. ``normalize`` returns
     ``(state, norm)``. With ``counts``, each reuse of a held node adds one to
     ``counts["reuses"]``.
@@ -536,7 +540,7 @@ def _classical_query_state(plan, context, counts, right, values):
     state = _vector(right[: insertion + 1], plan, context, counts)
     tables = plan._native["inputs"].cache["action_tables"]
     term = tables["insertions"][right[insertion][0]][int(number(values["insert_term"]))]
-    # exp(sign*i*pi*P/4)=(I+sign*iP)/sqrt(2), an exact Pauli identity; P is
+    # exp(sign*i*pi*P/4)=(I+sign*iP)/sqrt(2), an exact Pauli identity. P is
     # the packed unit-coefficient row of the generator's term.
     action = apply_terms(term, state, num_qubits=plan.reconstruction.num_qubits)
     state = (state + 1j * int(number(values["insert_sign"])) * action) / np.sqrt(2)
@@ -556,7 +560,7 @@ def _offset_free_column(plan, context, counts, right, state):
     alike, and a dense or sparse matrix has c removed from its stored
     diagonal first (``fixed_basis._offset_free_actions``), so the column never
     carries the rounding of ``c|right>``. A miss adds one Hamiltonian action
-    to ``counts``; a hit adds none. Pair queries (``_pair_scalars``) and
+    to ``counts``. A hit adds none. Pair queries (``_pair_scalars``) and
     screening (``_screen_gradients``) share this column.
     """
     if right not in context.h_columns:
@@ -617,7 +621,7 @@ def _screen_gradients(plan, context, counts, right, state):
     that norm, and ``_vector`` normalizes after every generator exponential,
     so screening uses the normalized-state convention. The column
     ``context.h_columns[right]`` holds ``(H-cI)psi_right`` when a pair query
-    acquired it; it can be absent for a new chain, the initial screen, a
+    acquired it. It can be absent for a new chain, the initial screen, a
     restored context or after ``_keep_current`` evicts states, and is then
     computed once (``_offset_free_column``). Changing from ``H psi`` to
     ``(H-cI) psi`` changes rounding and can change selection among nearly
@@ -629,7 +633,7 @@ def _screen_gradients(plan, context, counts, right, state):
     ``adapt_gcim.py`` (c5efcb0), lines 303-398. With a fixed angle, reusing
     a generator repeats its single-generator basis state, so reuse would
     define another trial space. Each screened generator adds one generator
-    action and one scalar product to ``counts``; a cache hit adds no
+    action and one scalar product to ``counts``. A cache hit adds no
     Hamiltonian action.
     """
     h0_state = _offset_free_column(plan, context, counts, right, state)
@@ -829,7 +833,7 @@ def bind_classical(plan, inputs, reference):
             # gradient, 24k bytes. Inside taylor_action_derivative the old
             # base and tangent base, the two current Horner vectors, two
             # action outputs and up to three expression temporaries coexist,
-            # at most 2k + 8 complex vectors at the last forward factor; the
+            # at most 2k + 8 complex vectors at the last forward factor. The
             # twelve-vector term leaves room for normalizer scans and callback
             # buffers. With the C_cache <= 8L vectors the Run's caches can
             # still hold, it reserves 16 (C_cache + 2k + 12) d + 24k +
@@ -1045,7 +1049,7 @@ def _read_values(plan, point, chunk):
     by ``total``, where ``odd`` is the count mass with odd parity. Each count
     is at most ``MAX_COUNT``, but a chunk's total is not, so ``total`` is a
     Python int. When it is at most ``MAX_COUNT``, every ``odd``, a sum of a
-    subset of the nonnegative counts, fits in int64; otherwise ``odd`` is
+    subset of the nonnegative counts, fits in int64. Otherwise ``odd`` is
     summed as Python ints.
     """
     values = {b.parameter: b.value for b in point.bindings}
@@ -1267,7 +1271,7 @@ def _matrix_from_observations(plan, selected, context, *, acquire=None, receipt=
     elif plan.shots is None:
         # Each exact pair reduction returns (H0, S) in its canonical chain
         # orientation. It is conjugated once when basis[j] < basis[i], applied
-        # to both H0 and S; the reduction already returns complex entries, so
+        # to both H0 and S. The reduction already returns complex entries, so
         # no per-quadrature sign adjustment applies. Its entry bounds come
         # from its own receipt's state error with the ordered-action envelope.
         from .fixed_basis import _coefficient_mass
@@ -1284,11 +1288,11 @@ def _matrix_from_observations(plan, selected, context, *, acquire=None, receipt=
                 h0, overlap = h0.conjugate(), overlap.conjugate()
             pairs[(i, j)] = (h0, overlap)
             prepared = None if receipt is None else receipt(prepared_id)
-            # The input array can carry a shared host phase correction; the
+            # The input array can carry a shared host phase correction. The
             # pair entries cancel the common global phase (saved-state budget).
             delta = None if prepared is None else prepared.saved_state_error(("amplitude-derived masses",))[0]
-            entry = entry_bounds(delta, c1, 1 << rec.num_qubits, terms, 1, terms,
-                                 diagonal=basis[i] == basis[j], ordered=True)
+            entry = entry_bounds(delta, c1, 1 << rec.num_qubits, terms,
+                                 diagonal=basis[i] == basis[j])
             bounds[(i, j)] = None if entry is None else entry[0]
         h, s = assemble_pair_pencil(b, pairs)
         allowance = _exact_overlap_allowance(b, bounds)
@@ -1451,38 +1455,6 @@ def _new_controller_state(controls):
     )
 
 
-def _admit_saved_state(state, reconstruction, options):
-    """Check the saved chain and counters before they are used to form states.
-
-    A restored checkpoint must hold a chain of distinct in-pool indices with
-    finite angles, no longer than ``max_selections``, and nonnegative
-    integer counters within their limits. A state that fails raises
-    ``ValueError`` instead of preparing a state or charging a query.
-    """
-    indices, angles = state["selected"], state["theta"]
-    if (
-        type(indices) is not list
-        or type(angles) is not list
-        or len(indices) != len(angles)
-        or len(indices) > reconstruction.max_selections
-        or len(indices) != len(set(indices))
-        or any(type(i) is not int or not 0 <= i < len(reconstruction.pool) for i in indices)
-        or any(type(x) not in (int, float) or not isfinite(x) for x in angles)
-        or type(state["energy_queries"]) is not int
-        or state["energy_queries"] < 0
-        or options.optimize_max_evaluations is not None
-        and state["energy_queries"] > options.optimize_max_evaluations
-        or type(state["analysis_attempts"]) is not int
-        or state["analysis_attempts"] < 0
-        or state["current_analysis_attempt"] is not None
-        and (
-            type(state["current_analysis_attempt"]) is not int
-            or not 0 < state["current_analysis_attempt"] <= state["analysis_attempts"]
-        )
-    ):
-        raise ValueError("invalid saved ADAPT parameter/query state")
-
-
 def _flat_counter_update(flat_count, previous_energy, value, iteration, *, valid, tolerance):
     """Return ``(flat_count, previous_energy)`` after one projected analysis.
 
@@ -1570,7 +1542,7 @@ def _single_chunk(completed):
     A pair reduction has one point and returns its chunk. The exact shared
     full-chain query has two points at one boundary, its weighted diagonal
     reduction and its screening labels, and keeps both chunks in schedule
-    order; they share one acquisition and receipt.
+    order. They share one acquisition and receipt.
     """
     if isinstance(completed, tuple) and len(completed) == 1:
         (completed,) = completed
@@ -1585,8 +1557,8 @@ def _chunks(observation):
 def _observation_index(chunks):
     """Index observations by realization, keeping the point chunks of one acquisition together.
 
-    The first acquisition of a realization is kept, as for single chunks;
-    a later point chunk of that same acquisition joins it in collection
+    The first acquisition of a realization is kept, as for single chunks.
+    A later point chunk of that same acquisition joins it in collection
     order, which is its schedule order.
     """
     index = {}
@@ -1603,7 +1575,7 @@ def _observation_index(chunks):
 
 
 def drive_adapt(plan, *, run, prepare_only=False):
-    """One method controller over the original run, query budget and journal.
+    """Run the ADAPT controller until it finishes, must wait for external work or, with ``prepare_only``, has prepared its first new query.
 
     The controller is a checkpointed state machine. Its phases are
     ``matrix`` (acquire every pencil entry of the current basis),
@@ -1672,7 +1644,6 @@ def drive_adapt(plan, *, run, prepare_only=False):
         state = _new_controller_state(controls)
     elif state.get("kind") != "adapt_gcim/3" or state.get("controls") != controls:
         raise ValueError("resume requires the identical ADAPT Plan/runtime/policy")
-    _admit_saved_state(state, reconstruction, options)
     indices, angles = state["selected"], state["theta"]
     context.accepted = tuple(zip(indices, angles, strict=True))
     active = state["active_energy"]
@@ -1902,7 +1873,7 @@ def drive_adapt(plan, *, run, prepare_only=False):
         """Return a completed energy and update the optimizer's incumbent for objective queries.
 
         ``values`` are the labels already read from these queries by
-        ``complete_saved_energy``; without them each collected chunk is read
+        ``complete_saved_energy``. Without them each collected chunk is read
         here once. With ``gradient`` a classical query also returns its
         ``gradient_j`` labels as an array, from the same evaluation.
         """
@@ -2155,8 +2126,8 @@ def drive_adapt(plan, *, run, prepare_only=False):
                         selected, state["history"], len(reconstruction.nonidentity_terms),
                         exact=plan.shots is None)
                     if plan.shots is None:
-                        # Each exact pair reduction registers pair_work host work;
-                        # the whole stage is admitted against max_products here.
+                        # Each exact pair reduction registers pair_work host work.
+                        # The whole stage is admitted against max_products here.
                         from .fixed_basis import pair_reduction_point
                         from .pair_reducer import pair_work
 
@@ -2458,8 +2429,7 @@ def _matched_query_chunks(plan, data):
 
 
 def analyze_adapt(plan, data, *, settings):
-    """Read the saved adaptive trajectory, optionally rebuilding only its acquired pencil at a
-    new cutoff.
+    """Read the saved adaptive trajectory and, for a new cutoff, solve its acquired pencil again.
 
     The history, selections and stop reason come from the saved controller
     state as they were decided. With ``settings={"overlap_cutoff": c}`` the

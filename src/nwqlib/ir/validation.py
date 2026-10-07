@@ -53,7 +53,7 @@ class AdmissionStepsExceeded(ValueError):
             field slots: a ``max_steps`` of at least this value passes the
             inventory, and later admission, preparation and lowering can
             still need more. For admission work, the count when the check
-            stopped; work is charged before the item it pays for, so the
+            stopped. Work is charged before the item it pays for, so the
             complete count is at least this value, and it is not a value
             that admits.
         ceiling: The ``max_steps`` that refused.
@@ -111,7 +111,7 @@ def admission_refusal(option, exceeded, *, subject="the Program"):
     Method field owning ``max_steps``, such as
     ``"FixedGCIM.max_admission_steps"``. The message names the refused stage,
     its counted need and the ceiling. For the stored field inventory the
-    need is the complete count, and that value passes the inventory; for
+    need is the complete count, and that value passes the inventory. For
     admission work it is the lower bound reached when the check stopped.
     Neither is a promised admitting value: later admission, preparation and
     lowering can need more. For
@@ -244,7 +244,7 @@ class _Admission:
         # Count all kept record/tuple slots, including edges, settings and ports.
         # This does not expand references or serialize nested identities. An
         # inventory above max_steps is counted to its end, so the refusal
-        # reports the complete count; no table is built for it.
+        # reports the complete count. No table is built for it.
         stored_slots = 0
         def reserve(amount):
             nonlocal stored_slots
@@ -352,8 +352,9 @@ class _Admission:
         if self.p.root not in self.nodes:
             raise ValueError("unresolved root reference")
         self.node_order = topological(self.nodes, children, self.limits)
-        # One bounded, shared-DAG inventory owns terminal acquisition ancestry.
-        # Resource accounting reuses it; neither path expands repetitions/axes.
+        # One bounded pass over the shared DAG records which nodes contain a
+        # MeasurementBatch. The resource fold reuses it, and neither expands
+        # repetitions or axes.
         self.contains_batch = {}
         for name in self.node_order:
             node = self.nodes[name]
@@ -719,7 +720,7 @@ class _Admission:
         elif isinstance(node, (Repeat, AdaptiveLoop)):
             count = self.integer(node.count if isinstance(node, Repeat) else node.max_rounds,
                                  context, "repeat count")
-            # Even a zero body is checked once for invalid declared use; it exports no effects.
+            # Even a zero body is checked once for invalid declared use. It exports no effects.
             qa, ca = self.visit(node.body, q, available, binding, protected)
             if isinstance(node, AdaptiveLoop):
                 ca = self.stage(node.policy, qa, ca, context)
@@ -826,7 +827,10 @@ class _Admission:
             q[wire] = (status, None if status == "unknown" or epoch is None else self.bounded(epoch + 1), group)
 
     def connect(self, q, wires):
-        """Conservatively keep correlation unless independence is explicitly promised."""
+        """Merge the correlation groups of ``wires`` into one interned group and return it.
+
+        A caller skips this when a signature promises independent coupling.
+        """
         groups = {}
         for wire in wires:
             self.tick()
@@ -856,7 +860,7 @@ class _Admission:
         return self.groups.setdefault(group, group)
 
     def partition(self, q):
-        """One kept set per live component; never compare it once per wire."""
+        """Return the live correlation groups, one per component, so that two partitions are compared once rather than once per wire."""
         self.tick(len(q))
         groups = {id(group): group for state, _, group in q.values() if state != "released"}
         self.tick(sum(map(len, groups.values())))

@@ -114,7 +114,7 @@ def test_projector_rotations_match_the_qiskit_definitions(support, angle):
     assert (population.arbitrary_rotations, population.exact_t) == _census(circuit)
     if angle == 0.371:
         assert population.arbitrary_rotations + population.exact_t == (1, 3, 7, 15, 31, 63, 127, 263, 387)[support - 1]
-    slots, _, _ = _projector_slots(block)
+    slots, _, _ = _projector_slots(block, {})
     assert sum(slots.values()) == (2**support - 1 if provider == "diagonal_synthesis" else max(1, 4 * support - 5))
 
 
@@ -1517,7 +1517,7 @@ def test_the_wrapped_phase_cache_hits_evicts_the_oldest_and_keeps_the_bits(monke
     assert calls == [(16,)] * len(angles)
     assert len(cache) == owner_module.WRAPPED_PHASE_CACHE_ENTRIES
     assert (angles[0].hex(), 4) not in cache and (angles[-1].hex(), 4) in cache
-    assert [owner_module.wrapped_projector_phase(a, 4) for a in angles] == values
+    assert [owner_module.wrapped_projector_phase(a, 4, {}) for a in angles] == values
     del calls[:]
     assert owner_module.wrapped_projector_phase(angles[-1], 4, cache) == values[-1] and calls == []
     assert owner_module.wrapped_projector_phase(angles[0], 4, cache) == values[0] and calls == [(16,)]

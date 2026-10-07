@@ -23,16 +23,15 @@ from .records import ModeStatus
 # work (RefinementResources.evolution_work) with either initial state. With
 # the best observed point and the uniform initial state, kappa = 1 did
 # better on the exact-readout double well (0.00112 against 0.00360). These
-# were measured on 2026-09-26 at revision
-# aede9fd119563d63562c9afed4b00021920560c6, in the environment that the
-# refinement module docstring states. At revision
-# 461d7dce706eed4724a4e850915746f8683831b2 on the same day and in the same
-# environment, the best observed point with the uniform initial state,
-# max_no_improve=2, max_work = max_bytes = 10**10 per solve and 256 outcomes
+# were measured on 2026-09-26, in the environment that the refinement
+# module docstring states. On the same day and in the same environment,
+# the best observed point with the uniform initial state, max_no_improve=2,
+# max_work = max_bytes = 10**10 per solve and 256 outcomes
 # per level drawn from each computed distribution (seeds 7, 19 and 43, by
 # composing one-level classical solves, since classical execution takes no
 # shots) favored kappa = 1 on one of three Ackley seeds. So the value stays
-# configurable. Only 1 and 8 were compared. Registered in
+# configurable. Only 1 and 8 were compared. Revisit with a comparison of
+# other gains, schedules, dimensions or problem classes. Registered in
 # docs/ENGINEERING_CONSTANTS.md ("Box refinement scaling and
 # potential_gain").
 DEFAULT_POTENTIAL_GAIN = 8.0
@@ -45,7 +44,8 @@ DEFAULT_POTENTIAL_GAIN = 8.0
 # one-variable split-step check of refinement._best_point_gaussian both
 # used amplitude width 1/6 in unit coordinates. That docstring gives their
 # settings and results, and the refinement module docstring the revision
-# and environment of the measurements. Registered in
+# and environment of the measurements. Revisit with a comparison of widths
+# or problem classes that shows when the Gaussian helps. Registered in
 # docs/ENGINEERING_CONSTANTS.md ("Box refinement level initial state").
 DEFAULT_LEVEL_GAUSSIAN_WIDTH = 1 / 6
 
@@ -194,10 +194,9 @@ class BoxRefinement(Record):
     # numpy.random.RandomState(123) that the authors' experiment script,
     # which the paper does not link, makes one per test function, the Ackley
     # draw after those of the quadratic, Rosenbrock and Rastrigin functions.
-    # Measured
-    # on 2026-09-26 at revision aede9fd119563d63562c9afed4b00021920560c6 with
-    # seed 7, in the environment that the refinement module docstring
-    # states. The physical model stays an explicit option. Registered in
+    # Measured on 2026-09-26 with seed 7, in the environment that the
+    # refinement module docstring states. The physical model stays an
+    # explicit option. Registered in
     # docs/ENGINEERING_CONSTANTS.md ("Box refinement scaling and
     # potential_gain").
     scaling: Literal["search_model", "physical"] = "search_model"
@@ -218,11 +217,9 @@ class BoxRefinement(Record):
     # tied twice and gave a better point once in three seeds. With the
     # uniform initial state "best_observed" gave better points on refined
     # constrained Rastrigin and on sampled standalone Ackley, so it stays an
-    # explicit option. These comparisons were made on 2026-09-26 at revision
-    # 461d7dce706eed4724a4e850915746f8683831b2 (standalone, uniform start) and
-    # 659fa80702e79192a27568ea4935531004d14e51 (augmented Lagrangian, and
-    # standalone with the kinetic start), in the environment that the
-    # refinement module docstring states, with classical schrodinger
+    # explicit option. These comparisons were made on 2026-09-26, in the
+    # environment that the refinement module docstring states, with
+    # classical schrodinger
     # evolution over T = 10 in 200 steps and max_work = max_bytes = 10**10
     # per solve. The standalone runs used the problems and grids of the
     # scaling comparison above, gain 8, at most ten levels and
@@ -308,20 +305,21 @@ class RefinementResources(Record):
 
     `RefinementLevel.resources` holds a level's, and `BoxRefinementResult.resources` the
     refinement's totals. The fields below are read-only. Measurement (circuit
-    preparations and attempts, shots, stored Run data) and host work (planning tables,
-    classical kernel runs, construction, exact synthesis and the refinement's own
-    evaluations) are separate counts and are never added to each other. Each work field
-    has its own unit, so the host-work fields are not summed either. A search-model
+    preparations and attempts, shots, stored Run data) and classical work (planning
+    tables, classical evolution runs, construction, exact synthesis and the refinement's
+    own evaluations) are separate counts and are never added to each other. Each work
+    field has its own unit, so the classical-work fields are not summed either. A search-model
     level plans twice: once for the unscaled level objective, whose support tables give
     E and c (`table_evaluations`), and once for the normalized objective it solves
     (`support_evaluations`). A physical level plans once. A count is None when it is
     unknown, and `unavailable` names each such field with its reason. Unknown is never
     replaced by zero, so a total is None when any level's count is. The counts are the
     work of the algorithm, each counted once as in an uninterrupted refinement, and not
-    the host time spent across the calls of a saved refinement
+    the wall time spent across the calls of a saved refinement
     (`resume_box_refinement`), whose completed levels keep their recorded counts and
-    whose continued Run keeps the counts of its own run log. The unscaled table stage of
-    a reopened search-model level, which resume repeats, is not counted again.
+    whose continued Run keeps the counts of its own run log. A resumed search-model
+    level whose table stage had completed reads its saved unscaled support tables and
+    their evaluation count instead of evaluating them again.
 
     Attributes:
         circuit_preparations: Circuit preparations of the level Runs.
@@ -330,10 +328,10 @@ class RefinementResources(Record):
         shots: Raw shots set aside by the attempts of every status.
         completed_shots: Raw shots of the completed attempts.
         data_bytes: Run data bytes recorded by the level Runs.
-        evolution_work: Work units that the level Runs counted for classical kernel runs
+        evolution_work: Work units that the level Runs counted for classical evolution runs
             (restricted evolution and readout summary), zero for quantum execution.
         construction_work: Construction work that the level Runs counted, for a quantum
-            circuit or for the classical kernel's setup.
+            circuit or for the setup of classical evolution.
         synthesis_work: Exact dense synthesis work set aside by the level Runs.
         table_evaluations: Grid tuples evaluated for the unscaled level objective's
             support tables, the extra planning of the search model. Zero for the
@@ -664,8 +662,10 @@ class RefinementLevel(Record):
 
     @model_validator(mode="after")
     def _domain(self):
-        """Require one entry per variable, ordered intervals, a nonempty next box inside the box, a split of it,
-        and the integer counts of a counts readout.
+        """Check the level's per-variable fields, intervals, next box, split and readout counts.
+
+        It requires one entry per variable, ordered intervals, a nonempty next box inside the box, a split
+        of it, and the integer counts of a counts readout.
         """
         d = len(self.box)
         if not d or any(
@@ -718,7 +718,8 @@ class RefinementLevel(Record):
                 raise ValueError("region_axis_counts needs one count between zero and valid_count per variable")
             # The intersection has at most each marginal's count. The union
             # of their complements has at most sum_j (S - C_j) draws, so its
-            # complement has at least max(0, S - sum_j (S - C_j)).
+            # complement has at least max(0, S - sum_j (S - C_j)). Here S = valid_count and
+            # C_j = region_axis_counts[j].
             if self.region_count is None or not max(0, n - sum(n - count for count in counts)) <= self.region_count <= min(counts):
                 raise ValueError("region_count must lie between the marginal union lower bound and every axis count")
         return self
@@ -816,7 +817,7 @@ class BoxRefinementResult(Record):
     the refinement (``stopped_resources``), so what a failed level's tables and Run
     counted is included. A planning that raises reports no work, so its partial work is
     not counted. ``results`` gives the QHD results of the completed levels. They are
-    live objects, outside the record's content hash.
+    objects held in memory, outside the record's content hash.
 
     The reported points are finite-grid search results. Neither the joint mass bound nor
     a small box certifies that the global minimizer lies in the box or that the best
@@ -875,9 +876,9 @@ class BoxRefinementResult(Record):
         two per search-model level (the table stage and the solved objective) and one
         per physical level, known before the first level. Each operation that one
         planning checks, namely the symbolic expansion, the running total of the initial
-        state and tables, a kept state, a classical kernel and a circuit construction,
+        state and tables, a kept state, a classical evolution and a circuit construction,
         is at most ``qhd.max_work`` units and ``qhd.max_bytes`` bytes, so the table,
-        support, kernel and construction work fields of ``resources`` are each at most
+        support, evolution and construction work fields of ``resources`` are each at most
         ``max_plannings * qhd.max_work``. The refinement's own objective evaluations and
         joint-mass reads, and the second expansion of each level objective that those
         evaluations use, are outside this bound.
@@ -905,8 +906,10 @@ class BoxRefinementResult(Record):
 
     @model_validator(mode="after")
     def _levels(self):
-        """Check level numbering and chaining, the best level, the resource total, the readout kind of every
-        level and the rule that reports a mean position.
+        """Check the level sequence, the best level, the resource total and the readout of every level.
+
+        The sequence check covers numbering and chaining, and the readout check covers the readout kind
+        and the rule that reports a mean position.
         """
         for number, level in enumerate(self.levels, 1):
             if level.level != number:

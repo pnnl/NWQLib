@@ -305,7 +305,9 @@ def ingest_fermion(terms, *, num_modes, max_bytes=DEFAULT_INPUT_BYTES):
 
 
 def mapping_requirements(lengths, *, num_modes, max_bytes=DEFAULT_INPUT_BYTES, labels=False):
-    """Cumulative mapping law, including raw admission and final conversion.
+    """Return the cumulative ``(items, bytes, work)`` law of mapping strings with ``lengths`` ladder operators to Pauli rows, checked against ``max_bytes`` after each string.
+
+    The law includes raw admission and final conversion.
 
     Count arithmetic is capped by intp representability and data bytes before
     shifts/arrays. Counts and scalar visits remain descriptive cost laws.
@@ -386,13 +388,13 @@ def _ladder_image(mode, *, creation, num_modes, mapping):
     w = (num_modes + 63) // 64
     x, z = np.zeros((2, w), dtype=np.uint64), np.zeros((2, w), dtype=np.uint64)
     x[:, mode // 64] = np.uint64(1 << (mode % 64))
-    # Mutation probe qeb_z_ladder_injected targets the actual parity choice.
+    # docs/scripts/mutation_probes.py (qeb_z_ladder_injected) replaces the next line by exact text match.
     parity = mapping == "jw"
     if parity:
         for word in range(mode // 64):
             z[:, word] = np.uint64(2**64 - 1)
         z[:, mode // 64] = np.uint64((1 << (mode % 64)) - 1)
     z[1, mode // 64] |= x[1, mode // 64]
-    # Mutation probe jw_phase_string_sign_flip targets creation phase.
+    # docs/scripts/mutation_probes.py (jw_phase_string_sign_flip) replaces the next line by exact text match.
     y_coefficient = -0.5j if creation else 0.5j
     return PauliTerms._snapshot(num_modes, x, z, np.array([0.5, y_coefficient], dtype=np.complex128))

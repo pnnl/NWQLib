@@ -4,9 +4,9 @@ This page gives the rules that a Result follows when it is attached to its data,
 
 ## What a Result is attached to
 
-The public objects are the original Problem, the immutable configured Method, the plain `core.planning.Plan`, `core.analysis.Result` and `_prepared_execution.Run`. A Plan contains the chosen construction, the realizations, the output and the data needed to rebuild the Method. There is no second Plan hierarchy for reports. Method archive hooks restore the saved bindings and numerical data without planning again.
+The public objects are the original Problem, the immutable configured Method, the plain `core.planning.Plan`, `core.analysis.Result` and `_prepared_execution.Run`. A Plan contains the chosen construction, the realizations, the output and the data needed to rebuild the Method. Method archive hooks restore the saved bindings and numerical data without planning again.
 
-A Result identifies its Plan, construction, observation view and contributing chunks. Its attached RunData keeps every execution event, prepared receipt and physical submission, including successful unused data and failed or uncertain work. The scientific contributors may be a subset of the acquired data, while exposure accounting still covers every acquisition. An analyzer keeps the immutable snapshot it used. When the Method returns a Result that it has already attached, `Run.resume` publishes it only if it belongs to this Plan and its observations, receipts, forecast, allocation and trace equal the Run's current data. The stored-byte counter is excluded from that comparison because it keeps growing after the Result is captured.
+A Result identifies its Plan, construction, observation view and contributing chunks. Its attached RunData keeps every execution event, preparation record and physical submission, including successful unused data and failed or uncertain work. The scientific contributors may be a subset of the acquired data, while exposure accounting still covers every acquisition. An analyzer keeps the immutable snapshot it used. When the Method returns a Result that it has already attached, `Run.resume` publishes it only if it belongs to this Plan and its observations, receipts, forecast, allocation and trace equal the Run's current data. The stored-byte counter is excluded from that comparison because it keeps growing after the Result is captured.
 
 `Result.analyze` computes a new explicit reduction from existing data. `Result.assess` checks a stated criterion against the scoped facts. Neither action starts an acquisition or a retrospective method choice. An absent criterion means no accuracy verdict. The original confidence, samples and dependence premises belong to their scientific evidence, and a later requested confidence cannot overwrite them. Conditional evidence stays conditional, and a component bound does not establish total physical accuracy.
 
@@ -30,7 +30,7 @@ The common lines that follow name the Method and execution route, the first prep
 | `summary` | The display text of the Result |
 | `plan` | The original chosen construction, output, assumptions and error model |
 | `result` | The scientific result with its original analysis origin, environment, facts and uncertainty |
-| `trace`, `observations`, `receipts` | Every collected chunk and prepared receipt, including unused and uncertain exposure |
+| `trace`, `observations`, `receipts` | Every collected chunk and preparation record, including unused and uncertain exposure |
 | `artifacts` | Array manifests and resident availability, without array payloads |
 | `forecast` | The original forecast, not refreshed or reassessed |
 | `allocation` | The supplied Allocation |
@@ -42,7 +42,7 @@ Reading a summary or a report performs no acquisition, reanalysis, numerical val
 
 ## Comparison
 
-Comparison keeps candidate Methods and Plans in their supplied order. Missing applicability or resource information stays explicit. Resource context and device profile affect estimates, not scientific inputs or native compilation. An execution uses the effective backend configuration, and its receipt and native inventory describe that configuration. Resource inspection never silently escalates from a formula to a representative native compilation or a full preparation.
+Comparison keeps candidate Methods and Plans in their supplied order. Missing applicability or resource information stays explicit. Resource context and device profile affect estimates, not scientific inputs or native compilation. An execution uses the effective backend configuration, and its preparation record and native inventory describe that configuration. Resource inspection never silently escalates from a formula to a representative native compilation or a full preparation.
 
 ## Saving and loading
 

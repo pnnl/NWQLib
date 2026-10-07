@@ -1,4 +1,7 @@
-"""Coherent QPE construction; statistical methods live in algorithms.qpe."""
+"""Coherent QPE construction.
+
+The statistical methods are in ``algorithms.qpe``.
+"""
 
 from typing import TYPE_CHECKING
 

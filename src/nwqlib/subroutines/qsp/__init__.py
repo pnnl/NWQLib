@@ -1,4 +1,7 @@
-"""QSP owners loaded only when selected; numerical fits do not import an SDK."""
+"""QSP subroutines, each imported from its module on first access.
+
+The numerical fits import no quantum SDK.
+"""
 
 from importlib import import_module
 

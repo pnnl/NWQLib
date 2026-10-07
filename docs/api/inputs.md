@@ -7,7 +7,9 @@ from nwqlib.operators import operator_input, ingest_pauli, PeriodicStencil
 from nwqlib.problems import state_input
 ```
 
-A Problem field accepts a NumPy array, a SciPy sparse matrix, a Qiskit `SparsePauliOp`, a `PeriodicStencil` or a state vector directly. The functions on this page make the same conversion explicit and return a handle that keeps an immutable copy of the data in its original representation. Passing one handle to several Problems reuses that copy:
+Every operator function and record on this page imports from `nwqlib.operators`, and every state function and record from `nwqlib.problems`. The annotation types under [Input types](#input-types) are defined in `nwqlib.core.records`, `nwqlib.problems.records` and `nwqlib.operators.access`.
+
+A Problem field accepts a NumPy array, a SciPy sparse matrix, a Qiskit `SparsePauliOp`, a `PeriodicStencil` or a state vector directly. The functions on this page make the same conversion explicit and return an `OperatorInput` or a `StateInput`, which keeps an immutable copy of the data in its original representation. Passing one such object to several Problems reuses that copy:
 
 ```python
 import numpy as np
@@ -55,7 +57,7 @@ The Pauli operator stays a sum of two terms on 2 qubits, the dense matrix maps `
 | A computational basis state | `ingest_occupation(bits, num_qubits=q)` | `StateInput`, at most q X gates |
 | Norm and spectral bounds of an operator | `refine_operator_facts(A, unit=..., scope=..., refinements=(...))` | `OperatorFactReport` |
 
-Every function checks the bytes it will keep against `max_bytes`, default 10 GB (decimal, `10_000_000_000`), before it copies data. [Input cost controls](../development/input_contracts.md) gives each size formula. Coordinates follow Qiskit, with qubit 0 the rightmost tensor factor and the rightmost character of a Pauli label.
+Every function checks the bytes it will keep against `max_bytes`, default 10 GB (decimal, `10_000_000_000`), before it copies data. To check whether a large input fits under `max_bytes` before you build it, use the size formula for its representation in [Input cost controls](../development/input_contracts.md). Coordinates follow Qiskit, with qubit 0 the rightmost tensor factor and the rightmost character of a Pauli label.
 
 ## Operators
 
@@ -94,6 +96,7 @@ Every function checks the bytes it will keep against `max_bytes`, default 10 GB 
 ::: nwqlib.operators.inputs.OperatorInput
     options:
       heading_level: 3
+      show_signature: false
 
 ## Fermionic and factorized operators
 
@@ -108,6 +111,7 @@ Every function checks the bytes it will keep against `max_bytes`, default 10 GB 
 ::: nwqlib.operators._fermion.FermionTerms
     options:
       heading_level: 3
+      show_signature: false
 
 ::: nwqlib.operators.df.ingest_df
     options:
@@ -116,6 +120,7 @@ Every function checks the bytes it will keep against `max_bytes`, default 10 GB 
 ::: nwqlib.operators.df.FactorizedHamiltonian
     options:
       heading_level: 3
+      show_signature: false
 
 ::: nwqlib.operators.df.DFConversion
     options:
@@ -162,6 +167,7 @@ Every function checks the bytes it will keep against `max_bytes`, default 10 GB 
 ::: nwqlib.problems.inputs.StateInput
     options:
       heading_level: 3
+      show_signature: false
 
 ::: nwqlib.problems.inputs.StatePreparationSpec
     options:
@@ -208,7 +214,7 @@ Every function checks the bytes it will keep against `max_bytes`, default 10 GB 
 
 ## Input types
 
-Problem and record fields use these types. A field typed `OperatorData` or `StateData` accepts the raw forms in the table and stores the handle that [`operator_input`][nwqlib.operators.inputs.operator_input] or [`state_input`][nwqlib.problems.inputs.state_input] returns.
+Problem and record fields use these types. A field typed `OperatorData` or `StateData` accepts the raw forms in the table and stores the `OperatorInput` that [`operator_input`][nwqlib.operators.inputs.operator_input] returns or the `StateInput` that [`state_input`][nwqlib.problems.inputs.state_input] returns.
 
 | Type | Accepts |
 | --- | --- |

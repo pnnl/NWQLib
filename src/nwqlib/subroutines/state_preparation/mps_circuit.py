@@ -1,6 +1,6 @@
 """Circuit-level MPS state preparation via layered disentangling.
 
-This backend constructs a Qiskit circuit without calling Qiskit's dense
+This module constructs a Qiskit circuit without calling Qiskit's dense
 ``StatePreparation`` synthesis. The NumPy TT-SVD and its compression
 analysis are
 [`decompose_state_to_mps`][nwqlib.subroutines.state_preparation.mps.decompose_state_to_mps]
@@ -153,8 +153,9 @@ def mps_to_circuit(mps: Any, *, num_layers: int = 1) -> QuantumCircuit:
     whenever the average gate fidelity between them is at least
     ``1 - 1e-9``. For states within about 1e-5 of a product state it saved
     one or two CX per unitary and erred by about the distance from the
-    product state (1e-9 to 1e-5 in tests), and the exact synthesis keeps
-    those CX.
+    product state (observed for distances 1e-9 to 1e-5 with Qiskit 2.5.2 in
+    NWQLib's test ``test_mps_two_qubit_gates_are_exact_near_a_product_state``),
+    and the exact synthesis keeps those CX.
 
     Args:
         mps (scikit_tt.TT): Right-canonical tensor train with cores of shape
@@ -162,9 +163,10 @@ def mps_to_circuit(mps: Any, *, num_layers: int = 1) -> QuantumCircuit:
         num_layers (int): Default `1`. Number of disentangling layers.
 
     Returns:
-        QuantumCircuit that approximates the MPS state from ``|0...0>``.
-        A finite layer count can leave a residual even when the original
-        TT-SVD discarded weight is zero; no circuit error is measured here.
+        circuit (QuantumCircuit): Circuit that approximates the MPS state
+            from ``|0...0>``. A finite layer count can leave a residual even
+            when the original TT-SVD discarded weight is zero, and no circuit
+            error is measured here.
     """
 
     if num_layers < 1:
@@ -271,10 +273,10 @@ class MPSCircuitStatePreparation:
     [`build_mps_circuit_state_preparation`][nwqlib.subroutines.state_preparation.mps_circuit.build_mps_circuit_state_preparation]
     returns it with the fidelity fields unset, and
     [`validate_mps_circuit_state_preparation`][nwqlib.subroutines.state_preparation.mps_circuit.validate_mps_circuit_state_preparation]
-    returns a copy with them evaluated. The circuit is `circuit`. It stores
-    the decomposition and the normalized target used by the validator, and
-    no compression-analysis object or other reconstructed vector. The
-    fields below are read-only.
+    returns a copy with them evaluated. Its `circuit` field holds the
+    result. It stores the decomposition and the normalized target used by
+    the validator, and no compression-analysis object or other
+    reconstructed vector. The fields below are read-only.
 
     Attributes:
         circuit: The layered MPS disentangling state-preparation circuit.
@@ -354,6 +356,10 @@ def build_mps_circuit_state_preparation(
         num_layers (int): Default `2`. Number of MPS disentangling layers.
         register_name (str): Default `"system"`. Name for the prepared
             quantum register.
+        _selected_decomposition (MPSDecomposition | None): Default `None`.
+            Decomposition that LCHS planning has already computed for the
+            normalized `vector` and supplies, so that no TT-SVD runs again.
+            A caller leaves it at its default.
         max_bytes (int): Default 10 GB (decimal, `10_000_000_000` bytes).
             Limit on the known input and TT-SVD arrays. It does not measure
             process memory. The layered construction
@@ -399,8 +405,8 @@ def build_mps_circuit_state_preparation(
             target_state, max_bond_dim=max_bond_dim, threshold=threshold,
             max_bytes=max_bytes, max_svd_work=max_svd_work, input_norm=input_norm)
     else:
-        # The selected factory owns this already-normalized immutable target and
-        # the exact cores; no TT-SVD or full-state reconstruction is repeated.
+        # The caller (algorithms/lchs/native.py) passes the normalized target and the cores it
+        # already computed, so the TT-SVD and the full-state reconstruction are not repeated.
         target_state, input_norm, decomposition = vector, 1.0, _selected_decomposition
         from nwqlib.operators.access import _check_bytes
         from nwqlib.operators.inputs import _digest

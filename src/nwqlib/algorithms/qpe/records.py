@@ -160,7 +160,13 @@ class QPECommonStep(Record):
             ``r_max*val(h_hat)``.
         error_budget: Effective product-formula allowance for the full common
             trajectory after the other structural contributions are reserved
-            at every queried power:
+            at every queried power. For each positive queried power p,
+            ``epsilon_p`` is its ``controlled_power_error_budget``, ``r_p`` its
+            cumulative ``QPEPower.steps``, and ``r_max`` the final ``step_count``.
+            ``P_p``, ``T_p``, ``I_p`` and ``A_p`` are respectively the pruning,
+            time-displacement, identity-phase and angle-formation bounds
+            (``trotterization.error_budget.emitted_subtotal`` and
+            ``trotterization.error_budget._emitted_parts``). The allowance is
             ``min_(p>0) (epsilon_p-P_p-T_p-I_p-A_p)*r_max/r_p``, rounded
             downward.
         bound_value: Upward product-formula bound
@@ -225,7 +231,7 @@ class QPEPower(Record):
             their own step block. A dense exact trajectory names the block of the gap
             B^(p_i - p_(i-1)) of its selected base B (exp(-i*tau*H), or the
             polar factor V of a unitary input) that precedes this power's
-            position, so several powers can name one gap block; sampled and
+            position, so several powers can name one gap block. Sampled and
             RWPE dense Plans name the power's own dense block. None for
             power 0, for the classical route and for a product formula
             without nonidentity Pauli terms.
@@ -308,11 +314,10 @@ class QPEReconstruction(Record):
         bound_variant: Selected Pauli-triangle expression, "exact_census" for
             the full pair/triple indicator structure or "relaxed_prefix" for
             the second-order suffix relaxation. None without a census.
-        coefficient_arithmetic: Numerical evaluation used for the supplied
-            coefficient, "outward_float64_scaled" for scaled binary64 upper
-            products and sums with rational rescaling. None without a census.
-        bound_coefficient: The census's upward coefficient W_up as an exact
-            (numerator, denominator) pair, None without a census.
+        bound_coefficient: Exact (numerator, denominator) of the upper
+            coefficient W_up of the selected bound_variant expression,
+            evaluated with scaled binary64 products and sums rounded upward
+            followed by exact rational rescaling. None without a census.
         census_block: Contraction block size actually passed to the census's
             coefficient evaluation, None without a census.
         common_step: The shared step of an exact static product-formula
@@ -321,8 +326,6 @@ class QPEReconstruction(Record):
         selected_base: For unitary input, the admitted operator V = polar(A)
             of the target A, the single base of every power, gap and
             spectral consumer. None for Hamiltonian input.
-        numerical_work: Admitted host-kernel work, 0 for quantum execution.
-        numerical_payload: Admitted host-kernel bytes, 0 for quantum execution.
         convention: Kernels use principal radians, and the public Eigenphase
             is converted to turns once.
     """
@@ -347,13 +350,10 @@ class QPEReconstruction(Record):
     pair_commutation_checks: Count = 0
     nested_commutation_checks: Count = 0
     bound_variant: Literal["exact_census", "relaxed_prefix"] | None = None
-    coefficient_arithmetic: Literal["outward_float64_scaled"] | None = None
     bound_coefficient: tuple[StrictInt, StrictInt] | None = None
     census_block: PositiveInt | None = None
     common_step: QPECommonStep | None = None
     selected_base: InputRef | None = None
-    numerical_work: Count
-    numerical_payload: Count
     convention: Literal["kernels use principal radians; public Eigenphase uses turns once"] = (
         "kernels use principal radians; public Eigenphase uses turns once"
     )
@@ -374,7 +374,7 @@ class QPEReconstruction(Record):
         the power inventory equals the distinct query powers. An exact
         trajectory's common-grid power keeps the display
         ``float(p*Fraction(tau))`` of its exact target time and the cumulative
-        count ``(p/g)*m``; an independently selected sampled or RWPE
+        count ``(p/g)*m``. An independently selected sampled or RWPE
         product-formula time is ``abs(p)*tau``. Each Pauli label matches the
         register width, with its coefficient at the same position and the
         identity coefficient stored separately. The census provenance fields
@@ -425,8 +425,7 @@ class QPEReconstruction(Record):
             raise ValueError(
                 "nonidentity Pauli terms must match width and keep identity separately"
             )
-        census = (self.bound_variant, self.coefficient_arithmetic, self.bound_coefficient,
-                  self.census_block)
+        census = (self.bound_variant, self.bound_coefficient, self.census_block)
         if any(value is None for value in census) != all(value is None for value in census):
             raise ValueError("QPE census provenance fields are recorded together")
         if self.bound_coefficient is not None and (self.bound_coefficient[1] < 1
@@ -470,7 +469,8 @@ class QPEInterval(Record):
         method: Interval construction, ``rwpe_gaussian_credible``.
         frame: Unwrapped phase turns centered on the reported phase, or
             energy in the requested operator units.
-        interpretation: Scope text, prefixed by any identification_note.
+        interpretation: Scope text of the interval, preceded by a warning when
+            the stored bounds do not establish what the estimate identifies.
     """
 
     low: Real
@@ -502,17 +502,18 @@ class QPESample(Record):
         experiment: Query name.
         power: Power p, or RWPE relative time, of that query.
         phase_shift: Ancilla phase in radians actually applied, the bound
-            feedback for RWPE, or the logical quadrature that the classical
-            host kernel evaluated. None for a trajectory point, which reads
+            feedback for RWPE, or the logical quadrature that classical
+            execution evaluated. None for a trajectory point, which reads
             its quadrature from the ancilla X or Y expectation without an
             executed phase.
         mean: `Re(exp(i*s)*z_p)` as measured, in [-1, 1].
         raw_mean: Original exact mean when it lay just outside [-1, 1].
         zeros: Returned shots with outcome 0, None for exact readout.
         ones: Returned shots with outcome 1, None for exact readout.
-        contributions: Content IDs of the observation chunks used. The two
-            quadratures of one trajectory point name the same point chunk,
-            which is one acquisition, not two.
+        contributions: Content hashes of the saved data used: measured
+            counts, exact expectations or classically computed values.
+            The two quadratures of one trajectory point name the same saved
+            data, which count as one measurement, not two.
         point: Trajectory point ID of the value, or None.
     """
 
@@ -621,13 +622,17 @@ def identification_note(plan):
             "The phase remains a modulo-one estimate.")
 
 
-def plan_route(plan):
-    """Return the Plan's acquisition route: classical, trajectory, sampled or rwpe."""
-    if plan.execution == "classical":
+def plan_route(execution, estimator, shots):
+    """Return the acquisition route: classical, trajectory, sampled or rwpe.
+
+    Planning calls it before a Plan exists, and validate_selection with the
+    stored Plan's fields, so both apply one rule.
+    """
+    if execution == "classical":
         return "classical"
-    if plan.method.estimator == "rwpe":
+    if estimator == "rwpe":
         return "rwpe"
-    return "trajectory" if plan.shots is None else "sampled"
+    return "trajectory" if shots is None else "sampled"
 
 
 def validate_selection(plan):
@@ -709,7 +714,7 @@ def validate_selection(plan):
                     or real.phase_shift != 0 or imag.phase_shift != -pi/2
                     or real.multiplicity != imag.multiplicity):
                 raise ValueError("SPE queries must pair real and imaginary tests of each drawn odd frequency")
-    route = plan_route(plan)
+    route = plan_route(plan.execution, m.estimator, plan.shots)
     if route == "trajectory":
         expected = ("trajectory",)
     elif route == "classical" and m.estimator != "rwpe":
@@ -749,7 +754,7 @@ def query_at(plan, experiment, bindings=()):
 
 
 class RWPEGaussian(Record):
-    """Moment-matched Gaussian posterior N(mean, standard_deviation**2) for phi = -tau*E.
+    """Moment-matched Gaussian posterior `N(mean, standard_deviation**2)` for `phi = -tau*E`.
 
     Attributes:
         mean: Posterior mean of the unwrapped phase in radians.
@@ -763,11 +768,12 @@ class RWPEGaussian(Record):
 
 
 class QPEExposure(Record):
-    """Requested and received population of one count-mode SPE or RFE query.
+    """Requested and received shots of one SPE or RFE query measured with counts.
 
     Attributes:
-        experiment: Query name; its power and quadrature are the Plan's query
-            and its contributing count identities are its samples'.
+        experiment: Query name. Its power and quadrature are those of the
+            Plan's query, and the content hashes of its counts are the
+            `contributions` of its samples.
         multiplicity: Original random-draw multiplicity m.
         requested: Requested shots ``plan.shots * m``.
         received: Shots actually returned, 1 <= received <= requested.
@@ -796,7 +802,7 @@ class QPEAnalysis(Result):
     `print(result)` shows the estimate with these limits, and
     `result.analyze(grid_size=...)` reanalyzes QCELS or SPE from the same
     samples. The fields below are read-only. The fields of
-    [`Result`][nwqlib.core.analysis.Result] are present too. Its
+    [`Result`][nwqlib.core.analysis.Result] are present too. This Result's
     construction and uncertainty refer to the original Plan, and the
     preparation records of the contributing observations record the points
     actually run.
@@ -809,7 +815,10 @@ class QPEAnalysis(Result):
         phase_turns: Eigenphase of U in turns, in [0, 1).
         interval: Nominal model interval, RWPE only.
         samples: Reduced ancilla means, one per measured value.
-        missing: Names of planned queries without data.
+        missing: Names of planned queries without data. For QCELS, SPE
+            and RFE, a query is one planned quadrature of z_p at one power,
+            with the setting that observes it. For RWPE, the entry states
+            that the saved controller state is missing.
         complete: True when all planned data are present and an estimate
             exists. For RWPE, every planned step has been processed.
         gaussian: RWPE posterior moments, None for the other estimators.
@@ -829,14 +838,20 @@ class QPEAnalysis(Result):
             `(numerator, denominator)`, an effective number of shots per draw
             rather than a fractional physical shot count. None without count
             queries.
-        rfe_coordinate_variance_upper: The exact received-count proxy
-            `A = sum_u (m_u/M)**2 max(1/n_uR, 1/n_uI)`, rounded up to
-            binary64, an upper bound on each real and imaginary coordinate
-            proxy of the sampled Fourier coefficients in units of squared
-            ancilla expectation. For SPE, `4*S**2*A` bounds the CDF proxy
-            with its weight sum S. It concerns the conditional shot
-            contribution under independent stationary shots, not the
-            random-draw term, and gives no energy confidence interval.
+        rfe_coordinate_variance_upper: The exact received-count quantity
+            ``A = sum_u (m_u/M)**2 max(1/n_uR, 1/n_uI)``, rounded up to
+            binary64. Here u indexes distinct drawn powers, ``m_u`` is a power's
+            draw multiplicity, M is the total number of draws, and ``n_uR`` and
+            ``n_uI`` are its positive received real- and imaginary-query shot counts.
+            Conditional on the drawn schedule and outcome-independent received
+            counts, A bounds the shot variance of each real and imaginary
+            coordinate of the sampled Fourier coefficients, in units of squared
+            ancilla expectation, under independent stationary shots. For SPE,
+            ``4*S**2*A`` bounds the conditional shot variance of its sampled
+            filtered CDF at any fixed evaluation point, where S is the sum of
+            the magnitudes of the positive-frequency filter coefficients.
+            It excludes the random-draw term and gives no energy confidence
+            interval.
     """
 
     estimator: Literal["qcels", "spe", "rfe", "rwpe"]
@@ -929,7 +944,8 @@ class QPEAnalysis(Result):
             if self.fit is not None:
                 powers = tuple(q.power for q in plan.reconstruction.queries)
                 size = qcels_grid_size(config.grid_size, max(powers)-min(powers))
-                # G grid evaluations plus at most G refined local minima.
+                # With G = size, count G grid evaluations plus QCELS_BRACKET_EVALUATIONS
+                # for each of at most G refined local minima.
                 if (self.fit.effective_grid != size
                         or self.fit.evaluations > (1 + QCELS_BRACKET_EVALUATIONS)*size):
                     raise ValueError("QCELS fit differs from its actual finite analysis grid")
@@ -1131,11 +1147,14 @@ class QPEVerification(Record):
     `QPEVerification(tolerance=1e-3)`, and pass it to
     `result.verify(checks=...)`. `tolerance` is the only required argument.
     The check computes a nominal reference spectrum of the estimator's
-    target, H or U, and a QR projector. SPE compares the lowest spectral
-    cluster, and the other estimators compare the largest prepared cluster.
-    It returns `(receipt, facts)`, a record of the check and the facts that
-    compare `component_error` with `tolerance` and
-    `overlap_deficit = max(0, minimum_overlap - weight)` with zero.
+    target Hamiltonian H or unitary U and uses QR to orthonormalize the
+    eigenvectors of each numerical spectral cluster. The projector is onto
+    the span of those eigenvectors, and its prepared-state weight is compared
+    with `minimum_overlap`. SPE compares the lowest spectral cluster, and
+    the other estimators compare the cluster with the largest prepared-state
+    weight. It returns `(receipt, facts)`, a record of the check and the facts
+    that compare `component_error` with `tolerance` and
+    ``overlap_deficit = max(0, minimum_overlap - weight)`` with zero.
     Numerical grouping does not prove degeneracy. The check runs on
     explicit dense data only, with no automatic Pauli expansion.
 

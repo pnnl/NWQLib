@@ -1,8 +1,7 @@
 """Explicit Pauli and sparse structural bounds from the supplied binary64 data."""
 
 from fractions import Fraction
-from math import fsum
-from typing import Literal, NamedTuple
+from typing import Literal
 from uuid import uuid4
 
 from pydantic import model_validator
@@ -142,9 +141,7 @@ class OperatorFactReport(Record):
 
     @model_validator(mode="after")
     def _association(self):
-        """Associate scalar operator facts and refinement receipts with one input, frame and
-        valid numerical domain.
-        """
+        """Check that the facts and receipts belong to one input, frame and valid numerical domain."""
         if bool(self.options) == (self.reason is not None):
             raise ValueError("unavailable refinement requires its own reason")
         names = [statement.fact.quantity for statement in self.facts]
@@ -196,35 +193,6 @@ def _options(operator):
             work_law="O(nnz+D) compressed-entry visits and exact scalar operations; no conversion",
             payload_law="borrow immutable native arrays plus a bounded exact-scalar frontier"),)
     return ()
-
-
-class _PauliCensus(NamedTuple):
-    """Binary64 identity coefficient, non-identity L1 norm and centered table of a Pauli operator.
-
-    Attributes:
-        center: ``fsum`` of the real parts of the identity-word coefficients.
-        alpha: ``fsum`` of the absolute non-identity coefficients.
-        centered: Ordered ``(label, coefficient)`` pairs of the nonzero non-identity terms.
-    """
-
-    center: float
-    alpha: float
-    centered: tuple
-
-
-def _pauli_census(raw, num_qubits):
-    """Binary64 identity coefficient, non-identity L1 norm and centered table.
-
-    The Lanczos Method uses ``[center - alpha, center + alpha]`` as the
-    spectral frame of its Chebyshev walk. ``fsum`` makes the sums correctly
-    rounded, and exact-zero non-identity terms are omitted from the ordered
-    table. ``_pauli_values`` computes the certified rational counterparts.
-    """
-    identity = "I" * num_qubits
-    center = fsum(float(c.real) for label, c in raw if label == identity)
-    centered = tuple((label, float(c.real)) for label, c in raw if label != identity and c != 0)
-    alpha = fsum(abs(c) for _, c in centered)
-    return _PauliCensus(center, alpha, centered)
 
 
 def _scalar_frontier(count):

@@ -26,10 +26,11 @@ class LCHSVerification(Record):
     Build it with keyword arguments and pass it to
     `result.verify(checks=...)`, for example
     `result.verify(checks=LCHSVerification(reference="expm"))`. `reference`
-    is the only required argument. The call returns `(receipt, facts)`.
-    `facts[0].fact.value.value` is the discrepancy between the Result's
-    physical solution u and the reference `u_ref`, and the receipt records
-    every computed value and call count. The check is named `name`, and
+    is the only required argument. The call returns `(receipt, facts)`: a
+    `VerificationReceipt` that records the check, its raw values and the
+    numerical calls it made, and a tuple of `FramedFact` records that cite
+    the receipt. `facts[0].fact.value.value` is the discrepancy between the
+    Result's physical solution u and the reference `u_ref`. The check is named `name`, and
     `"ivp_closed_form"` adds `name + ".reference_consistency"`.
     `Certificate.with_verification` turns `facts` into PASS when the value
     is at most `threshold`, FAIL when it is larger, and INCONCLUSIVE when
@@ -245,8 +246,8 @@ def _admit_publication(checks, frames, arguments):
     is refused without spending that work.
     """
     from nwqlib._run_journal import _json_bound
-    # Two fact copies, one receipt and their nested source/frame identities
-    # are below sixteen portable projections of these actual scalar inputs.
+    # Reserve 16 times the inputs' JSON byte bound for two fact copies,
+    # one receipt and their nested source/frame identities.
     # The fixed 8192 bytes cover the record envelope that does not scale with
     # the inputs (registered in ENGINEERING_CONSTANTS).
     size = 16*_json_bound((checks, frames, arguments), checks.max_bytes) + 8192
@@ -345,8 +346,7 @@ def _arguments(checks, elapsed, dimension, counts, *, reference_dimension):
 
 
 def verify(plan, result, *, checks):
-    """Run one explicitly selected bounded reference comparison in the original physical solution
-    frame.
+    """Run one explicitly selected bounded reference comparison in the original physical solution frame.
 
     The target is the Result's own phase-faithful physical vector, traced to
     its producing acquisition, so the comparison can never use a vector from
@@ -362,7 +362,6 @@ def verify(plan, result, *, checks):
         raise TypeError("checks requires one explicit LCHSVerification")
     _validate_result(plan, result)
     target, manifest = _target(plan, result, checks)
-    checks.validate_domain(plan.problem)
     selected_checks = checks._check_specs(plan)
     grid = None
     if checks.reference == "selected_grid" and plan.reconstruction.mode not in {"initial", "zero"}:

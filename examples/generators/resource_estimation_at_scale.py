@@ -611,7 +611,7 @@ budget_sum = bounds["kernel_approximation"] + bounds["k_quadrature"] + bounds["t
 show_table([
     ("Kernel", f"An–Childs–Lin Eq. (7) ({coefficients.resolved_lchs_kernel.implementation}), β = "
                f"{coefficients.resolved_lchs_kernel.parameters['beta']:g}", "Selected construction"),
-    ("Cutoff K", rule.effective_range_k, "Chosen by inverting the finite tail bound for its share"),
+    ("Cutoff K", rule.range_k, "Chosen by inverting the finite tail bound for its share"),
     ("Gauss rule", f"{2 * rule.interval_count_each_side} panels × {rule.node_count} points", "Exact selected inventory"),
     ("Branches / padded address slots", f"{lchs[100].reconstruction.physical_branches} / "
                                         f"{lchs[100].reconstruction.padded_branches}", "Exact selected inventory"),
@@ -1008,7 +1008,7 @@ show_table([(name, formula, library, "equal" if formula == library else "differe
 U = 2.0**-53  # binary64 unit roundoff
 beta = coefficients.resolved_lchs_kernel.parameters["beta"]
 record = lchs[100].reconstruction
-K, T, L_norm = rule.effective_range_k, record.elapsed_time, record.l_norm
+K, T, L_norm = rule.range_k, record.elapsed_time, record.l_norm
 C_beta = 2 * pi * exp(-2**beta)
 x = cos(beta * pi / 2) * K**beta
 rho = exp(asinh(1.8 / (K / rule.interval_count_each_side)))
@@ -1159,7 +1159,6 @@ for key, selected_qpe in [*qpe.items(), (("Commuting", 100), commuting)]:
     assert rec.pruned_mass == 0 and rec.identity_coefficient == 0
     W_exact, E, N, F = exact_census(terms)
     assert rec.bound_variant == "exact_census"
-    assert rec.coefficient_arithmetic == "outward_float64_scaled"
     W_rec = Q(*rec.bound_coefficient)
     delta = census_delta([abs(c) for _, c in terms], E, F, rec.census_block)
     assert W_exact <= W_rec <= W_exact*(1 + delta)

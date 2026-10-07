@@ -1,4 +1,4 @@
-"""Native dense augmentation/projector owners, without circuit imports."""
+"""Dense matrices of the QLS shortcut (projector complement, Dalzell augmentation), without circuit imports."""
 
 from typing import Any
 import numpy as np

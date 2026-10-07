@@ -1,4 +1,4 @@
-"""Current selected Result storage. Opening never plans or analyzes again.
+"""Saving, reporting and loading of a Result folder. Opening never plans or analyzes again.
 
 A saved Result folder holds ``result.json`` (format, selection, data and result)
 and its payload files. Saving checks the associations between Plan, receipts,
@@ -28,7 +28,7 @@ from nwqlib.execution import ExecutionTrace, ObservationView, PreparedArtifact
 # field change may instead bump that Method's archive format when load_result
 # checks it before validating the concrete Result. read_report checks shared
 # metadata, leaving Method-owned fields and archive formats uninterpreted.
-RESULT_FORMAT = "nwqlib.result/12"
+RESULT_FORMAT = "nwqlib.result/13"
 
 
 def _validate_recorded_data(plan_id, observations, trace, receipts, manifests):
@@ -43,7 +43,7 @@ def _validate_recorded_data(plan_id, observations, trace, receipts, manifests):
     The chunks are grouped by attempt, in one pass, and each group is frozen
     once. An ordinary readout's attempt holds its one chunk, whose identity
     the completed event names. A trajectory's attempt holds one chunk per
-    declared point, placed by the receipt's point index; a duplicate or
+    declared point, placed by the receipt's point index. A duplicate or
     missing point is refused, and the event names the identity of the
     ``ObservationView`` of the ordered collection. Each point chunk declares
     the one-point readout of its point in the receipt's trajectory
@@ -59,7 +59,6 @@ def _validate_recorded_data(plan_id, observations, trace, receipts, manifests):
         raise ValueError("saved preparation belongs to another Plan")
     if any(event.prepared_id not in prepared for event in trace.events):
         raise ValueError("saved attempt has no original preparation receipt")
-    from nwqlib.execution import ObservationView
 
     attempts = {}
     for chunk in observations.chunks:
@@ -116,7 +115,7 @@ def _saved_arrays(data):
     They are the RunData's artifact handles, as given, then the arrays of
     probability chunks that the handles do not hold, for example a chunk
     built with ``ObservationChunk.from_histogram``, which keeps its arrays in
-    memory. ``read()`` returns the stored array; it is called only when the
+    memory. ``read()`` returns the stored array. It is called only when the
     array is written.
     """
     arrays = [(handle.manifest, lambda handle=handle: handle.array) for handle in data.artifacts]
@@ -158,8 +157,9 @@ def _validate_selection(plan, data):
     for receipt in data.receipts:
         receipt.realization.validate_plan(plan)
         if receipt.execution == "quantum_circuit":
-            # The held Experiment and construction resolve the readout, so the
-            # point is selected once.
+            # Select the receipt's construction once and resolve the readout
+            # from that Experiment and construction, because
+            # ``Realization.resolved_observation`` would select it again.
             experiment, construction = receipt.realization._selected_construction(plan)
             if experiment.batch is None:
                 observation = experiment.observation

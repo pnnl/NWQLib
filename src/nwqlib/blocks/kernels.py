@@ -1,4 +1,7 @@
-"""Factory-bound host execution; portable Sources never resolve into callables."""
+"""Host kernels bound by a Method's factory.
+
+A portable Source never resolves into a callable.
+"""
 
 from dataclasses import dataclass, field
 
@@ -48,8 +51,9 @@ class KernelOutput:
 class BoundKernel:
     """Method-owned immutable inputs and an exact static or point-bound closure.
 
-    A point binder only captures already admitted inputs/arguments; numerical
-    work starts at invocation. Persisted declarations never load either callable.
+    A point binder only captures already admitted inputs and arguments.
+    Numerical work starts at invocation. Persisted declarations never load
+    either callable.
     A point closure may capture its context, but must not keep the live Run.
 
     Attributes:
@@ -72,7 +76,7 @@ class BoundKernel:
 
     @classmethod
     def _bind_pointwise(cls, plan, record, binder):
-        """Bind (realization, declaration, run) to one no-argument closure."""
+        """Return a pointwise binding whose ``binder(realization, declaration, run)`` returns the no-argument closure at each admitted point (see ``_at``)."""
         return cls._make(plan, record, call=None, binder=binder)
 
     @classmethod

@@ -32,6 +32,7 @@ from typing import Annotated, ClassVar, Literal, NamedTuple
 
 from pydantic import Field, StrictBool, StrictInt, model_validator
 
+from nwqlib.algorithms._eigen_inputs import AUTO_DENSE_PAULI_DIMENSION, classical_constant_matrix
 from nwqlib.algorithms.protocol import Method, AlgorithmDescriptor, ApplicabilityError
 from nwqlib.blocks import SelectedBlock, SelectedConstruction, select_preparation
 from nwqlib.core.analysis import Result, capture_analysis_origin
@@ -85,7 +86,38 @@ from nwqlib.operators.access import Count, _check_bytes
 from nwqlib._limits import DEFAULT_MAX_BYTES
 from nwqlib.problems.inputs import PhysicalScale, ingest_occupation
 from nwqlib.problems.records import Accuracy, Expectation, NormalizedExpectation, QuadraticForm
-from .expectation_metadata import _DESCRIPTOR, _METHOD
+
+_METHOD = Source(
+    name="finite_pauli_expectation",
+    version="2",
+    domain="normalized expectation or physical quadratic form of admitted Hermitian input",
+    reference="nwqlib.algorithms.expectation.ExpectationMethod",
+)
+
+_DESCRIPTOR = AlgorithmDescriptor(
+    method=_METHOD.name,
+    version=_METHOD.version,
+    problem_families=("expectation",),
+    output_families=("normalized_expectation", "quadratic_form"),
+    access_families=("pauli", "dense", "csr", "csc"),
+    resource_coverage=(
+        "bounded selected preparation/parity size and actual science/calibration shots",
+    ),
+    evidence_coverage=(
+        "exact grouped Pauli expectation, finite-shot parity statistics or explicit provider estimate",
+        "conditional fixed-time/time-uniform/Beta inference and selected binary readout calibration",
+    ),
+    limitations=(
+        "quantum: power-of-two Pauli or dense dimension "
+        f"<={AUTO_DENSE_PAULI_DIMENSION}; classical: original Hermitian matvec access",
+        "common ErrorModel preserves unknown preparation/simulation/physical accuracy",
+        "sampling/channel assumptions are explicit; provider uncertainty does not establish physical accuracy",
+        "fixed-time intervals require the original complete acquisition; no automatic anytime conversion",
+        "no certified bound or state/output fallback",
+    ),
+    references=(_METHOD,),
+    maintenance="NWQLib",
+)
 
 _ANALYSIS_SOURCE = Source(
     name="finite_pauli_expectation.analysis",
@@ -154,18 +186,12 @@ def _classical_constant(operator, *, max_bytes):
     does not establish this property.
 
     A Pauli table qualifies when every row with a nonzero coefficient has
-    ``x|z == 0``; the value is the fsum of the real coefficients. Separate
-    cancelling nonidentity rows are deliberately not recognized. For
-    admitted canonical dense/CSR/CSC storage every coordinate is unique, so
-    the number of nonzero stored values equals the number of nonzero
-    diagonal entries exactly when every off-diagonal value is zero.
-    Explicit sparse zeros do not affect the counts, and a missing sparse
-    diagonal coordinate reads as zero. Then the diagonal must be constant,
-    and ``diagonal[0].real`` is returned, not the trace mean: diag(1, 2)
-    is not a scalar observable. The work is O(D²) dense or O(nnz + D)
-    compressed. A raw duplicate-bearing sparse matrix before canonical
-    admission is outside this test. No eigensolve or format conversion is
-    performed.
+    ``x|z == 0``. The value is the fsum of the real coefficients. Separate
+    cancelling nonidentity rows are deliberately not recognized. Admitted
+    dense/CSR/CSC storage is tested by
+    ``_eigen_inputs.classical_constant_matrix``, the test that
+    ``gershgorin_frame`` applies for Lanczos. No eigensolve or format
+    conversion is performed.
     """
     import numpy as np
 
@@ -182,12 +208,9 @@ def _classical_constant(operator, *, max_bytes):
         operator.manifest.payload_bytes + 32 * d, max_bytes, "expectation scalar recognition"
     )
     compressed = operator.reference.representation in ("csr", "csc")
-    matrix = operator._data if compressed else operator.dense_array()
-    diagonal = matrix.diagonal()
-    values = matrix.data if compressed else matrix
-    if np.count_nonzero(values) != np.count_nonzero(diagonal):
-        return None
-    return float(diagonal[0].real) if np.all(diagonal == diagonal[0]) else None
+    return classical_constant_matrix(
+        operator._data if compressed else operator.dense_array(), compressed=compressed
+    )
 
 
 def _classical_action_requirements(operator, state, *, max_bytes):
@@ -210,7 +233,10 @@ def _classical_action_requirements(operator, state, *, max_bytes):
 
 
 class PauliCoefficient(Record):
-    """One physical observable coefficient; no encoding normalization is applied."""
+    """One physical observable coefficient.
+
+    No encoding normalization is applied.
+    """
 
     label: Text
     coefficient: Real
@@ -224,7 +250,7 @@ class ExpectationSetting(Record):
     nonidentity labels in first-fit member order, basis is the group's
     accumulated local Pauli basis (one I/X/Y/Z per qubit, qubit zero
     rightmost), and qubits lists the group's support, the non-I sites of
-    basis, in increasing order; its labels read only these sites. The
+    basis, in increasing order. Its labels read only these sites. The
     experiment measures the whole width-q register ``system`` into the
     width-q classical value ``readout``, bit i holding qubit i, and each
     label's parity is decoded from the support bits of that joint outcome.
@@ -310,14 +336,14 @@ class ExpectationStatistics(Record):
             non-identity term, named `<group setting>:<label>`, in group and
             member order. Its counts are the term's marginal parities in its
             group's histogram, and the terms of one group share that group's
-            sources, observations and preparation records, which count as one
+            measured data and preparation records, which count as one
             measurement. With mitigation, one `BinaryEstimate` per
             predeclared science and calibration setting, in setting order.
             Each keeps its raw counts and any posterior.
         corrections: With mitigation, one affine `BinaryCorrection` per
             science term, with its signed corrected point. Empty otherwise.
-        receipt_ids: Content hashes of the preparation records of the counted
-            sources.
+        receipt_ids: Content hashes of the preparation records behind the
+            counted data.
         raw_value: The same weighted sum over the uncorrected raw means, for
             the requested output.
         variance_kind: `"empirical"`, `"delta_method"` for fitted calibration,
@@ -330,9 +356,10 @@ class ExpectationStatistics(Record):
         interval: Linear image of the simultaneous per-population intervals
             for the requested output, or None for point inference.
         fixed_time: Whether the data qualify for a fixed-time interval:
-            exactly one complete original measurement per setting (group,
-            parity or calibration) with its preparation records, no reason
-            blocking a population, and no cancellation or early stop.
+            exactly one complete original measurement per predeclared setting
+            (group, parity or calibration) with its preparation records, no
+            recorded population reason that prevents interval inference, and
+            no cancellation or early stop.
         fixed_time_reason: Why `fixed_time` holds or fails.
         applicability_reason: Why missing preparation records leave the
             target, compiler or layout unverified, or None.
@@ -505,8 +532,6 @@ class ExpectationAnalysis(Result):
         ):
             raise ValueError("expectation result differs from its reconstruction/availability")
         if plan.reconstruction.classical:
-            if plan.reconstruction.operator_exponent != plan._native.get("operator_exponent"):
-                raise ValueError("classical observable exponent differs from original input binding")
             if self.statistics is not None or self.estimates or self.missing:
                 raise ValueError(
                     "classical expectation cannot contain quantum acquisition statistics"
@@ -792,7 +817,7 @@ class _BinaryData(NamedTuple):
         independence_reason: Why a fixed sampling stream shared across settings leaves their independence unverified, or None.
         fixed_time: Whether the data are one complete original acquisition per setting with its receipts, no blocking population reason, and no cancellation or early termination.
         fixed_time_reason: Why fixed_time holds or fails.
-        histograms: Group setting name to its joint histogram over distinct sources, outcome index to count, for grouped readout; empty with mitigation.
+        histograms: Group setting name to its joint histogram over distinct sources, outcome index to count, for grouped readout. Empty with mitigation.
     """
 
     populations: tuple
@@ -963,7 +988,7 @@ def _parity_counts(chunk, plan, trace, events, expected, layouts, support=None):
     The chunk's layouts must equal layouts, the logical registers and the
     classical readout that _measured_program declares.
     For a parity or calibration setting (support is None) the values may
-    hold only "0" and "1" count bins; n0 counts outcome 0 of the measured
+    hold only "0" and "1" count bins. n0 counts outcome 0 of the measured
     pivot bit, which is the +1 eigenvalue for a science term's Pauli, and
     n1 counts outcome 1, and (n0, n1) is returned. For a QWC group the
     histogram, read through ObservationChunk.histogram (indices, or packed
@@ -1484,7 +1509,7 @@ def _combined_interval(terms, selected, options, family_size, reconstruction, *,
     inference. On that event the weighted sum lies in the interval whose
     endpoints take each term's lower or upper endpoint by the sign of its
     coefficient. Terms that share calibration data make this an outer
-    enclosure. Labels of one QWC group use the same shots; the union bound
+    enclosure. Labels of one QWC group use the same shots. The union bound
     needs no independence between them. extra_assumptions are appended to
     the per-term assumptions.
     """
@@ -1610,7 +1635,7 @@ def _group_variance(plan, estimates, histograms, frame):
     two, so with the largest denominator D each ``D*c_j`` is an integer,
     ``D*Y_g(s)`` is an exact integer sum (_group_scores), and the quotient
     is ``(n*S2_D - S1_D**2)/(D**2*n**2*(n-1))`` with ``S1_D = D*S1`` and
-    ``S2_D = D**2*S2``; its width is checked against the exact-arithmetic
+    ``S2_D = D**2*S2``. Its width is checked against the exact-arithmetic
     limit. The work is one pass over the group's outcomes per label.
     Within-group covariance is essential and per-label
     means alone cannot recover it: for the Bell labels ZI and IZ with
@@ -1843,8 +1868,7 @@ def _binary_variance(
 
 
 def _analyze_measured(plan, observations, *, trace, receipts, inference):
-    """Infer and optionally calibrate the actual binary populations before combining their
-    observables.
+    """Infer each binary population, correct each science term with calibration when mitigation is set, and combine the terms into the value.
 
     Each stored population is inferred with infer_binary at delta/F for the
     F predeclared populations: the L labels of grouped readout, whose
@@ -1982,7 +2006,6 @@ def _analyze_measured(plan, observations, *, trace, receipts, inference):
         inference=inference,
         facts=_sampling_facts(plan, statistics, value, inference),
     )
-    result.validate_plan(plan)
     return result
 
 
@@ -2001,7 +2024,7 @@ def _sampling_facts(plan, statistics, value, inference):
     not substituted for the achieved radius.
 
     Each label's parity mean satisfies Hoeffding's bound at failure
-    probability delta/L with its group's n_g(j) shots; a union bound over
+    probability delta/L with its group's n_g(j) shots. A union bound over
     labels and the triangle inequality need no independence within or
     across groups (ExpectationMethod.sampling_shots, Hoeffding (1963),
     doi:10.1080/01621459.1963.10500830, Theorem 2). The fact is a numerical
@@ -2043,7 +2066,7 @@ def _sampling_facts(plan, statistics, value, inference):
         if not 0 < failure < 1:
             return ()
         coefficients = {term.label: abs(term.coefficient) for term in plan.reconstruction.terms}
-        # One marginal population per label; n_g(j) is its group's size.
+        # One marginal population per label. n_g(j) is its group's size.
         sizes = {
             item.population.name: item.population.zeros + item.population.ones
             for item in statistics.populations
@@ -2090,7 +2113,12 @@ def _sampling_facts(plan, statistics, value, inference):
 
 
 def _provider_mean(estimates):
-    """Round the mean once; avoid overflow or premature underflow in scaling."""
+    """Return the mean of the provider estimates' values, rounded once, or None when there are none.
+
+    A single estimate is returned unchanged. ``_mean`` adds the values in
+    exact rationals, so neither overflow nor early underflow can occur
+    before the single rounding.
+    """
     if not estimates:
         return None
     if len(estimates) == 1:
@@ -2108,11 +2136,12 @@ def _mean(values):
 
 
 def _analyze_estimated(plan, observations, *, trace, receipts):
-    """Preserve provider uncertainty for the weighted sum; do no count inference.
+    """Keep the provider uncertainty for the weighted sum.
 
-    Repeated acquired estimates have an empirical arithmetic-mean point only.
-    Their original standard errors remain separate; no covariance or combined
-    standard error is manufactured for that mean.
+    No count inference is done. Repeated acquired estimates have an
+    empirical arithmetic-mean point only. Their original standard errors
+    remain separate. No covariance or combined standard error is
+    manufactured for that mean.
     """
     events = {event.attempt: event for event in trace.events}
     receipt_map = {receipt.content_id: receipt for receipt in receipts}
@@ -2187,7 +2216,6 @@ def _analyze_estimated(plan, observations, *, trace, receipts):
         if estimates and value is None
         else None,
     )
-    result.validate_plan(plan)
     return result
 
 
@@ -2210,8 +2238,8 @@ def _measured_program(problem, labels, method, shots):
     ``(-1)**popcount(outcome & support_j)``. Measuring the sites outside
     the group's support adds q - s_g physical measurements per shot but no
     basis rotation or CX gate, and summing over their outcomes gives the
-    support marginal. shots keeps its meaning of shots per setting, now per
-    group, so the science workload is G*shots.
+    support marginal. shots counts the shots of one setting, which here is
+    one group, so the science workload is G*shots.
 
     With mitigation, each nonidentity term gets its own science experiment,
     which applies the state PREP, the label's basis rotations and CX parity
@@ -2287,7 +2315,7 @@ def _measured_program(problem, labels, method, shots):
                     if axis != "I":
                         axes[bit] = axis
             basis = "".join(reversed(axes))
-            # One selected basis block per group; first fit gives each group a
+            # One selected basis block per group. First fit gives each group a
             # distinct accumulated basis.
             signature = f"basis_{index}"
             blocks.append(select_pauli_group_basis(signature, basis, basis=state.manifest.basis))
@@ -2408,8 +2436,6 @@ def _terms(problem, output):
     form is zero, and _validate_inputs has already rejected its normalized
     expectation.
     """
-    from nwqlib.algorithms._eigen_inputs import AUTO_DENSE_PAULI_DIMENSION
-
     _validate_inputs(problem, output, quantum=True)
     if problem.state.preparation.physical_scale.mantissa == 0:
         return ()
@@ -2474,8 +2500,9 @@ class ExpectationMethod(Method):
 
     Attributes:
         preparation_choice: Default `"native"`, the state's own preparation
-            circuit. `"hzh"` selects an equivalent wiring that is accepted
-            only for occupation-number states.
+            circuit. `"hzh"` prepares each occupied site with the gates H, Z,
+            H, which equal X, in place of X, and is accepted only for
+            occupation-number states.
         inference: Default `BinaryInferenceOptions()`, empirical points
             without an interval. How measured counts become estimates and
             intervals. Any other choice needs positive shots.
@@ -2496,14 +2523,15 @@ class ExpectationMethod(Method):
             classical operator applications, and on the comparisons that
             sort the terms of sampled readout into qubit-wise commuting
             groups.
-        max_admission_steps: Default `1_000_000`. Limit on the planning work
-            of checking each circuit description that the method builds. It
-            caps both the number of stored fields of a description and the
-            work units of one structural check of it.
-            Summing a description's resource counts may use up to 24 times
-            this value. The default equals that of `QLS` and is ten times the
-            shared default of `100_000`. Raising it permits a larger check
-            and changes no quantum operation
+        max_admission_steps: Default `1_000_000`. Upper limit on the
+            planning work of checking each `Program` that the method builds
+            (NWQLib's description of a circuit as named steps). It caps the
+            number of stored fields of a `Program` and the work units of one
+            check of it. Summing a `Program`'s resource counts may use up to
+            24 times this value. A larger `Program` is refused with a
+            ValueError that names this field, the refused stage and its
+            count. Raising the limit permits a larger check and changes no
+            quantum operation
             ([planning work limit](../../development/program_checks.md#planning-work-limit)).
 
     Raises:
@@ -2625,10 +2653,10 @@ class ExpectationMethod(Method):
         # P(|mean-mu|>r) <= 2 exp(-n*r^2/2). With C=sum|cj| over the L labels,
         # a union bound at delta/L and the triangle inequality set r=eps/C,
         # so the labels of one QWC group may share its shots. This conditions
-        # on independent stationary successive shots of each group; it bounds
-        # sampling alone, not native/PREP/physical bias.
+        # on independent stationary successive shots of each group. It bounds
+        # sampling alone, not native, PREP or physical bias.
         # Preserve exact binary64 inputs before the transcendental evaluation.
-        # Decimal.ln is correctly rounded; next_plus and upward arithmetic keep
+        # Decimal.ln is correctly rounded. next_plus and upward arithmetic keep
         # the admitted integer above the analytical bound near an integer edge.
         from decimal import Decimal, ROUND_CEILING, localcontext
         from fractions import Fraction
@@ -2782,7 +2810,14 @@ class ExpectationMethod(Method):
         )._bind(blocks=blocks)
 
     def _plan_classical(self, problem, output, rng):
-        """Select one original-dimensional matvec and scalar reduction; no PREP work."""
+        """Plan the classical kernel, one matrix-vector product with the observable in its original dimension and its scalar reduction.
+
+        No circuit is built. The kernel's counted work adds the products of
+        the scaled observable action and the known classical preparation
+        products of the state. A custom circuit's unknown preparation work is
+        left out. An observable equal to cI, or a zero state, needs no kernel,
+        and the Plan's Program is one empty Sequence.
+        """
         from nwqlib.algorithms._eigen_inputs import preparation_requirements
         from nwqlib.algorithms._eigen_support import host_construction
         from nwqlib.operators.inputs import _observable_exponent
@@ -2845,8 +2880,7 @@ class ExpectationMethod(Method):
                 "classical normalized-direction matvec; floating-point reduction is not a certified bound",
             ),
         )
-        return plan._bind(blocks=self._host_blocks(plan) if experiments else (),
-                          operator_exponent=exponent)
+        return plan._bind(blocks=self._host_blocks(plan) if experiments else ())
 
     def _host_blocks(self, plan):
         """Bind the classical kernel that evaluates v^dagger (O*2**(-e)) v.
@@ -2922,7 +2956,6 @@ class ExpectationMethod(Method):
             else "classical physical observable is unrepresentable",
             facts=exact_readout_sampling(plan, data.observations, random_draws=False),
         )
-        result.validate_plan(plan)
         return result
 
     def analyze(self, plan, data, *, settings):
@@ -2971,7 +3004,6 @@ class ExpectationMethod(Method):
             else None,
             facts=exact_readout_sampling(plan, data.observations, random_draws=False),
         )
-        result.validate_plan(plan)
         return result
 
     def save_archive(self, plan, files):
@@ -2986,7 +3018,7 @@ class ExpectationMethod(Method):
 
         if plan.execution == "classical":
             return dict(
-                format="expectation/5",
+                format="expectation/6",
                 plan=plan.to_record(),
                 problem=files.write_problem(plan.problem),
                 output=files.write_output(plan.output),
@@ -3010,7 +3042,7 @@ class ExpectationMethod(Method):
                 "preparation" if block._constructor is _preparation_circuit else "primitives"
             )
         return dict(
-            format="expectation/5",
+            format="expectation/6",
             plan=plan.to_record(),
             problem=files.write_problem(plan.problem),
             output=files.write_output(plan.output),
@@ -3033,8 +3065,8 @@ class ExpectationMethod(Method):
         from nwqlib._choice_archive import unsupported_archive_format
         from nwqlib.blocks.selection import _preparation_circuit, _primitive_circuit
 
-        if saved.get("format") != "expectation/5":
-            raise unsupported_archive_format("Expectation archive", saved.get("format"), "expectation/5")
+        if saved.get("format") != "expectation/6":
+            raise unsupported_archive_format("Expectation archive", saved.get("format"), "expectation/6")
         method = cls.model_validate(saved["method"])
         plan = files.read_plan(
             saved["plan"],
@@ -3054,8 +3086,7 @@ class ExpectationMethod(Method):
                 exponent = _observable_exponent(plan.problem.observable)
             if plan.reconstruction.operator_exponent != exponent:
                 raise ValueError("saved observable exponent differs from original input storage")
-            return plan._bind(blocks=method._host_blocks(plan) if plan.experiments else (),
-                              operator_exponent=exponent)
+            return plan._bind(blocks=method._host_blocks(plan) if plan.experiments else ())
         inputs = {name: files.read_state(value) for name, value in saved["inputs"].items()}
         constructors = dict(preparation=_preparation_circuit, primitives=_primitive_circuit)
         blocks = tuple(

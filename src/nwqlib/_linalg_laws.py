@@ -53,14 +53,13 @@ def seeded_norm_estimates():
     generator (np.random.randint). scipy.sparse.linalg.expm calls it from
     order 200, and expm_multiply for a shifted 1-norm above 63.36, condition
     (3.13) of Al-Mohy and Higham (2011), doi:10.1137/100788860. Without
-    this guard such a call
-    advances the caller's random stream, and the estimated norms, and with
-    them the parameters SciPy selects and the rounding of its result, depend
-    on the caller's state. Inside the guard the generator starts from seed 0,
-    so the same input gives the same draws and the same result, and on exit
-    the generator returns to the caller's state. The generator is shared by
-    the whole process, so another thread that draws from it during the call
-    interleaves with these draws.
+    this guard such a call advances the caller's random stream, and the
+    estimated norms, and with them the parameters SciPy selects and the
+    rounding of its result, depend on the caller's state. Inside the guard
+    the generator starts from seed 0, so the same input gives the same draws
+    and the same result, and on exit the generator returns to the caller's
+    state. The generator is shared by the whole process, so another thread
+    that draws from it during the call interleaves with these draws.
     """
     import numpy as np
 
@@ -77,23 +76,26 @@ def expm_requirements(dimension, norm):
 
     Both scipy.linalg.expm and scipy.sparse.linalg.expm follow Algorithm 5.1
     of Al-Mohy and Higham, SIAM J. Matrix Anal. Appl. 31, 970 (2009),
-    doi:10.1137/09074721X. They
-    form M**2, M**4, M**6, M**8 and M**10 to choose the Pade degree (for
-    large n they estimate the norms of the last two instead), then three
-    products and one LU solve with n right-hand sides for the degree-13
-    quotient, then s squarings. The squaring count is ceil(log2(eta/4.25)),
-    with eta at most ||M||_1, plus a backward-error term that adds squarings
-    only while 2**-s ||M||_1 exceeds 2**2.44, so
-    s <= max(0, ceil(log2(||M||_1/4.25))). The law charges
-    ceil(log2 ||M||_1) squarings, two more once ||M||_1 exceeds 4.25, which
-    covers rounding in that choice. The work is (10 + s) n**3 units, eight
-    products and 4/3 for the solve, plus 128 n**2 units for the 79 products
-    of |M| with a vector in the backward-error tests of orders 3 to 13,
-    their absolute values and norms, and 34 scaled sums of the Pade
-    evaluation. The kernels hold at most 20 complex n-square arrays at once
-    (M, the identity, the five powers, four scaled powers, two partial
-    products, U, V, their sum and difference, the LU factors, the solution
-    and a squared copy), 320 n**2 bytes, and 65536 bytes cover small objects.
+    doi:10.1137/09074721X. They form M**2, M**4, M**6, M**8 and M**10 to
+    choose the Pade degree (for large n they estimate the norms of the last
+    two instead), then three products and one LU solve with n right-hand
+    sides for the degree-13 quotient, then s squarings. The squaring count
+    is ceil(log2(eta/4.25)), with eta at most ||M||_1, plus a backward-error
+    term that adds squarings only while 2**-s ||M||_1 exceeds 2**2.44, so
+    s <= max(0, ceil(log2(||M||_1/4.25))).
+    The law charges ``ceil(log2(norm))`` squarings when ``norm > 1`` and
+    zero otherwise, using the supplied upper bound ``norm`` on ``||M||_1``.
+    For ``norm > 4.25``, this charge is two or three larger than
+    ``ceil(log2(norm/4.25))`` in exact arithmetic.
+    With c the charged squaring count above, the law charges (10 + c) n**3
+    units for eight products, the solve at 4/3 n**3 units and c squarings.
+    It adds 128 n**2 units for the 79 products of |M| with a vector in the
+    backward-error tests of orders 3 to 13, their absolute values and norms,
+    and 34 scaled sums of the Pade evaluation.
+    The kernels hold at most 20 complex n-square arrays at once (M, the
+    identity, the five powers, four scaled powers, two partial products, U,
+    V, their sum and difference, the LU factors, the solution and a squared
+    copy), 320 n**2 bytes, and 65536 bytes cover small objects.
     Traced peaks of scipy.sparse.linalg.expm stayed at or below 17.2 complex
     n-square arrays for n from 32 to 256. scipy.linalg.expm allocates
     6 n**2 + 4 n complex entries of workspace and its n-square output.
@@ -121,12 +123,11 @@ def expm_multiply_requirements(dimension, entries, norm):
     and norm bounds ||G - (trace(G)/n) I||_1, the shifted 1-norm that SciPy
     uses. SciPy 1.18.1 implements Algorithm 3.2 of Al-Mohy and Higham
     (2011), doi:10.1137/100788860, in _expm_multiply_simple. It shifts G
-    by its mean diagonal and
-    takes the exact 1-norm, 5 (entries + n) units. It then applies s times
-    m terms of the Taylor series, one product of G with a vector each. The
-    parameter search of _fragment_3_1 includes the pair m = 55,
-    s = ceil(alpha/9.9) with alpha at most the norm, so it applies at most
-    55 ceil(norm/9.9) products and none for a zero norm. Above the 1-norm of
+    by its mean diagonal and takes the exact 1-norm, 5 (entries + n) units.
+    It then applies s times m terms of the Taylor series, one product of G
+    with a vector each. The parameter search of _fragment_3_1 includes the
+    pair m = 55, s = ceil(alpha/9.9) with alpha at most the norm, so it
+    applies at most 55 ceil(norm/9.9) products and none for a zero norm. Above the 1-norm of
     condition (3.13), 63.36 for one vector, it also estimates the 1-norms of
     the powers 2 to 9 with onenormest. Each estimate of the p-th power makes
     at most six forward and five transposed products of a two-column block,

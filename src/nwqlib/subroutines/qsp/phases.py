@@ -6,7 +6,7 @@ Ni, and Wang, arXiv:2307.12468v1. Equation and section numbers refer to
 these arXiv versions, those of [DLNW] to the PDF of that version.
 
 Convention (project standard, [MRTC] arXiv:2105.02859v5, Sec. II.A,
-Eqs. (1)-(3) and Theorem 1; App. A.1, Eq. (A2)): the signal operator is
+Eqs. (1)-(3) and Theorem 1, and App. A.1, Eq. (A2)): the signal operator is
 ``W(x) = [[x, i sqrt(1-x^2)], [i sqrt(1-x^2), x]]``, phases apply as
 ``e^{i phi Z}``, and a phase vector ``(phi_0, ..., phi_d)`` realizes
 
@@ -77,8 +77,7 @@ of them.
 L-BFGS runs in ``scipy.optimize`` and each Newton step is one
 ``numpy.linalg.lstsq`` solve. Phase-factor computation
 is classical preprocessing of ``poly(d)`` cost, independent of any
-Hilbert-space dimension
-(``classical_preprocessing_scope: "qsp_phase_factor_optimization"``).
+Hilbert-space dimension.
 """
 
 from __future__ import annotations
@@ -95,29 +94,28 @@ from nwqlib.operators.access import DEFAULT_INPUT_BYTES, _check_bytes
 
 # Engineering constants for the phase solver (registered in
 # docs/ENGINEERING_CONSTANTS.md). Rationale:
-# - GRID_MULTIPLIER 4: the symmetric problem is exactly determined on
-#   ceil((d+1)/2) positive Chebyshev nodes; a 4x overdetermined grid removes
+# - QSP_SOLVER_GRID_MULTIPLIER 4: the symmetric problem is exactly determined on
+#   ceil((d+1)/2) positive Chebyshev nodes, and a 4x overdetermined grid removes
 #   spurious fit-the-grid minima observed at 1x. Revisit if solver cost binds.
-# - LBFGS ftol 1e-30 / gtol 1e-18: the objective is a mean SQUARE residual,
-#   so hitting a 1e-12 residual needs objective ~1e-24; scipy's defaults stop
+# - QSP_SOLVER_LBFGS_OPTIONS ftol 1e-30 / gtol 1e-18: the objective is a mean squared
+#   residual, so hitting a 1e-12 residual needs objective ~1e-24. SciPy's defaults stop
 #   at ~1e-18 objective. maxiter 2000 covers the worst converged case (~1500).
 #   Revisit when the residual tolerance or the objective changes.
-# - POLISH_MAX_STEPS 30 with 15 halvings: damped Gauss-Newton supplies the
-#   terminal quadratic digits after L-BFGS, and the same limits bound the
-#   Newton start of [DLNW] arXiv:2307.12468v1. Steps that do not reduce the
-#   max residual are
-#   rejected, so each run can only improve its starting point. On the
-#   default grid of the registered tau x epsilon sweep the Newton start
+# - QSP_SOLVER_POLISH_MAX_STEPS 30 with 15 halvings (QSP_SOLVER_POLISH_MAX_HALVINGS):
+#   damped Gauss-Newton supplies the terminal quadratic digits after L-BFGS, and the
+#   same limits bound the Newton start of [DLNW] arXiv:2307.12468v1. Steps that do not
+#   reduce the max residual are rejected, so each run can only improve its starting
+#   point. On the default grid of the registered tau x epsilon sweep the Newton start
 #   converged within 10 residual evaluations, including the evaluation at
 #   the starting point.
 #   Revisit if the polish or the Newton start stops above the residual
 #   tolerance on a target that passes the max|f| <= 1 check.
-# - RESIDUAL_TOLERANCE 1e-12: the stopping tolerance of [DMWL]
+# - QSP_SOLVER_RESIDUAL_TOLERANCE 1e-12: the stopping tolerance of [DMWL]
 #   arXiv:2002.11649v2, Eq. (30),
 #   applied here to the dense verification grid. It is a solver acceptance
 #   control, not a bound on the error of any transformed operator. Revisit
 #   for a different floating-point precision.
-# - TARGET_BOUNDARY_ULPS 256: admission band above max|f| = 1 for the
+# - QSP_TARGET_BOUNDARY_ULPS 256: admission band above max|f| = 1 for the
 #   binary64 evaluation of the target's norming bound. A target whose bound
 #   exceeds one by more than this band is rejected before optimization.
 #   Revisit if the norming implementation or the supported precision changes.
@@ -169,7 +167,7 @@ def _real_coefficients(values: Any, *, max_degree: int, max_bytes: int) -> np.nd
 
 
 class _PhaseEvaluations:
-    """One solver's actual objective/Jacobian and verification evaluations."""
+    """Count the objective, Jacobian and verification evaluations of one solve against its evaluation limit."""
 
     def __init__(self, maximum: int, limit_name: str = "max_evaluations"):
         self.maximum = integer(maximum, limit_name, 1)
@@ -183,7 +181,17 @@ class _PhaseEvaluations:
 
 
 def chebyshev_grid(num_points: int) -> np.ndarray:
-    """Return the Chebyshev grid ``x_j = cos(pi (j + 1/2) / M)``."""
+    """Return the Chebyshev grid ``x_j = cos(pi (j + 1/2) / M)``, ``j = 0, ..., M - 1``, with ``M = num_points``.
+
+    Args:
+        num_points (int): Positive number `M` of nodes.
+
+    Returns:
+        grid (numpy.ndarray): The `M` nodes in index order.
+
+    Raises:
+        ValueError: If `num_points` is not positive.
+    """
 
     if num_points <= 0:
         raise ValueError("num_points must be positive")
@@ -196,7 +204,7 @@ def chebyshev_norming_sup_bound(
     degree: int,
     num_points: int,
 ) -> float:
-    """Bound a degree-``degree`` polynomial's sup norm from a Chebyshev grid.
+    """Bound the sup norm of a polynomial of degree `degree` from its maximum on a Chebyshev grid.
 
     Returns ``grid_max / cos(pi d / (2 N))``, an upper bound on
     ``sup_{x in [-1, 1]} |p(x)|`` when ``grid_max`` is the largest ``|p|``
@@ -277,6 +285,16 @@ def chebyshev_polynomial_sup_bound(chebyshev_coefficients: Any, *, max_degree: i
     scale and the input check of `solve_symmetric_qsp_phases` all use this
     bound. `max_degree` (default 256) and `max_bytes` (default 10 GB) are
     checked before the grid is formed.
+
+    Args:
+        chebyshev_coefficients (array_like): Chebyshev coefficients
+            `(c_0, ..., c_d)` of `f`.
+        max_degree (int): Default 256. Largest accepted degree `d`.
+        max_bytes (int): Default 10 GB (decimal, `10_000_000_000` bytes).
+            Limit on the grid arrays.
+
+    Returns:
+        bound (float): The upper bound on ``sup_{x in [-1, 1]} |f(x)|``.
     """
 
     return _chebyshev_polynomial_norming_data(chebyshev_coefficients, max_degree=max_degree, max_bytes=max_bytes)[2]
@@ -345,10 +363,18 @@ def wx_phases_to_reflection(phases: Any) -> tuple[np.ndarray, float]:
     except that the
     ``i^d`` factor is returned as a global phase (see the module docstring).
 
+    Args:
+        phases (array_like): Wx phase vector `(phi_0, ..., phi_d)` with
+            `d >= 1`.
+
     Returns:
-        ``(reflection_phases, global_phase)`` such that the reflection-form
-        product times ``e^{i global_phase}`` equals the Wx-form product;
-        ``global_phase = d * pi / 2`` compensates the ``i^d`` factor.
+        reflection_phases (numpy.ndarray): The reflection-convention phases.
+        global_phase (float): ``global_phase = d * pi / 2`` compensates the
+            ``i^d`` factor, so that the reflection-form product times
+            ``e^{i global_phase}`` equals the Wx-form product.
+
+    Raises:
+        ValueError: If fewer than two phases are given.
     """
 
     converted = np.asarray(phases, dtype=float).copy().reshape(-1)
@@ -367,13 +393,15 @@ class SymmetricQSPPhases:
     """Solved symmetric QSP phase factors with their residual and its sup-norm bound.
 
     [`solve_symmetric_qsp_phases`][nwqlib.subroutines.qsp.phases.solve_symmetric_qsp_phases]
-    returns it. The answer is `phases`. The fields below are read-only.
+    returns it. Its `phases` field holds the result. The fields below are
+    read-only.
 
     Attributes:
         phases: Full symmetric Wx phase vector `(phi_0, ..., phi_d)`.
         degree: Polynomial degree `d`.
         parity: Target parity (`0` even, `1` odd).
-        target_chebyshev_coefficients: The solved-for coefficient vector.
+        target_chebyshev_coefficients: Chebyshev coefficients
+            `(c_0, ..., c_d)` of the target `f` that the phases fit.
         max_residual: Largest `|Re P - f|` on the dense verification grid.
         residual_sup_bound: Chebyshev-grid norming bound on
             `sup_{x in [-1,1]} |Re P(x) - f(x)|`.
@@ -436,7 +464,7 @@ def _symmetric_problem(coefficients: np.ndarray, *, evaluations: _PhaseEvaluatio
     degree = coefficients.size - 1
     num_free = (degree + 2) // 2
     num_points = QSP_SOLVER_GRID_MULTIPLIER * num_free
-    # Positive-half Chebyshev nodes of [DMWL] arXiv:2002.11649v2; parity makes
+    # Positive-half Chebyshev nodes of [DMWL] arXiv:2002.11649v2. Parity makes
     # x < 0 redundant.
     grid = np.cos((2.0 * np.arange(1, num_points + 1) - 1.0) * np.pi / (4.0 * num_points))
     target = np.polynomial.chebyshev.chebval(grid, coefficients)

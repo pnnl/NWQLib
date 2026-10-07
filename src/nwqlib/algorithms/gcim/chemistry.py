@@ -18,7 +18,7 @@ CHEMISTRY_EXTRA_MESSAGE = (
     'install them with pip install "nwqlib[chemistry]".'
 )
 # Coefficients below this fraction of an MO's largest AO magnitude do not set its
-# sign. Symmetry zeros carry roundoff near 1e-16 of the scale; see
+# sign. Symmetry zeros carry roundoff near 1e-16 of the scale. See
 # docs/ENGINEERING_CONSTANTS.md.
 ORBITAL_PHASE_RELATIVE_THRESHOLD = 1.0e-8
 
@@ -68,8 +68,10 @@ class GCIMChemistryProblemData:
         reference_panel: RHF and explicitly requested MP2/CCSD/CASCI values/statuses.
             Unrequested or failed reference energies stay None with their status/reason.
         metadata: Geometry and basis, charge, ordering, cutoff, active space
-            and dependency versions of this construction. `to_dict` omits the
-            large integral tensors.
+            and dependency versions of this construction, and the reference
+            panel under `"chemistry_reference_panel"`, which
+            `chemistry_reference_diagnostic` reads. `to_dict` omits the large
+            integral tensors.
     """
 
     hamiltonian: SparsePauliOp
@@ -420,8 +422,8 @@ def chemistry_reference_diagnostic(
     e_hf = panel.get("e_hf")
     e_ccsd = panel.get("e_ccsd")
     if energy is not None and e_hf is not None and e_ccsd is not None:
-        # A zero-correlation panel (E_CCSD == E_HF) has no defined fraction;
-        # the panel is context, not a gate, so record why instead of failing
+        # A zero-correlation panel (E_CCSD == E_HF) has no defined fraction.
+        # The panel is context, not a gate, so record why instead of failing
         # a completed run during result assembly.
         if float(e_ccsd) == float(e_hf):
             diagnostic["correlation_fraction_note"] = "undefined: E_CCSD == E_HF"
@@ -699,9 +701,7 @@ def _chemistry_reference_panel(
     reference_methods: tuple[str, ...],
     casci: Any | None,
 ) -> dict[str, Any]:
-    """Run only requested molecular reference methods and preserve missing or failed results as
-    context.
-    """
+    """Run only the requested molecular reference methods and keep missing or failed results as context."""
     panel: dict[str, Any] = {
         "label": "application context, not a validation gate",
         "e_hf": float(rhf_energy),
@@ -756,7 +756,7 @@ def _chemistry_reference_panel(
 
 
 def _mp2_reference(extras: _ChemistryExtras, mean_field: Any) -> dict[str, Any]:
-    # PySCF 2.13 MP2 does not expose ``converged``; absence means "not
+    # PySCF 2.13 MP2 does not expose ``converged``. Its absence means "not
     # reported", not failure. CCSD below does expose it and must pass.
     return _reference_energy(
         "mp2",
@@ -833,7 +833,7 @@ def _fixed_orbital_phase(mo_coefficients: np.ndarray) -> np.ndarray:
 
     The rule reads the first significant coefficient rather than the largest one,
     because symmetry-equivalent atoms give largest magnitudes that differ only
-    by roundoff. It fixes signs only; a degenerate orbital subspace can still be
+    by roundoff. It fixes signs only. A degenerate orbital subspace can still be
     returned in another rotation.
     """
     magnitudes = np.abs(mo_coefficients)

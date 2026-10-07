@@ -487,7 +487,7 @@ def test_maximizer_and_mode_status_survive_save_and_load_and_contradictions_are_
     assert [(r.most_probable_indices, r.probability_maximizer_indices, r.mode_status) for r in results] == expected
     paths = [result.save(tmp_path / str(i)) for i, result in enumerate(results)]
     forbid = Mock(side_effect=AssertionError("load analyzed, decoded, summarized or evolved"))
-    for name in ("_evolve_restricted", "_summarize", "decode_onehot_basis_index"):
+    for name in ("_evolve_restricted", "_summarize"):
         monkeypatch.setattr(owner, name, forbid)
     monkeypatch.setattr(QHD, "analyze", forbid)
     monkeypatch.setattr("nwqlib.algorithms.qhd.decoding.decode_statevector_probabilities", forbid)
@@ -569,7 +569,7 @@ def test_position_moments_come_from_saved_marginals(tmp_path, monkeypatch):
         path = result._attach(source.plan, data).save(tmp_path / str(index))
         restored.append(load_result(path))
     forbid = Mock(side_effect=AssertionError("moments evolved, decoded, evaluated or acquired"))
-    for name in ("_evolve_restricted", "objective_at", "decode_onehot_basis_index"):
+    for name in ("_evolve_restricted", "objective_at"):
         monkeypatch.setattr(owner, name, forbid)
     monkeypatch.setattr(QHD, "analyze", forbid)
     monkeypatch.setattr("nwqlib.algorithms.qhd.decoding.decode_statevector_probabilities", forbid)

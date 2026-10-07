@@ -21,9 +21,10 @@ class QLSVerification(Record):
     `result.verify(checks=...)`, for example
     `result.verify(checks=QLSVerification(comparisons=("spectral_domain",)))`.
     `comparisons` is the only required argument. The call returns
-    `(receipt, facts)`, with one nonnegative dimensionless fact per
-    comparison, in the given order, ready for
-    `Certificate.with_verification` with the same options. The receipt also
+    `(receipt, facts)`: a `VerificationReceipt` that records the check, its
+    raw values and the numerical calls it made, and a tuple with one
+    nonnegative dimensionless `FramedFact` per comparison, in the given
+    order, ready for `Certificate.with_verification` with the same options. The receipt also
     keeps the companion values, such as raw discrepancies and error
     budgets. The [QLS guide](../../algorithms/qls.md#explicit-verification-and-evidence)
     shows a complete check.
@@ -245,14 +246,14 @@ def _threshold(plan, choice, comparison):
 def _target(plan, result, choice):
     """Admit the requested comparisons and return the acquired vector they compare.
 
-    Inverse comparisons need an inverse Plan, and shortcut comparisons a
-    shortcut Plan. Mass comparisons need an observed algorithm mass from a
+    ``verification_checks`` has already admitted the solver: inverse
+    comparisons need an inverse Plan, and shortcut comparisons a shortcut
+    Plan. Mass comparisons need an observed algorithm mass from a
     nonempty population. Vector comparisons need the Result's own stored
     vector in its declared frame, which keeps physical scale and phase for
     the inverse and is a unit vector modulo global phase for a shortcut. Returns
     ``(vector, manifest)``, or ``(None, None)`` when no vector is compared.
     """
-    _admit_solver(plan, choice)
     inverse = plan.method.solver == "qsvt_inverse"
     vector = any(
         name in choice.comparisons for name in ("inverse_relative_error", "shortcut_direction")
@@ -280,8 +281,7 @@ def _target(plan, result, choice):
 
 
 def _verify(plan, result, choice):
-    """Run the explicitly requested spectral, inverse or direction reference comparisons under
-    their work caps.
+    """Run the explicitly requested spectral, inverse or direction reference comparisons under their work caps.
     """
     import numpy as np
     from nwqlib._linalg_laws import singular_values_work
@@ -505,9 +505,9 @@ def _comparisons(plan, result, options, *, bounds, norm, discrepancy, parameters
     rec = plan.reconstruction
     values = {}
     # An explicit numeric kappa is an admitted premise, not its proof. Only
-    # compatible selected/acquired numerical evidence can contradict it here;
-    # absence never requests a hidden spectrum computation.
-    lower, upper = (None, None) if bounds is None else bounds
+    # compatible selected/acquired numerical evidence can contradict it here.
+    # Absence never requests a hidden spectrum computation.
+    lower, upper = bounds
     lower_deficit = None if lower is None else max(0.0, 1.0 - (lower / rec.alpha) * rec.kappa_be)
     upper_deficit = None if upper is None else max(0.0, upper / rec.alpha - 1.0)
     covered = all(
@@ -632,7 +632,7 @@ def _comparisons(plan, result, options, *, bounds, norm, discrepancy, parameters
                 widened_lower = widened_upper = deterministic = None
                 if covered and delta is not None:
                     # Reuse exact selected endpoints when there is no phase-fit
-                    # discrepancy; sqrt followed by square would add rounding.
+                    # discrepancy. Sqrt followed by square would add rounding.
                     # Numerical sqrt/square rounding must not shrink the
                     # base interval that a nonnegative delta only widens.
                     widened_lower = (

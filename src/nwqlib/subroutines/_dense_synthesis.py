@@ -55,11 +55,10 @@ The construction:
   two-qubit block with a small second Weyl coordinate, near the
   controlled-rotation class or a local gate, can keep three CX, because the
   trace condition of A.2 then fixes the diagonal too poorly to remove the
-  last coordinate exactly. In tests this happened below about 1e-3 for a
-  first coordinate of 0.7 and below about 1e-2 near a local gate. With one
-  more CX in every block except the last, any input on n >= 2 qubits takes
-  at most ``(25/48) 4**n - (3/2) 2**n + 2/3`` CX, the count of the
-  recursion without A.2. A matrix that is block diagonal with respect to
+  last coordinate exactly. With one more CX in every block except the last,
+  any input on n >= 2 qubits takes at most
+  ``(25/48) 4**n - (3/2) 2**n + 2/3`` CX, the count of the recursion
+  without A.2. A matrix that is block diagonal with respect to
   one qubit, such as a controlled unitary, is demultiplexed directly and
   does not use A.2, as in Qiskit. On m >= 3 qubits it takes one
   multiplexor of ``2**(m-1)`` CX and two (m-1)-qubit blocks without A.2,
@@ -828,9 +827,11 @@ def _standard_gate_appender(circuit: Any):
     ``QuantumCircuit._append_standard_gate`` does in Qiskit 2.5.2, and add
     it with ``QuantumCircuit._append``, which Qiskit
     documents as a fast path for callers that have checked their
-    arguments. The first two are private (docs/dependency_issues.md,
+    arguments. ``CircuitInstruction.from_standard`` is undocumented and
+    ``StandardGate`` is defined in the private module
+    ``qiskit._accelerate.circuit`` (docs/dependency_issues.md,
     "Standard-gate instructions"), and the exactness tests in
-    ``tests/test_dense_synthesis.py`` fail when their interface changes.
+    ``tests/test_dense_synthesis.py`` fail when either interface changes.
     The circuit must not be inside a control-flow builder.
     """
     from qiskit._accelerate.circuit import StandardGate

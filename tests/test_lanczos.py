@@ -44,6 +44,7 @@ def test_signed_centered_pencil_from_independent_moments():
 
 def test_analytical_readout_moments_reconstruct_sector_pencil():
     from nwqlib.algorithms.lanczos.readout import decode_histogram
+    from nwqlib.execution import Histogram
     from nwqlib.problems.inputs import ingest_occupation
 
     # H = X0 + Z0 + Z1 + Z2 + Z3 on |1110> stays in basis indices
@@ -78,6 +79,8 @@ def test_analytical_readout_moments_reconstruct_sector_pencil():
         zip(rec.settings, weights, expected_moments, strict=True), start=1
     ):
         marginal = {bits: weight / sum(histogram.values()) for bits, weight in histogram.items()}
+        marginal = Histogram(setting.histogram_width, list(marginal),
+                             np.array(list(marginal.values()), dtype=np.float64))
         stats = decode_histogram(plan._native["readout"], setting, marginal, counts=False)
         assert setting.degree == degree
         assert stats.mean == pytest.approx(expected, rel=0, abs=2e-15)
@@ -161,7 +164,7 @@ def test_regularized_sensitivity_rotates_the_kept_projector():
         h, s, overlap_eigenvalue_cutoff=0.5, _sampled_overlap=True, _keep_overlap_eigenvectors=True
     )
     assert failure is None and result.kept_overlap_rank == 1
-    derivative = numerical._moment_energy_derivatives(result, h, s, 0.0, 1.0, 0.5)
+    derivative = numerical._moment_energy_derivatives(result, h, s, 0.5)
     # S=[[1,t],[t,1/4]] rotates the kept vector by (0,4/3).
     # K=[[t,1/4],[1/4,t/4]] gives 1 + 2*(1/4)*(4/3)=5/3.
     assert derivative @ [0.0, 1.0, 0.0, -2.0] == pytest.approx(5 / 3, rel=0, abs=2e-14)
@@ -271,7 +274,7 @@ def test_sensitivity_weights_match_independent_quadratic_root():
     weights, evidence = numerical._sensitivity_weights(
         # This oracle differentiates the full-rank quadratic root. Select that
         # exploratory rank explicitly, independently of automatic sampling admission.
-        selection.reconstruction, statistics, 7.0, 2.0, selection.method.revise(overlap_cutoff=1e-4)
+        selection.reconstruction, statistics, selection.method.revise(overlap_cutoff=1e-4)
     )
     assert evidence["fallback_reason"] is None
     # det(K-kappa*S)=a*kappa^2+b*kappa+c. Implicit differentiation
@@ -284,7 +287,9 @@ def test_sensitivity_weights_match_independent_quadratic_root():
     da = np.array([-2 * u, 0.5, 0.0])
     db = np.array([(1 + v) / 2 - 0.75, u / 2, -0.25])
     dc = np.array([(6 * u + w) / 4, -(1 + v) / 2, u / 4])
-    derivatives = -2 * (kappa * kappa * da + kappa * db + dc) / (2 * a * kappa + b)
+    derivatives = -selection.reconstruction.alpha * (
+        kappa * kappa * da + kappa * db + dc
+    ) / (2 * a * kappa + b)
     variances = np.array(
         [
             (p * (1 - mu) ** 2 + n * (-1 - mu) ** 2 + z * mu**2) / (p + n + z - 1)

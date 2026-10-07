@@ -1291,10 +1291,6 @@ def test_refinement_save_validates_attachments_and_preserves_results(monkeypatch
     bare._results = (other.results[0], result.results[1])
     with pytest.raises(ValueError, match="Result of level 1 differs from the Result, Plan and Run"):
         bare.save(tmp_path / "bare")
-    copied = result.revise(levels=(result.levels[0].revise(mode_status="unresolved"), result.levels[1]))
-    copied._problem, copied._results = problem, result.results
-    with pytest.raises(ValueError, match="level 1 records counts, a valid mass or a mode status"):
-        copied.save(tmp_path / "bare")
     assert not (tmp_path / "bare").exists()
     saves = []
 

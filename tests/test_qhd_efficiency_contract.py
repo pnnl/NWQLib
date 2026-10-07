@@ -15,7 +15,6 @@ from nwqlib.algorithms.qhd.potential import PotentialCompiler
 from nwqlib.subroutines.hamiltonian_evolution.pauli_evolution import (
     append_number_projector_phase,
     append_pauli_evolution_block,
-    resolve_number_projector_lowering,
     structured_number_projector_provider,
 )
 
@@ -73,7 +72,6 @@ def test_projector_routing_prices_the_realized_provider(angle) -> None:
     expected_costs = [0, 2, 6, 14, 30, 62, 126, 220]
     for support_size, expected_cost in enumerate(expected_costs, start=1):
         provider = structured_number_projector_provider(support_size)
-        resolution = resolve_number_projector_lowering(support_size)
         support = tuple(range(support_size))
         grid = OneHotGrid(
             variables=sp.symbols(f"x:{support_size}"),
@@ -84,11 +82,15 @@ def test_projector_routing_prices_the_realized_provider(angle) -> None:
         # The table entry at grid indices (0, ..., 0) is the angle; the other entries are zero.
         table = np.zeros(2**support_size)
         table[0] = angle
-        blocks = compiler.compile(
-            {support: table},
+        blocks = compiler.compile_selected(
+            compiler.select_occurrences(
+                {support: table},
+                num_grid_points=grid.num_grid_points,
+                dt=1.0,
+                potential_weight=1.0,
+            ),
             grid,
             dt=1.0,
-            potential_weight=1.0,
         )
         # A zero projector is the identity: no emitted block may reserve CX work,
         # even when the user disables pruning. Nonzero blocks keep the routing.
@@ -97,12 +99,12 @@ def test_projector_routing_prices_the_realized_provider(angle) -> None:
         if angle == 0.0:
             assert (
                 sum(
-                    block.metadata["lowering_resolution"]["costs"]["structured"] for block in blocks
+                    block.metadata["projector_provider"]["cx"] for block in blocks
                 )
                 == 0
             )
             continue
-        assert blocks[0].metadata["lowering_resolution"] == resolution
+        assert blocks[0].metadata["projector_provider"] == provider
         circuit = QuantumCircuit(support_size)
         append_number_projector_phase(circuit, range(support_size), angle)
         realized = transpile(
@@ -114,7 +116,4 @@ def test_projector_routing_prices_the_realized_provider(angle) -> None:
 
         # Exact for the pinned provider and cx/u basis at optimization level zero.
         assert provider["cx"] == expected_cost
-        assert resolution["selected"] == "structured"
-        assert resolution["costs"]["structured"] == expected_cost
-        assert resolution["structured_provider"] == provider
         assert int(realized.count_ops().get("cx", 0)) == expected_cost

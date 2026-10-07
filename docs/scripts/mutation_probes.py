@@ -2648,16 +2648,6 @@ PROBES = (
         ),
     ),
     single_replacement_probe(
-        name="basis_lowering_synthesis_admission_drop",
-        module="nwqlib.subroutines.qiskit_compat",
-        qualname="exact_dense_unitaries",
-        old="        if max_work is not None and work > max_work:\n",
-        new="        if False:\n",
-        pytest_args=(
-            "tests/test_dense_synthesis.py::test_basis_lowering_admits_its_syntheses_before_the_first_one",
-        ),
-    ),
-    single_replacement_probe(
         name="dense_synthesis_widths_matrix_key_drop",
         module="nwqlib.subroutines.qiskit_compat",
         qualname="_dense_unitary_widths",

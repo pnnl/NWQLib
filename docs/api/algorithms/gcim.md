@@ -8,7 +8,7 @@ from nwqlib.algorithms import ADAPT, FixedGCIM
 from nwqlib.algorithms.gcim import build_gcim_chemistry_problem
 ```
 
-Every object on this page imports from `nwqlib.algorithms.gcim`. The methods, their results, `ProjectedPencil`, `FixedGCIMBasis` and `AdaptVerificationOptions` also import from `nwqlib.algorithms`.
+Every object on this page imports from `nwqlib.algorithms.gcim`, except `PairEstimate`, `GroupMoment` and `SampledPairVariance`, which import from `nwqlib.algorithms.gcim.fixed_basis`. The methods, their results, `ProjectedPencil`, `FixedGCIMBasis` and `AdaptVerificationOptions` also import from `nwqlib.algorithms`.
 
 `FixedGCIM` solves the discretized Hill-Wheeler problem of Zheng et al., Phys. Rev. Research 5, 023200 (2023), arXiv:2212.09205v1, Eq. (13). `ADAPT` follows Zheng et al., npj Quantum Information 10, 127 (2024), arXiv:2312.07691v3. The [GCiM guide](../../algorithms/gcim.md) explains the matrix elements, their error bounds and the adaptive screening rule, and its [source and code map](../../algorithms/gcim.md#source-and-code-map) gives the paper location of each step.
 
@@ -87,6 +87,7 @@ Every object on this page imports from `nwqlib.algorithms.gcim`. The methods, th
 ::: nwqlib.algorithms.gcim.chemistry.GCIMChemistryProblemData
     options:
       heading_level: 3
+      show_signature: false
       members:
         - eigenproblem
         - adapt_method

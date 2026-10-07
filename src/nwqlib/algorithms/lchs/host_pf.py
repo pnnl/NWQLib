@@ -192,10 +192,10 @@ def select_actions(data, *, elapsed, source_nodes, source_weights, has_initial):
     union-index arrays, its identity coefficient and upper dropped mass.
     Each application (the initial state, then each Duhamel node) keeps, for
     every quadrature position, its step record (fixed, or budgeted per node)
-    and the cheaper admitted route; per-application records stay separate
+    and the cheaper admitted route. Per-application records stay separate
     even when two durations coincide. Every distinct k-node is combined and
     pruned once, and its bound coefficient comes from one admitted shared
-    census (_node_bound_coefficients); each application then selects its
+    census (_node_bound_coefficients). Each application then selects its
     own steps at its elapsed time, pruning bound and remaining allowance.
     Routes are chosen only after every record is admitted, so a later
     record cannot invalidate an earlier dense route. Execution replays these
@@ -223,13 +223,20 @@ def select_actions(data, *, elapsed, source_nodes, source_weights, has_initial):
     combined nodes (_node_cache_bytes) stay live through record selection
     and are held in every phase.
 
-    Work, with d the padded dimension, N = d**2, K distinct nodes and M
-    applications: W_coeff = W_dec + W_align + K*(2*m_L + 23*u + 8), the
-    decomposition (_pauli_decomposition_requirements), the one-time
-    alignment of the actual L/H supports and each distinct node's
-    combination, pruning and streamed upper dropped mass
-    (_coefficient_preparation_work), then the census p*q + G + K_n*V, the
-    scalar selections 16*M*K, M*N + 4*M*K*d + 4*d and each selected action
+    Work, with d the padded dimension, ``q = log2(d)``, ``N = d**2``,
+    K distinct node keys, M applications and N_grid quadrature positions:
+    ``W_coeff = W_dec + W_align + K*(2*m_L + 23*u + 8)``, where m_L is the
+    L support size and u the union size including identity. W_dec is the
+    decomposition work (_pauli_decomposition_requirements), and W_align
+    is the one-time alignment work of the actual L/H supports
+    (_coefficient_preparation_work). Each distinct node's contribution
+    covers combination, pruning and streamed upper dropped mass.
+    Budgeted selection adds scalar selections ``16*M*N_grid`` and, when
+    there are active nodes, the census ``p*q + G + K_n*V``. Here p counts
+    shared nonidentity labels, G is the structural census work, K_n counts
+    distinct active nodes, and V is the per-node contraction work
+    (_lchs_census_choice). With no active nodes the census charge is zero.
+    Every route adds ``M*N + 4*M*N_grid*d + 4*d`` and each selected action
     route (_action_route). Align the actual L/H support once in lexical
     order, then combine and prune it once per distinct k node. Selection
     charges the alignment and each reached coefficient operation.
@@ -248,7 +255,7 @@ def select_actions(data, *, elapsed, source_nodes, source_weights, has_initial):
     keys = tuple(_node_key(k) for k in k_nodes)
     distinct = tuple(dict.fromkeys(keys))
     decomposition_work, decomposition_bytes = _pauli_decomposition_requirements(d)
-    # The admitted decomposition first; the alignment and node combinations
+    # The decomposition is admitted first. The alignment and node combinations
     # are admitted from the actual supports once they exist.
     selection_work = decomposition_work
     _check_bytes(decomposition_bytes, method.max_bytes, "LCHS Pauli selection arrays")
@@ -341,7 +348,7 @@ def select_actions(data, *, elapsed, source_nodes, source_weights, has_initial):
     live_selected = 32*d*d+q*union+nodes_bytes+applications_bytes
     rotations = [_rotation_count(count, method.trotter_order) for count in kept]
     action_scratch = 0
-    # Select against the actual whole retained population, not a prefix whose
+    # Select routes against every admitted record at once, not a prefix whose
     # later records could invalidate a previously admitted dense route.
     for application in applications:
         for index, position in zip(table.grid_to_node, application["positions"], strict=True):

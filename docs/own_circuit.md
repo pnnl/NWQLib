@@ -122,10 +122,14 @@ class GHZMethod(Method):
         method="ghz_counts", version="1")
 
     def plan(self, problem, *, output, execution, shots, rng):
-        # ApplicabilityError refuses a request this Method cannot serve.
-        if execution != "quantum" or shots is None:
+        # nwqlib.plan does not check that this Method computes the requested
+        # output, so refuse every Problem, output and execution it does not serve.
+        if (not isinstance(problem, GHZProblem)
+                or not isinstance(output, GHZCounts)
+                or execution != "quantum" or shots is None):
             raise ApplicabilityError(
-                "ghz_counts executes its circuit and needs a shot count")
+                "ghz_counts returns the counts of a GHZProblem and needs "
+                "quantum execution with a shot count")
         circuit = ghz_circuit(problem.qubits)
         # state_input accepts the circuit as the unitary on the all-zero
         # state, and select_preparation turns it into the block "body"
@@ -194,7 +198,7 @@ On the default local Aer backend this prints the counts of `000` and `111`, whic
 
 ## What each part does
 
-The Problem and the output kind are ordinary Records. `nwqlib.plan` checks that the returned Plan keeps the same Problem, Method and output objects and the stream snapshot taken after planning, so the Method cannot substitute inputs or randomness. It does not check that the Method computes the requested output, so a Method whose Problem allows several outputs refuses, with `ApplicabilityError`, every output it does not compute, as the [Hadamard-test Method](#compare-with-a-built-in-method) does. A built-in Problem such as `Expectation` or `Eigenproblem` serves the same role when its fields describe your input.
+The Problem and the output kind are ordinary Records. `nwqlib.plan` checks that the returned Plan keeps the same Problem, Method and output objects and the stream snapshot taken after planning, so the Method cannot substitute inputs or randomness. It does not check that the Method computes the requested output, so each Method must refuse, with `ApplicabilityError`, each Problem and output it does not compute, as the GHZ Method and the [Hadamard-test Method](#compare-with-a-built-in-method) do. A built-in Problem such as `Expectation` or `Eigenproblem` serves the same role when its fields describe your input.
 
 `state_input` accepts only a circuit without classical bits, measurements or free parameters, so measurement belongs to the Program's `Measure` node. Building the Qiskit circuit inlines your circuit's gates. A supplied circuit carries no cost formula and no approximation bound, so its [block](blocks.md#supplied-circuits) records unknown synthesis cost and error. `nwqlib.estimate` adds up the resource counts of the Plan's blocks without any Method hook, and it reports the operations of a supplied circuit as unavailable. `state_input` and `select_preparation` each give a supplied circuit a fresh content hash, so planning the same circuit twice gives two Plans with different content hashes. A block bound to your own constructor through `SelectedBlock.bind` is the alternative. It requires a complete `SelectedDefinition`, and the archive writer stores only blocks made by the library's own factories.
 
@@ -218,6 +222,7 @@ Leave out every hook your Method does not need.
 | `sampling_shots` | `plan(..., accuracy=...)` chooses the shot count from an accuracy request | [Add a method](algorithm_protocol.md#optional-hooks) |
 | `prepare_all_refusal` | An adaptive Method, whose later settings depend on earlier outcomes, used with `prepare(plan, settings="all")` | [Add a method](algorithm_protocol.md#optional-hooks) |
 | `Result._summary_lines` | Your own first lines of `print(result)` | [Supported protected extension hooks](algorithm_protocol.md#supported-protected-extension-hooks) |
+| `validate_plan(plan)` and `validate_data(data)` on your Result class | When your Result's fields must follow from the Plan or the data beyond their content hashes, and always for `check-method`, which requires `validate_plan` to reject the Result that your case's `invalid_result` returns | [Add a method](algorithm_protocol.md#optional-hooks) |
 | A `Registration` record | Listing and resolving your Method through a registry | [Register a Method](algorithm_protocol.md#explicit-trusted-registration) |
 | A `case()` factory returning a `MethodCase` | `python -m nwqlib check-method`, which runs the case with its independent expected answer against your Method | [Check a Method](algorithm_protocol.md#author-cases-and-their-limits) |
 | `reduction_allowance` and a registered reducer | A Plan that reduces readout data while the circuits run | [Add a method](algorithm_protocol.md#reduction-hooks) |

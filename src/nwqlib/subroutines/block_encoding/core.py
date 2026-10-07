@@ -66,10 +66,8 @@ from nwqlib.subroutines._multiplexors import (
     projected_unitary_resource_law,
 )
 from nwqlib._preparation_laws import direct_preparation_cx_bound
-from nwqlib.subroutines.block_encoding.registry import (
-    BLOCK_ENCODING_IMPLEMENTATIONS,
-    block_encoding_implementation_metadata,
-)
+from nwqlib.subroutines._registry_utils import implementation_metadata
+from nwqlib.subroutines.block_encoding.registry import BLOCK_ENCODING_IMPLEMENTATIONS
 from nwqlib.subroutines.pauli_decomposition import (
     PauliDecomposition,
     PauliTerm,
@@ -85,8 +83,10 @@ class BlockEncoding:
     [`build_block_encoding`][nwqlib.subroutines.block_encoding.build_block_encoding],
     [`build_block_encoding_from_plan`][nwqlib.subroutines.block_encoding.build_block_encoding_from_plan]
     and [`build_banded_block_encoding`][nwqlib.subroutines.block_encoding.build_banded_block_encoding]
-    return it. The circuit is the answer: its all-zero ancilla block is
-    `A / alpha`, which
+    return it, and so do `build_qsp_evolution_encoding` and
+    `build_control_diagonal_generator_encoding` of `nwqlib.subroutines.qsp`.
+    Its `circuit` field holds the result, and the all-zero ancilla block of
+    that circuit is `A / alpha`, which
     [`block_encoding_top_left`][nwqlib.subroutines.block_encoding.block_encoding_top_left]
     reads from the circuit's unitary. Construction requires a finite
     positive `alpha`, a finite nonnegative `error_bound` when one is given,
@@ -104,7 +104,11 @@ class BlockEncoding:
             `|| A - alpha * encoded block ||` in the units of `A`, or None
             when unavailable.
         implementation: Construction used: `"multiplexed_pauli"`,
-            `"banded"` or `"dense_dilation"`.
+            `"banded"` or `"dense_dilation"` from the builders of this
+            module, `"qsp_jacobi_anger_evolution"` from
+            `build_qsp_evolution_encoding`, or
+            `"control_diagonal_generator_lcu"` from
+            `build_control_diagonal_generator_encoding`.
         metadata: JSON-like record of how the circuit was built. Where it
             repeats the subnormalization, ancilla count, error or
             construction, the fields above are the values to use.
@@ -164,10 +168,9 @@ class BlockEncodingPlan:
             `"multiplexed_pauli"`, `"banded"` or `"dense_dilation"`.
             LCHS's compiled QSP SELECT also records `"exact_zero"` for the
             H part of `A = L + iH` when relative pruning keeps none of its
-            Pauli terms. No encoding is built for that part: the record has
+            Pauli terms. No encoding is built for that part. The record has
             zero `alpha`, error and ancilla count, no source and no
-            decomposition, it cannot be built into a circuit, and it
-            introduces no division by zero.
+            decomposition, and it cannot be built into a circuit.
         alpha: Subnormalization in the units of A. The all-zero ancilla
             block of the unitary is `A / alpha`. It is the Pauli
             coefficient 1-norm for multiplexed Pauli, the band-coefficient
@@ -204,9 +207,7 @@ class BlockEncodingPlan:
             choice. For banded it holds the band count, how the bands were
             detected and the gate counts. It is empty when dense dilation
             was requested for a dense matrix. The Pauli and dense-dilation
-            builders copy it into the circuit metadata, the Pauli builder
-            builds SELECT from its `dependency_supports`, and the banded
-            builder reads how the bands were detected.
+            builders copy it into the circuit metadata.
     """
 
     requested_implementation: str
@@ -314,7 +315,8 @@ def _base_metadata(
         "requested_block_encoding_implementation": requested,
         "preprocessing_label": preprocessing_label,
         "classical_preprocessing_note": preprocessing_note,
-        "implementation_metadata": block_encoding_implementation_metadata(resolved),
+        "implementation_metadata": implementation_metadata(BLOCK_ENCODING_IMPLEMENTATIONS, resolved,
+                                                           slot="block encoding"),
         "register_order": list(register_order),
     }
 
@@ -385,18 +387,12 @@ def _pauli_plan_detail(decomposition: Any) -> dict[str, Any]:
     positive-amplitude magnitude trees of ``2**a - 2`` CX each
     (``direct_preparation_cx_bound``).
 
-    The projected address support of each system qubit is computed here
-    from the decomposition's X/Z masks packed once (qubit zero first, as
-    ``_pauli_masks`` numbers them), with ``local_pauli_dependencies``
-    (``_pauli_dependency_supports``): a control bit is required exactly when
-    two identity-padded Pauli letter codes differing only in that address
-    bit are unequal. This is the same support as entrywise projection of
-    their canonical local Pauli matrices (``project_unitary_table_dependencies``,
-    which stays the definition for general unitary tables). The supports
-    are stored as ``dependency_supports``. The builder reads them from the
-    plan and appends the projected tables they determine
-    (``project_local_pauli_table``). Coefficient phases stay in
-    their separate diagonal.
+    ``_pauli_dependency_supports`` computes the projected address support of
+    each system qubit, which is the support that
+    ``project_unitary_table_dependencies`` defines, and the plan stores it as
+    ``dependency_supports``. The builder reads it from the plan and appends
+    the projected tables it determines (``project_local_pauli_table``).
+    Coefficient phases stay in their separate diagonal.
     """
 
     term_count = len(decomposition.terms)
@@ -434,7 +430,7 @@ def _pauli_lcu_encoding(
     plan: BlockEncodingPlan,
     *, max_bytes=DEFAULT_MAX_BYTES, max_work=DEFAULT_MAX_BLOCK_WORK,
 ) -> BlockEncoding:
-    """Build dependency-projected Pauli SELECT from its shared pure plan.
+    """Build the multiplexed-Pauli block encoding (PREP, dependency-projected SELECT, PREP adjoint) of ``plan``.
 
     For ``A = sum_j c_j P_j`` with ``L`` terms, PREP prepares
     ``sum_j sqrt(|c_j| / alpha) |j>`` on ``ceil(log2 L)`` address qubits and
@@ -534,15 +530,15 @@ def _dense_dilation_encoding(
     matrix: Any,
     *,
     requested_implementation: str,
-    normalization: float | None,
-    planned_error_bound: float | None = None,
+    normalization: float,
+    planned_error_bound: float,
     selected_svd: tuple[np.ndarray, np.ndarray, np.ndarray] | None = None,
 ) -> BlockEncoding:
     """Build the one-ancilla dense dilation of ``A``, reusing a supplied SVD and error bound.
 
-    ``selected_svd`` is the SVD ``(W, s, V^dagger)`` of the matrix computed
-    during planning, and ``planned_error_bound`` is the plan's bound. Either
-    one is computed here when absent.
+    ``normalization`` and ``planned_error_bound`` are the plan's alpha and
+    bound. ``selected_svd`` is the SVD ``(W, s, V^dagger)`` of the matrix
+    computed during planning. Only the SVD is computed here when absent.
 
     The dilation is ``U = [[A/alpha, K], [K, -A/alpha]]`` with
     ``K = W sqrt(I - S^2) V^dagger`` from the SVD ``A = W (alpha S) V^dagger``.
@@ -559,24 +555,19 @@ def _dense_dilation_encoding(
     coordinates, so the singular values are not sorted. This constructor
     never recomputes supplied factors.
 
-    The single ancilla is circuit qubit 0, the low-order bit. Without a
-    supplied ``normalization``, ``alpha = ||A||_2``. Every block encoding
-    satisfies ``||A|| <= alpha + eps`` (Gilyen et al., arXiv:1806.01838v1,
-    remark after Definition 43), so this is the smallest alpha with zero
-    encoding error.
+    The single ancilla is circuit qubit 0, the low-order bit.
     """
     from qiskit import QuantumCircuit, QuantumRegister
     from qiskit.circuit.library import UnitaryGate
 
     array = _as_power_of_two_matrix(matrix)
     dimension = array.shape[0]
-    if normalization is not None:
-        normalization = float(normalization)
-        if not np.isfinite(normalization) or normalization <= 0.0:
-            raise ValueError("dense-dilation normalization must be finite and positive")
-        # Every entry magnitude is at most ||A||_2, so this cheap test rejects
-        # some alphas below the spectral norm before the SVD.
-        _require_alpha_covers(normalization, float(np.max(np.abs(array))), "the largest entry magnitude")
+    alpha = float(normalization)
+    if not np.isfinite(alpha) or alpha <= 0.0:
+        raise ValueError("dense-dilation normalization must be finite and positive")
+    # Every entry magnitude is at most ||A||_2, so this cheap test rejects
+    # some alphas below the spectral norm before the SVD.
+    _require_alpha_covers(alpha, float(np.max(np.abs(array))), "the largest entry magnitude")
     if selected_svd is None:
         left, singular_values, right_h = np.linalg.svd(array)
     else:
@@ -586,17 +577,6 @@ def _dense_dilation_encoding(
                 or not all(np.isfinite(value).all() for value in selected_svd)):
             raise ValueError("selected singular frames differ from the dense-dilation dimensions/domain")
     largest_singular = float(np.max(singular_values))
-    alpha = (
-        largest_singular
-        if normalization is None
-        else float(normalization)
-    )
-    if alpha == 0.0:
-        raise ValueError(
-            "dense_dilation cannot block-encode the zero matrix (alpha = ||A||_2 = 0)"
-        )
-    if not np.isfinite(alpha):
-        raise ValueError("dense-dilation normalization must be finite and positive")
     _require_alpha_covers(alpha, largest_singular, "the largest singular value")
     scaled = normalized_matrix(array, alpha)
     scaled_singular = singular_values / alpha
@@ -615,18 +595,14 @@ def _dense_dilation_encoding(
     unitarity_deviation = float(
         np.max(np.abs(full @ full.conj().T - np.eye(2 * dimension)))
     )
-    # Construction guard, not a physical tolerance: float64 SVD roundoff
-    # lands near 1e-14 at validation dimensions while any construction
-    # defect lands at O(1); 1e-10 separates the two by four orders.
+    # Construction guard, not a physical tolerance. Float64 SVD roundoff lands near 1e-14 at
+    # validation dimensions, and a construction defect lands at O(1). 1e-10 is four orders
+    # above the roundoff. Registered in docs/ENGINEERING_CONSTANTS.md. Revisit for larger
+    # dimensions or another precision.
     if not np.isfinite(unitarity_deviation) or unitarity_deviation > 1.0e-10:
         raise RuntimeError(
             f"SVD dilation failed the unitarity check (deviation {unitarity_deviation:.3e})"
         )
-    achieved_error = (
-        _normalization_error_bound(array, alpha, scaled)
-        if planned_error_bound is None
-        else planned_error_bound
-    )
 
     num_system_qubits = int(np.log2(dimension))
     ancilla = QuantumRegister(1, "dilation_ancilla")
@@ -663,14 +639,14 @@ def _dense_dilation_encoding(
         alpha=alpha,
         num_ancillas=1,
         system_qubits=num_system_qubits,
-        error_bound=achieved_error,
+        error_bound=planned_error_bound,
         implementation="dense_dilation",
         metadata=metadata,
     )
 
 
 def _stored_dense_is_hermitian(array):
-    """Read an already-present dense array in O(d²) time and O(d) workspace."""
+    """Return whether the stored entries satisfy ``A[i, j] == conj(A[j, i])`` exactly, in O(d²) time and O(d) workspace."""
     return all(np.array_equal(array[row, row:], array[row:, row].conj())
                for row in range(len(array)))
 
@@ -837,9 +813,11 @@ def _detect_banded_pauli_structure(
     if not parsed_terms or not band_coefficients:
         raise ValueError("banded structure detection found only zero bands")
 
-    # Window for binary64 coefficients against their exact rational
-    # prediction. It grows with the qubit, term and band counts, and a
-    # mismatch above it rejects the circulant candidate.
+    # Untuned relative window for binary64 coefficients against their exact rational
+    # prediction. It grows with the qubit, term and band counts, and a mismatch above it
+    # rejects the circulant candidate. The exact residual is computed separately.
+    # Registered in docs/ENGINEERING_CONSTANTS.md. Revisit with a changed accumulation or
+    # classification algorithm.
     relative_tolerance = (
         64.0
         * np.finfo(float).eps
@@ -1009,7 +987,7 @@ def _circulant_classification_work(q, terms, bands):
 
     The classifier path is ``_detect_circulant`` -> ``_detect_banded_pauli_structure``
     -> ``_shift_pauli_trace_sum``. It parses each label into flip and phase
-    masks and accumulates the candidate first-column coefficients; there are
+    masks and accumulates the candidate first-column coefficients. There are
     only d = 2**q possible flip masks, so the nonzero candidate band count b
     is at most min(m, d). The trace kernel is called once per term and band
     checked, at most m*b times, and always scans q bits with two carry states
@@ -1030,7 +1008,7 @@ def _circulant_classification_work(q, terms, bands):
     or first hashing costs one visit per character, and a coefficient
     conversion, output-record emission or dictionary insertion is one
     visit. A carry-transition visit and a rational arithmetic visit are
-    counted separately; Fractions can have thousands of bits, so one
+    counted separately. Fractions can have thousands of bits, so one
     rational visit is not a constant CPU-time operation. These units are
     admission proxies, not timings or equal-cost CPU operations.
     """
@@ -1059,15 +1037,11 @@ def _admit_pauli_plan(decomposition, *, held_bytes, max_bytes, max_work, classif
     live. Passing the original max_bytes independently to two children is
     not total-memory admission.
 
-    The caller charges each live decomposition once as `m(n+16)` logical
-    label and complex-coefficient bytes, together with each distinct live
-    dense matrix at `16D²` and any completed child payloads that coexist.
-    SELECT construction adds `64P(n+16)`. An active circulant classifier
-    additionally requires `[128L(2J)+512]V+H0`, including its fixed
-    bookkeeping allowance. With `classify=False`, or with an empty skipped
-    classifier, that entire classifier allowance is zero. These charges
-    follow the stated logical payload conventions and do not bound process
-    RSS.
+    SELECT construction adds ``64P(n+16)``, and an active circulant
+    classifier adds the allowance ``C_B`` given below, including its fixed
+    bookkeeping allowance. With ``classify=False``, or with an empty skipped
+    classifier, the classifier allowance is zero. These charges follow the
+    stated logical payload conventions and do not bound process RSS.
 
     With ``classify``, the circulant classification is admitted before
     candidate bands are known with b = min(m, 2**n). Its work is
@@ -1093,10 +1067,10 @@ def _admit_pauli_plan(decomposition, *, held_bytes, max_bytes, max_work, classif
     with L(b) = ``integer_object_bytes`` and H0 = ``BOOKKEEPING_BYTES``. The
     detector holds parsed term and mask tuples, a band dictionary, exact band
     coefficients, expected rational coefficients and one carry recurrence
-    with its current arithmetic; there is no m*b rational table. Every finite
+    with its current arithmetic. There is no m*b rational table. Every finite
     binary64 band component is an integer multiple of 2**-1074 below 2**1024
-    in magnitude; division by d gives a common denominator at most
-    2**(1074+n); predicted components are below b*2**1024 and residual
+    in magnitude. Division by d gives a common denominator at most
+    2**(1074+n). Predicted components are below b*2**1024 and residual
     components below (b+1)*2**1024, so their squared masses over m terms and
     b bands fit a numerator width of 4196 + 2n + 2 ceil(log2(b+1)) +
     ceil(log2(m+b+1)) plus a small fixed allowance, and J supplies twelve
@@ -1105,13 +1079,15 @@ def _admit_pauli_plan(decomposition, *, held_bytes, max_bytes, max_work, classif
     representation, and 512V covers parsed tuples and list slots, Fraction
     wrappers, dictionary entries and floating complex values. The m(n+16)
     label and complex-coefficient population is charged only when it is
-    materialized independently; the decomposition these callers classify is
+    materialized independently. The decomposition these callers classify is
     already in B_held, so it is not charged twice here. ``classify=False``
     omits the classifier storage and work.
 
     Returns:
         The admitted work, so the caller can add later stages to it.
-        Work remains `32*P*max(1,n)**2` plus `_circulant_classification_work(n,m,b)` for an active classifier.
+        It is ``32*P*max(1,n)**2`` plus
+        ``_circulant_classification_work(n,m,b)`` for an active classifier,
+        with P, n, m and b as defined above.
         The caller's ``max_work`` stays the budget of this plan.
     """
     n, terms = decomposition.num_qubits, len(decomposition.terms)
@@ -1182,8 +1158,12 @@ def plan_block_encoding(
             `num_ancillas` and `error_bound`.
 
     Raises:
-        ValueError: For unknown implementation names or operator/implementation
-            mismatches.
+        ValueError: For unknown implementation names, operator and
+            implementation mismatches, a zero operator, a matrix that is not
+            square with power-of-two dimension, a `normalization` that is not
+            finite and positive or lies below `||A||_2`, a limit that is not a
+            positive integer, or a planning step that exceeds `max_bytes` or
+            `max_work`.
         OverflowError: If structural error-bound arithmetic overflows.
         FloatingPointError: If a structural error bound is nonfinite.
     """
@@ -1493,8 +1473,8 @@ def _plan_block_encoding(operator, *, implementation, normalization=None,
             raise ValueError("dense-dilation normalization must be finite and positive")
         _require_alpha_covers(dense_alpha, float(np.max(np.abs(dense_source))), "the largest entry magnitude")
     # At equal CX cost, the smaller alpha gives the stronger encoded amplitude.
-    # A supplied dense normalization can lawfully exceed the Pauli triangle
-    # bound, so that case selects Pauli instead of making the tie an error.
+    # A supplied dense normalization can exceed the Pauli triangle bound, and then the tie
+    # selects Pauli.
     if implementation == "auto" and pauli_cost == dense_cost:
         assert dense_alpha is not None
         if dense_alpha > pauli_alpha:

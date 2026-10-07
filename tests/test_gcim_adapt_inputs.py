@@ -132,7 +132,8 @@ def test_commutator_from_anticommuting_pairs_equals_product_and_cancel_table(cas
     a = pauli_table(a_rows, num_qubits=q)
     ledger = [0]
     arrays, removed = _commutator_arrays(h, a, cutoff=0.0, ledger=ledger, held=0,
-                                         max_bytes=1 << 30, max_products=1 << 40)
+                                         max_bytes=1 << 30, max_products=1 << 40,
+                                         admit_rows=lambda rows: None)
     assert removed == 0.0 and ledger[0] > 0
     ha, ah = h.product(a), a.product(h)
     rows = combine_terms((*ha.labels(), *((p, -c) for p, c in ah.labels())))

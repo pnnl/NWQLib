@@ -258,13 +258,13 @@ class OneHotGrid:
         """Return the K coordinates of one variable as a float64 array, bit for bit ``grid_value``.
 
         Form each coordinate by converting its integer grid index, multiplying by the stored spacing and adding
-        the lower bound, in that order. Vectorized validation checks finiteness, strict increase and the
-        boundary conditions of the selected grid. It uses the same binary64 coordinates as ``grid_value``.
+        the lower bound, in that order. ``__post_init__`` checks finiteness, strict increase and the boundary
+        conditions of the selected grid on this array. It uses the same binary64 coordinates as ``grid_value``.
 
         ``grid_value(j, i)`` is ``lower + (i + interior) h``, where interior is one only for a Dirichlet grid
         without endpoints. The multiplication converts the integer to binary64 and rounds once, then the
         addition rounds once. The integer index is generated first, converted to float64, and multiplied and
-        added by separate ufuncs, which gives the same numbers on every admitted materializable grid; a floating
+        added by separate ufuncs, which gives the same numbers on every admitted materializable grid. A floating
         ``arange`` with a large start, a fused expression or ``linspace`` does not have this property. For K
         below ``2**53`` every index is exactly representable.
         """

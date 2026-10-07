@@ -1,4 +1,4 @@
-"""Interpret acquired LCHS populations in the original physical coordinates."""
+"""Turn LCHS readouts (amplitudes, the exact projected reduction or counts) into the requested output in the original physical coordinates."""
 
 from math import fsum, isfinite, sqrt
 
@@ -33,8 +33,8 @@ def error_model(problem,output,construction,components=(),*,shots=None):
     """Declare the requested-output error terms and the listed physical components.
 
     The required terms are algorithmic approximation, native floating point
-    and sampling in the output frame. Components such as truncation or
-    trotter_synthesis are listed_only physical-solution facts. Analysis
+    and sampling in the output frame. Components such as kernel_approximation
+    or trotter_synthesis are listed_only physical-solution facts. Analysis
     propagates them into algorithmic_approximation once and never counts
     them twice.
     """
@@ -117,7 +117,8 @@ def projected_moments(data,chunk):
     qualified saved-state budget (``PreparedArtifact.saved_state_error``,
     host phase product included), or the producing receipt's propagated
     window (``saved_state_probability_window``) when another premise remains
-    unavailable. Acquisition and publication use this same pair.
+    unavailable. Acquisition and publication use the same saved_state_error
+    and saved_state_probability_window.
     """
     import json
     from nwqlib._quantum_readout import (PROJECTED_KERNEL, PROJECTED_MASS_EXCLUSIONS, PROJECTED_MOMENTS,
@@ -146,7 +147,7 @@ def _sampled(rec,output,chunks):
     A normalized unpadded output averages each group's weighted parities
     over its success-selected shots. Otherwise every returned shot is kept
     with its success indicator, and the identity coefficient is assigned
-    once to the first group; a padded normalized output divides by the
+    once to the first group. A padded normalized output divides by the
     separately acquired physical-prefix mass.
     """
     import numpy as np
@@ -243,6 +244,8 @@ def analyze_quantum(plan,data,chunks):
         recovered = recover_scaled_pair(p,rec.recovery)
         norm = None if recovered is None else pair_float(recovered)
         if p[0]!=0:
+            # p represents positive mass m*2**e with 1/2 <= m < 1.
+            # For odd e, dividing sqrt(2*m) by two keeps the mantissa in [1/2, 1).
             m,e = p
             root = sqrt(m*2) if e%2 else sqrt(m)
             scale = compose_recovery(PhysicalScale(mantissa=root/2 if e%2 else root,exponent=(e+1)//2 if e%2 else e//2),
@@ -267,10 +270,10 @@ def analyze_quantum(plan,data,chunks):
             numerator = value
     else:
         for setting in rec.settings:
-            validate_readout_layout(chunks[setting.name],observed=observed_bits(rec,output,setting),classical=plan.construction.program.classical)
+            validate_readout_layout(chunks[setting.name],observed=observed_bits(rec),classical=plan.construction.program.classical)
         if isinstance(output,Samples):
             submitted,returned = first.observation.shots,first.returned_shots
-            indices,counts,_,selected = reduce_sample_arrays(first,observed=observed_bits(rec,output,rec.settings[0]),
+            indices,counts,_,selected = reduce_sample_arrays(first,observed=observed_bits(rec),
                 coordinates=rec.system_bits,success=success,dimension=rec.dimension)
             # The reducer returns fresh, C-contiguous int64 arrays that nothing else
             # references, so the record adopts them without copying.
@@ -281,7 +284,7 @@ def analyze_quantum(plan,data,chunks):
                 unavailable = 'no observed original-coordinate algorithm-success shots'
         elif isinstance(output,NormSquared):
             setting = rec.settings[0]
-            _,mass,_ = reduce_setting(first,observed=observed_bits(rec,output,setting),success=success,
+            _,mass,_ = reduce_setting(first,observed=observed_bits(rec),success=success,
                 coordinates=rec.system_bits if setting.physical_projection else (),
                 dimension=rec.dimension if setting.physical_projection else None)
             norm = value = None if mass is None else physical_moment(mass,rec.recovery)

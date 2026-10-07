@@ -3,7 +3,7 @@
 from collections.abc import Iterable
 from dataclasses import dataclass
 from importlib import import_module
-from importlib.metadata import EntryPoint, entry_points
+from importlib.metadata import entry_points
 from typing import TypeVar
 
 from nwqlib.core import Source
@@ -80,20 +80,14 @@ class Registration:
                 )
 
 
-def third_party_registrations(
-    entries: Iterable[EntryPoint] | None = None,
-) -> tuple[Registration, ...]:
+def third_party_registrations() -> tuple[Registration, ...]:
     """Return a registration for each installed `nwqlib.algorithms` entry point, without loading its code.
 
     Each entry point must be named `method@version`, and its value is the
     factory path. The descriptor and Method class of these registrations stay
-    `None` until code is loaded explicitly. Builtin inventory does not call this
-    function, so installed extensions are found only when it is called.
-
-    Args:
-        entries (Iterable[EntryPoint] | None): Entry points to read. `None` reads the
-            installed entry points of the group `nwqlib.algorithms`. Entries of
-            other groups are ignored.
+    `None` until code is loaded explicitly. `builtin_registrations` does not
+    call this function, so installed extensions are found only when
+    `third_party_registrations` is called.
 
     Returns:
         registrations (tuple[Registration, ...]): The registrations, sorted by method, version and factory.
@@ -101,11 +95,8 @@ def third_party_registrations(
     Raises:
         ValueError: If an entry-point name is not `method@version`.
     """
-    entries = entry_points(group=ENTRY_POINT_GROUP) if entries is None else entries
     rows = []
-    for entry in entries:
-        if entry.group != ENTRY_POINT_GROUP:
-            continue
+    for entry in entry_points(group=ENTRY_POINT_GROUP):
         method, separator, version = entry.name.rpartition("@")
         if not separator or not method or not version:
             raise ValueError("algorithm entry-point name must be method@version")
@@ -258,7 +249,15 @@ def builtin_registrations() -> tuple[Registration, ...]:
 
 
 def algorithm_card(registration: Registration) -> dict:
-    """Describe a registration from its stored metadata. Discovery qualifies nothing."""
+    """Return a JSON-ready dict of a registration's metadata for the command-line listing.
+
+    The keys are `source`, `descriptor`, `options_available` and a fixed
+    `qualification` text. `descriptor` is None when the registration does not
+    carry it, as for an installed extension found by
+    `third_party_registrations`. The card reads only the stored metadata, so
+    it loads no code and assesses no backend. `nwqlib card` and
+    `nwqlib algorithms --json` print it.
+    """
     return {
         "source": registration.source.model_dump(mode="json"),
         "descriptor": None

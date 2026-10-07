@@ -1,4 +1,7 @@
-"""Scientific diagnostic sections; attached Results own complete run reports."""
+"""Sections of scientific diagnostics.
+
+A complete run report comes from `Result.report`.
+"""
 
 from nwqlib.reporting.records import ReportSection
 

@@ -9,6 +9,8 @@ from nwqlib.evidence import Certificate
 from nwqlib.evidence.verification import ProjectedVerificationOptions
 ```
 
+`ProjectedVerificationOptions`, `verify_projected` and `ProjectedDiagnostics` import from `nwqlib.evidence.verification`, `EnergyShiftOptions` and `verify_energy_shift` from `nwqlib.evidence.energy_shift`, and `NumberSectorOptions` and `verify_number_sector` from `nwqlib.evidence.sector`. `VerificationReceipt` and `KernelApplication` import from `nwqlib.execution`, and every other entry on this page from `nwqlib.evidence`.
+
 Both operations read what a Result already holds: its error bounds, `result.facts`, and its stored data. Neither runs the Method again, and only an explicit `verify` call computes new check values.
 
 ## Check a result against a tolerance
@@ -224,6 +226,8 @@ A Method states its error sources in an `ErrorModel` and its checks as `CheckSpe
 ::: nwqlib.evidence.VarianceAssessment
     options:
       heading_level: 3
+
+The section [Independent scalar-bound inversion](../error_evidence.md#independent-scalar-bound-inversion) works through an example of `resolve_scalar_bound`.
 
 ::: nwqlib.evidence.resolve_scalar_bound
     options:

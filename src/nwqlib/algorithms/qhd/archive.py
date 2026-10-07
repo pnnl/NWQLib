@@ -9,7 +9,7 @@ from .method import QHD, _execute_theory
 from .records import QHDReconstruction
 
 # Layout of the Method, reconstruction and QHDAnalysis saved together.
-FORMAT = "qhd/7"
+FORMAT = "qhd/8"
 
 
 class _SymbolicReader(pickle.Unpickler):

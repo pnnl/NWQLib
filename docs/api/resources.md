@@ -34,11 +34,13 @@ exact 2
 unavailable
 ```
 
-The Plan uses at most 3 CX gates and exactly 2 qubits. No rule of its circuit blocks gives a total operation count in this basis, so that count is unavailable rather than zero, and `operations.fact.reason` says why. `print(workload)` lists every quantity with its label and conditions. Each quantity also keeps its evidence, the kind of basis of the cost rules it came from, for example a proof, a numerical estimate, an observation or an assertion.
+The Plan uses at most 3 CX gates and exactly 2 qubits. No rule of its circuit blocks gives a total operation count in this basis, so that count is unavailable rather than zero, and `operations.fact.reason` says why. `print(workload)` lists every quantity with its label and conditions. A quantity with a value also keeps its evidence in `fact.evidence`, whose kind is the weakest among the sources that determined the value, for example a proof, a numerical estimate, an observation or an assertion.
 
 An estimate describes the planned logical circuit. It is not a count of compiled gates, which `Prepared.inspect_resources` gives for a prepared circuit, and it includes no routing, error correction or provider billing.
 
 ## Estimate a plan
+
+The entry below is `nwqlib.resources.estimate`, the lower-level function that [`nwqlib.estimate(plan)`][nwqlib.scientist.estimate] calls on `plan.construction`. It takes the Plan's `SelectedConstruction`, not the Plan. Every entry on this page imports from `nwqlib.resources`.
 
 ::: nwqlib.resources.fold.estimate
     options:

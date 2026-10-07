@@ -1,8 +1,8 @@
 """NWQLib package root.
 
 Root modules resolve lazily (PEP 562), so importing the root does not load
-the whole library. ``__all__`` lists the current advertised entries; each
-scientific owner defines its supported operations.
+the whole library. ``__all__`` lists the public names. Each scientific
+module defines its own operations.
 """
 
 from importlib import import_module

@@ -1,4 +1,4 @@
-"""Explicit operation inventory of existing native circuits; compile only on request."""
+"""Explicit operation inventory of existing native circuits. Compilation runs only on request."""
 
 import os
 import sys
@@ -99,7 +99,7 @@ def inspect_circuit_resources(
     max_operations=100_000,
     max_bytes=DEFAULT_INPUT_BYTES,
 ):
-    """Count one circuit's top-level operations by name; compile only on request.
+    """Count one circuit's top-level operations by name, and compile only on request.
 
     Each top-level ``circuit.data`` entry counts once under its operation name,
     including measurements, barriers, simulator saves, ``Clifford`` objects and
@@ -184,7 +184,7 @@ def inspect_circuit_resources(
         options = _options_snapshot(options, max_bytes=max_bytes)
         _check_bytes(96 * size + 16 * width, max_bytes, "auxiliary inspection copy")
         # Aer save instructions are simulator requests the transpiler cannot
-        # lower; the compiled copy omits them.
+        # lower, so the compiled copy omits them.
         save_module = sys.modules.get("qiskit_aer.library.save_instructions.save_data")
         save_types = () if save_module is None else (save_module.SaveData,)
         selected = circuit.copy_empty_like(vars_mode="drop")

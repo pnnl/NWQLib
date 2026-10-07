@@ -2,7 +2,7 @@
 
 NWQLib differs from the quantum software packages under [Packages checked](#packages-checked) in five ways:
 
-1. You state a scientific problem and the accuracy you need, and get the answer, for example x of `Ax=b` with its scale and phase, in one Result that you can verify, save and reanalyze.
+1. You state a scientific problem and the accuracy settings of the method, and get the answer, for example x of `Ax=b` with its scale and phase, in one Result that you can verify, save and reanalyze.
 2. NWQLib builds Qiskit circuits for block encodings, QSVT linear solvers and LCHS, which Qiskit 2.x does not provide.
 3. It implements ADAPT-GCIM, QCELS, and the augmented-Lagrangian QHD and QHD box refinement of Wu et al., which none of the other packages checked implements as a library.
 4. It estimates the resources of the construction chosen for your input before any circuit is built, and the example notebooks compare these estimates with compiled circuits.

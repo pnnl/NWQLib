@@ -12,6 +12,8 @@ from nwqlib.evidence.binary import (
 )
 ```
 
+`BinaryEstimate`, `BinaryCorrection`, `BinaryInterval` and `BinaryPopulation` are defined in `nwqlib.evidence.binary`, and `EstimateValue` in `nwqlib.execution`.
+
 The shot count for an absolute sampling tolerance follows Hoeffding (1963), doi:10.1080/01621459.1963.10500830, Theorem 2, with a union bound over the measured terms, and [Proposition 1](../../mathematics.md#r1) derives it. The fixed-time interval of `BinaryInferenceOptions(method="hoeffding")` follows Theorem 1, Eq. (2.3), p. 15, of the same paper. The [Expectation guide](../../algorithms/expectation.md) states the assumptions of each inference and of the readout calibration model, and its [source and code map](../../algorithms/expectation.md#source-and-code-map) links each step to its source and implementing function.
 
 ## Configure the method
@@ -37,11 +39,21 @@ The shot count for an absolute sampling tolerance follows Hoeffding (1963), doi:
       members:
         - provider_output_estimates
 
+::: nwqlib.execution.EstimateValue
+    options:
+      heading_level: 3
+      members: false
+
 ::: nwqlib.algorithms.expectation.ExpectationStatistics
     options:
       heading_level: 3
 
 ::: nwqlib.evidence.binary.BinaryEstimate
+    options:
+      heading_level: 3
+      members: false
+
+::: nwqlib.evidence.binary.BinaryPopulation
     options:
       heading_level: 3
       members: false

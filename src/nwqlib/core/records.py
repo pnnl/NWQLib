@@ -1,4 +1,7 @@
-"""Small immutable interchange records; no payload access or scientific execution."""
+"""Small immutable interchange records.
+
+They hold no payload access and run no scientific computation.
+"""
 
 from __future__ import annotations
 
@@ -23,7 +26,10 @@ Surrounding whitespace is removed, and a string that is then empty is
 rejected. Only a `str` is accepted, not a number or bytes.
 """
 ContentID = Annotated[str, StringConstraints(strict=True)]
-"""A content hash: `"sha256:"` followed by 64 lowercase hexadecimal digits.
+"""A content hash, as text.
+
+NWQLib generates `"sha256:"` followed by 64 lowercase hexadecimal digits, and
+the type checks only that the value is a `str`.
 
 Every record has one in its `content_id`, computed from its type and fields,
 and a record refers to another, such as a Result to its Plan, by this hash.
@@ -74,8 +80,8 @@ class FrozenArray:
     object with three keys: ``dtype`` (``"<f8"`` or ``"<i8"``), ``shape`` (a
     list of nonnegative integers) and ``data`` (standard base64 of the
     little-endian C-order element bytes). Validation accepts that object, a
-    FrozenArray or a NumPy array of one of the two dtypes; other dtypes are
-    rejected rather than cast. The JSON text grows with the array, so a
+    FrozenArray or a NumPy array of one of the two dtypes. Other dtypes are
+    rejected, not cast. The JSON text grows with the array, so a
     record that stores a problem-sized array names the admission that bounds
     it, as for other growing record JSON.
 
@@ -254,9 +260,10 @@ class Record(BaseModel):
     rejected, and a record cannot be changed after it is built.
     `record.revise(**changes)` returns a validated new record with the
     changes and leaves the old one unchanged. Constructors, `model_validate`
-    and `model_validate_json` validate field data. An instance of the exact
-    declared type is reused. `model_dump(mode="json")` returns a detached
-    JSON description.
+    and `model_validate_json` validate field data. A field value that is
+    already an instance of the field's exact declared record type is kept as
+    it is, without validating it again. `model_dump(mode="json")` returns a
+    detached JSON description.
 
     Each record has a content hash, `content_id`. A Result names its Plan,
     an observation its circuit and a resource quantity its evidence by this
@@ -264,16 +271,19 @@ class Record(BaseModel):
     the record's concrete type, so two record classes with equal fields stay
     distinct, its schema version, so a format change cannot collide with
     old data, and its `parent_id`, so a revision stays distinguishable from
-    a separately built record with the same fields. The identity is computed
-    from the admitted fields when first requested.
+    a separately built record with the same fields. The content hash is
+    computed from the validated fields when first requested.
 
     Attributes:
         schema_version: Version of the record's format, fixed by its type.
         parent_id: Content hash of the record that this one revises, or
             `None`. `revise` sets it.
-        content_id: The record's content hash, read-only: the SHA-256 digest
-            of compact, sorted-key UTF-8 JSON of the record's fully qualified
-            type and all its declared fields. Tuples keep their order, and
+        content_id: The record's content hash, read-only: `"sha256:"`
+            followed by the hexadecimal SHA-256 digest of compact, sorted-key
+            UTF-8 JSON of an object with the keys `"identity_encoding"`
+            (`"nwqlib.record/1"`), `"type"` (the record's fully qualified
+            type) and `"fields"` (all its declared fields in
+            `model_dump(mode="json")` form). Tuples keep their order, and
             numbers use Python's round-trip binary64 JSON form.
     """
 
@@ -281,10 +291,9 @@ class Record(BaseModel):
     # receives an instance of exactly the declared record type, validation
     # returns that instance unchanged: its validators, including heavy
     # admission such as Program admission, do not run again, and it keeps its
-    # stored identity and any other stored admission result. Records are frozen
-    # by their normal constructors. For an instance of the exact type, the
-    # wrap validator
-    # ``_admit_record`` returns it before any other validator runs.
+    # stored identity and any other stored admission result. For an instance
+    # of the exact type, the wrap validator ``_admit_record`` returns it before
+    # any other validator runs.
     # ``revise`` and ``model_copy`` still validate a new record from field
     # values, and so does a field or ``model_validate`` that receives an
     # instance of a subclass of the declared type. An instance of any other
@@ -337,8 +346,8 @@ class Record(BaseModel):
         """Validate field data and reuse instances of the exact declared type.
 
         An instance of exactly this type is returned unchanged and no
-        validator runs again (the admitted-instance
-        path of the class docstring). Every Record type's validator is wrapped
+        validator runs again, as the comment "Reuse of admitted records" in
+        the class body describes. Every Record type's validator is wrapped
         here, so the path covers each type without a per-class guard.
         """
         if type(value) is cls:
@@ -598,6 +607,7 @@ class InputRef(Record):
             `"circuit"`.
         source: Required. The [`Source`][nwqlib.core.records.Source] of the
             input.
+        schema_version: Fixed `2`. Version of the saved record format.
     """
 
     schema_version: Literal[2] = 2
@@ -634,7 +644,7 @@ class Limit(Record):
     budget that is used up (`"consumption"`, such as CPU seconds, shots or
     currency), a capacity that is reused (`"capacity_stock"`, such as memory
     or stored bytes) and a `"deadline"`, because they combine differently.
-    Use adds up across work, a capacity is compared with a peak, and a
+    A budget adds up across work, a capacity is compared with a peak, and a
     deadline bounds the elapsed time. Each metric accepts one unit and one
     kind, so a limit cannot be read in the wrong sense:
 
@@ -676,12 +686,10 @@ class Limit(Record):
 
     @model_validator(mode="after")
     def _metric_unit(self):
-        """Require the one (unit dimension, unit symbol, kind) triple each metric admits.
+        """Require the one (unit dimension, unit symbol, kind) triple each metric admits, as listed in the class docstring.
 
-        Both times are in seconds. CPU time is a consumption and wall time a
-        deadline. Memory and stored bytes are capacities, and the other byte
-        and count metrics are consumptions. A currency limit accepts any
-        currency symbol. Byte and count values must be exact integers.
+        A currency limit accepts any currency symbol, and byte and count
+        values must be exact integers.
         """
         expected = {
             "cpu_time": ("time", "s", "consumption"),

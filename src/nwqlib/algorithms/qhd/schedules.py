@@ -192,21 +192,22 @@ def _unit_mean(start, width, numerator_power):
     [0, 1]. Each of the four panels applies the 16-point Gauss-Legendre rule
     (``_UNIT_MEAN_NODES``).
 
-    For the truncation error, ``f(z) = 1/(1 + z**3)`` has poles at -1 and
+    For the truncation error, ``f(z) = 1/(1 + z**3)`` has poles ``z_j`` at -1 and
     ``exp(±i pi/3)``, at least ``R = sqrt(3)/2`` from every real point of [0, 1]. A panel has
-    midpoint m and half-width ``L <= 1/8``, so ``q = L/R <= 1/(4 sqrt(3))``.
+    midpoint m and half-width ``L <= 1/8``, so ``rho = L/R <= 1/(4 sqrt(3))``.
     Expanding each factor ``1/(z - z_j)`` about m as a geometric series with
     ratio at most ``|z - m|/R`` bounds the degree-k Taylor coefficient of f by
     ``f(m) C(k+2, 2)/R**k``, since ``C(k+2, 2)`` counts the ways to split k
     among three factors. The rule is exact through degree 31 and has positive
-    weights, so its panel error is at most ``2 f(m) T_32(q)`` times the panel
-    width, where ``T_n(q) = sum_{k >= n} C(k+2, 2) q**k
-    = (q**n/2)((n+1)(n+2)/(1-q) + (2n+3) q/(1-q)**2 + q (1+q)/(1-q)**3)``.
-    On the panel ``f >= f(m)/(1 + q)**3``, so the relative panel error is at
-    most ``2 (1 + q)**3 T_32(q)``. For ``z f = (m + (z - m)) f`` the bound
-    gains ``(L/m) T_31(q)``, and ``m >= L`` gives the common bound
-    ``2 (1 + q)**3 (T_32(q) + T_31(q)) < 1.9e-23``, below ``1.7e-7 u``. Sums
-    of positive panel values keep this relative bound.
+    weights, so its panel error is at most ``2 f(m) T_32(rho)`` times the panel
+    width, where for a nonnegative integer n,
+    ``T_n(rho) = sum_{k >= n} C(k+2, 2) rho**k
+    = (rho**n/2)((n+1)(n+2)/(1-rho) + (2n+3) rho/(1-rho)**2 + rho (1+rho)/(1-rho)**3)``.
+    On the panel ``f >= f(m)/(1 + rho)**3``, so the relative panel error is at
+    most ``2 (1 + rho)**3 T_32(rho)``. For ``z f = (m + (z - m)) f`` the bound
+    gains ``(L/m) T_31(rho)``, and ``m >= L`` gives the common bound
+    ``2 (1 + rho)**3 (T_32(rho) + T_31(rho)) < 1.9e-23``, below ``1.7e-7 u``,
+    with ``u = 2**-53``. Sums of positive panel values keep this relative bound.
 
     Roundoff dominates. The stored nodes, the mapping and the panel offset
     put q within 3u. With the divisions by which the caller forms start and
@@ -376,6 +377,7 @@ class QuadraticSchedule(Record):
     def exact_integrals(self, lower, upper):
         """Return ``(A, B)`` over ``[l, r]`` as exact rationals, with A None where it is not rational.
 
+        ``lower`` and ``upper`` are the exact rational endpoints l and r.
         ``B = (r - l) + gamma (r**3 - l**3)/3`` is rational, and so is ``A = r - l`` for
         gamma = 0. For gamma > 0, A is an arctangent difference and None. The coefficient
         residual of ``evolution_bound`` compares the exact product of the stored step
@@ -548,6 +550,7 @@ class CubicSchedule(Record):
     def exact_integrals(self, lower, upper):
         """Return ``(A, B)`` over ``[l, r]`` as exact rationals, with A None because it is not rational.
 
+        ``lower`` and ``upper`` are the exact rational endpoints l and r.
         ``B = (r**4 - l**4)/2``. A mixes a logarithm and an arctangent. The coefficient
         residual of ``evolution_bound`` compares the exact product of the stored step
         duration and the stored potential step average with the rational integral B
@@ -677,6 +680,7 @@ class ShiftedCubicSchedule(Record):
     def exact_integrals(self, lower, upper):
         """Return ``(A, B)`` over ``[l, r]`` as exact rationals.
 
+        ``lower`` and ``upper`` are the exact rational endpoints l and r.
         ``A = 4 ((s + l)**-2 - (s + r)**-2)`` and ``B = (r**4 - l**4)/2``, both rational, so
         the exact subtraction has no cancellation error. The coefficient residual of
         ``evolution_bound`` compares the exact product of the stored step duration and each
@@ -733,9 +737,11 @@ def step_weights(schedule, rule, total_time, num_steps):
     Adjacent steps share their binary64 endpoint ``(k + 1) dt``, so the
     intervals tile ``[0, num_steps dt]``.
 
-    Range admission (``validation._normal_range``). ``dt = fl(total_time/N)``
-    is positive and normal, and so is ``dt/2``, the first midpoint and the
-    second-order half duration, which is then exact. Every step's binary64
+    Range admission (``validation._normal_range``). With ``N = num_steps``
+    and fl denoting binary64 round-to-nearest,
+    ``dt = fl(total_time/N)`` is positive and normal, and so is ``dt/2``,
+    which is both the first midpoint and the second-order half duration
+    and is then exact. Every step's binary64
     endpoints ``k dt < (k + 1) dt`` are finite and increasing, and under the
     midpoint rule its midpoint lies strictly between them. Every weight is
     positive and normal. The point values raise otherwise, and under the

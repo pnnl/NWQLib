@@ -1,6 +1,6 @@
 # Rank candidate plans
 
-<a id="search-selected-plans"></a>`scan` ranks a finite set of existing Plans by objectives such as requested shots, and returns the nondominated ones. Each candidate is a Plan you have already made, so a different Method setting or shot count needs a new Plan. You plan and execute the candidates yourself.
+<a id="search-selected-plans"></a>`scan` ranks a finite set of existing Plans by objectives such as requested shots, and marks the nondominated ones (the Pareto front) among all the rows it returns. Each candidate is a Plan you have already made, so a different Method setting or shot count needs a new Plan. You plan and execute the candidates yourself.
 
 ```python
 from nwqlib import Expectation, plan, scan, solve
@@ -29,11 +29,11 @@ Each objective is minimized:
 
 - `requested_shots`: the shots of the Plan's measurement batches plus the separately declared direct readouts of its experiments. This is the planned number of shots. Retries and later adaptive measurements that the Plan does not specify are outside this count, which does not treat them as zero.
 - `logical_width`: the largest exact peak of logical qubits at one location, for one measurement run. A peak that holds only when the measurement runs execute one after another requires `ResourceContext(batch_schedule="serial")`, and the value keeps that condition.
-- `predicted_seconds`: the predicted times of one explicit `model_id` and timing `scope`, summed only under an explicit serial schedule. Every measurement run of the Plan needs a matching prediction. Overlapping scopes are not added together. The sum is conditional on its model and carries no confidence guarantee.
+- `predicted_seconds`: the predicted times of one timing model and scope, given as `Objective(kind="predicted_seconds", model_id=time_model.content_id, scope=...)`, summed only under a serial schedule declared with `context=ResourceContext(batch_schedule="serial")`. Every measurement run of the Plan needs a matching prediction. Overlapping scopes are not added together. The sum is conditional on its model and carries no confidence guarantee.
 
 ## Read the ranking
 
-A row whose values are all available is nondominated when no other such row is at least as good on every listed objective and strictly better on at least one, within this supplied set. Equal rows all remain. Rows with an unavailable value keep their reasons in `selection.incomparable` and are not ranked as zero. With a profile, the comparison also keeps all five assessment fields when available ([applicability, capability, capacity, time and accuracy](profiles.md#independent-axes-and-original-associations)), including for infeasible rows. The nondominated set (the Pareto front of this set) is neither a feasibility filter nor a global optimum. `select(index)` returns any original row, including a dominated row that you choose deliberately. Execution rejects a blocked row before preparation.
+A row whose values are all available is nondominated when no other such row is at least as good on every listed objective and strictly better on at least one, within this supplied set. Equal rows all remain. Rows with an unavailable value keep their reasons in `selection.incomparable` and are not ranked as zero. With a profile, the comparison also keeps all five assessment fields when available ([applicability, capability, capacity, time and accuracy](profiles.md#independent-axes-and-original-associations)), including for infeasible rows. The nondominated set (the Pareto front of this set) is neither a feasibility filter nor a global optimum. `select(index)` returns any original row, including a dominated row that you choose deliberately. Execution rejects a row without a Plan before preparation.
 
 ## Run a selected row
 
@@ -41,7 +41,7 @@ Passing a selected row to `prepare` or `solve` keeps its original `PlanEstimate`
 
 ## Rescore a comparison
 
-Rescore an existing comparison with `scan(search.comparison, objectives=...)`. It reads the stored quantities and forecasts and rejects a replacement profile, context or assessment time. It runs no planning, resource summation, model evaluation, backend call or reference computation. Blocked rows keep their Method, reason and Allocation, with no Plan made up for them. `SearchSelection.model_validate_json(...)` checks a saved selection, recomputing its nondominated and incomparable rows from the stored values, and `validate_comparison(comparison)` checks that the selection belongs to that comparison. Neither restores missing numerical data or circuits.
+Rescore an existing comparison with `scan(search.comparison, objectives=...)`. It reads the stored quantities and forecasts and rejects a replacement profile, context or assessment time. It runs no planning, resource summation, model evaluation, backend call or reference computation. Rows without a Plan keep their Method, reason and Allocation, with no Plan made up for them. `SearchSelection.model_validate_json(...)` checks a saved selection, recomputing its nondominated and incomparable rows from the stored values, and `validate_comparison(comparison)` checks that the selection belongs to that comparison. Neither restores missing numerical data or circuits.
 
 ## Limits
 

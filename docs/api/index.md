@@ -14,7 +14,7 @@ result = solve(problem, method=method, seed=7)
 print(round(result.eigenvalue, 10))  # 1.0
 ```
 
-Entries are listed under their defining module, and the import line at the top of each page gives the public import path.
+Entry headings show the object's name. The anchor of an entry names a module path, usually the module that defines it, which can differ from the public import path. The import lines and the opening paragraphs of each page give the public import path of the objects you construct or call.
 
 ## Find an entry by task
 
@@ -35,16 +35,16 @@ Entries are listed under their defining module, and the import line at the top o
 
 ## Algorithms
 
-| Computes | Methods | Reference | Guide |
-| --- | --- | --- | --- |
-| Expectation of a Hermitian observable in a state | `ExpectationMethod` | [Pauli expectation](algorithms/expectation.md) | [Finite Pauli expectation](../algorithms/expectation.md) |
-| Estimate of the smallest eigenvalue from Chebyshev moments | `Lanczos` | [Lanczos](algorithms/lanczos.md) | [Chebyshev Lanczos](../algorithms/lanczos.md) |
-| Eigenphase or energy by phase estimation | `QCELS`, `SPE`, `RFE`, `RWPE` | [QPE](algorithms/qpe.md) | [QPE](../algorithms/qpe.md) |
-| Estimate of the smallest eigenvalue in a fixed or adaptively grown trial basis | `FixedGCIM`, `ADAPT` | [GCiM and ADAPT](algorithms/gcim.md) | [GCiM](../algorithms/gcim.md) |
-| Solution of `du/dt = -A u + b` | `LCHS` | [LCHS](algorithms/lchs.md) | [LCHS](../algorithms/lchs.md) |
-| Solution of `A x = b` | `QLS` | [QLS](algorithms/qls.md) | [QLS](../algorithms/qls.md) |
-| Candidate minimizer of an objective over a box | `QHD` | [QHD](algorithms/qhd.md) | [QHD](../algorithms/qhd.md) |
-| Candidate minimizer subject to constraints, and box refinement | `solve_augmented_lagrangian`, `refine_box` | [QHD constrained problems and box refinement](algorithms/qhd_constrained.md) | [Constrained problems](../algorithms/qhd.md#constrained-problems) |
+| Computes | Methods | Reference and guide |
+| --- | --- | --- |
+| Expectation of a Hermitian observable in a state | `ExpectationMethod` | [Pauli expectation](algorithms/expectation.md) and the guide [Finite Pauli expectation](../algorithms/expectation.md) |
+| Estimate of the smallest eigenvalue from Chebyshev moments | `Lanczos` | [Lanczos](algorithms/lanczos.md) and the guide [Chebyshev Lanczos](../algorithms/lanczos.md) |
+| Eigenphase or energy by phase estimation | `QCELS`, `SPE`, `RFE`, `RWPE` | [QPE](algorithms/qpe.md) and the guide [QPE](../algorithms/qpe.md) |
+| Estimate of the smallest eigenvalue in a fixed or adaptively grown trial basis | `FixedGCIM`, `ADAPT` | [GCiM and ADAPT](algorithms/gcim.md) and the guide [GCiM](../algorithms/gcim.md) |
+| Solution of `du/dt = -A u + b` | `LCHS` | [LCHS](algorithms/lchs.md) and the guide [LCHS](../algorithms/lchs.md) |
+| Solution of `A x = b` | `QLS` | [QLS](algorithms/qls.md) and the guide [QLS](../algorithms/qls.md) |
+| Candidate minimizer of an objective over a box | `QHD` | [QHD](algorithms/qhd.md) and the guide [QHD](../algorithms/qhd.md) |
+| Candidate minimizer subject to constraints, and box refinement | `solve_augmented_lagrangian`, `refine_box` | [QHD constrained problems and box refinement](algorithms/qhd_constrained.md) and the guide [Constrained problems](../algorithms/qhd.md#constrained-problems) |
 
 ## Subroutines
 

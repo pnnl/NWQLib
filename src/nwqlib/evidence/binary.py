@@ -169,16 +169,32 @@ class BinaryReadoutMitigation(Record):
 
 
 class BinaryPopulation(Record):
-    """Actual counted data after reuse of a frozen preparation is removed.
+    """Counts of zeros and ones of one binary readout, with each source of sampled data counted once.
 
-    source_ids are distinct counted-data identities; observation_ids name their
-    counted observations in that order. reused_observation_ids keep further
-    observations of the same frozen sources without increasing sample size.
-    preparation_ids keep the receipts associated with each counted source,
-    including replay receipts. One hardware preparation may supply many fresh
-    acquisitions, and many same-seed preparations may supply one frozen source.
-    Supplied non-quantum data can omit preparation_ids. Equal counts from
-    distinct sources remain distinct data, not proof of IID.
+    `BinaryEstimate.population` holds it. A source is one set of sampled
+    data. A preparation with a fixed seed reproduces its source each time it
+    runs, so a repeated observation of that source is listed in
+    `reused_observation_ids` and does not increase the sample size. One
+    hardware preparation may supply many fresh sources, and many same-seed
+    preparations may supply one source. Equal counts from distinct sources
+    remain distinct data, not proof that the samples are independent and
+    identically distributed.
+
+    Attributes:
+        name: Name of the setting, or `<setting>:<label>` for one label of a
+            grouped setting.
+        zeros: Number n0 of zero outcomes over the distinct sources.
+        ones: Number n1 of one outcomes over the distinct sources.
+        source_ids: Content hashes that identify the distinct counted
+            sources.
+        observation_ids: Content hash of the observation counted for each
+            source, in the order of `source_ids`.
+        reused_observation_ids: Default `()`. Further observations of the
+            same sources, which add no sample size.
+        preparation_ids: Default `()`. For each counted source, the content
+            hashes of the preparation records that produced it, including
+            repeated runs. Supplied data that no quantum preparation produced
+            can leave it empty.
     """
 
     name: Text
@@ -382,8 +398,6 @@ def _interval(options, family_size, *, reason, assumptions, bounds=None, empty=F
     unavailable one whose reason explains why.
     """
     probability = 1.0 - options.failure_probability
-    if not 0 < probability < 1:
-        raise ValueError("selected interval probability is not representable strictly between zero and one")
     return BinaryInterval(kind=_kind(options), probability=probability,
         status="empty" if empty else "conditional" if bounds is not None else "unavailable",
         lower=None if bounds is None else bounds[0], upper=None if bounds is None else bounds[1],
@@ -538,7 +552,12 @@ def infer_binary(population, *, options, family_size, fixed_time, fixed_time_rea
 
 
 def _float(value, arithmetic, *, side=None):
-    """Convert a bounded exact scalar, with outward rational endpoint rounding."""
+    """Convert an exact scalar to binary64, or return None when it overflows or a nonzero value rounds to zero.
+
+    With ``side="lower"`` or ``side="upper"`` the result is rounded outward
+    so that it bounds the exact value. Otherwise it is the nearest binary64
+    value.
+    """
     try:
         result = float(value)
     except OverflowError:
@@ -562,8 +581,8 @@ def correct_binary(science, zero, one, *, options, inference, applicability_reas
     a=(z0-z1)/2 is the contrast and b=(z0+z1)/2 the offset.
 
     Calibration fields keep distinct data identities even when their values
-    happen to agree. Shared-population derivatives are composed by the
-    existing linear_variance owner, and this function never assumes their
+    happen to agree. Shared-population derivatives are composed by
+    ``statistics.linear_variance``, and this function never assumes their
     independence. Stored inference options and interval families must agree
     before their rectangle can be composed. Correction never changes its
     statistical model.

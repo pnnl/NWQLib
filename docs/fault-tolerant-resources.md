@@ -60,7 +60,7 @@ Operation/transport caps and timeout do not bound native internal RSS or synthes
 
 The compiled circuit has 26 T gates on 1 logical qubit, with 71 operations and depth 71 (NWQEC 0.1.2, Qiskit 2.5.2, macOS arm64). The counts are exact for this compiled circuit and describe one execution of it, not the plan's eight shots. The `source` content hash identifies this preparation and differs from run to run. Repeated compiles of one circuit can give different Clifford counts, and hence different operation counts and depths. In the repeated compiles recorded under [NWQEC 0.1.2](dependency_issues.md#nwqec-012), the T count stayed the same. Saving writes a new file and refuses to overwrite an existing one. Displaying, saving and loading a stored record compile nothing.
 
-The input of `compile_logical` is a live prepared circuit (`Prepared`), or a `LogicalCircuit` returned by `nwqlib.blocks.lower_qiskit`, which compiles blocks without an Aer Run and needs `index=0`. The index of a prepared circuit follows `prepared.circuits` and `prepared.setting_names`. A circuit released with `run.release_native()` is reloaded from its saved QPY snapshot, as for `prepared.inspect_resources`, without building or transpiling it again. The record keeps the source content hash, how the circuit was built, the qubit layout, the gate basis, the mapping of terminal measurements, the original readout and phase, the digest of the input QASM, the NWQEC version, the requested and effective options, the counts, the output circuit and the elapsed seconds.
+The input of `compile_logical` is a live prepared circuit (`Prepared`), or a `LogicalCircuit` returned by `nwqlib.blocks.lower_qiskit`, which compiles blocks without an Aer Run and needs `index=0`. The index of a prepared circuit follows `prepared.circuits` and `prepared.setting_names`. A circuit released with `run.release_native()` is reloaded from its saved QPY copy, as for `prepared.inspect_resources`, without building or transpiling it again. The record keeps the source content hash, how the circuit was built, the qubit layout, the gate basis, the mapping of terminal measurements, the original readout and phase, the digest of the input QASM, the NWQEC version, the requested and effective options, the counts, the output circuit and the elapsed seconds.
 
 ### Choose the target and precision
 
@@ -76,7 +76,7 @@ QASM2 and NWQEC transformations can discard global phase, and recording the sour
 
 ### Limits
 
-Each compilation runs in one child process with defaults of 100000 top-level input or output operations, 10 GB of transport and saved bytes and 60 seconds. Nested stored input data are checked against the existing snapshot byte limit. These limits do not bound the compiler's internal memory or synthesis work. A timeout or capture failure stops the child and saves no successful result. Nothing is retried, and no limit is raised automatically.
+Each compilation runs in one child process with defaults of 100000 top-level input or output operations (`max_operations`), 10 GB of transport and saved bytes (`max_bytes`) and 60 seconds (`timeout_seconds`). The stored data of the input circuit, including nested gate definitions and their arrays, are checked separately against the same `max_bytes`. These limits do not bound the compiler's internal memory or synthesis work. A timeout or capture failure stops the child and saves no successful result. Nothing is retried, and no limit is raised automatically.
 
 ## Project physical qubits and runtime {#apply-one-explicit-physical-model}
 
@@ -132,7 +132,7 @@ An empty feasible set is a valid result. For a short enough workload, this model
 
 ## Compile every setting of a Plan {#compile-every-setting-of-a-plan}
 
-A `Plan` can measure several settings with one circuit each, for example the queries of a sampled QCELS or RFE `Plan` (`shots=N`) or the measurement bases of an `Expectation`. An exact QCELS or RFE `Plan` reads every query from one trajectory, so it has one setting. `prepare` prepares only the first setting of a static `Plan` by default, so only index 0 has a circuit. `prepare(..., settings="all")` prepares every static setting on local Aer without submitting, and `setting_names[i]` names the setting of circuit i. ZZ and XX need different measurement bases, so the `Plan` below has two settings and two circuits. Continuing the example above:
+A `Plan` can measure several settings with one circuit each, for example the queries of a sampled QCELS or RFE `Plan` (`shots=N`) or the measurement bases of an `Expectation`. An exact QCELS or RFE `Plan` reads every query from one exact evaluation of its circuit (a `trajectory` readout), so it has one setting. When a Plan's settings are fixed in advance, `prepare` prepares only the first setting by default, so only index 0 has a circuit. `prepare(..., settings="all")` prepares every fixed setting on local Aer without submitting, and `setting_names[i]` names the setting of circuit i. ZZ and XX need different measurement bases, so the `Plan` below has two settings and two circuits. Continuing the example above:
 
 ```python
 zz_xx = ingest_pauli([("ZZ", 1), ("XX", 0.5)], num_qubits=2)
@@ -162,7 +162,7 @@ Each compilation counts one execution of one circuit, and the `Plan`'s shots are
 
 ## Estimate QHD rotations and T gates without compiling {#estimate-qhd-rotations-and-t-gates-without-compiling}
 
-Compilation is limited to small circuits. A QHD `Plan` with native one-hot execution records the arbitrary-rotation count of its circuit when it is planned, and a binary `Plan` an upper bound on it. `circuit_resources` adds a T estimate for a stated synthesis budget together with the circuit's separate error sources, without building the circuit:
+Compilation is limited to small circuits. A QHD `Plan` with `execution="quantum"` and the one-hot encoding records the arbitrary-rotation count of its circuit when it is planned, and a binary `Plan` an upper bound on it. `circuit_resources` adds a T estimate for a stated synthesis budget together with the circuit's separate error sources, without building the circuit:
 
 ```python
 import sympy as sp

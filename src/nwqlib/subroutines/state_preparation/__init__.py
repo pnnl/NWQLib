@@ -1,4 +1,8 @@
-"""State preparation with NumPy compression and selected optional circuits."""
+"""State preparation.
+
+The MPS compression needs no quantum SDK, and the circuit builders import
+Qiskit on first access.
+"""
 
 from importlib import import_module
 

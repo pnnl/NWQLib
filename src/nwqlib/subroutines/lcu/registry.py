@@ -4,8 +4,6 @@ from __future__ import annotations
 
 from typing import Any
 
-from nwqlib.subroutines._registry_utils import registry_metadata_function
-
 
 LCU_PREPARATION_IMPLEMENTATIONS: dict[str, dict[str, Any]] = {
     "direct": {
@@ -30,12 +28,6 @@ LCU_PREPARATION_IMPLEMENTATIONS: dict[str, dict[str, Any]] = {
 }
 
 
-lcu_preparation_implementation_metadata = registry_metadata_function(
-    LCU_PREPARATION_IMPLEMENTATIONS, slot="LCU PREP"
-)
-
-
 __all__ = [
     "LCU_PREPARATION_IMPLEMENTATIONS",
-    "lcu_preparation_implementation_metadata",
 ]

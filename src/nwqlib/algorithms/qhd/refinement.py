@@ -17,10 +17,9 @@ Run is durable, and ``resume_box_refinement`` continues an interrupted
 refinement (``_durable``).
 
 The docstrings below quote measured refinements as examples of what an
-option does. They were measured on 2026-09-26 at revision
-aede9fd119563d63562c9afed4b00021920560c6 with Python 3.12.14, NumPy 2.5.2,
-SciPy 1.18.1 and SymPy 1.14.0 on macOS arm64, and the quantum example with
-Qiskit 2.5.2 and Aer 0.17.2. Each example runs ``refine_box`` with
+option does. They were measured on 2026-09-26 with Python 3.12.14, NumPy
+2.5.2, SciPy 1.18.1 and SymPy 1.14.0 on macOS arm64, and the quantum example
+with Qiskit 2.5.2 and Aer 0.17.2. Each example runs ``refine_box`` with
 ``execution="classical"`` and ``seed=7``, except the one with exact
 quantum readout, which runs with ``seed=3``, and keeps every QHD and
 ``BoxRefinement`` setting it does not name at its default. The defaults
@@ -199,25 +198,21 @@ def _tabulated_objective(decomposer, offset, tables, k, show=None):
     with ``value`` the objective and ``relative`` the objective minus
     ``offset`` (below), both checked to be finite and real.
 
-    At a known level-grid index, read the stored entries of that level's
-    unscaled objective and combine them with its constant using ``fsum``.
-    The relative value uses the same entries with the exactly formed
-    constant difference ``c0-C``. At an off-grid point, evaluate the level's
-    support expressions at its centered coordinates. Array and scalar
-    expression evaluation need not produce identical binary64 entries, so
-    only an indexed read establishes agreement with the selected grid table.
-
-    With ``indices``, the grid-index tuple of the level point, the value is
-    therefore ``method.objective_at`` of the stored tables. Without it, as
-    at a ``mode_or_mean`` mean position, each p_S is lambdified over its own
-    variables and evaluated separately at ``x - m`` for the point x
-    (``potential._evaluate_objective``), and the terms, which sum to F
-    exactly, are combined with the separately converted constant, so the
-    value is F up to the evaluation of each term and the rounding of the
-    sum. Combining the support expressions into one expression before
-    evaluating it would round differently, and can overflow in a partial
-    sum when every term and the total are finite, as for
-    ``10**308 (x - x**2 - x y) - y`` at ``(1, 1)``. Evaluating F in another
+    With ``indices``, the grid-index tuple of the level point, the function
+    reads the stored entries at those indices and combines them with the
+    constant by ``fsum``, so the value is ``method.objective_at`` of the
+    stored tables. Without it, as at a ``mode_or_mean`` mean position, each
+    p_S is lambdified over its own variables and evaluated separately at
+    ``x - m`` for the point x (``potential._evaluate_objective``), and the
+    terms, which sum to F exactly, are combined with the separately
+    converted constant, so the value is F up to the evaluation of each term
+    and the rounding of the sum. Array and scalar expression evaluation need
+    not produce identical binary64 entries, so only an indexed read
+    establishes agreement with the selected grid table. Combining the
+    support expressions into one expression before evaluating it would
+    round differently, and can overflow in a partial sum when every term and
+    the total are finite, as for ``10**308 (x - x**2 - x y) - y`` at
+    ``(1, 1)``. Evaluating F in another
     written form, such as unexpanded, can also meet a pole that the tables
     do not. An evaluation error of a term raises ValueError, and an ``fsum``
     whose exact sum exceeds binary64 raises OverflowError. The decomposition
@@ -332,11 +327,9 @@ def _face(p, q):
     ``x_i + h/2`` on a uniform grid of spacing h.
 
     Return the midpoint of two finite binary64 coordinates, rounded once to
-    binary64. A finite rounded sum can be halved without changing that
-    result, including in the subnormal range. If the sum overflows, halving
-    both same-sign inputs is exact and their sum rounds the midpoint
-    directly. Let ``t = p + q`` be the exact real sum
-    and ``s = RN(t)`` finite. If ``abs(s) >= 2*nu`` (``nu = 2**-1022``),
+    binary64. Let ``t = p + q`` be the exact real sum
+    and ``s = RN(t)`` finite, with RN denoting round to nearest binary64
+    with ties to even. If ``abs(s) >= 2*nu`` (``nu = 2**-1022``),
     halving s is exact normal scaling and the rounding lattice around t
     scales to the lattice around t/2, so ``s/2 = RN(t/2)``. If
     ``abs(s) < 2*nu``, every possible t is an integer multiple of
@@ -653,9 +646,10 @@ def _table_magnitude(tables):
     """Return ``sum_S max |T_S|`` over the grid, the size of the table values that E is a difference of.
 
     Each table value carries its own evaluation rounding, a few units of
-    ``u |T_S|`` for a simple expression and more for an ill-conditioned one,
-    with ``u = 2**-53``. The search model divides the tables by E, so that
-    rounding reaches its potential multiplied by ``table_magnitude/E``, the
+    ``u_fp |T_S|`` for a simple expression and more for an ill-conditioned one,
+    with binary64 unit roundoff ``u_fp = 2**-53``.
+    The search model divides the tables by E, so that rounding reaches its
+    potential multiplied by ``table_magnitude/E``, the
     conditioning that each level records (``RefinementLevel.conditioning``,
     derived in ``_level_problem``). No rounding bound that holds for every
     objective expression is known here, so the level reports the factor
@@ -688,9 +682,10 @@ def _resolution_stop(tables):
     error can also exceed the threshold, as for ``sin(x)**2 + cos(x)**2``
     evaluated through rounded intermediates, so a level that passes can
     still vary mostly by rounding. Its ``RefinementLevel.conditioning``
-    reports this, and the rule does not bound it. For normal values the
-    threshold is at most ``2 u sum_S max |T_S|`` with ``u = 2**-53``. Both
-    sums are formed and compared exactly.
+    reports this, and the rule does not bound it.
+    For normal values the threshold is at most
+    ``2 u_fp sum_S max |T_S|``, with binary64 unit roundoff
+    ``u_fp = 2**-53``. Both sums are formed and compared exactly.
     """
     # The cached exact extrema of the stored tables (records.SupportValues).
     variation = sum((Fraction(t.maximum) - Fraction(t.minimum) for t in tables), Fraction(0))
@@ -703,8 +698,9 @@ def _resolution_stop(tables):
 def _require_scale(tables):
     """Return E = ``_outer.range_bound(tables)``, raising when the bound exceeds binary64.
 
-    A level whose E is not finite cannot be normalized, so it stops the
-    refinement as ``inner_failed`` with this message.
+    A level whose E is not finite cannot be normalized. Its ValueError ends
+    the refinement as ``inner_failed`` after a completed level or round, and
+    propagates before one (``_outer.inner_failure``).
     """
     # range_bound reads each table's max and min, here its cached exact extrema.
     scale = range_bound((t.minimum, t.maximum) for t in tables)
@@ -772,21 +768,22 @@ def _level_problem(problem, box, qhd, scaling, gain, stored=None):
     that value, with the evaluation that uses the actual factor f, then
     ``|T'_S - f T_S| <= e'_S + f e_S``. The constant term is converted to
     binary64 once, which in normal arithmetic moves it by at most
-    ``u f sum_S |min T_S|``, with ``u = 2**-53``. At every grid point the
-    exact sum of the solved constant and table values therefore lies within
-    ``delta = sum_S (e'_S + f e_S) + u f sum_S |min T_S|`` of kappa times
+    ``u_fp f sum_S |min T_S|``, with binary64 unit roundoff
+    ``u_fp = 2**-53``. At every grid point the exact sum of the solved constant
+    and table values therefore lies within
+    ``delta = sum_S (e'_S + f e_S) + u_fp f sum_S |min T_S|`` of kappa times
     the value in ``[0, 1]`` that the stored tables give, so in
     ``[-delta, kappa + delta]``. The classical kernel's ``method.objective_at``
-    rounds that sum once more with ``fsum``, by at most u times its
-    magnitude. For values rounded once, ``e_S`` is about ``u max |T_S|`` and
-    ``e'_S`` about ``2 u f max |T_S|``, one more rounding for the factor f,
-    so delta is about ``4 u kappa`` times ``table_magnitude/E``
+    rounds that sum once more with ``fsum``, by at most u_fp times its
+    magnitude. For values rounded once, ``e_S`` is about ``u_fp max |T_S|``
+    and ``e'_S`` about ``2 u_fp f max |T_S|``, one more rounding for the
+    factor f, so delta is about ``4 u_fp kappa`` times ``table_magnitude/E``
     (``RefinementLevel.conditioning``). This estimate illustrates the scale
     for simple expressions. It does not bound the evaluation error of an
     arbitrary expression, whose e_S and e'_S can be much larger. The
     resolution stop does not bound the conditioning either.
     ``exp(2**-51 x)`` on the grid ``{0, 1}`` passes it with conditioning
-    about ``2.25e15``, where ``4 u`` times the conditioning is about one.
+    about ``2.25e15``, where ``4 u_fp`` times the conditioning is about one.
     Each level reports its conditioning. A strict enclosure would need
     outward rounding of every table evaluation.
 
@@ -949,12 +946,24 @@ def _state_probabilities(state):
 
 
 def _kept_readout_choice(d, k, entries, native, held, max_bytes, max_work):
-    """Choose a complete dense allowance, or an admitted streamed chunk."""
+    """Return ``(chunk, workspace, work)`` for a kept-state readout.
+
+    ``chunk == 0`` selects the dense ``(K,)*d`` grid, and a positive
+    ``chunk`` the streamed pass of that many points. ``workspace`` is the
+    byte allowance of the chosen route, and ``work`` the work of one dense
+    readout or of one streamed pass. The byte and work formulas are those
+    that ``_LevelReadout`` states.
+    """
     from .decoding import QHD_DECODING_PROBABILITY_CHUNK_SIZE
 
     dimension = k**d
+    # The one-hot index builder allows 24*K bytes for three K-entry int64
+    # vectors: local indices, their register offsets and the resulting bit masks.
+    # This scratch allowance is also included for binary and classical readout.
     dense_bytes = (48 if native else 32) * dimension + 24 * k + 65536
     fixed = 65536 + 1024 * d
+    # The 16*d bytes per streamed point allow two coordinate blocks to coexist
+    # while the consumer advances the generator, each with d eight-byte indices.
     rate = 16 * d + 128
     dense_work = (d + 4) * dimension + (4 * d + 8) * entries
     if held + dense_bytes <= max_bytes and dense_work <= max_work:
@@ -977,8 +986,7 @@ def _kept_readout_choice(d, k, entries, native, held, max_bytes, max_work):
 class _LevelReadout:
     """The valid grid population of one level, decoded once from its joint observations and reused within the level.
 
-    Decode each level's joint observations once into its valid grid
-    population. One-hot indices set the bit ``j*K+i_j`` for every variable,
+    One-hot indices set the bit ``j*K+i_j`` for every variable,
     and binary indices use the variable-axis permutation. Valid, invalid and
     total masses describe their respective observed populations. Joint box
     mass sums the selected grid slice and conditions it on valid mass. A
@@ -1151,8 +1159,6 @@ class _LevelReadout:
         import numpy as np
 
         ranges = tuple(ranges)
-        if not 1 <= len(ranges) <= 2:
-            raise ValueError('readout modes requires one or two index intervals')
         if self.grid is not None:
             return tuple(self.mode(axis, first, last, window)
                          for first, last in ranges)
@@ -1220,7 +1226,7 @@ class _LevelReadout:
             return fsum(map(float, self.grid[slices].flat)) / self.valid_mass
         if self.state is not None:
             self._admit_passes(1)
-            # The same terms streamed from the kept state; fsum is correctly rounded in any order.
+            # The same terms streamed from the kept state. fsum is correctly rounded in any order.
             def terms():
                 for points, values in self._stream():
                     inside = np.ones(values.shape, dtype=bool)
@@ -1243,7 +1249,8 @@ class _LevelReadout:
             inside &= selected
         if self.counts:
             # C_j and M count the same valid draws in the marginal events and
-            # their intersection. Preserve the existing mass evaluation order.
+            # their intersection. The mass is M / returned shots / valid_mass,
+            # evaluated in that order.
             self.region_axis_counts = tuple(axes)
             self.region_count = self._count_mask(inside)
             return self.region_count / self.denominator / self.valid_mass
@@ -1268,9 +1275,11 @@ def _joint_mass(readout, intervals):
     copy, and an empty intersection gives zero. Counts sum their exact
     integer counts in the box and divide once by the total returned shots
     (``"empirical"``), and exact bins sum their observed values ``v/C`` in
-    the box with ``fsum``. Pooling exact counts before one division is an
-    explicit arithmetic change from the former sum of per-entry quotients
-    ``count/total`` and can change the last bits and a threshold decision.
+    the box with ``fsum``. Pooling exact counts before division by the
+    total returned shots can differ in the last bits, and so in a threshold
+    decision, from a sum of per-entry quotients ``count/total``, where count
+    is an entry's count and total is the returned-shot count. The joint
+    mass also divides by the valid mass.
     A classical result without a kept state has only marginals and returns
     ``(None, None)``, since different joint distributions can have the same
     marginals.
@@ -1286,7 +1295,7 @@ def _point_weights(readout):
     A kept state gives ``indices`` None and ``weights`` the level's
     ``_LevelReadout``, whose ``mode`` reads its ``(K,)*d`` grid of
     probabilities in C order, lexicographic grid order, kept or streamed, so
-    no index array of the ``K**d`` points is formed; the zero entries take
+    no index array of the ``K**d`` points is formed. The zero entries take
     no part in ``_stall_split``. Counts and
     exact bins list each observed valid point once, with its integer count
     summed over chunks or its values ``value/C`` over C chunks added in
@@ -1475,8 +1484,7 @@ def _clearest_valley(rows, admits):
     ``unscreened`` says whether any axis has a valley before the resolution
     test, found in the same pass, so that a level without a resolved valley
     can name its reason. The flanking peaks come from prefix and suffix
-    maxima (``_flank_peaks``), O(K) per axis, and the exact Fraction ratio
-    comparison and the tie rules below are unchanged.
+    maxima (``_flank_peaks``), O(K) per axis.
 
     ``rows`` holds the conditional marginal p of each axis and ``admits`` the
     resolution test of ``_valley_admission``. An interior index v is a
@@ -1785,13 +1793,6 @@ def refine_box(
             stopped, `levels` the completed levels, `results` their QHD results and
             `problem` the original problem, which `save` stores.
 
-    Raises:
-        ValueError: If the options ask for what the QHD configuration cannot carry out,
-            such as a split budget on a periodic grid, or if the first level fails as
-            described above.
-        FileExistsError: If `directory` exists. The message names
-            `resume_box_refinement`, which continues it.
-
     Stops:
         Before each level, refinement stops at `max_levels` levels, an unchanged box, a
         box at its width floor (for the physical model also a box that the grid
@@ -1821,6 +1822,13 @@ def refine_box(
         has completed, and the original exception propagates. An exception from the
         refinement's own evaluation of a solved level, such as a nonreal objective value
         at the reported grid point, propagates.
+
+    Raises:
+        ValueError: If the options ask for what the QHD configuration cannot carry out,
+            such as a split budget on a periodic grid, or if the first level fails as
+            described above.
+        FileExistsError: If `directory` exists. The message names
+            `resume_box_refinement`, which continues it.
 
     Point rules:
         Each level reads the rule's grid point. For `mode_or_mean` it compares F at that
@@ -1884,8 +1892,6 @@ def refine_box(
 
     if not isinstance(problem, Optimization):
         raise TypeError("refine_box requires an Optimization; box refinement has no constraint handling")
-    if not isinstance(options, BoxRefinement):
-        raise TypeError("refine_box requires BoxRefinement options")
     execution, limits = check_arguments(qhd, execution, shots, seed, limits)
     check_refinement_options(options, qhd, execution)
     root = np.random.SeedSequence(seed)
@@ -1931,8 +1937,8 @@ def resume_box_refinement(directory, *, backend, progress=None, end_at_unfinisha
     Run's error as the failure. This option handles an unfinishable continuation after a
     Run has reopened. A Run folder without a committed run-log header fails during
     reopen and is not handled by `end_at_unfinishable`. Reopen does not remove or
-    recreate that folder automatically. Before a completed round or level exists, an
-    inner failure still propagates.
+    recreate that folder automatically. Before a completed level exists, an inner
+    failure still propagates.
 
     A directory whose refinement has ended returns its result, with the level Results
     read from their Runs and the problem from `problem.pickle` attached, and plans,
@@ -2006,10 +2012,10 @@ def _check_attachments(result, problem, results):
     original objective on its smaller box, while a search-model level
     solves its normalized transformed expression on the unit box, so a
     level Plan's objective identity need not equal the original problem's.
-    The level's copied valid count, returned shots, valid mass and mode
-    status must be its Result's, and a grid point must be the Result's
-    point of the refinement's point rule, the candidate for
-    ``best_observed`` and the most probable point otherwise. A physical
+    The level's copied valid mass must be its Result's, and a grid point and
+    its probability must be those of the Result's point of the refinement's
+    point rule, the candidate for ``best_observed`` and the most probable
+    point otherwise. A physical
     level's point is that point's coordinates in the Result, and its
     objective the Result's table objective, since at its grid index ``_tabulated_objective``
     reads the same stored table entries and the same
@@ -2034,10 +2040,8 @@ def _check_attachments(result, problem, results):
                 != (level.result_id, level.plan_id, level.run_id)):
             raise ValueError(f"the Result of level {level.level} differs from the Result, Plan and Run that the "
                              "record names")
-        if ((level.valid_count, level.returned_shots, level.valid_mass, level.mode_status)
-                != (inner.valid_count, inner.returned_shots, inner.valid_mass, inner.mode_status)):
-            raise ValueError(f"level {level.level} records counts, a valid mass or a mode status that differ from "
-                             "its Result")
+        if level.valid_mass != inner.valid_mass:
+            raise ValueError(f"level {level.level} records a valid mass that differs from its Result")
         if level.point_indices is not None and (level.point_indices, level.point_probability) != (
                 getattr(inner, f"{source}_indices"), getattr(inner, f"{source}_probability")):
             raise ValueError(f"the grid point of level {level.level} differs from its Result's "
@@ -2059,18 +2063,13 @@ def _check_attachments(result, problem, results):
 def save_archive(result, path):
     """Write ``result`` to the new directory ``path`` and return its path (``BoxRefinementResult.save``).
 
-    The directory holds ``refinement.json`` (format ``qhd.refinement/4``)
-    with the portable refinement record and the problem record, which keeps
-    the bounds, units and identity of the original problem, and
-    ``problem.pickle`` with its live SymPy objective and variables, read
-    back by ``archive._SymbolicReader``. Each completed level z keeps its
-    Result, saved by its own archive with its own Plan, under
-    ``levels/<z>/result/``. A refinement without a completed level has no
-    ``levels/`` folder. The checks of ``_check_attachments`` run first, so
-    a record without its live problem or level Results is refused before
-    the directory is created. ``path`` must not exist, and a failed save
-    removes the directory. This is a terminal result archive, not a
-    controller directory that ``resume_box_refinement`` continues.
+    ``BoxRefinementResult.save`` describes the layout. The SymPy objective
+    and variables in ``problem.pickle`` are read back by
+    ``archive._SymbolicReader``. The checks of
+    ``_check_attachments`` run before the directory is created, ``path``
+    must not exist, and a failed save removes the directory. This is a
+    result archive, not a directory that ``resume_box_refinement``
+    continues.
     """
     from nwqlib._choice_archive import ArchiveFiles
     from nwqlib._limits import DEFAULT_MAX_BYTES
@@ -2164,10 +2163,9 @@ def check_refinement_options(options, qhd, execution):
 def _decimal_length_bound(value):
     """Return an upper bound on the decimal characters of ``str(value)`` for an integer, sign included.
 
-    ``30103/100000 > log10(2)``; the bound includes zero and a possible minus sign.
+    ``30103/100000 > log10(2)``, and the bound includes zero and a possible minus sign.
     """
     value = int(value)
-    # 30103/100000 > log10(2); includes zero and a possible minus sign.
     return max(1, (abs(value).bit_length() * 30103) // 100000 + 1) + (value < 0)
 
 
@@ -2185,7 +2183,7 @@ def _table_json_bound(specs):
     ``q_i = 4*((p_i + 2)//3)`` base64 characters. The FrozenArray object has
     exact compact-JSON length ``36 + sum digits(shape_j) + max(0, rank-1) + q_i``,
     counting the existing dtype/shape/data representation without reading
-    or encoding entries; base64 characters are ASCII and need no JSON
+    or encoding entries. Base64 characters are ASCII and need no JSON
     escaping. The rank-one ``SupportValues`` bound is
     ``J_fields,i <= 227 + digits(n_i) + sum_(j in support_i) digits(j)
     + max(0, len(support_i) - 1) + q_i`` for ``parent_id=None``, plus 69 if a
@@ -2194,7 +2192,7 @@ def _table_json_bound(specs):
     floats. The default ``model_dump(mode="json")`` also includes
     ``content_id``, whose comma, key, colon and quoted 71-character identity
     add 87 bytes, so ``J_file,i = J_fields,i + 87`` (383 = 227 + 69 + 87)
-    and the list has ``2 + max(0, T-1) + sum J_file,i`` bytes; ``tables=None``
+    and the list has ``2 + max(0, T-1) + sum J_file,i`` bytes. ``tables=None``
     costs four.
     """
     if specs is None:
@@ -2219,10 +2217,10 @@ def _level_json_bound(specs, evaluations, offset):
     ``J_v3 = 86+[T(specs)-4]+[D(evaluations)-1]+[R(offset)-4]
     = 77+T(specs)+D(evaluations)+R(offset)``.
 
-    T still includes every nested support-table record, content identity
-    and base64 array. D and R keep their existing integer-width-dependent
-    decimal bounds. For null tables or offset, the corresponding value is
-    four bytes. No array is encoded to compute this envelope.
+    T includes every nested support-table record, content identity and
+    base64 array. D and R are the integer-width-dependent decimal bounds of
+    ``_decimal_length_bound`` and ``_rational_json_bound``. For null tables
+    or offset, the corresponding value is four bytes. No array is encoded to compute this envelope.
     """
     import json
 
@@ -2256,8 +2254,8 @@ def _level_table_phase_bytes(d, specs, json_bytes):
     characters, ``R_scalar(S) = 4S + 64 L(4 max(1, S) + 1)`` covers those
     strings, decimal conversions and the reconstruction of at most four
     rational numerator/denominator integers (``log2(10) < 4``, so each
-    decimal integer of at most S characters has at most 4S magnitude bits);
-    the factor 64 is a conservative engineering allowance for
+    decimal integer of at most S characters has at most 4S magnitude bits).
+    The factor 64 is a conservative engineering allowance for
     simultaneously live integer/conversion/GCD storage under the current
     scalar codec, ``sp.Rational(int(p), int(q))``, and also covers the
     evaluation-count integer. The identity payload of one ``SupportValues``
@@ -2270,15 +2268,15 @@ def _level_table_phase_bytes(d, specs, json_bytes):
     ``W_load = max(4J, Q + max(q_max, 9 n_max)) + R_scalar(S)``,
     ``B_save = P_data + H_level + W_save``, ``B_load = P_data + H_level + W_load``.
 
-    Save: the frozen tables contribute ``P_data``; the portable tree keeps
-    all Q base64 characters; serializing the current array overlaps raw
+    Save: the frozen tables contribute ``P_data``. The portable tree keeps
+    all Q base64 characters. Serializing the current array overlaps raw
     and base64 bytes, or encoded bytes and the ASCII string, within
-    ``Q + q_max``; the default dump's computed ``content_id`` forms a
-    separate identity serialization, ``I_max`` beyond Q; the streamed
+    ``Q + q_max``. The default dump's computed ``content_id`` forms a
+    separate identity serialization, ``I_max`` beyond Q. The streamed
     ``json.dump`` chunks, escaped current token and UTF-8 writing fit 12J.
     Load: ``read_text`` and parsing overlap input bytes/text and the parsed
     strings within 4J, and the complete input text dies when
-    ``json.loads(path.read_text(...))`` returns; each array is decoded one
+    ``json.loads(path.read_text(...))`` returns. Each array is decoded one
     at a time (ASCII encoding and base64 decoding overlap ``q_i + p_i``, the
     byte copy dies before ``FrozenArray`` makes its owner, and freezing
     overlaps the decoded raw ``8n_i``, the final owner and the ``n_i``
@@ -2318,7 +2316,7 @@ def _level_table_phase_bytes(d, specs, json_bytes):
 
 
 def _admit_level_save(qhd, *, d, tables, evaluations, offset, held_bytes):
-    """Admit a level file's save phase against ``qhd.max_bytes`` before any serialization; return its bound J."""
+    """Admit a level file's save phase against ``qhd.max_bytes`` before any serialization and return its bound J."""
     specs = None if tables is None else tuple(
         (tuple(t.support), int(t.values.array.size)) for t in tables)
     j = _level_json_bound(specs, evaluations, offset)
@@ -2328,7 +2326,7 @@ def _admit_level_save(qhd, *, d, tables, evaluations, offset, held_bytes):
 
 
 def _admit_level_load(qhd, *, path, d, specs, held_bytes):
-    """Admit a level file's load phase against ``qhd.max_bytes`` from its size, before reading it; return that size."""
+    """Admit a level file's load phase against ``qhd.max_bytes`` from its size, before reading it, and return that size."""
     j = path.stat().st_size
     _, load = _level_table_phase_bytes(d, specs, j)
     _require_bytes(qhd.max_bytes, held=held_bytes, local=load, stage="level tables load")
@@ -2336,7 +2334,7 @@ def _admit_level_load(qhd, *, path, d, specs, held_bytes):
 
 
 def _retained_bytes(results):
-    """Return the bytes of the retained level Results' kept states, 16 per amplitude, and their Plans' tables, 8 per entry."""
+    """Return the bytes of the given level Results' kept states, 16 per amplitude, and their Plans' tables, 8 per entry."""
     return sum(16 * inner.data.artifact(inner.artifact).array.size if inner.artifact is not None else 0
                for inner in results) + sum(8 * t.values.array.size for inner in results
                                            for t in inner.plan.reconstruction.support_values)
@@ -2366,29 +2364,29 @@ class _LevelTables:
 
     ``load`` checks the format and reconstructs each ``SupportValues``
     record with its array and saved extrema. It reads the stored evaluations
-    and C as saved; ``stored_offset``
+    and C as saved, and ``stored_offset``
     reads C from the first level's file. The expected population of a
     resumed search-model level, which sizes the load admission, comes from
     its symbolic decomposition, formed before the load and reused by the level (``_level_problem``), with ``K**|S|`` entries per
-    support S; that of the first level, read for C, from the first level's
+    support S. That of the first level, read for C, comes from the first level's
     Plan. The decomposition itself, whose support expressions and constant
     cannot be rebuilt from the stored entries, is formed again symbolically.
-    An irrational C is not stored and is obtained from a decomposition as
-    before.
+    An irrational C is not stored, so a resumed refinement forms it again
+    from the decomposition of the first box (``_refine``).
 
     Saving admits the live frozen tables, portable base64 strings, encoder
     buffers, computed record identities and scalar metadata before
     serialization. Loading admits text parsing and, one table at a time,
     base64 decoding, the new float64 owner and its finite-value mask before
     reading the file. Both phases use the level QHD Method's max_bytes with
-    other live level and retained-result data included. The file's UTF-8
-    length describes outer-directory storage; under the outer-directory
-    contract it is outside the inner Runs' max_data_bytes.
+    the other live level data and the completed level Results included. The
+    file's UTF-8 length describes outer-directory storage. Under the
+    outer-directory contract it is outside the inner Runs' max_data_bytes.
 
     The save phase is ``_admit_level_save`` with the upper file length of
     ``_level_json_bound``, and the load phase ``_admit_level_load`` with the
     file's actual length, both by ``_level_table_phase_bytes``. The held
-    data are the retained level Results' kept states and Plan tables
+    data are the completed level Results' kept states and Plan tables
     (``_retained_bytes``), and for the first level's file read for C also
     the current level's loaded tables.
     """
@@ -2593,7 +2591,7 @@ def _refine(problem, qhd, options, execution, shots, backend, root, limits, prog
                 termination = "no_improvement"
         if termination is not None:
             break
-        funded, reason = round_limits(limits, used, execution, shots)
+        funded, reason = round_limits(limits, used, shots)
         if funded is None:
             termination, failure = "budget_exhausted", reason
             break
@@ -2613,7 +2611,7 @@ def _refine(problem, qhd, options, execution, shots, backend, root, limits, prog
             # tables and their evaluation count, which resume reads instead of evaluating them again (_LevelTables).
             # A fault of that file is a fault of the durable directory, which propagates as reopen does.
             stage = "level_tables"
-            # The retained level Results stay live through the level-file phases (_LevelTables).
+            # The completed level Results stay live through the level-file phases (_LevelTables).
             retained = _retained_bytes(results)
             persisted = decomposition = None
             if folder is not None and _LevelTables.path(folder).is_file():
@@ -2772,7 +2770,7 @@ def _refine(problem, qhd, options, execution, shots, backend, root, limits, prog
             for name, count in run_counts(trace)[0].items():
                 if name in after:
                     after[name] += count
-            funded, reason = round_limits(limits, after, execution, shots)
+            funded, reason = round_limits(limits, after, shots)
             if len(levels) + 1 == options.max_levels:
                 declined = f"the level is the last of max_levels={options.max_levels}"
             elif splits == options.max_splits:
@@ -2832,8 +2830,8 @@ def _refine(problem, qhd, options, execution, shots, backend, root, limits, prog
                         break
                     next_box = split.regions[split.chosen]
                     if readout.counts:
-                        # The retained old-grid event includes the valley on
-                        # either side; every other axis keeps all S valid draws.
+                        # The kept old-grid event includes the valley cell, whichever side is
+                        # chosen, and every other axis keeps all valid_count draws.
                         first, last = ((0, split.valley) if split.chosen == 0
                                        else (split.valley, grid.num_grid_points - 1))
                         kept = sum(readout.split_marginal_counts[split.axis][first:last + 1])

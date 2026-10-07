@@ -11,15 +11,15 @@ from nwqlib.core.records import Float64, Rational
 
 DEFAULT_MAX_INTEGER_BITS = 4096
 
-# Byte-accounting convention H0 of the admission laws that name it (the energy
-# endpoint capture and relation laws in energy_shift.py and the Pauli plan
-# classification gate in subroutines/block_encoding/core.py). "H0=65536 is an
-# explicit engineering allowance for scalar bookkeeping, ndarray headers,
-# iterators and fixed sort stacks on the checked 64-bit CPython/NumPy stack.
-# Variable populations of Python objects are charged separately. This is not a
-# universal interpreter or process-RSS theorem. Allocator fragmentation,
-# library thread pools and native synthesis have separate owners."
-# Registered in ENGINEERING_CONSTANTS.md, "Byte-accounting conventions".
+# H0 of the byte-accounting laws that name it (the energy endpoint capture and
+# relation laws in energy_shift.py and the Pauli plan classification gate in
+# subroutines/block_encoding/core.py). It is an engineering allowance for
+# scalar bookkeeping, ndarray headers, iterators and fixed sort stacks on the
+# checked 64-bit CPython/NumPy stack, not a process-RSS bound. Variable
+# populations of Python objects, allocator fragmentation, library thread pools
+# and native synthesis are counted separately. Registered in
+# ENGINEERING_CONSTANTS.md, "Byte-accounting conventions", with its revisit
+# condition.
 BOOKKEEPING_BYTES = 65536
 
 
@@ -28,17 +28,22 @@ def integer_object_bytes(bits):
 
     ``L(b) = 32 + 4 ceil(max(1, b)/30)`` on the checked 64-bit CPython stack:
     CPython uses thirty magnitude bits per four-byte digit, and the 32 covers
-    its header above the observed 28-byte minimum. The byte-accounting
-    conventions that use it: numerical arrays use eight-byte float64, int64,
-    uint64 and intp entries, sixteen-byte complex128 entries and one-byte
-    Boolean entries; counts and size products are Python integers admitted
-    before allocation or intp conversion; stored payload, incremental
-    workspace, peak simultaneous storage and archive size are distinct
-    quantities. ``B_held`` denotes other already admitted allocations that
-    remain live in the phase being checked, a shared buffer counted once; a
-    gate limiting total simultaneous storage adds ``B_held`` to its local
-    formula or subtracts it from the available limit, and a local function
-    cannot infer unrelated live child plans from its term count.
+    its header above the observed 28-byte minimum.
+
+    The byte-accounting conventions that use it:
+
+    - Numerical arrays use eight-byte float64, int64, uint64 and intp
+      entries, sixteen-byte complex128 entries and one-byte Boolean entries.
+    - Counts and size products are Python integers admitted before
+      allocation or intp conversion.
+    - Stored payload, incremental workspace, peak simultaneous storage and
+      archive size are distinct quantities.
+    - ``B_held`` denotes other already admitted allocations that remain
+      live in the phase being checked, a shared buffer counted once.
+    - A gate limiting total simultaneous storage adds ``B_held`` to its
+      local formula or subtracts it from the available limit, and a local
+      function cannot infer unrelated live child plans from its term count.
+
     Registered in ENGINEERING_CONSTANTS.md, "Byte-accounting conventions".
     """
     return 32 + 4 * ((max(1, bits) + 29) // 30)
@@ -77,8 +82,8 @@ class ExactArithmetic:
     scalar checks. A finite binary64 value needs at most a 1024-bit numerator
     and a 1075-bit denominator (the smallest subnormal is 2**-1074). See
     ENGINEERING_CONSTANTS "Exact evidence integer representation".
-    Cross products are bounded before Fraction can reduce them;
-    a rejected operation may have a smaller reduced result. Raise this explicit
+    Cross products are bounded before Fraction can reduce them,
+    so a rejected operation may have a smaller reduced result. Raise this explicit
     representation limit only for an intended larger exact-arithmetic domain.
 
     With numerator and denominator widths ``(ln, ld)`` and ``(rn, rd)``, the

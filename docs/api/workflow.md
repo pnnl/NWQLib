@@ -122,6 +122,7 @@ A Result's answer field depends on its Method, as the table in the `Result` entr
 ::: nwqlib.artifacts.ArtifactHandle
     options:
       heading_level: 3
+      show_signature: false
       members:
         - array
         - available
@@ -208,7 +209,7 @@ A Result's answer field depends on its Method, as the table in the `Result` entr
 
 ## Run step by step {#actual-execution-state}
 
-`prepare` builds the circuits and returns them with their open `Run`, `submit` starts the Run, and `Run.wait` returns the Result. The [Run on a backend](../prepared_execution.md) guide describes progress, pending jobs, cancellation and limits.
+`prepare` builds the Plan's first circuit, or every circuit with `settings="all"`, and returns a `Prepared` that holds the built circuits and their open `Run`. `submit` starts the Run, and `Run.wait` returns the Result. The [Run on a backend](../prepared_execution.md) guide describes progress, pending jobs, cancellation and limits.
 
 ::: nwqlib.scientist.prepare
     options:
@@ -230,6 +231,7 @@ A Result's answer field depends on its Method, as the table in the `Result` entr
 ::: nwqlib._prepared_execution.Run
     options:
       heading_level: 3
+      show_signature: false
       members:
         - wait
         - resume
@@ -292,7 +294,7 @@ A Result's answer field depends on its Method, as the table in the `Result` entr
     options:
       heading_level: 3
 
-A Method family that runs a sequence of Plans documents it with the family. QHD's augmented-Lagrangian layer and box refinement run one ordinary QHD Plan per round or level, each planned with its own random streams, as `compare` plans each Method, and run with `prepare` and `submit`. With `directory=...` these Runs are saved as they run, and `resume_augmented_lagrangian` and `resume_box_refinement` continue an interrupted run, reopening an unfinished Run with `load_run` and the `progress` of the resume call ([QHD constrained problems and box refinement](algorithms/qhd_constrained.md)).
+A Method family that runs a sequence of Plans documents that sequence on its own page. QHD's augmented-Lagrangian layer and box refinement run one ordinary QHD Plan per round or level, each with `prepare` and `submit`. Each Plan draws its own random streams from one root seed, in the same way that `compare` seeds each Method. With `directory=...` these Runs are saved as they run. `resume_augmented_lagrangian` and `resume_box_refinement` continue an interrupted run. They reopen the unfinished Run with `load_run` and pass it the `progress` argument of the resume call ([QHD constrained problems and box refinement](algorithms/qhd_constrained.md)).
 
 ## Entries on other pages
 

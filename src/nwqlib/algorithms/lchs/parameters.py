@@ -17,7 +17,7 @@ from .primary_records import METHOD
 
 
 def freeze_selected(value, *, max_bytes):
-    """Snapshot numerical selection arrays once; metadata does no numerical work.
+    """Snapshot the selected numerical arrays once. Metadata does no numerical work.
 
     Writable arrays are copied read-only and their bytes are admitted against
     max_bytes first. Already frozen arrays are shared, not copied, so a Plan
@@ -172,14 +172,12 @@ def select_parameters(method, problem, data):
         and weights.
     """
     from .native import LCHS_QSP_EPSILON_FRACTION, resolve_lcu_select_implementation
-    from nwqlib.subroutines._multiplexors import product_formula_select_resource_law
     from .time_independent_terms import generate_lchs_product_formula_select_plan, _build_product_formula_select_plan, _trotter_pauli_decomposition, _admit_pauli_decomposition, LCHSProductFormulaSelectData
     backend = method.hamiltonian_evolution_backend
     dimension = len(data.initial)
     # Stage 1: provisional SELECT route. Product-formula routes are resolved
     # again below, once their plan and its structure certificate exist.
-    resolved = resolve_lcu_select_implementation(data.method,he_backend=backend)
-    selected_select = resolved['resolved_lcu_select_implementation']
+    selected_select = resolve_lcu_select_implementation(data.method)
     extra = dict(select_ancillas=0,qsp_recovery=1.,physical_branches=len(data.coefficient_plan.coefficients))
     # Stage 2: constant-source branch layout (initial and Duhamel applications).
     layout = None
@@ -220,7 +218,7 @@ def select_parameters(method, problem, data):
         if layout is None:
             ledger = {}
             selected = generate_lchs_product_formula_select_plan(final_time=problem.elapsed_time,
-                method=data.method,_quadrature_plan=data.quadrature,
+                method=data.method,quadrature=data.quadrature,
                 max_steps=method.max_trotter_steps,max_bytes=method.max_bytes,max_select_work=method.max_select_work,
                 work_ledger=ledger)
             extra['select_work_charged'] = ledger['work']
@@ -243,9 +241,7 @@ def select_parameters(method, problem, data):
             selected = LCHSProductFormulaSelectData(coefficients=layout.coefficients,plan=pf,quadrature=summary,
                 numerical_psd_premise_satisfied=data.quadrature.numerical_psd_premise_satisfied,nodes=nodes)
             data = replace(data,select_records=records)
-        resolved = resolve_lcu_select_implementation(data.method,he_backend=backend,
-            candidate_costs=product_formula_select_resource_law(selected.plan),select_plan=selected.plan)
-        selected_select = resolved['resolved_lcu_select_implementation']
+        selected_select = resolve_lcu_select_implementation(data.method,select_plan=selected.plan)
         data = replace(data,select_data=freeze_selected(selected,max_bytes=method.max_bytes))
         extra['step_counts'] = selected.plan.branch_step_counts
     zero_generator = not np.any(data.quadrature.l_part) and not np.any(data.quadrature.h_part)
@@ -279,7 +275,8 @@ def select_parameters(method, problem, data):
             # L=0: the first and only joint-generator child is H, weighted by
             # each application's elapsed time. No artificial k integral.
             diagonal_l,diagonal_h = diagonal_h,diagonal_l
-        # Synthesis receives its own 0.1*tol component allowance. The kernel's
+        # Synthesis receives LCHS_QSP_EPSILON_FRACTION times
+        # method.approximation_tolerance as its component allowance. The kernel's
         # tail and k-quadrature allocations do not cover this evolution error.
         selected = _compiled_select_qsp_plan(part_plans=parts,l_diagonal=diagonal_l,h_diagonal=diagonal_h,
             padded_length=1<<(len(coefficients)-1).bit_length(),evolution_time=problem.elapsed_time,
@@ -338,7 +335,7 @@ def construction_work(data,extra,*,method,elapsed):
     route = method.dense_control_route
     whole = False
     if data.selected_select == 'identity_evolution':
-        # Only the actual address phase diagonal remains; source PREP is
+        # Only the actual address phase diagonal remains. Source PREP is
         # priced below with its real controls and multiplicity.
         cx, work, peak = max(0,(1<<a)-2), max(1,1<<a), 64*(1<<a)
     elif backend == 'dense_exact':
@@ -366,7 +363,7 @@ def construction_work(data,extra,*,method,elapsed):
                           for branch in range(len(coefficients)) if layout.branch_to_node[branch] is not None)
         identity = not (np.any(quad.l_part) or np.any(quad.h_part))
         timed = tuple(call for call in calls if call[0] != 0)
-        # A source layout caches each distinct node's eigensystem; the
+        # A source layout caches each distinct node's eigensystem. The
         # homogeneous branches stream one node at a time.
         eigensystems = (0 if identity or not timed else 1 if not np.any(quad.l_part)
                         else len({_node_key(k) for _, k in timed}) if layout is not None else len(timed))
@@ -377,7 +374,7 @@ def construction_work(data,extra,*,method,elapsed):
         # eigensystems cached across the applications of a source layout
         # (16*D**2 + 8*D each) or the current one, and the pre-synthesis
         # matrix frontier. Branches are formed, controlled and appended one
-        # at a time; the kept circuits are added below. The queried LAPACK
+        # at a time. The kept circuits are added below. The queried LAPACK
         # workspace is not charged (a declared known-array workspace). The
         # construction forms no matrix of the full address-plus-system width.
         cached = eigensystems if layout is not None else min(eigensystems, 1)
@@ -472,7 +469,7 @@ def construction_work(data,extra,*,method,elapsed):
     return work,dict(select_cx=cx,known_peak_bytes=peak)
 
 
-def selected_error_facts(payload, *, method, problem, output, raw):
+def selected_error_facts(payload, *, problem, raw):
     """Publish each selected circuit-path error stage as a planning fact.
 
     One application record is built per physical application (the
@@ -504,8 +501,8 @@ def selected_error_facts(payload, *, method, problem, output, raw):
                 records = [payload.select_records[slot] for slot in slots]
                 synthesis = _trotter_budget_quadrature_terms(records,coefficients=payload.quadrature.coefficients,
                     method=payload.method)["trotter_synthesis_error_bound"]
-        # A nonrepresentable physical input scale preserves unit-output access;
-        # component error evidence remains unavailable rather than infinity.
+        # A nonrepresentable physical input scale preserves unit-output access.
+        # Component error evidence remains unavailable rather than infinity.
         if weight is None:
             direct = {"initial_state_preparation":getattr(payload.method,"initial_state_preparation","direct") == "direct",
                       "lcu_coefficient_preparation":getattr(payload.method,"lcu_state_preparation","direct") == "direct"}

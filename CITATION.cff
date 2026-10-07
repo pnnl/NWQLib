@@ -3,8 +3,8 @@ message: "If you use NWQLib, please cite it as below."
 title: "NWQLib"
 abstract: "NWQLib applies quantum algorithms to scientific inputs and returns the computed quantities with their methods, resources and evidence."
 type: software
-version: 1.0.1.post1
-date-released: 2026-10-04
+version: 1.0.2
+date-released: 2026-10-07
 license: BSD-2-Clause
 repository-code: "https://github.com/pnnl/NWQLib"
 url: "https://pnnl.github.io/NWQLib/"

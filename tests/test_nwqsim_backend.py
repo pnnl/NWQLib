@@ -338,6 +338,8 @@ def test_native_trajectory_saved_states_carry_the_prefix_phase_only_at_the_last_
         shape=lambda parameters: (ReducerOutput("complex128", (1,)),),
         work=lambda parameters, width: 2 << width, execute=first))
     monkeypatch.setattr(ExpectationMethod, "save_archive", lambda self, plan, files: {"format": "unreopened"})
+    monkeypatch.setattr(ExpectationMethod, "reduction_allowance",
+                        lambda self, plan, point, *, observation, width, run: 4 * (2 << 2), raising=False)
     plan = three_call_plan(trajectory(
         ObservationPoint(id="middle", position=1, kind="reduction", reducer="norm_mass", parameters={}),
         ObservationPoint(id="end", kind="reduction", reducer="first_amplitude", parameters={})),
@@ -345,8 +347,7 @@ def test_native_trajectory_saved_states_carry_the_prefix_phase_only_at_the_last_
     backend = NWQSimBackend(executable=runner, spool=str(tmp_path / "spool"), max_input_bytes=1 << 20,
                             max_output_bytes=1 << 20, max_buffer_bytes=1 << 20)
     with Run(plan, backend=backend, directory=tmp_path / "run", progress=False) as run:
-        handle = prepare_experiment(plan.resolve("trajectory"), run=run, runtime=RuntimeOptions(seed=7),
-                                    reduction_allowance=4 * (2 << 2))
+        handle = prepare_experiment(plan.resolve("trajectory"), run=run, runtime=RuntimeOptions(seed=7))
         submission = submit_detached((handle,), run=run)
         run._state["backend_context"]["processes"][submission.submission_id].wait()
         chunks = {chunk.point: chunk for chunk in refresh_submissions(run=run)}

@@ -147,13 +147,6 @@ class AxisAssessment(Record):
     status: Outcome
     details: tuple[AssessmentDetail, ...]
 
-    @model_validator(mode="after")
-    def _status(self):
-        """Require the stored status to be ``_outcome`` of the stored details, so it cannot be edited alone."""
-        if not self.details or self.status != _outcome(self.details):
-            raise ValueError("axis status must summarize its nonempty scoped details")
-        return self
-
 
 class TimePrediction(Record):
     """The prediction of one time model for one point, in seconds, with its interval and the feature counts it used.
@@ -168,7 +161,6 @@ class TimePrediction(Record):
     Attributes:
         model_id: Content hash of the time model.
         point_id: Content hash of the assessed point.
-        form: `"acquisition_linear/1"`.
         scope: The model's time scope, copied from the model.
         seconds: Nonnegative predicted seconds, or `None` when unavailable.
         unit: Seconds.
@@ -183,7 +175,6 @@ class TimePrediction(Record):
 
     model_id: ContentID
     point_id: ContentID
-    form: Literal["acquisition_linear/1"]
     scope: TimeScope
     seconds: Float64 | None
     unit: Unit
@@ -228,7 +219,11 @@ class TimePrediction(Record):
 
 
 class AssessmentPoint(Record):
-    """Actual immutable input identities for this read-only evaluation."""
+    """Content hashes of the inputs one assessment read, and the assessment time.
+
+    ``base_construction_id`` is the Plan's construction and ``construction_id``
+    is the construction its Realization selects.
+    """
 
     problem_id: ContentID
     plan_id: ContentID
@@ -371,8 +366,9 @@ def _select_workload(plan, realization, context, memo=None):
     ``readout_shape`` forms it. Unresolved register widths leave the readout
     shape unknown instead of guessing.
     """
-    # Consume the same effective pair boundary as native preparation. The fold
-    # remains the sole population and workspace engine for this selected graph.
+    # Use the Experiment and construction that native preparation selects for
+    # this Realization. Workspace, and the shots and exact evaluations of a
+    # measurement batch, come only from the fold below.
     experiment, construction = realization._selected_construction(plan)
     program_admission = _Admission(construction.program)
     readiness = program_admission.check()
@@ -911,9 +907,10 @@ def _capacity_detail(quantity: ResourceQuantity, limit, allocation, context, at,
 
 
 def _state_body_detail(workload, profile, allocation, stocks, at):
-    """Compare powers by bit length before constructing any integer storage law.
+    """Compare the state-body lower memory requirement with its location's memory stock.
 
-    An unpartitioned statevector body on q qubits needs ``b * 2**q`` bytes,
+    Powers are compared by bit length before any is formed. An unpartitioned
+    statevector body on q qubits needs ``b * 2**q`` bytes,
     and a density matrix ``b * 4**q``, with b = 16 for complex128 and 8 for
     complex64. This is a necessary lower requirement for the body alone, not
     a sufficient memory estimate for the simulator. It applies only to one
@@ -948,7 +945,8 @@ def _state_body_detail(workload, profile, allocation, stocks, at):
     width = widths[0]
     if width.interpretation != "exact" or _integer(width) is None:
         # Unknown extra ancillas do not erase a known system-register lower
-        # requirement. Consume the separately kept role peak from the fold.
+        # requirement, so use the fold's exact ``system`` quantity at the same
+        # location.
         system = next(
             (
                 item
@@ -1334,8 +1332,8 @@ def _model_reasons(model, workload, profile, allocation, at, runtime):
         reasons.append("model requires one exact simultaneous logical width")
     elif not domain.min_qubits <= _integer(widths[0]) <= domain.max_qubits:
         reasons.append("logical width lies outside the model scale domain")
-    # quantity() scans the kept tuple. Five requests below are five scans,
-    # charged anew for each actual supplied model, independently of output size.
+    # quantity() scans the kept tuple, so the five lookups below cost five scans
+    # for each supplied model, independent of output size.
 
     operations = workload.estimate.quantity("operations")
     count = _integer(operations)
@@ -1383,7 +1381,7 @@ def _predict_time(model: TimeModel, workload, profile, allocation, at, runtime, 
 
     """Evaluate an applicable supplied time model on exact selected workload features.
 
-    The ``acquisition_linear/1`` prediction is ``sum(c_f * x_f)`` seconds over
+    The prediction is ``sum(c_f * x_f)`` seconds over
     the model's nonzero coefficients c_f and the exact features x_f. A supplied
     residual interval gives ``[max(0, s + lower), s + upper]`` around the
     central value s, keeping the interval's kind and coverage unchanged. An
@@ -1437,7 +1435,6 @@ def _predict_time(model: TimeModel, workload, profile, allocation, at, runtime, 
     return TimePrediction(
         model_id=model.content_id,
         point_id=point_id,
-        form=model.form,
         scope=model.scope,
         seconds=seconds,
         unit=Unit(symbol="s", dimension="time"),
@@ -1481,7 +1478,7 @@ def _assess_time(workload, profile, allocation, at, *, runtime, point_id):
                 quantity="wall_time",
                 scope=prediction.scope,
                 status="conditional" if prediction.seconds is not None else "unknown",
-                reason=f"{prediction.form} predicts {prediction.seconds.value:g} s under the supplied model"
+                reason=f"the time model predicts {prediction.seconds.value:g} s under the supplied model"
                 if prediction.seconds is not None
                 else "; ".join(prediction.reasons),
                 prediction_ids=(prediction.content_id,),
@@ -1567,7 +1564,7 @@ def _assess_time(workload, profile, allocation, at, *, runtime, point_id):
 
 
 def _assessment_time(value):
-    """Read the clock once for a new assessment; stored views never call this."""
+    """Read the clock once for a new assessment. Stored views never call this."""
     value = datetime.now(timezone.utc) if value is None else value
     if not isinstance(value, datetime) or value.tzinfo is None or value.utcoffset() is None:
         raise ValueError("assessment time must be timezone-aware")
@@ -1606,7 +1603,7 @@ def _assessment_inputs(plan, realization, profile, allocation, context, runtime,
 def _accuracy_detail_fields(error, frame):
     """Summarize a ClaimAssessment as the single accuracy detail.
 
-    PASS supports the sufficient criterion. Remaining contributions or a
+    PASS supports the sufficient criterion. Remaining contributions or an
     absent criterion stay unknown. Any other status is conditional,
     because failing a sufficient bound does not show that the actual error is
     too large.
@@ -1644,7 +1641,9 @@ def _accuracy_detail_fields(error, frame):
 
 
 class ProfileAssessment(Record):
-    """The forecast of one resolved Plan point on a device profile: five independent axes and the time predictions.
+    """The forecast of one resolved point of a Plan on a device profile: five independent axes and the time predictions.
+
+    A point is the `Realization` that `plan.resolve(experiment, bindings=...)` returns.
 
     [`assess`][nwqlib.backends.assessment.assess] returns it, and
     [`PlanEstimate.assessments`][nwqlib.backends.assessment.PlanEstimate] holds
@@ -1652,9 +1651,9 @@ class ProfileAssessment(Record):
     [`AxisAssessment`][nwqlib.backends.assessment.AxisAssessment] whose `status`
     summarizes its own details only, so a memory failure cannot hide a supported
     error bound. No conclusion grants permission to run, configures a backend or
-    changes the computation. An excessive sufficient error bound stays
-    `INCONCLUSIVE` in `error` rather than proving that the actual error is too
-    large.
+    changes the computation. A sum of error bounds above the threshold
+    leaves `error`
+    `INCONCLUSIVE` and is not evidence that the error exceeds the tolerance.
 
     Attributes:
         point: Content hashes of the inputs: problem, Plan, point, base and
@@ -1668,12 +1667,15 @@ class ProfileAssessment(Record):
             problem. The built-in Methods record no such statement, so this axis
             is unknown, or conditional when the Plan lists assumptions or
             requirements.
-        capability: Whether the target supports the point's circuit form, Program
-            nodes, readout, instructions, host kernel and control or adjoint use.
+        capability: Whether the target supports the point's circuit form,
+            [Program](../glossary.md#program) nodes, readout, instructions,
+            [host kernel](../glossary.md#host-kernel) and control or adjoint use.
         capacity: Whether each granted location holds the point's simultaneous
             memory and storage peaks and its known lower requirements.
         time: The time-model predictions and the matching time limits.
         accuracy: The Plan's error-model assessment of `criterion`.
+        frame: The [`ErrorFrame`][nwqlib.evidence.ErrorFrame] of the Plan's
+            output, in which `error` is stated.
         criterion: The [`Accuracy`][nwqlib.problems.records.Accuracy] criterion
             assessed, or `None`.
         error: The complete `ClaimAssessment` of `criterion`, or `None` without a
@@ -1781,7 +1783,6 @@ class ProfileAssessment(Record):
         for prediction, model in zip(self.predictions, profile.models, strict=True):
             if (
                 prediction.evidence != model.evidence
-                or prediction.form != model.form
                 or prediction.scope != model.scope
                 or prediction.assumptions[: len(model.assumptions)] != model.assumptions
                 or prediction.uncertainty
@@ -1798,7 +1799,7 @@ class ProfileAssessment(Record):
         ``validate_context``'s. ``PlanEstimate.validate_plan`` runs them once
         per assessment, and ``PlanEstimate.assessment_for`` runs that once per
         Plan. ``observation`` is the readout that ``realization`` resolves to
-        in ``plan``, when the caller already resolved it; otherwise it is
+        in ``plan``, when the caller already resolved it. Otherwise it is
         resolved here.
         """
         if observation is None:
@@ -1962,8 +1963,9 @@ class PlanEstimate(Record):
     fields below are read-only. All assessments share one assessment time.
     Points that an adaptive method has not chosen yet, and points along a range
     axis that is not expanded, are listed in `unpredicted` instead of being
-    guessed. When a Run is prepared with this estimate, each submission looks up
-    the forecast of its own point, and later timings can be compared with it by
+    guessed. When a Run is prepared from a `compare` or `scan` row that holds
+    this estimate, as `prepare(row, ...)`, each submission looks up the
+    forecast of its own point, and later timings can be compared with it by
     [`align_telemetry`][nwqlib.backends.telemetry.align_telemetry].
 
     Attributes:
@@ -2153,7 +2155,7 @@ def estimate_plan(
     context equal an already folded pair reuses that fold, so each distinct
     pair folds once. ``profile_points`` is the ``(points, unpredicted)`` pair
     that ``_profile_points(plan)`` returned to a caller that already needed it
-    (``scientist.compare``); None evaluates it here.
+    (``scientist.compare``). None evaluates it here.
     """
     if not isinstance(plan, Plan):
         raise TypeError("estimate_plan requires an actual Plan")

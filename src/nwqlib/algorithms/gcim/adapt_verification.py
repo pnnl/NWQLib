@@ -54,7 +54,8 @@ class AdaptVerificationOptions(Record):
         reference_energy: Default `None`. Supplied reference energy, with the
             quantity and unit it refers to and its source, required by
             `"supplied_reference_energy"`. It must be a concrete real scalar
-            without point restrictions.
+            with empty `bindings`, that is, not restricted to particular
+            parameter values.
         reference_tolerance: Default `None`. Positive absolute comparison
             threshold for that energy, required by
             `"supplied_reference_energy"`.
@@ -70,7 +71,7 @@ class AdaptVerificationOptions(Record):
             `"supplied_reference_energy"` lacks `reference_energy` or
             `reference_tolerance`, or has them without that comparison. Also
             if `reference_energy` is not a concrete real scalar with a source
-            and no point restrictions.
+            and empty `bindings`.
     """
 
     name: Text
@@ -276,7 +277,7 @@ def _binary64_square(value):
 
 
 def _residual_metrics(sigma, energy, eigenvalues, options, mode, stop_reason):
-    """Preserve raw square status and conditional nearness; no ground claim.
+    """Return the residual metrics of a Ritz pair: the norm, its square with overflow and underflow flags and, for non-sampled results, the nearness interval, the threshold classification and the heuristic Kato-Temple endpoint.
 
     For a unit vector ``psi`` and real ``E``, ``||(H - E) psi|| >= min_i |lambda_i - E|``,
     so some eigenvalue of H lies in ``[E - sigma, E + sigma]``. This gives the
@@ -435,8 +436,8 @@ def _state_frontier(length):
 
     A multi-gate native suffix can hold the current state, a transposed or
     reshaped copy and a contraction result together, three additional full
-    vectors during an evolution (Qiskit's ``Statevector._evolve_operator``);
-    the scalar multiply-add into the Ritz state needs one temporary. For
+    vectors during an evolution (Qiskit's ``Statevector._evolve_operator``).
+    The scalar multiply-add into the Ritz state needs one temporary. For
     ``l >= 2`` six vectors are live while a later single is evolved with the
     reference, single 1 and the accumulator, and during the last product
     evolution at most ``l - 2`` later-needed product prefixes, the
@@ -456,8 +457,7 @@ def _state_frontier(length):
 
 
 def verify(plan, result, *, options):
-    """Explicitly compare the completed Ritz state or supplied scalar reference under bounded
-    verification work.
+    """Compare the completed Ritz state, or a supplied scalar reference, under bounded verification work.
 
     The state checks rebuild the normalized Ritz state
     ``psi = sum_i c_i |b_i>`` of the value basis (``basis_chains``) from the
@@ -486,7 +486,6 @@ def verify(plan, result, *, options):
     """
     if type(options) is not AdaptVerificationOptions:
         raise TypeError("ADAPT checks require AdaptVerificationOptions")
-    result.validate_plan(plan)
     if result.eigenvalue is None:
         raise ValueError("verification requires a completed projected value")
     checks = options.verification_checks(result)

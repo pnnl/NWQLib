@@ -6,6 +6,8 @@ Use `LinearDynamics(A=..., initial_state=..., time=..., source=...)` with `LCHS`
 from nwqlib.algorithms.lchs import LCHS, LCHSRefinement, LCHSVerification
 ```
 
+Every entry on this page imports from `nwqlib.algorithms.lchs`, except the result records `LCHSSamples`, `LCHSProjectedMoments` and `LCHSGroupMoments`, which are defined in `nwqlib.algorithms.lchs.primary_records`, and the coefficient-table records `LCHSQuadraturePlan` and `LCHSPairCompatibility` in `nwqlib.algorithms.lchs.providers`.
+
 ## Solve a linear ODE
 
 ::: nwqlib.algorithms.lchs.method.LCHS
@@ -31,6 +33,21 @@ from nwqlib.algorithms.lchs import LCHS, LCHSRefinement, LCHSVerification
         - solution
         - state_vector
 
+::: nwqlib.algorithms.lchs.primary_records.LCHSSamples
+    options:
+      heading_level: 3
+      members: false
+
+::: nwqlib.algorithms.lchs.primary_records.LCHSProjectedMoments
+    options:
+      heading_level: 3
+      members: false
+
+::: nwqlib.algorithms.lchs.primary_records.LCHSGroupMoments
+    options:
+      heading_level: 3
+      members: false
+
 ## Check a result
 
 `LCHSVerification` compares the physical solution with an independent reference, and `LCHSRefinement` evaluates error components that planning leaves unknown. Each runs only when passed to `result.verify(checks=...)`.
@@ -54,14 +71,27 @@ from nwqlib.algorithms.lchs import LCHS, LCHSRefinement, LCHSVerification
 ::: nwqlib.algorithms.lchs.providers.LCHSCoefficientPlan
     options:
       heading_level: 3
+      show_signature: false
       members:
         - prep_amplitudes
         - decompose_mps
         - record
 
+::: nwqlib.algorithms.lchs.providers.LCHSQuadraturePlan
+    options:
+      heading_level: 3
+      show_signature: false
+      members: false
+
+::: nwqlib.algorithms.lchs.providers.LCHSPairCompatibility
+    options:
+      heading_level: 3
+      members: false
+
 ::: nwqlib.algorithms.lchs.provider_config.ResolvedProviderConfig
     options:
       heading_level: 3
+      show_signature: false
       show_bases: false
 
 ## Lower-level functions

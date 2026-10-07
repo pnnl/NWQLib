@@ -30,7 +30,8 @@ class CoherentQPECircuit:
     """A coherent phase-estimation circuit, without measurement, and its register sizes.
 
     [`build_coherent_qpe_circuit`][nwqlib.subroutines.qpe.coherent.build_coherent_qpe_circuit]
-    returns it. The circuit is `circuit`. The fields below are read-only.
+    returns it. Its `circuit` field holds the result. The fields below are
+    read-only.
 
     Attributes:
         circuit: Circuit on the `phase` register followed by the `system`
@@ -84,23 +85,23 @@ def build_coherent_qpe_circuit(
     inverse of the QFT of Eq. (4.1) (p. 8). The circuit has no measurement,
     and its register order is ``phase`` followed by ``system``.
 
-    Let m = num_phase_qubits. Phase qubit q controls U^(2**q). For an
-    eigenvector with U v = exp(2*pi*i*theta) v, the phase register after the
-    controlled powers is 2**(-m/2) * sum_k exp(2*pi*i*theta*k) |k>, with k
+    Let m = num_phase_qubits. Phase qubit q controls ``U^(2**q)``. For an
+    eigenvector with ``U v = exp(2*pi*i*theta) v``, the phase register after the
+    controlled powers is ``2**(-m/2) * sum_k exp(2*pi*i*theta*k) |k>``, with k
     read little-endian. This is Eq. (5.1), whose phase phi is theta here,
-    with the factor 2**(-m/2) included. Qiskit's QFTGate maps |j> to
-    2**(-m/2) * sum_k exp(2*pi*i*j*k/2**m) |k>, which is the normalized
-    Eq. (4.1), so its inverse returns |j> exactly when theta = j/2**m
+    with the factor ``2**(-m/2)`` included. Qiskit's QFTGate maps |j> to
+    ``2**(-m/2) * sum_k exp(2*pi*i*j*k/2**m) |k>``, which is the normalized
+    Eq. (4.1), so its inverse returns |j> exactly when ``theta = j/2**m``
     modulo 1. For any other theta, a measurement of the register gives an
-    integer nearest to 2**m*theta (modulo 2**m) with probability at least
-    4/pi**2, Eqs. (5.2)-(5.4) (p. 11).
+    integer nearest to ``2**m*theta`` (modulo ``2**m``) with probability at least
+    ``4/pi**2``, Eqs. (5.2)-(5.4) (p. 11).
 
-    Conventions relative to the paper. The eigenvalue exp(2*pi*i*theta)
+    Conventions relative to the paper. The eigenvalue ``exp(2*pi*i*theta)``
     has the same sign. The paper takes 0 <= phi < 1. Here theta may be any
     real number, and theta + 1 gives the same eigenvalue and the same
-    register state, so the register integer estimates 2**m*theta modulo
-    2**m. The paper writes y = y_1...y_m with the most significant bit y_1
-    on its top qubit, which controls U^(2**(m-1)) (Fig. 6 labels it U^(2^j)
+    register state, so the register integer estimates ``2**m*theta`` modulo
+    ``2**m``. The paper writes y = y_1...y_m with the most significant bit y_1
+    on its top qubit, which controls ``U^(2**(m-1))`` (Fig. 6 labels it U^(2^j)
     with j = m - 1). Qiskit puts the least
     significant bit on phase qubit 0. Both registers hold the same integer,
     so the state is the same vector. The paper's QFT network of Fig. 5
@@ -113,22 +114,23 @@ def build_coherent_qpe_circuit(
     tolerance, not an accuracy statement. Each squaring can double
     the unitarity defect, so the powers skip Qiskit's own constructor check
     of ``U^dagger U`` (``numpy.allclose`` with the identity, atol 1e-8 and
-    rtol 1e-5), which would reject high powers of an admitted input.
+    rtol 1e-5), which would reject high powers of an accepted input.
     The unitary polar factor of each controlled power is synthesized to
     binary64 rounding from its controlled matrix on n + 1 qubits, for n
     system qubits (see
     [Controlled dense unitaries](../../development/dense_synthesis.md#controlled-dense-unitaries)),
     so the realized power differs from the computed one by the order of its
-    unitarity defect. That takes at most
-    `(25/96) 4**(n+1) - 2**(n+1) + 4/3` CX for n >= 2 and order
-    `8**(n+1)` classical arithmetic per power.
+    unitarity defect. Synthesizing one controlled power takes at most
+    ``(25/96) 4**(n+1) - 2**(n+1) + 4/3`` CX for ``n >= 2`` and order
+    ``8**(n+1)`` classical arithmetic per power.
 
     Before the unitarity check, the work of the check and the m - 1
-    squarings, `D**3` units each for dimension D, plus m times the work of
+    squarings, ``D**3`` units each for dimension D, plus m times the work of
     one exact controlled synthesis on n + 1 qubits is compared with
     `max_work`. The bytes of six D-square complex128 arrays, as for the
     dense powers of the QPE Methods, plus the working bytes of one
-    synthesis and the kept bytes of all m are compared with `max_bytes`.
+    synthesis and the stored circuit definitions from all m controlled
+    power syntheses are compared with `max_bytes`.
     The default work limit is the QPE Methods' `max_work`.
 
     Args:

@@ -7,8 +7,6 @@ from typing import Any
 import numpy as np
 
 from nwqlib._validation import finite_real
-from nwqlib.subroutines._power_of_two import is_power_of_two
-from nwqlib.subroutines._serialization import complex_to_dict
 
 
 def as_square_matrix(matrix: Any) -> np.ndarray:
@@ -33,7 +31,5 @@ def validate_final_time(final_time: Any) -> float:
 
 __all__ = [
     "as_square_matrix",
-    "complex_to_dict",
-    "is_power_of_two",
     "validate_final_time",
 ]

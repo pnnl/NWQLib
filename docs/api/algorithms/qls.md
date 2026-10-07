@@ -6,6 +6,8 @@ Use `LinearSystem(A=..., b=...)` with `QLS`. Its `solver` chooses the inverse po
 from nwqlib.algorithms.qls import QLS, QLSVerification
 ```
 
+`QLSAnalysis` also imports from `nwqlib.algorithms.qls`. The result records `QLSSamples`, `QLSProjectedMoments` and `QLSGroupMoments` are defined in `nwqlib.algorithms.qls.primary_records`.
+
 `solve(problem, method=QLS())` defaults to quantum execution of `qsvt_inverse` with `epsilon_inv=0.01`, auto-selected encoding scale and condition estimate, and physical solution output. This default performs no reference solve. The inverse target controls the selected approximation and does not establish a total-output error guarantee.
 
 ## Solve a linear system
@@ -25,6 +27,21 @@ from nwqlib.algorithms.qls import QLS, QLSVerification
         - x
         - alpha
         - kappa
+
+::: nwqlib.algorithms.qls.primary_records.QLSSamples
+    options:
+      heading_level: 3
+      members: false
+
+::: nwqlib.algorithms.qls.primary_records.QLSProjectedMoments
+    options:
+      heading_level: 3
+      members: false
+
+::: nwqlib.algorithms.qls.primary_records.QLSGroupMoments
+    options:
+      heading_level: 3
+      members: false
 
 ## Check a result
 

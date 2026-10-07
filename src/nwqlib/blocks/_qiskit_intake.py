@@ -201,7 +201,7 @@ def snapshot_circuit(circuit, *, max_bytes=DEFAULT_INPUT_BYTES):
         floats or complex numbers, the form Qiskit stores, are admitted
         together: one census charge of 16 bytes per amplitude, as
         ``parameter`` charges each, and one finiteness check of their
-        complex128 array; the kept values are the same objects. Every other
+        complex128 array. The kept values are the same objects. Every other
         parameter, including a Python int, is admitted by ``parameter``.
         """
         values = original.params

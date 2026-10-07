@@ -151,9 +151,9 @@ def test_registry_loads_only_exact_selected_factory_and_never_source_paths(monke
 def test_external_metadata_has_no_implicit_discovery_or_schema_execution(monkeypatch):
     import nwqlib.algorithms.registry as owner
 
-    rows = third_party_registrations(
-        (EntryPoint(name="not_installed@2", value="absent:factory", group="nwqlib.algorithms"),)
-    )
+    installed = (EntryPoint(name="not_installed@2", value="absent:factory", group="nwqlib.algorithms"),)
+    monkeypatch.setattr(owner, "entry_points", lambda *, group: installed if group == "nwqlib.algorithms" else ())
+    rows = third_party_registrations()
     registry = AlgorithmRegistry(rows)
     monkeypatch.setattr(
         owner, "import_module", lambda *args: pytest.fail("inventory imported a Method module")
@@ -165,8 +165,9 @@ def test_external_metadata_has_no_implicit_discovery_or_schema_execution(monkeyp
     for entries in (
         (EntryPoint(name="unversioned", value="absent:factory", group="nwqlib.algorithms"),),
     ):
+        monkeypatch.setattr(owner, "entry_points", lambda *, group, entries=entries: entries)
         with pytest.raises(ValueError, match="method@version"):
-            third_party_registrations(entries)
+            third_party_registrations()
 
 
 def test_fresh_protocol_import_attempt_audit():

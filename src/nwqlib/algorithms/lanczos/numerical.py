@@ -63,7 +63,7 @@ def _projected_matrices(moments: np.ndarray, m: int):
     a, b, c, d, e, f = _moment_indices(m)
     # S_ij = <T_i T_j> = (mu_(i+j) + mu_|i-j|)/2 by T_i T_j = (T_(i+j) + T_|i-j|)/2.
     overlap = (moments[a] + moments[b]) / 2
-    # c,d are symmetric; e,f exchange under transpose. Pair the latter so
+    # c,d are symmetric. e,f exchange under transpose. Pair the latter so
     # cancellation cannot make opposite entries follow different sum orders.
     shifted = moments[c] + moments[d]
     paired = moments[e]  # Advanced indexing owns this temporary.
@@ -215,7 +215,8 @@ def _resolve_overlap_cutoff(requested, m, *, sampled, variances=None,
     raised to at least the numerical floor. The empirical RMS is the
     adjustable default because the strict bound can remove useful trial
     directions, or all of them, at modest shot counts (Lanczos guide,
-    "Continue from the same observations").
+    "Reanalyze with another cutoff" and "Gram noise and the confidence
+    cutoff").
 
     Empirical RMS. Independent moment estimates with sample-mean variances
     sigma_k^2 (the per-shot variance divided by the shot count) give
@@ -325,7 +326,7 @@ def _resolve_overlap_cutoff(requested, m, *, sampled, variances=None,
     )
 
 
-def _sensitivity_weights(reconstruction, statistics, center, alpha, options):
+def _sensitivity_weights(reconstruction, statistics, options):
     """Return main-stage allocation weights from the pilot's regularized solve.
 
     Variance formula and its premises. Let the main stage estimate each
@@ -353,10 +354,12 @@ def _sensitivity_weights(reconstruction, statistics, center, alpha, options):
     Unresolved setting variances or spectral derivatives use uniform weights.
 
     Args:
-        reconstruction: LanczosReconstruction of the sensitivity Plan.
+        reconstruction: LanczosReconstruction of the sensitivity Plan, including
+            its fixed physical frame E = center + alpha*kappa. The pilot solve
+            and derivative use the normalized pencil (K,S). Multiplication by
+            reconstruction.alpha gives the physical energy derivatives used
+            in the returned weights.
         statistics: Pilot MomentStatistics aligned with its moment_indices.
-        center: Identity shift of the physical frame, in operator units.
-        alpha: Positive scale of the physical frame, in operator units.
         options: The Lanczos Method, read for its overlap cutoff settings.
 
     Returns:
@@ -442,17 +445,10 @@ def _sensitivity_weights(reconstruction, statistics, center, alpha, options):
         evidence["fallback_reason"] = "pilot_overlap_rank_unstable"
         return uniform, evidence
     energy = float(result.eigenvalues[0])
-    # Differentiate normalized K/S first; restoring center in the pencil or
+    # Differentiate normalized K/S first. Restoring center in the pencil or
     # subtracting E from center loses small offsets under large identity shifts.
-    derivatives = alpha * _moment_energy_derivatives(
-        result,
-        h,
-        s,
-        0.0,
-        1.0,
-        cutoff,
-    )
-    evidence["pilot_energy"] = center + alpha * energy
+    derivatives = reconstruction.alpha * _moment_energy_derivatives(result, h, s, cutoff)
+    evidence["pilot_energy"] = reconstruction.center + reconstruction.alpha * energy
     evidence["pilot_normalized_ritz_value"] = energy
     evidence["pilot_kept_rank"] = result.kept_overlap_rank
     if np.any(~np.isfinite(derivatives)):
@@ -467,42 +463,47 @@ def _sensitivity_weights(reconstruction, statistics, center, alpha, options):
     return weights, evidence
 
 
-def _moment_energy_derivatives(result, hamiltonian, overlap, center, alpha, cutoff):
-    """Differentiate the entire fixed-rank regularized Ritz solve in O(m^3).
+def _moment_energy_derivatives(result, hamiltonian, overlap, cutoff):
+    """Differentiate the fixed-rank normalized Ritz solve in O(m^3).
 
-    The thresholded solve keeps the eigenvectors V_R of S with eigenvalues
-    s_R above the cutoff and discards V_D with s_D. It returns E and the
-    length-m vector c=V_R y, where (E, y) is the lowest eigenpair of the
-    reduced pencil (V_R^dag H V_R, V_R^dag S V_R), scaled so c^dag S c=1.
-    H is the supplied projected matrix, the normalized K in this module's
-    calls. With y=V_R^dag c, first-order perturbation gives
-    dE=c^dag(dH-E dS)c+2Re[(dV_R y)^dag(H-E S)c]. The kept block of
-    (H-E S)c vanishes, and V_D^dag dV_R has entries
-    (V_D^dag dS V_R)_dr/(s_r-s_d), so the kept projector rotates with S.
-    With r_D=V_D^dag(H-E S)c the rotation term is Tr((W+W^dag)dS),
-    W=V_D [(r_D conj(y))/(s_R-s_D)] V_R^dag. The chain rule through the
-    degree arrays a, ..., f of _moment_indices then gives dE/dmu_k, using
-    dS_ij/dmu_k=([a_ij=k]+[b_ij=k])/2 and
-    dK_ij/dmu_k=([c_ij=k]+[d_ij=k]+[e_ij=k]+[f_ij=k])/4. This analytic derivative
-    replaces the automatic differentiation of Oumarou et al., arXiv
-    2603.15552v1, Section 3.3.2. Only kept/discarded
-    spectral gaps occur; degeneracies within either block require no division.
-    The caller's pilot stability rule excludes a cutoff crossing. This is
-    classical postprocessing sensitivity, not an error certificate.
+    The supplied matrices are the projected normalized operator K and
+    Gram matrix S. The thresholded solve keeps the overlap eigenvectors
+    V_R with eigenvalues s_R above cutoff and discards V_D with s_D.
+    Its lowest kept Ritz value is kappa and its coefficient vector
+    is c = V_R y, normalized by c^dagger S c = 1.
+
+    For fixed rank and a simple selected Ritz value, differentiation gives
+    ``d kappa = c^dagger(dK-kappa*dS)c
+                 + 2 Re[(dV_R y)^dagger(K-kappa*S)c]``.
+    The kept projection of the residual vanishes. With
+    ``r_D = V_D^dagger(K-kappa*S)c`` and ``y = V_R^dagger c``, define
+    ``W = V_D [(r_D conj(y))/(s_R-s_D)] V_R^dagger``. The matrix gradients
+    are ``D = c c^dagger`` for K and ``-kappa*D + W + W^dagger`` for S.
+    This includes rotation of the kept overlap subspace. W is zero when
+    all modes are kept. The derivation is Proposition 10 of
+    ``docs/mathematics.md``.
+
+    The six degree arrays (a,b,c,d,e,f) from ``_moment_indices`` give
+    ``dS_ij/dmu_k = ([a_ij=k]+[b_ij=k])/2`` and
+    ``dK_ij/dmu_k = ([c_ij=k]+[d_ij=k]+[e_ij=k]+[f_ij=k])/4``.
+    Contracting these arrays with the matrix gradients gives each
+    normalized moment derivative. Only kept/discarded gaps occur, so
+    overlap degeneracies within either block require no division.
+    The formula requires no cutoff crossing and a simple selected Ritz
+    value. The caller checks pilot stability before using it.
 
     Args:
-        result: Thresholded solve of (hamiltonian, overlap) that kept its
-            overlap eigenvectors.
-        hamiltonian: Projected matrix center*S+alpha*K whose pencil result
-            solved. This module passes K with center 0 and alpha 1.
-        overlap: Gram matrix S.
-        center: Coefficient of S in hamiltonian.
-        alpha: Coefficient of K in hamiltonian.
-        cutoff: Overlap-eigenvalue cutoff that result used.
+        result: Thresholded solve of (K,S), keeping the overlap eigenbasis.
+        hamiltonian: Projected normalized matrix K used by result.
+        overlap: Gram matrix S used by result.
+        cutoff: Overlap-eigenvalue cutoff used by result.
 
     Returns:
-        Real array of length 2m with dE/dmu_k for k=0, ..., 2m-1, in the
-        units of E.
+        Real array of length 2m with dimensionless d kappa/dmu_k for
+        k = 0,...,2m-1. For a fixed physical frame
+        E = reconstruction.center + reconstruction.alpha*kappa, the
+        caller multiplies by reconstruction.alpha to obtain dE/dmu_k.
+        These postprocessing sensitivities are not an error certificate.
     """
     eigenbasis = result.overlap_eigenvectors
     if eigenbasis is None:
@@ -510,9 +511,10 @@ def _moment_energy_derivatives(result, hamiltonian, overlap, center, alpha, cuto
     coefficients = result.ground_state_coefficients
     energy = float(result.eigenvalues[0])
     density = np.outer(coefficients, coefficients.conj())
-    # With H=center*S+alpha*K and D=c c^dag, c^dag(dH-E dS)c equals
-    # Tr(alpha*D dK)+Tr((center-E)*D dS). metric_gradient collects every dS term.
-    metric_gradient = (center - energy) * density
+    # On the normalized pencil, D = c c^dagger gives
+    # d kappa = Tr(D dK) - kappa*Tr(D dS) plus the kept-projector rotation.
+    # metric_gradient collects the dS terms. The caller applies physical alpha.
+    metric_gradient = -energy * density
     keep = result.overlap_eigenvalues > cutoff
     if np.any(~keep):
         kept, discarded = eigenbasis[:, keep], eigenbasis[:, ~keep]
@@ -526,18 +528,18 @@ def _moment_energy_derivatives(result, hamiltonian, overlap, center, alpha, cuto
         metric_gradient += rotation + rotation.conj().T
     a, b, c, d, e, f = _moment_indices(len(coefficients))
     derivatives = np.zeros(2 * len(coefficients))
-    # Tr(G dM) = sum_ij G_ji dM_ij; all moment derivatives are real.
+    # Tr(G dM) = sum_ij G_ji dM_ij. All moment derivatives are real.
     for index in (a, b):
         np.add.at(derivatives, index.ravel(), (metric_gradient.T.real / 2).ravel())
     for index in (c, d, e, f):
-        np.add.at(derivatives, index.ravel(), (alpha * density.T.real / 4).ravel())
+        np.add.at(derivatives, index.ravel(), (density.T.real / 4).ravel())
     return derivatives
 
 
 def restore_ritz_values(values, center, alpha):
-    """Restore c+alpha*x; bounded scalar cancellation recovery never repeats a solve.
+    """Return center+alpha*x for each normalized Ritz value x, without repeating the solve.
 
-    A binary64 product alpha*x can overflow although c+alpha*x is finite, for
+    A binary64 product alpha*x can overflow although center+alpha*x is finite, for
     example under a large identity shift. Such entries are recomputed once in
     exact rational arithmetic. Entries that remain unrepresentable stay
     nonfinite for the caller to report.
@@ -717,7 +719,6 @@ def reconstruct(
         _sampled_overlap=sampled,
         overlap_input_tolerance=regularization["gram_input_tolerance"],
     )
-    # Keep physical pencil only if representable; normalized solve remains valid.
     with np.errstate(over="ignore", invalid="ignore"):
         physical_h = reconstruction.center * s + reconstruction.alpha * h
     fields.update(

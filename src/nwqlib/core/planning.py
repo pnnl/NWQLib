@@ -1,5 +1,6 @@
-"""Portable Plan/Realization ownership, with method-owned concrete record types.
+"""Plans, their experiments and readout declarations, the registry of saved-state reducers, and the random streams a Plan records.
 
+Methods own their concrete Problem, Method and output record types.
 Interchange never loads a class from a Source. Callers deserialize with the
 same module-level concrete class used to construct the Plan.
 """
@@ -28,18 +29,23 @@ from nwqlib.problems.records import Accuracy
 
 
 class ObservableEstimateSpec(Record):
-    """One requested finite real Pauli sum, in its original physical units.
+    """The finite real Pauli sum whose expectation a provider estimates, in its original physical units.
 
-    observable_id identifies the original physical observable; labels and
-    coefficients keep the actual weighted operator, including identity terms.
-    precision is a requested standard-error target in the same coefficient
+    An `ObservationSpec` of kind `"estimated_observable"` carries it as
+    `estimate`, and the provider's answer is an `EstimateValue` whose
+    `estimate_id` is this record's content hash. `labels` and `coefficients`
+    give the weighted operator, including identity terms.
+    `precision` is a requested standard-error target in the same coefficient
     units, not a bound on physical error or provider cost.
 
     Attributes:
-        observable_id: Identity of the original physical observable.
-        labels: Distinct equal-width Pauli labels, including identity contributions.
-        coefficients: Finite real weights in the original observable units, aligned with labels.
-        precision: Requested provider standard-error target in those units; not total physical error.
+        observable_id: Content hash that identifies the original physical
+            observable.
+        labels: Distinct Pauli labels of equal width over I, X, Y and Z,
+            including identity contributions.
+        coefficients: Finite real weights in the original observable units,
+            in the order of `labels`.
+        precision: Requested provider standard-error target in those units, not total physical error.
     """
 
     observable_id: ContentID
@@ -62,94 +68,73 @@ class ReducerOutput:
     """One output component of a registered acquisition-time reduction.
 
     ``shape`` is the component's array shape, whose product is its number of
-    logical output values. ``index_width`` is the bit width of the packed
-    outcome index stored beside each value of an indexed component, and zero
-    for an unindexed component. The payload reservation of the component is
-    ``payload_bytes`` below.
+    logical output values.
     """
 
     dtype: Literal["float64", "int64", "complex128"]
     shape: tuple[int, ...]
-    index_width: int = 0
 
     def __post_init__(self):
         if (self.dtype not in ("float64", "int64", "complex128") or type(self.shape) is not tuple
-                or any(type(size) is not int or size < 0 for size in self.shape)
-                or type(self.index_width) is not int or self.index_width < 0
-                or (self.index_width and self.dtype == "complex128")):
-            raise ValueError("reducer output needs a float64, int64 or complex128 dtype, a nonnegative integer "
-                             "shape and a nonnegative index width; an indexed component stores an 8-byte value")
+                or any(type(size) is not int or size < 0 for size in self.shape)):
+            raise ValueError("reducer output needs a float64, int64 or complex128 dtype and a nonnegative integer "
+                             "shape")
 
     @property
     def items(self):
         """Number of logical output values, the product of ``shape``."""
         return prod(self.shape)
 
-    @property
-    def payload_bytes(self):
-        """Numerical payload bytes of the component under the NWQLib array payload law.
-
-        The array law is ``8*sum(unindexed_real L_k) + 16*sum(complex L_k) +
-        8*sum(indexed (W_k+1)*s_k)`` with ``W_k=(width_k+63)//64``. An
-        unindexed float64 or int64 value occupies eight bytes, a complex128
-        value sixteen. An indexed component stores an eight-byte value column
-        and ``W`` packed eight-byte index words per entry. A reduction reserves
-        its registered output's actual dtype and shape, including any indexed
-        components, so two complex128 output scalars reserve 32 numerical
-        bytes. The component's shape counts its stored entries.
-        """
-        if self.index_width:
-            return 8 * ((self.index_width + 63) // 64 + 1) * self.items
-        return (16 if self.dtype == "complex128" else 8) * self.items
-
 
 @dataclass(frozen=True)
 class Reducer:
-    """Registered acquisition-time reduction: its shape, byte, work and execution functions.
+    """A registered reduction, which turns a saved simulator state into output values at a trajectory point.
 
-    The registry interface supplies the validated output shape/dtypes, the
-    host work of one reduction and its execution. Unknown reducers fail
-    shape resolution before native work. A built-in reducer registers itself
-    in ``READOUT_REDUCERS`` when its module is imported, and that module is
-    listed in ``BUILTIN_REDUCER_MODULES`` so that ``registered_reducer``
-    resolves its name in a process that has not imported it. A user reducer
-    is added to ``READOUT_REDUCERS`` directly, under a name that no built-in
-    reducer uses. Each reducer's shape is
-    registered before it can be admitted.
+    An `ObservationPoint` of kind `"reduction"` names it by `reducer`, and
+    ``registered_reducer(name)`` returns this entry. The registry supplies
+    the validated output shapes and dtypes, the work of one reduction and
+    its execution. A reducer name without a registered shape fails when
+    the point's output shape is resolved, before any backend work. A built-in reducer registers itself in ``READOUT_REDUCERS`` when
+    its module is imported, and that module is listed in
+    ``BUILTIN_REDUCER_MODULES`` so that ``registered_reducer`` resolves its
+    name in a process that has not imported it. A user reducer is added to
+    ``READOUT_REDUCERS`` directly, under a name that no built-in reducer
+    uses.
 
     The functions a reducer registers are:
 
-    - ``shape(parameters)``: the output components, whose byte function is
-      ``ReducerOutput.payload_bytes`` (the reservation of the published
-      output, which ``point_array_reservation`` and ``_admit_readout`` use).
-    - ``work(parameters, width)``: the host work of one reduction of a saved
-      state of ``width`` qubits, as a nonnegative integer in the unit that
-      the calling Method's work allowance counts. The execution interface
-      (``admit_reductions``) takes the calling Method's remaining work
-      allowance and refuses a schedule whose summed registered work exceeds
-      it, before acquisition. No shared reduction cap exists.
+    - ``shape(parameters)``: the output components, each with its dtype and
+      shape. Before data collection, the Run sets aside an upper bound on the
+      JSON bytes needed to store each component.
+    - ``work(parameters, width)``: the classical work of one reduction of a
+      saved state of ``width`` qubits, as a nonnegative integer in the unit
+      that the calling Method's work allowance counts. ``admit_reductions``
+      requires the calling Method's remaining work allowance and refuses a
+      schedule whose summed registered work exceeds it, before the circuits
+      run. The allowance is specific to the calling Method.
     - ``execute(state, parameters, bindings)``: the reduction itself. It
       receives the read-only complex128 simulator state saved at its point
       (qubit zero least significant), the validated read-only parameter
       mapping and the experiment's immutable argument bindings, and returns
       one array per registered component with that component's dtype and
-      shape (``execute_reduction`` checks them). The saved outputs keep the
-      bindings with them in their point chunk. A reducer registered with
-      ``receives_context=True`` is also called with the keyword ``context``,
-      a read-only ``ReductionContext`` of the producing preparation receipt,
-      so that its acquisition-time validation can consult that receipt's
-      window, exclusions and qualified state error before its outputs are
-      published. The context's ``state_error`` is the modulo-phase budget for
+      shape (``execute_reduction`` checks them). The saved outputs are
+      stored with these bindings in the `ObservationChunk` of their point.
+      A reducer registered with ``receives_context=True`` is also called
+      with the keyword ``context``, a read-only ``ReductionContext`` of the
+      preparation record that produced the state, so that the reducer can
+      check that record's probability window, exclusions and qualified
+      state error while the data are collected, before its outputs are
+      saved. The context's ``state_error`` is the modulo-phase budget for
       a reducer registered ``phase_invariant`` and unavailable, with its
-      reason, for any other; ``modulo_phase_state_error`` carries the
+      reason, for any other. ``modulo_phase_state_error`` carries the
       modulo-phase budget for both (``ReductionContext``).
 
     Attributes:
         shape: Function of the validated parameter mapping that returns the
             output components as a nonempty tuple of ``ReducerOutput``. It
-            describes the published output only; the reduction's private
-            state or action workspace is admitted by the owner that allocates it.
-        work: Registered host work function, or None when no execution is registered.
+            describes the saved output only. The memory of the reduction's
+            own state or workspace is checked by the code that allocates it.
+        work: Registered work function, or None when no execution is registered.
         execute: Registered execution function, or None when no execution is
             registered. A reducer is executable when both are registered.
         phase_invariant: True when the reducer's outputs are unchanged when
@@ -161,12 +146,14 @@ class Reducer:
             global phase at that point, and whether its context carries the
             modulo-phase budget as its ``state_error`` (``ReductionContext``).
         receives_context: True when ``execute`` takes the keyword
-            ``context``; False, the default, calls it with the three
+            ``context``. False, the default, calls it with the three
             positional arguments only.
-        state_error_resolutions: Receipt exclusion labels whose effects this
-            reducer's own readout arithmetic bounds. The execution interface passes
-            them to the producing receipt's saved_state_error method when it builds the
-            ReductionContext. The default resolves no labels.
+        state_error_resolutions: Labels in the preparation record's
+            ``probability_window_exclusions`` whose effects this reducer's own
+            readout arithmetic bounds. The execution interface passes them to the
+            ``saved_state_error`` method of the preparation record that produced
+            the state when it builds the ``ReductionContext``. The default
+            resolves no labels.
     """
 
     shape: Callable[[Mapping[str, Any]], tuple[ReducerOutput, ...]]
@@ -202,26 +189,29 @@ class ReductionContext:
     preparation record ([`PreparedArtifact`][nwqlib.execution.PreparedArtifact])
     that produced the saved state.
 
-    A saved-state reduction receives a native error estimate modulo the
-    global phase, with its conditions, when its declared outputs do not
-    change under that phase. A state uncertainty defined with the phase is
-    unavailable unless a separate phase-error model supplies it, and the
-    context reports that reason. A host correction of the phase adds its
-    finite multiplication and modulus error to every user of the corrected
-    array. Projected mass checks can use the modulo-phase estimate even when
-    other diagnostics of the same reducer depend on the phase. If an
-    assumption of the native estimate remains unavailable, they use the
-    probability window, propagated through the phase correction, and report
-    the original exclusions.
+    For outputs declared invariant under a common global phase, a saved-state
+    reduction receives the backend's state-error estimate modulo that phase
+    when its assumptions are satisfied. This estimate includes the finite
+    multiplication and modulus error of the classical phase correction.
+    For phase-sensitive outputs, ``state_error`` is unavailable and
+    ``state_error_reason`` explains why. The separately supplied
+    ``modulo_phase_state_error`` can still be used for projected masses,
+    which are phase invariant even when other diagnostics of the same
+    reducer depend on phase. If the backend estimate is unavailable, the
+    projected mass checks instead use ``probability_window``, already
+    propagated through the classical phase correction, and keep the original
+    ``probability_window_exclusions`` visible. This window is the acceptance
+    tolerance for those mass checks and does not replace the missing
+    state-error estimate.
 
     The preparation record's state error (`PreparedArtifact.state_error`)
     bounds the computed state only up to one common global phase. It does
     not bound the exact prefix phase, the summation that accumulates the
     prefix phase, the subtraction that forms the correction angle, or an
-    amplitude defined with its phase, and adding a host term to it gives no
-    finite estimate for such a quantity. A saved state used by a
+    amplitude defined with its phase, and adding a classical term to it gives
+    no finite estimate for such a quantity. A saved state used by a
     phase-sensitive and a phase-invariant reducer is corrected once, and
-    both see the same array and the same host error bound of the preparation
+    both see the same array and the same classical error bound of the preparation
     record (`PreparedArtifact.statevector_roundoff`). The phase-invariant
     reducer therefore includes the error of the phase product, even though
     its own registration did not request the phase correction.
@@ -231,9 +221,9 @@ class ReductionContext:
             the saved state.
         probability_window: The preparation record's
             `saved_state_probability_window`, its probability window
-            propagated through the host correction of the saved state, or
+            propagated through the classical correction of the saved state, or
             `None` when that correction was not assessed, which gives no
-            finite budget for a mass check. It does not bound a host
+            finite budget for a mass check. It does not bound a classical
             contraction of the saved state, which has its own accumulated
             error.
         probability_window_exclusions: The preparation record's
@@ -245,20 +235,21 @@ class ReductionContext:
             declared phase behavior. For a reducer registered
             `phase_invariant` it is `modulo_phase_state_error`. For any other
             reducer it is `None`, since a bound defined with the phase is
-            unavailable. It is also `None` when an assumption of the native
+            unavailable. It is also `None` when an assumption of the backend
             estimate remains unavailable. A reducer uses its probability
             window when this value is unavailable, and the original
             exclusions stay available in `probability_window_exclusions`.
         state_error_reason: Why `state_error` is `None`. For a reducer that
             is not registered phase invariant it is the reason a bound
             defined with the phase is unavailable, and otherwise the
-            preparation record's native or host reason. `None` when
+            preparation record's backend or classical reason. `None` when
             `state_error` is available.
         modulo_phase_state_error: The preparation record's
             `saved_state_error` after resolving the labels that the reducer
             declares, a distance modulo one common global phase that includes
-            the error of the host phase product, or `None` when an assumption
-            of the native estimate or the host assessment is unavailable. A
+            the error of the classical phase product, or `None` when an
+            assumption of the backend estimate or the classical assessment is
+            unavailable. A
             phase-sensitive reducer may use it only for outputs shown
             separately to be phase invariant, as the projected mass checks
             do.
@@ -353,25 +344,22 @@ def admit_reductions(observation, *, width, allowance):
     """Admit a trajectory's reductions before acquisition and return their registered host work.
 
     Each reduction point needs a reducer registered with its execution and
-    work functions, and unindexed output components (an indexed component
-    needs an array payload, which the point chunk's JSON values do not
-    provide). The work of the schedule is the sum of ``work(parameters,
+    work functions. The work of the schedule is the sum of ``work(parameters,
     width)`` over its reduction points, checked against ``allowance`` point
-    by point. ``allowance`` is the calling Method's remaining work allowance
-    (the Method owns the ledger it comes from); a schedule with reductions
-    and no allowance is refused. Nothing here runs a reduction.
+    by point. ``allowance`` is the calling Method's remaining work allowance,
+    taken from the Method's own work record. A schedule with reductions and no
+    allowance is refused. Nothing here runs a reduction.
     """
     total = 0
     for point in observation.positions:
         if point.kind != "reduction":
             continue
-        outputs = reducer_outputs(point.reducer, point.parameters)
+        # Resolving the shape refuses an unknown reducer or a failing shape
+        # function before the registry lookup below can return None.
+        reducer_outputs(point.reducer, point.parameters)
         reducer = registered_reducer(point.reducer)
         if not reducer.executable:
             raise ValueError(f"reduction {point.reducer!r} has no registered execution")
-        if any(output.index_width for output in outputs):
-            raise ValueError(f"reduction {point.reducer!r} has an indexed output component, which needs an array "
-                             "payload")
         if allowance is None:
             raise ValueError(f"reduction {point.reducer!r} at point {point.id!r} needs the calling Method's "
                              "remaining work allowance")
@@ -390,7 +378,7 @@ def execute_reduction(point, state, *, bindings, context=None):
 
     ``context`` is the ``ReductionContext`` of the producing receipt. A
     reducer registered with ``receives_context`` receives it as the keyword
-    ``context``, and the call refuses without one; any other reducer is
+    ``context``, and the call refuses without one. Any other reducer is
     called with the state, parameters and bindings only.
 
     The state can be shared with other points at the same boundary, so the
@@ -399,7 +387,7 @@ def execute_reduction(point, state, *, bindings, context=None):
     write the state through that view or re-enable writing on it. A
     registered reducer must not change the writability of the arrays its
     view is based on. The returned arrays must match the registered
-    components' dtypes and shapes; each is returned read-only.
+    components' dtypes and shapes. Each is returned read-only.
     """
     import numpy as np
 
@@ -453,44 +441,46 @@ class ReadoutView(Record):
 
 
 class ObservationPoint(Record):
-    """One observation point of an exact trajectory.
+    """One readout point of an exact trajectory: where the state is read and what is returned.
 
-    A point observes the selected coherent body at one boundary, optionally
-    through a reversible readout view. Its readout kind is
+    The `positions` of an `ObservationSpec` of kind `"trajectory"` hold the
+    points in order. A point reads the state of the coherent circuit body at
+    one boundary, optionally through a readout view (a basis change applied
+    for the readout and then undone). Its readout kind is
     ``pauli_expectation`` with ``labels``, ``probabilities`` with ``qubits``,
-    ``amplitudes`` with its ``AmplitudeReadout`` output/projection declaration
-    (the kind name alone does not determine its selected dimension, frame,
-    masses or output bytes), or ``reduction`` with a registered ``reducer``
-    name and its ``parameters``.
+    ``amplitudes`` with its ``AmplitudeReadout`` output declaration (the
+    kind name alone does not determine its dimension, frame, masses or
+    output bytes), or ``reduction`` with a registered ``reducer`` name and
+    its ``parameters``.
 
     Attributes:
-        id: Point identity, unique within its trajectory.
-        position: Number of bound logical operations preceding an observation
-            point. Zero observes the initial state, and the body length
-            observes its final state. Resolve an end-position shorthand before
-            native preparation. Lowering preserves this boundary when it
-            expands operations and, on a backend that executes readout views,
-            inserts them. None is the
-            end-position shorthand.
-        kind: pauli_expectation, probabilities, amplitudes or reduction.
+        id: Point ID, unique within its trajectory.
+        position: Default `None`, which means the end of the body. Number of
+            bound logical operations before the readout point. Zero reads
+            the initial state, and the body length reads the final state. The
+            end is resolved before the circuit is prepared. Building the
+            circuit keeps this boundary when it expands operations and, on a
+            backend that runs readout views, inserts them there.
+        kind: `"pauli_expectation"`, `"probabilities"`, `"amplitudes"` or
+            `"reduction"`.
         labels: Ordered Pauli labels for this point, with one character per
             logical qubit and qubit zero rightmost. Labels are distinct within
             a point. The same label at another point denotes another returned
             value.
         qubits: Ordered logical qubits of this point's probability marginal,
             least significant first in each returned outcome. A reversible
-            view acts before the marginal is saved and is undone before
-            continuation.
-        amplitudes: The existing amplitude output/projection declaration of
-            an amplitude point.
-        reducer: Registered reducer name of a reduction point.
-        parameters: Canonical sorted-key compact JSON object of the reducer
-            parameters; a mapping is accepted and canonicalized. Other kinds
-            keep ``{}``.
-        view: Optional reference to the selected coherent readout tail and
-            its bound wire mapping. Its inverse restores the continuation
-            state in ideal arithmetic. The receipt includes every executed
-            forward and inverse operation.
+            view acts before the marginal is saved and is undone before the
+            evolution continues.
+        amplitudes: The `AmplitudeReadout` declaration of an amplitude point.
+        reducer: Registered reducer name of a reduction point (`Reducer`).
+        parameters: Reducer parameters as a JSON object in canonical text,
+            with sorted keys and no spaces. A mapping is accepted and
+            converted. Other kinds keep ``{}``.
+        view: Default `None`. The point's `ReadoutView`: the circuit
+            definitions of its basis change and of the exact inverse, and the
+            logical wires they act on. Its inverse restores the continuation
+            state in ideal arithmetic. The preparation record includes every
+            executed forward and inverse operation.
     """
 
     id: Text
@@ -519,9 +509,10 @@ class ObservationPoint(Record):
     def _point(self):
         """Admit only the detail fields that the point's readout kind uses.
 
-        Pauli labels are nonempty, distinct and use IXYZ; a probability
-        marginal names at least one wire (``q_k >= 1``), each once; an
-        amplitude point carries its declaration; a reduction names its reducer.
+        Pauli labels are nonempty, distinct and use IXYZ. A probability
+        marginal names at least one wire (``q_k >= 1``), each once. An
+        amplitude point carries its declaration, and a reduction names its
+        reducer.
         """
         reduction = self.reducer is not None or self.parameters != "{}"
         if self.kind == "pauli_expectation":
@@ -546,9 +537,10 @@ class ObservationPoint(Record):
 def point_items(point, *, width=None, max_items=None, max_items_source=None):
     """Return the number of logical items ``L_k`` one trajectory point produces.
 
-    This is the one per-point item count that the JSON-envelope reservation
-    and the array reservation both use. By the NWQLib admission law, for one
-    declared trajectory,
+    This per-point item count is used by the Pauli JSON-envelope reservation,
+    the binary probability-array reservation at eight bytes per outcome,
+    and the amplitude capacity check at 16 bytes per complex128 value.
+    By the NWQLib admission law, for one declared trajectory,
     ``N_items = sum_k L_k``. A Pauli point contributes its number of distinct
     requested labels. A probability marginal on ``q_k`` selected wires
     contributes ``2**q_k`` logical outcomes regardless of its eventual sparse
@@ -558,9 +550,10 @@ def point_items(point, *, width=None, max_items=None, max_items_source=None):
     parameters. Two distinct views at one boundary contribute both payloads.
     Positions are neither repetitions nor shots.
 
-    For a marginal and nonnegative remaining item capacity ``M_items``, the
-    point rejects when ``q_k >= M_items.bit_length()`` before forming
-    ``1 << q_k``; the existing nonempty-marginal domain requires ``q_k >= 1``.
+    For a marginal on ``q_k`` selected wires and nonnegative remaining item
+    capacity ``M_items``, the point rejects when
+    ``q_k >= max(1, M_items.bit_length())`` before forming ``1 << q_k``.
+    The nonempty-marginal domain requires ``q_k >= 1``.
 
     Args:
         point: The ObservationPoint.
@@ -597,57 +590,46 @@ def point_items(point, *, width=None, max_items=None, max_items_source=None):
     return items
 
 
-def point_array_reservation(point, *, width=None):
-    """Pre-acquisition numerical payload bytes of one point whose values are array-backed.
-
-    By the NWQLib array payload law, for array-backed components,
-    actual numerical payload bytes are ``8*sum(unindexed_real L_k) +
-    16*sum(complex L_k) + 8*sum(indexed (W_k+1)*s_k)``. Before acquisition,
-    each dense or adaptively sparse marginal reserves ``8*2**q_k`` payload
-    bytes. The adaptive encoding chooses indexed storage only when
-    ``8*(W_k+1)*s_k < 8*2**q_k``, otherwise dense storage, and records the
-    actual encoding on completion. A reduction reserves its registered
-    output's actual dtype and shape (``ReducerOutput.payload_bytes``). So a
-    Pauli point reserves eight bytes per real value, a marginal ``8*2**q_k``,
-    an amplitude point sixteen bytes per complex128 amplitude. Pauli/scalar
-    values that still use JSON keep their JSON prototype envelope, which
-    ``_prepared_execution._admit_readout`` charges now; this array
-    reservation is the law for the array representation.
-    """
-    if point.kind == "reduction":
-        return sum(output.payload_bytes for output in reducer_outputs(point.reducer, point.parameters))
-    items = point_items(point, width=width)
-    return (16 if point.kind == "amplitudes" else 8) * items
-
-
 class ReadoutDetails(Record):
-    """Method-owned readout details; a selected IR batch owns acquisition counts/kind.
+    """The readout fields that a Method declares besides the readout kind and shots.
 
+    An experiment of a Program's `MeasurementBatch` holds it as `readout`,
+    because the batch fixes the readout kind and the number of repetitions.
+    `ObservationSpec`, the readout of a direct experiment, adds `kind` and
+    `shots` to these fields.
     The one-endpoint readout (``position``, ``labels``, ``qubits``) is the
     one-point case of a trajectory. A populated ``positions`` belongs only to
     the ``trajectory`` kind, which leaves the one-endpoint fields empty, so a
     Plan never declares two competing schedules.
 
     Attributes:
-        amplitudes: Optional selected amplitude output/projection declaration.
-        estimate: Optional weighted-observable provider estimate specification.
-        position: Number of bound logical operations preceding an observation
-            point. Zero observes the initial state, and the body length
-            observes its final state. Resolve an end-position shorthand before
-            native preparation. Lowering preserves this boundary when it
-            expands operations and, on a backend that executes readout views,
-            inserts them. None is the
-            end-position shorthand.
-        labels: Ordered Pauli or host-scalar labels defining returned value association.
-        qubits: Explicit measured/marginal wire positions in least-significant-first order.
-        population: Requested unconditional or native_conditioned measurement population.
-        padding: Meaning of padding and which returned coordinates belong to the selected system.
-        positions: Ordered observation-point declarations for one exact
-            trajectory. Each point identifies a boundary in the selected
-            coherent body, its readout kind, and its ordered labels or
-            marginal qubits. A point may name a selected reversible readout
-            view. Points share one preparation and acquisition. Their order
-            and payload sizes are part of the Plan.
+        amplitudes: Default `None`. The amplitude output of an amplitude
+            readout (`AmplitudeReadout`).
+        estimate: Default `None`. The weighted Pauli sum whose expectation a
+            provider estimates (`ObservableEstimateSpec`).
+        position: Default `None`, which means the end of the body. Number of
+            bound logical operations before the readout point. Zero reads
+            the initial state, and the body length reads the final state. The
+            end is resolved before the circuit is prepared. Building the
+            circuit keeps this boundary when it expands operations and, on a
+            backend that runs readout views, inserts them there.
+        labels: Default `()`. Pauli or `host_scalars` labels, in the order of
+            the returned values.
+        qubits: Default `()`. Measured or marginal qubit positions, least
+            significant first.
+        population: Default `"unconditional"`. `"unconditional"` or
+            `"native_conditioned"`, the measured shots that the readout
+            covers.
+        padding: Default
+            `"no padding; all returned bit patterns belong to the declared registers"`.
+            Meaning of any padding, and which returned coordinates belong to
+            the system.
+        positions: Default `()`. The points (`ObservationPoint`) of a
+            trajectory, in order. Each point names a boundary in the planned
+            coherent body, its readout kind and its ordered labels or
+            marginal qubits, and may name a readout view. The points share
+            one preparation and measurement, and their order and payload
+            sizes are part of the Plan.
     """
 
     amplitudes: AmplitudeReadout | None = None
@@ -758,7 +740,7 @@ class ObservationSpec(ReadoutDetails):
     describe the Program's measurements and use their declared positive shot
     counts. The readouts of a trajectory are deterministic, and its zero
     shots do not allow measurement-conditioned, reset, postselected, noisy
-    or outcome-dependent evolution. Host, amplitude, sampled and
+    or outcome-dependent evolution. `host_scalars`, amplitude, sampled and
     provider-estimate readouts keep their own meanings.
 
     Readout requests are combined only when they have the same body,
@@ -789,7 +771,7 @@ class ObservationSpec(ReadoutDetails):
             end is resolved before the circuit is prepared. Building the
             circuit keeps this boundary when it expands operations and, on a
             backend that runs readout views, inserts them there.
-        labels: Default `()`. Pauli or host-scalar labels, in the order of
+        labels: Default `()`. Pauli or `host_scalars` labels, in the order of
             the returned values.
         qubits: Default `()`. Measured or marginal qubit positions, least
             significant first.
@@ -1126,11 +1108,12 @@ class Experiment(Record):
         return self
 
     def _resolved_observation(self, admission, *, construction_id: ContentID | None = None) -> tuple[str, ObservationSpec]:
-        """Resolve the admitted Program, binding batch amplitudes to its selected construction.
+        """Return this experiment's setting label and `ObservationSpec`, taking a batch experiment's kind and repetitions from the admitted Program.
 
         ``construction_id`` is required for a probability batch carrying an
-        amplitude declaration. Preparation, analysis and restoration supply
-        the same selected child identity; direct readouts keep their declaration.
+        amplitude declaration, whose declaration is bound to that
+        construction. Preparation, analysis and restoration supply the same
+        selected child identity. Direct readouts keep their declaration.
         """
         if self.batch is None:
             return self.setting, self.observation
@@ -1154,7 +1137,7 @@ class Experiment(Record):
 
 
 class RandomState(Record):
-    """Resolved entropy and exact PCG64 states; no array or live generator.
+    """Resolved entropy and exact PCG64 states, without an array or a live generator.
 
     Attributes:
         entropy: Root nonnegative seed entropy used by NumPy SeedSequence.
@@ -1181,8 +1164,10 @@ class RandomState(Record):
 
 
 class RandomStreams:
-    """Separate method and backend draws from one recorded SeedSequence.
+    """The two random streams of a Plan, one for the Method's choices and one for backend execution seeds, from one recorded seed.
 
+    `Method.plan` receives it as `rng`, and a Method draws its random
+    choices from `rng.method`.
     The root SeedSequence spawns two independent PCG64 streams. The method
     stream serves scientific selection (for example a default random
     initialization). The backend stream only generates execution seeds. Keeping
@@ -1190,6 +1175,17 @@ class RandomStreams:
     method's draws, so one seed reproduces the same selection however often
     it is executed. ``snapshot`` records the exact generator states in the
     Plan, and ``restore`` resumes them without replaying earlier draws.
+
+    Args:
+        seed (int | None): Nonnegative integer root seed of
+            `numpy.random.SeedSequence`, or `None` for fresh entropy.
+
+    Attributes:
+        method: The `numpy.random.Generator` of the Method's draws.
+        backend: The `numpy.random.Generator` of the execution seeds.
+
+    Raises:
+        ValueError: If `seed` is neither `None` nor a nonnegative integer.
     """
 
     def __init__(self, seed=None):
@@ -1260,9 +1256,9 @@ class Plan(Record):
     are not Plan fields, so they do not change its content hash. A row of a
     comparison or search holds at most one Plan, and selecting a row returns
     it with the same Plan object ([Execute the selected
-    row](../scientist.md#execute-the-selected-row)). A Plan keeps live
-    access to its inputs and to the circuit blocks that the Method bound to
-    it, and its JSON description cannot rebuild them.
+    row](../scientist.md#execute-the-selected-row)). A Plan holds its input
+    data and the circuit blocks that the Method attached to it, and its JSON
+    description cannot rebuild them.
 
     A Method author's planning step builds a Plan with keyword arguments, as
     [Run your own circuit](../own_circuit.md) shows. The fields below are
@@ -1282,8 +1278,8 @@ class Plan(Record):
             streams after planning.
         construction: Required. The planned circuit, described as a
             `Program` of named steps, with the definitions of its circuit
-            blocks and the host computations it declares
-            (`SelectedConstruction`).
+            blocks and of the classical computations that the Method runs on
+            this computer (`SelectedConstruction`).
         experiments: Default `()`. The
             [`Experiment`](extending.md#nwqlib.core.planning.Experiment) records in order,
             with unique names and the readout of each.
@@ -1352,7 +1348,10 @@ class Plan(Record):
                     fields=value.model_dump(mode="json", exclude_computed_fields=True))
 
     def to_record(self):
-        """Project selected metadata; never acquire or serialize native data."""
+        """Return the JSON form of the Plan's fields.
+
+        It acquires nothing and serializes no bound native data.
+        """
         return self.model_dump(mode="json", exclude_computed_fields=True)
 
     def __str__(self):
@@ -1386,7 +1385,7 @@ class Plan(Record):
         return self._blocks
 
     def _bind(self, *, blocks=(), **native):
-        """Bind the planned circuit blocks and named live inputs to this Plan once, and return the Plan.
+        """Bind the planned circuit blocks and named live inputs (in-memory objects that are not part of the Plan's saved record) to this Plan once, and return the Plan.
 
         A supported hook for Method authors ([Add a
         Method](../algorithm_protocol.md#supported-protected-extension-hooks)).
@@ -1473,8 +1472,8 @@ class Plan(Record):
         # The most recent point is cached: a repeated request reuses its
         # resolution while it occupies the recent-resolution slot and the
         # bindings match its stored or canonical bindings in order. An evicted
-        # point is resolved and admitted again. The cache affects reuse only;
-        # the immutable Plan and the effective bindings determine the result.
+        # point is resolved and admitted again. The cache affects reuse only.
+        # The immutable Plan and the effective bindings determine the result.
         _, program = self._resolve_selection(experiment, bindings)
         return Realization(plan_id=self.content_id, experiment=experiment, bindings=program.bindings)
 
@@ -1545,7 +1544,11 @@ class Plan(Record):
         return resolved
 
     def _resolve_selection_once(self, experiment, bindings):
-        """Use one merge rule and admit evidence inputs before constructing the point."""
+        """Merge and admit the point's bindings, let the Method specialize the experiment, and build the point's Program.
+
+        The specialized experiment must keep its name, setting, batch and
+        setting index.
+        """
         selected, values = self._effective_point(experiment, bindings)
         specialized = self.method.specialize_experiment(self, selected, MappingProxyType(values))
         if (type(specialized) is not Experiment or any(
@@ -1635,11 +1638,21 @@ class Plan(Record):
 
 
 class Realization(Record):
-    """Reference to one immutable Plan and its admitted experiment/binding choices.
+    """One experiment of a Plan with every parameter value bound, referring to the Plan by its content hash.
 
-    The actual Plan is stored once by the run/planning context. Loading this
-    small record alone does not verify the referenced Plan: validate_plan is the
-    explicit pair boundary. No N-experiment Plan is embedded in N realizations.
+    `Plan.resolve` returns it, and `PreparedArtifact.realization` records the
+    one a preparation used. It refers to the Plan by `plan_id` and does not
+    contain it, so a Plan with N experiments is stored once, not once in
+    each of its N `Realization` records. Loading a Realization alone does
+    not check it against its Plan. `validate_plan(plan)` checks that `plan`
+    is the referenced Plan and that the bindings are the ones
+    `Plan.resolve` returns, and returns the experiment.
+
+    Attributes:
+        plan_id: Content hash of the Plan.
+        experiment: Name of one of the Plan's experiments.
+        bindings: Default `()`. Every Program parameter value of the
+            experiment, in parameter-name order.
     """
 
     plan_id: ContentID

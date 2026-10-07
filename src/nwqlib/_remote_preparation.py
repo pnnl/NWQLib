@@ -62,7 +62,7 @@ def begin_preparation(data, *, run, reservation, fields, items, setting, binding
 
 
 def refresh_preparation(preparation_id, *, run):
-    """Refresh one original preparation once; return a handle or saved pending state.
+    """Refresh one original preparation once and return its handle or its saved pending state.
 
     No circuit construction or quantum acquisition occurs here. A terminal
     compilation consumes its selected local data only when building its receipt.
@@ -91,9 +91,10 @@ def _advance(pending, run, *, data=None):
     publishes the finished receipt through ``_finish_native_preparation``,
     joined to the original static workflow item. Cancellation marks a ``local``
     or ``uploaded`` preparation as cancelled without a provider call, and a
-    compile already running receives one cancellation request. Any error keeps
-    every acknowledged identity, turns an unacknowledged intent into its
-    uncertain state and propagates.
+    compile already running receives one cancellation request. Unless a
+    journal write has already failed, any error keeps every acknowledged
+    identity and turns an unacknowledged intent into its uncertain state. The
+    error then propagates.
     """
     backend, identity = run.backend, pending.preparation_id
 

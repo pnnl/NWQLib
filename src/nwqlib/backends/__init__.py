@@ -1,4 +1,4 @@
-"""Portable target declarations; native adapters load only when selected."""
+"""Portable target declarations. Native adapters load only when selected."""
 
 from importlib import import_module
 from typing import TYPE_CHECKING
@@ -12,8 +12,9 @@ from nwqlib.backends.capabilities import (
     InstructionSupport,
 )
 
-# Each native operation has one actual owner. Merely reading a stored target
-# must not import an SDK, even if that SDK happens to be installed.
+# Each name below maps to the one module that defines it, imported on first
+# access. Reading a stored target must not import an SDK, even when that SDK
+# is installed.
 _OPERATIONS = {
     "AerBackend": "connection",
     "NWQSimBackend": "nwqsim",

@@ -131,12 +131,21 @@ def analyze_initial(plan,data):
 
 
 def _initial_kernel(method,problem,output,kind):
-    """Declare actual initial-output work from input metadata, without action."""
+    """Declare actual initial-output work from input metadata, without action.
+
+    ``kind`` is ``initial_observable`` or ``initial_zero_vector``. For
+    ``initial_zero_vector``, ``plan_initial`` has checked that the initial
+    state's physical scale has zero mantissa, its representation is not
+    ``vector``, and the output is ``Solution`` or
+    ``StateVector(normalization="physical")``.
+    """
     state=problem.initial_state
     dimension=problem.dimension
     outputs=()
     if kind=='initial_observable':
-        state.physical_vector()  # Existing immutable data access, no copy.
+        # Fails early when the vector data is missing. The call returns the
+        # existing immutable array without a copy.
+        state.physical_vector()
         from nwqlib.operators.inputs import _scaled_observable_requirements
         workspace,products=_scaled_observable_requirements(output.observable)
         # Norm/subnormal refinement and the original binary vector frame.
@@ -146,17 +155,11 @@ def _initial_kernel(method,problem,output,kind):
         labels=('norm_squared','numerator')
         frames=('physical','unit' if isinstance(output,NormalizedExpectation) else 'physical')
         dependencies=('numpy','scipy') if output.observable.reference.representation in ('csr','csc') else ('numpy',)
-    elif kind=='initial_zero_vector':
-        if state.preparation.physical_scale.mantissa!=0 or not isinstance(output,(Solution,StateVector)):
-            raise ValueError('initial zero materialization requires a physical zero vector output')
-        if isinstance(output,StateVector) and output.normalization!='physical':
-            raise ValueError('unit zero vector is undefined')
+    else:
         work,workspace=dimension,32*dimension
         inputs,labels,frames,dependencies=(state.reference,),('norm_squared',),('physical',),('numpy',)
         outputs=(ArrayOutput(name='solution' if isinstance(output,Solution) else 'state_vector',kind='vector',
             basis=problem.basis,frame='physical',global_phase='physical' if isinstance(output,Solution) else output.global_phase),)
-    else:
-        raise ValueError('unknown initial-output kernel')
     if work>method.max_select_work:
         raise ValueError('initial output computation exceeds max_select_work')
     _check_bytes(workspace,method.max_bytes,'initial output arrays')
@@ -218,7 +221,7 @@ def _execute_initial_output(plan,kernel):
     if kernel.name=='initial_observable':
         _,_,statistics=physical_vector_statistics(state.physical_vector(),observable=output.observable,
             numerator_frame=kernel.scalar_frames[-1])
-        # The original admitted state owns norm/scale; only the requested
+        # The ingested state supplies the norm and scale. Only the requested
         # observable moment comes from this invocation's framed reduction.
         values.append(statistics[-1])
     else:
@@ -338,7 +341,7 @@ def _classical_work(data,elapsed,starts):
     its elapsed time T - s. time_independent_terms.spectral_lchs_sum forms
     one Hermitian eigensystem per k node (one for an exactly zero L, none for
     identity actions), projects each of the r distinct input vectors once per
-    node and makes one final eigenvector action per node; its work and phase
+    node and makes one final eigenvector action per node. Its work and phase
     bytes are _spectral_host_requirements. 4*D covers the final vector scans.
 
     Returns:
@@ -363,16 +366,11 @@ def _classical_work(data,elapsed,starts):
 def bind_host(plan,data):
     """Bind the Plan's single host kernel to its executor.
 
-    For a no-evolution Plan the kernel is declared again from the Problem and
-    output and must equal the saved one, so a loaded archive cannot run a
-    kernel whose inputs or work differ. Otherwise the executor evaluates the
-    selected finite LCHS sum from data.
+    A no-evolution Plan runs its declared initial-output kernel. Otherwise the
+    executor evaluates the selected finite LCHS sum from data.
     """
     kernel, = plan.construction.kernels
     if plan.reconstruction.mode in ('initial','zero'):
-        expected=_initial_kernel(plan.method,plan.problem,plan.output,plan.reconstruction.selected_backend)
-        if kernel!=expected:
-            raise ValueError('saved initial-output kernel differs from its actual inputs/output/work')
         return BoundKernel._bind(plan,kernel,lambda:_execute_initial_output(plan,kernel))
     return BoundKernel._bind(plan,kernel,lambda:_execute(plan,kernel,data))
 
@@ -416,7 +414,6 @@ def _planned_applications(method,problem,rec,data):
     from these, and execution records the same ones. Yielding one
     application at a time keeps one set of node records alive.
     """
-    from .inhomogeneous_theory import _kernel_context
     from .time_independent_terms import lchs_quadrature_summary, _trotter_budget_quadrature_terms
     elapsed = problem.elapsed_time
     norms = (rec.initial_scale.as_float(),None if rec.source_scale is None else rec.source_scale.as_float())
@@ -429,16 +426,12 @@ def _planned_applications(method,problem,rec,data):
                 coefficients=data.quadrature.coefficients,method=data.method))
             yield _HostApplication(action['start'],action['weight'],action['source'],norms[int(action['source'])],raw)
         return
+    # The shared quadrature record, without any node evolution.
+    raw = lchs_quadrature_summary(data.quadrature,method=data.method,he_backend='dense_exact',
+        final_time=elapsed)
     if data.source is None:
-        # The shared quadrature record, without any node evolution.
-        raw = lchs_quadrature_summary(data.quadrature,method=data.method,he_backend='dense_exact',
-            final_time=elapsed)
         yield _HostApplication(0.,1.,False,norms[0],raw)
         return
-    # The shared record of every Duhamel application. _kernel_context forms
-    # no propagator; execution applies the node evolutions to vectors
-    # (time_independent_terms.spectral_lchs_sum).
-    raw = dict(_kernel_context(final_time=elapsed,method=data.method,_quadrature_plan=data.quadrature).quadrature)
     if rec.initial_scale.mantissa!=0:
         yield _HostApplication(0.,1.,False,norms[0],raw)
     for node,weight in zip(rec.source_nodes,rec.source_weights,strict=True):
@@ -565,7 +558,7 @@ def _evolve(plan,data):
     """
     if data.host_actions is not None:
         return _evolve_pauli_actions(plan,data)
-    # Planning selects Pauli actions for every product-formula backend; the
+    # Planning selects Pauli actions for every product-formula backend. The
     # remaining host path applies the dense exact node evolutions to vectors
     # from one Hermitian eigensystem per node (spectral_lchs_sum).
     from .time_independent_terms import spectral_lchs_sum

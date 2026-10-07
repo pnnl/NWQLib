@@ -167,8 +167,8 @@ class SensitivitySampling(Record):
 
 # Fixed bookkeeping allowance of one simultaneous phase, and the fixed
 # allowance per newly owned rank-one or rank-two ndarray, on the qualified
-# native stack (centered_operator_bytes; ENGINEERING_CONSTANTS "Chebyshev
-# Lanczos defaults").
+# native stack, that is, checked by measurement (centered_operator_bytes,
+# ENGINEERING_CONSTANTS "Chebyshev Lanczos defaults" and its term "qualified").
 H0 = 65536
 ARRAY_FIXED_BYTES = 256
 
@@ -565,9 +565,11 @@ def _trajectory_program(reference, select_operator, *, n, a, degrees, max_bytes)
     contractive. ``readout.reduce_moments`` states how these terms enter
     the comparison with separately prepared moments.
 
-    A tail with d native operations and an inverse with the same count add
-    2d operations to the receipt's G, and d_forward + d_inverse when the
-    inverse lowers to another count.
+    When both execute, a tail with d native operations and an inverse with
+    the same count add 2d operations to the receipt's native operation count G
+    (``PreparedArtifact.probability_window``), and
+    ``d_forward + d_inverse`` when their respective native operation counts
+    ``d_forward`` and ``d_inverse`` differ.
 
     Each point's position is the number of bound logical operations before
     it, one operation per bound call (the lowering convention of
@@ -687,8 +689,10 @@ class Lanczos(Method):
 
     Attributes:
         initial_state: Default `None`. Reference state `|psi>`. `None` draws
-            the Method's default reference from the planning random
-            generator. A Problem with an explicit `sector` requires a
+            a random reference state from the Plan's method random stream, a
+            random product state when the dimension is a power of two and a
+            random complex Gaussian vector otherwise, so the same seed
+            reproduces it. A Problem with an explicit `sector` requires a
             supplied state.
         krylov_dimension: Default `None`, which selects `min(8, d)` for
             problem dimension d. Trial dimension m, a positive integer that
@@ -724,8 +728,10 @@ class Lanczos(Method):
             conversion, which quantum execution needs for sparse input and
             for dense input of dimension above 16.
         max_conversion_work: Default `1e8`. Limit on the work of operator
-            conversion, counted as `q*D²` transform work, where D includes
-            the quantum embedding. It is not a time estimate.
+            conversion, counted as ``q*D²`` transform work. For original
+            operator dimension d, ``q = max(1, ceil(log2(d)))`` is the
+            embedding's qubit count and ``D = 2**q`` is its padded dimension.
+            It is not a time estimate.
 
     Examples:
         `H = ZZ + 0.5*(XI + IX)` on two qubits has lowest eigenvalue
@@ -889,7 +895,7 @@ class Lanczos(Method):
         a = readout.index_width if pauli else 0
         degrees = tuple(range(1, 2 * m)) if self.degrees is None else tuple(sorted(self.degrees))
         if alpha == 0:
-            # T_k(0)=cos(k*pi/2), exactly; no fake SELECT normalization.
+            # T_k(0)=cos(k*pi/2) exactly. No SELECT is built, so nothing is divided by alpha=0.
             known = [(k, (1.0, 0.0, -1.0, 0.0)[k % 4]) for k in range(2 * m)]
             degrees = ()
         elif terms == 1:
@@ -1076,7 +1082,6 @@ class Lanczos(Method):
             operator, rec.krylov_dimension, affine=rec.enclosure_source != "pauli_l1"
         )
         prep_bytes, prep_work = preparation_requirements(reference)
-        # Unknown (None) preparation work is not counted; this total covers known work only.
         return required_bytes + prep_bytes, work + (prep_work if prep_work is not None else 0)
 
     def prepare_all_refusal(self):
@@ -1119,8 +1124,7 @@ class Lanczos(Method):
         return recover_sensitivity_analysis(plan, run=run)
 
     def statistics(self, plan, data, *, stage=None):
-        """Aggregate actual moment populations, optionally restricting them to one sampling
-        stage.
+        """Aggregate actual moment populations, optionally restricting them to one sampling stage.
 
         Count chunks of one degree are pooled with weights equal to their
         returned shots. Exact-probability point chunks and host chunks count
@@ -1133,11 +1137,7 @@ class Lanczos(Method):
         A quantum chunk's histogram is decoded by readout.decode_histogram
         with the bound Plan's LanczosReadout, which keeps the result by chunk
         and setting identity, so a pilot, an analysis and a re-analysis of
-        the same chunk decode it once. Decode the signed marginal with
-        denominator one and zero weight for unused SELECT addresses.
-        Comparison adds probability-evaluation and signed-sum errors to both
-        routes' state contributions. Unknown execution error is not replaced
-        by the population floor.
+        the same chunk decode it once.
         The return value is (statistics by degree, contributing chunk ids,
         their selected construction ids).
         """
@@ -1188,8 +1188,7 @@ class Lanczos(Method):
         return result, tuple(ids), tuple(construction_ids)
 
     def analyze(self, plan, data, *, settings):
-        """Solve the Chebyshev projected problem from acquired moments and the chosen overlap
-        cutoff.
+        """Solve the Chebyshev projected problem from acquired moments and the chosen overlap cutoff.
 
         settings may override overlap_cutoff, overlap_cutoff_policy,
         overlap_noise_multiplier and overlap_failure_probability for this
@@ -1260,14 +1259,15 @@ class Lanczos(Method):
         return save(plan, files)
 
     def verify(self, plan, result, *, checks):
-        """Run one explicit check. EnergyShiftOptions compares two saved results, and
+        """Run one explicit check.
+
+        EnergyShiftOptions compares two saved results, and
         ProjectedVerificationOptions read the stored projected diagnostics.
         Any other options type raises TypeError in verify_projected.
         """
         from nwqlib.evidence.energy_shift import EnergyShiftOptions, verify_energy_shift
         from nwqlib.evidence.verification import verify_projected
 
-        result.validate_plan(plan)
         if type(checks) is EnergyShiftOptions:
             return verify_energy_shift(result, options=checks)
         return verify_projected(result, options=checks)

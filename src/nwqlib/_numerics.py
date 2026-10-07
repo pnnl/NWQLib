@@ -31,7 +31,7 @@ def binary_scaled_matrix(matrix):
     """Return (A / 2**e, e), using a representable binary scale even at extremes.
 
     Real component maxima avoid an overflowing complex modulus. Scaling
-    improves eigensolver range; it does not certify numerical singular values.
+    improves eigensolver range. It does not certify numerical singular values.
     """
     array = np.asarray(matrix)
     largest = max(float(np.max(np.abs(array.real))), float(np.max(np.abs(array.imag))))
@@ -46,7 +46,7 @@ def stable_complex_sum(real_parts: Iterable[float], imag_parts: Iterable[float])
 
     Separate iterables permit packed coefficient buckets without copying them.
     This preserves fsum's cancellation/subnormal behavior and its intermediate
-    overflow rejection; it is not arbitrary-precision real arithmetic.
+    overflow rejection. It is not arbitrary-precision real arithmetic.
     """
     try:
         result = complex(fsum(real_parts), fsum(imag_parts))
@@ -119,7 +119,7 @@ def normalize_state_vector_with_scale(
     """Return direction, rounded float norm, and scaled physical norm.
 
     Args:
-        vector: Input state amplitudes.
+        vector: Input state amplitudes, a 1-D array or a 2-D single row or column.
 
     Returns:
         ``(normalized_vector, rounded_float_norm, (mantissa, exponent))``.
@@ -127,8 +127,8 @@ def normalize_state_vector_with_scale(
         including subnormal inputs before rounding to a float loses scale.
 
     Raises:
-        ValueError: If the vector is not one-dimensional, has non-power-of-two
-            length, or has zero norm.
+        ValueError: If the vector is neither one-dimensional nor a single row or
+            column, has non-power-of-two length, or has zero norm.
     """
 
     array = np.asarray(vector, dtype=complex)
@@ -142,7 +142,11 @@ def normalize_state_vector_with_scale(
 
 
 def normalize_physical_vector_with_scale(vector):
-    """Apply the established norm/direction kernel without a quantum width rule."""
+    """Return the direction, rounded float norm and scaled norm of a nonzero 1-D vector.
+
+    The vector may have any positive length. It skips the power-of-two length
+    check of ``normalize_state_vector_with_scale``.
+    """
     array = np.asarray(vector, dtype=complex)
     if array.ndim != 1 or array.size == 0:
         raise ValueError("physical vector must have a positive dimension")

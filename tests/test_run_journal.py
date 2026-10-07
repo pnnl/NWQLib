@@ -40,19 +40,19 @@ def test_binary_payload_roundtrip_reuses_storage_and_preserves_plain_saved_bytes
 
 
 def test_interrupted_binary_write_publishes_neither_reference_nor_partial_bytes(tmp_path, monkeypatch):
-    import nwqlib._sqlite_bytes as writer
+    import nwqlib._run_journal as writer
 
     data = b"partly written native input"
     ref = PayloadRef(format="test/bytes", key="interrupted-input", bytes=len(data))
     path = tmp_path / "binary.sqlite"
     store = LocalJournal(path, 4096, create=True)
-    original = writer.write_bytes
+    original = writer._write_bytes
 
     def interrupted(*args):
         original(*args)
         raise OSError("interrupted binary write")
 
-    monkeypatch.setattr(writer, "write_bytes", interrupted)
+    monkeypatch.setattr(writer, "_write_bytes", interrupted)
     with pytest.raises(OSError, match="interrupted binary"):
         store.commit((("payload", ref.content_id, ref),), payloads=((ref, data),))
     assert not list(store.rows("payload")) and store.usage["data_bytes"] == 0
@@ -190,7 +190,7 @@ def test_one_binary_identity_keeps_two_actual_publication_producers(tmp_path):
         with pytest.raises(ValueError, match="requires its acquisition outcome"):
             run.artifacts._publish(values, output=output, provenance=provenances[0])
         assert journal.connection.execute("SELECT count(*) FROM records").fetchone() == rows
-        assert not run.artifacts.manifests
+        assert not run.data.artifacts
         run._start_publications()
         handles = [run.artifacts._publish(values, output=output, provenance=provenance)
                    for provenance in provenances]
@@ -198,10 +198,10 @@ def test_one_binary_identity_keeps_two_actual_publication_producers(tmp_path):
         assert handles[0].manifest.content_id != handles[1].manifest.content_id
         assert handles[0].manifest.digest == handles[1].manifest.digest
         assert journal.connection.execute("SELECT sum(length(payload)) FROM binary").fetchone()[0] == values.nbytes
-        assert len(run.artifacts.manifests) == 2 and len(list(journal.rows("payload"))) == 1
+        assert len(run.data.artifacts) == 2 and len(list(journal.rows("payload"))) == 1
         # Each manifest keeps its own supplied producer, both in the handle and the store inventory.
         assert [h.manifest.producer_id for h in handles] == [p.content_id for p in producers]
-        assert {m.producer_id for m in run.artifacts.manifests} == {p.content_id for p in producers}
+        assert {h.manifest.producer_id for h in run.data.artifacts} == {p.content_id for p in producers}
         assert run._state["array_bytes"] == 2*values.nbytes
 
 
@@ -475,12 +475,12 @@ def test_array_and_completed_observation_publish_in_one_atomic_transition(
     observation.
     """
     import numpy as np
-    import nwqlib._sqlite_bytes as writer
+    import nwqlib._run_journal as writer
     import nwqlib
 
     case = supplied_qhd
     path = tmp_path / "arrays"
-    original = writer.write_bytes
+    original = writer._write_bytes
 
     def interrupted(*args):
         original(*args)
@@ -495,11 +495,11 @@ def test_array_and_completed_observation_publish_in_one_atomic_transition(
             stored.append(self.trace.data_bytes)
             return flush(self, *args, **kwargs)
 
-        monkeypatch.setattr(writer, "write_bytes", interrupted)
+        monkeypatch.setattr(writer, "_write_bytes", interrupted)
         monkeypatch.setattr(Run, "_flush_publications", observed)
         with pytest.raises(OSError, match="array completion interrupted"):
             run.resume()
-        assert not run.artifacts.manifests and run.artifacts.data_bytes == 0
+        assert not run.data.artifacts and run.artifacts.data_bytes == 0
         # The failed outcome leaves the stored byte count at its pre-outcome value.
         assert run.trace.data_bytes == stored[-1]
     else:
@@ -510,7 +510,7 @@ def test_array_and_completed_observation_publish_in_one_atomic_transition(
 
     with nwqlib.load_run(path, backend=AerBackend()) as restored:
         if failure:
-            assert not restored.observations.chunks and not restored.artifacts.manifests
+            assert not restored.observations.chunks and not restored.data.artifacts
             assert restored.exposure["uncertain"]["circuits"] == 1
             assert (
                 restored._state["journal"].connection.execute("SELECT count(*) FROM binary").fetchone()[0]

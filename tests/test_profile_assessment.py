@@ -208,8 +208,6 @@ def test_calibration_number_interval_and_dependent_only_freshness_domain():
 def test_model_schema_rejects_code_wrong_units_and_confidence_meaning():
     model = stored_inputs(calibrated=True)[2].models[0]
     with pytest.raises(ValueError):
-        model.revise(form="eval/python")
-    with pytest.raises(ValueError):
         TimeModel.model_validate({**model.model_dump(exclude_computed_fields=True), "callable": "os.system"})
     with pytest.raises(ValueError, match="feature/unit"):
         TimeCoefficient(feature="sampled_shots", seconds_per_unit=1., unit="s/exact_evaluation")

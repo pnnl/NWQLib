@@ -12,7 +12,7 @@ An accepted input keeps its representation, and not every Method can use every r
 | QLS | Dense, finite Pauli, supported periodic input, or a supplied `SelectedBlock` encoding bound to the original A | Dense A and an explicit numerical right-hand side |
 | LCHS | Dense A or supported `PeriodicStencil` | Dense A |
 | QPE | Dense Hamiltonian or unitary, or finite Pauli Hamiltonian | Dense spectral input |
-| Lanczos, FixedGCIM, ADAPT | Finite Pauli, small dense input through the default conversion, or explicit `input_conversion="dense_pauli"` | Original dense, CSR, CSC or Pauli access, with Method-specific preparation rules |
+| Lanczos, FixedGCIM, ADAPT | Finite Pauli input is accepted directly, dense matrices of dimension at most 16 are converted automatically, and larger dense matrices or CSR/CSC input require `input_conversion="dense_pauli"`, with all conversions subject to `max_conversion_work` and `max_bytes`. | Original dense, CSR, CSC or Pauli access, with Method-specific preparation rules |
 
 The table describes the general case. LCHS at zero elapsed time, or with a zero initial state and no nonzero source, returns the initial condition without evolution and has its own input domain. Algebraic identity shortcuts, such as an identity-only observable that needs no measurement ([Pauli expectation](algorithms/expectation.md)), also have their own input domains.
 
@@ -28,7 +28,7 @@ The explicit dense-Pauli conversion of Lanczos, FixedGCIM and ADAPT accepts CSR 
 
 ## Input handles
 
-Use input handles to reuse an accepted input or to choose a compact preparation:
+An input handle is the `OperatorInput` or `StateInput` object that `operator_input`, `state_input` and functions such as `ingest_pauli` return. Use one to reuse an accepted input or to choose a compact preparation:
 
 ```python
 from nwqlib.operators import operator_input, ingest_pauli, PeriodicStencil

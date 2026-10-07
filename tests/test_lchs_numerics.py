@@ -10,7 +10,7 @@ from nwqlib import LinearDynamics
 from nwqlib.algorithms.lchs import LCHS,ProviderConfig,cartesian_decomposition,duhamel_quadrature
 from nwqlib.algorithms.lchs.providers import composite_gauss_grid,eq7_cbeta,eq7_truncation_range
 from nwqlib.algorithms.lchs.solution_error_budget import _numerical_psd_decision
-from nwqlib.algorithms.lchs.time_independent_terms import (_TrotterPauliDecomposition,_budgeted_trotter_node_record,_combined_trotter_terms,_node_bound_coefficients,_prepare_decomposition,_union_nonidentity_labels,_trotter_pauli_decomposition,generate_lchs_quadrature)
+from nwqlib.algorithms.lchs.time_independent_terms import (_TrotterPauliDecomposition,_budgeted_trotter_node_record,_combined_trotter_terms,_node_bound_coefficients,_prepare_decomposition,_union_nonidentity_labels,_trotter_pauli_decomposition,generate_lchs_quadrature,lchs_quadrature_summary)
 import nwqlib.algorithms.lchs.inhomogeneous_theory as inhomogeneous_theory_module
 
 def test_cartesian_decomposition_default_reconstructs_a_equals_l_plus_i_h() -> None:
@@ -325,7 +325,7 @@ def test_shared_census_node_restriction_stays_within_the_admitted_bytes(omitted,
         triples = N if variant == "exact_census" else 0
         assert peak <= eb.census_bytes(p, q, E, triples, block, order=2, variant=variant)
     for key, kept in rows.items():
-        separate = eb._pauli_bound_coefficient_from_terms(kept, 2, variant=variant, block=block)
+        separate = eb._pauli_bound_coefficient_from_terms(kept, 2, choose=lambda E, N: (variant, block))
         assert evaluations[key].coefficient == separate.coefficient
 
 
@@ -346,7 +346,8 @@ def test_shared_census_prefers_the_default_contraction_block_when_it_fits() -> N
     evaluations, ledger = _node_bound_coefficients(labels, q, {"k": terms}, ("k",), order=2, max_work=10**12,
                                                    max_bytes=10**10, census_held=0)
     assert ledger["variant"] == "exact_census" and ledger["block"] == 65536
-    assert evaluations["k"].coefficient == eb._pauli_bound_coefficient_from_terms(terms, 2, variant="exact_census").coefficient
+    assert evaluations["k"].coefficient == eb._pauli_bound_coefficient_from_terms(
+        terms, 2, choose=lambda E, N: ("exact_census", 65536)).coefficient
 
 
 def test_budgeted_node_reserves_the_published_pruning_bound_before_selection() -> None:
@@ -597,25 +598,18 @@ def test_quadrature_summary_projects_selected_provider_bounds() -> None:
         ),
     )
     matrix = problem.A.dense_array()
-    context = inhomogeneous_theory_module._kernel_context(
-        matrix=matrix,
-        final_time=problem.elapsed_time,
-        method=options,
-    )
     quadrature_data = generate_lchs_quadrature(
         matrix=matrix,
         final_time=problem.elapsed_time,
         method=options,
     )
-    shared = inhomogeneous_theory_module.lchs_quadrature_summary(
+    shared = lchs_quadrature_summary(
         quadrature_data,
         method=options,
         he_backend="dense_exact",
         final_time=problem.elapsed_time,
     )
-    assert shared["operator_scale"] == context.quadrature["max_operator_scale"]
     provider = quadrature_data.coefficient_plan.quadrature
-    assert provider.effective_range_k == provider.range_k
     # The independent closed-form witnesses above establish the bound itself;
     # this relation checks that summary projects the selected provider bounds.
     assert shared['approximate_lchs_error_bound'] == provider.approximate_lchs_error_bound

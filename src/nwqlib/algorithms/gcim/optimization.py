@@ -23,7 +23,7 @@ from nwqlib.subroutines.fermionic_pool import (
 )
 
 
-def taylor_action_derivative(action, state, theta, steps, degree=18):
+def taylor_action_derivative(action, state, theta, steps, degree):
     """Return the fixed-step scaled Taylor action on ``state`` and its derivative in ``theta``.
 
     This differentiates all scaled Taylor steps with the step count fixed.
@@ -35,7 +35,7 @@ def taylor_action_derivative(action, state, theta, steps, degree=18):
     the Horner form of ``P_m(hA) = sum_{r<=m} (hA)**r/r!`` and its derivative
     in theta adds ``A v/(s r) + (h/r) A dv`` per Horner term. The derivative
     of the continuous polynomial model holds within each interval where
-    ``_taylor_steps`` is constant; step-count changes are piecewise
+    ``_taylor_steps`` is constant. Step-count changes are piecewise
     boundaries, and the integer step selector itself is not differentiated.
     With zero steps the model is the identity: at a zero angle the
     derivative is the limit from the nonzero-angle branch, ``A state``, and at
@@ -61,7 +61,7 @@ def taylor_action_derivative(action, state, theta, steps, degree=18):
     return value, derivative
 
 
-def fixed_taylor_action(action, state, theta, steps, degree=18):
+def fixed_taylor_action(action, state, theta, steps, degree):
     """Apply the fixed-step Taylor polynomial of ``exp(theta A)`` to ``state``, unnormalized.
 
     With the forward factor's step count this is ``F_j(theta)``. A
@@ -87,7 +87,7 @@ def fixed_taylor_action(action, state, theta, steps, degree=18):
 
 def normalized_taylor_energy_gradient(
     reference, generators, theta, *, action, step_count, normalize,
-    h0_action, degree=18, identity_shift=0.0,
+    h0_action, degree,
 ):
     """Evaluate the normalized Taylor product energy and its real-parameter gradient.
 
@@ -96,29 +96,30 @@ def normalized_taylor_energy_gradient(
     use the forward factor's fixed step count and are left unnormalized.
     Energy and gradient share one Hamiltonian action.
 
-    Evaluate the normalized surrogate product energy and its adjoint
-    gradient. Forward states follow the selected generator order. When the
-    forward action is the normalized Taylor model, differentiate the
-    selected polynomial and each normalization with the same step count. The
-    gradient and energy share one Hamiltonian action at a parameter point.
+    Derivation. Let H be the Hermitian operator applied by ``h0_action``
+    and psi_0 the normalized reference. For j = 1..k in the order
+    ``_vector`` applies the chain, set ``r_j = F_j(theta_j) psi_{j-1}``,
+    ``n_j = ||r_j||`` and ``psi_j = r_j/n_j``. The objective is
+    ``E(theta) = Re(psi_k^dagger H psi_k)``. Its last normalization is
+    part of the computational graph, and the terminal adjoint is
+    ``lambda_k = H psi_k``.
 
-    Derivation. Let ``psi_0`` be the normalized reference and, for
-    ``j = 1..k`` in the order ``_vector`` applies the chain, ``r_j =
-    F_j(theta_j) psi_{j-1}``, ``n_j = ||r_j||`` and ``psi_j = r_j/n_j``. The
-    objective is ``c0 + psi_k^dagger H0 psi_k``, and the last normalization is
-    part of the computational graph, so the terminal adjoint is
-    ``lambda_k = H0 psi_k``. Differentiating ``r/||r||`` gives, for an incoming
-    adjoint ``lambda_j``, the real normalization pullback
-    ``lambda~_j = (lambda_j - psi_j Re(psi_j^dagger lambda_j))/n_j``,
-    ``g_j = 2 Re<lambda~_j, F'_j psi_{j-1}>`` and ``lambda_{j-1} =
-    F_j^dagger lambda~_j``, with ``F_j^dagger = F_j(-theta_j)`` at the same
-    fixed step count. The reverse state is never normalized, and the unused
-    adjoint past factor 1 is not propagated. The gradient is the derivative
-    of the continuous normalized polynomial model, piecewise in the
-    selected Taylor step count, not a derivative of binary64 rounding or of
-    the integer step selector. ``c0 + <H0>`` can round differently from a
-    direct ``<H>`` energy, so the caller binds the energy it reports and this
-    gradient to the same objective.
+    Differentiating ``r/||r||`` gives the real normalization pullback
+    ``lambda~_j = (lambda_j - psi_j Re(psi_j^dagger lambda_j))/n_j``.
+    Then ``g_j = 2 Re<lambda~_j, F'_j psi_{j-1}>`` and
+    ``lambda_{j-1} = F_j^dagger lambda~_j``. For the anti-Hermitian
+    generators and real-coefficient Taylor factors,
+    ``F_j^dagger = F_j(-theta_j)`` at the same fixed step count. The
+    reverse state is never normalized, and the unused adjoint past
+    factor 1 is not propagated.
+
+    The gradient differentiates the continuous normalized polynomial
+    model on each interval with fixed selected Taylor step counts.
+    It does not differentiate binary64 rounding or the integer step
+    selector. A binary64 evaluation of ``c0 + <H-c0 I>`` can round
+    differently from direct ``<H>``. The caller therefore reports the
+    energy evaluated with the supplied action and binds this gradient
+    to that same objective.
 
     Cases. ``k = 0`` evaluates one reference energy and returns shape
     ``(0,)``. At ``theta = 0, s = 0`` the raw tangent is A times the input, at
@@ -153,7 +154,7 @@ def normalized_taylor_energy_gradient(
         del raw, tangent, state
     last = states[-1]
     adjoint = h0_action(last)
-    energy = identity_shift + float(np.vdot(last, adjoint).real)
+    energy = float(np.vdot(last, adjoint).real)
     gradient = np.empty(k, dtype=np.float64)
     for j in range(k - 1, -1, -1):
         state = states[j + 1]
@@ -374,7 +375,10 @@ def _generator_shift_rule(
 
 
 def optimize_product(*, options, execution, selected, starting, evaluate, completed_round, rules):
-    """One fresh BFGS invocation; caller keeps incumbent/query evidence.
+    """Run one fresh BFGS minimization and return ``(message, success)``.
+
+    The caller keeps the best point and the query record. An exhausted
+    evaluation allowance returns ``("evaluation_budget_exhausted", False)``.
 
     Zheng et al. (2024), arXiv:2312.07691v3, run their optimization rounds with
     SciPy BFGS (Table III caption, p. 8) on the ansatz parameters every m
@@ -405,8 +409,9 @@ def optimize_product(*, options, execution, selected, starting, evaluate, comple
         energy comes from ``evaluate``, which reuses an already collected
         point and charges only new ones.
         """
-        # Each callback reserves only a genuinely missing point. A prospective
-        # full-shift count would incorrectly reject kept zero-query values.
+        # ``evaluate`` charges only points that are not yet collected.
+        # Reserving the full shift count in advance would reject a derivative
+        # whose points were all collected already.
         derivatives = []
         for position, generator in enumerate(selected):
             rule = rules[generator.pool_index]

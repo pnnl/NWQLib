@@ -12,7 +12,10 @@ from nwqlib.problems.inputs import ingest_vector, ingest_product, state_input
 from nwqlib.problems.records import Eigenproblem, Eigenvalue
 
 
-AUTO_DENSE_PAULI_DIMENSION = 16  # Small convenience conversion; larger transforms are explicit.
+# Largest dense dimension converted to Pauli terms without an explicit
+# conversion request. ENGINEERING_CONSTANTS.md, "Eigen input conversion and
+# classical preparation", lists the methods that share it.
+AUTO_DENSE_PAULI_DIMENSION = 16
 DEFAULT_CONVERSION_WORK = 100_000_000  # q*D² block-transform traffic, not a time estimate.
 
 # Qiskit standard gates whose statevector action is a fixed dense k-qubit
@@ -105,10 +108,11 @@ def eigen_operator(
     max_conversion_work=DEFAULT_CONVERSION_WORK,
     pad_classical=False,
 ):
-    """Select Pauli access; explicit dense padding adds trace(A)/d on dummy states.
+    """Select Pauli access.
 
-    The original input owner already checked exact Hermiticity. This finite
-    transform has O(q D²) numerical traffic and O(D²) known array storage; it
+    Explicit dense padding adds trace(A)/d on dummy states. The original
+    input owner already checked exact Hermiticity. This finite transform has
+    O(q D²) numerical traffic and O(D²) known array storage. It
     never diagonalizes A. Structured Pauli access stays compact.
 
     Padding applies on the dense-to-Pauli conversion and, for classical
@@ -189,11 +193,8 @@ def eigen_state(value, problem, *, rng=None, max_bytes=DEFAULT_INPUT_BYTES, pad=
     from the method stream, so it is reproduced by the root seed recorded with
     the Plan. An explicit symmetry sector
     requires a supplied state, since a random draw would leave the sector.
-    With pad set and d below the padded dimension, the Gaussian draw uses
-    draw_padded_state: draw the original-dimensional Gaussian state into the
-    nonzero prefix of one padded complex128 vector, normalize that prefix
-    with the established reduction, and admit four simultaneous padded
-    complex arrays for input ingestion.
+    With pad set and d below the padded dimension, the Gaussian draw is made
+    by ``draw_padded_state``.
     """
     d = problem.dimension
     target = 1 << max(1, (d - 1).bit_length())
@@ -211,12 +212,12 @@ def eigen_state(value, problem, *, rng=None, max_bytes=DEFAULT_INPUT_BYTES, pad=
                 factors.append((np.sqrt(1 - p), np.exp(1j * phase) * np.sqrt(p)))
             state = ingest_product(factors, max_bytes=max_bytes)
         elif pad:
-            # The draw has the original dimension d by construction; the
+            # The draw has the original dimension d by construction. The
             # returned state already has the padded dimension.
             state = draw_padded_state(d, target, rng.method, max_bytes)
         else:
-            # Two float64 normal draws, their complex128 sum and a temporary,
-            # and the complex128 snapshot of ingest_vector: 64 bytes per coordinate.
+            # With d = problem.dimension, 64d covers four complex128 arrays during
+            # ingestion: input, physical snapshot, direction and direction snapshot.
             _check_bytes(64 * d, max_bytes, "eigenvalue initial vector")
             vector = rng.method.normal(size=d) + 1j * rng.method.normal(size=d)
             vector /= np.linalg.norm(vector)
@@ -231,8 +232,15 @@ def eigen_state(value, problem, *, rng=None, max_bytes=DEFAULT_INPUT_BYTES, pad=
     if state.preparation.physical_scale.mantissa == 0:
         raise ValueError("eigenvalue initialization must be nonzero")
     if pad and d != target and not padded:
-        # The zero-padded complex128 vector and its ingested snapshot.
-        _check_bytes(32 * target, max_bytes, "eigenvalue padded preparation")
+        # With T = target, ingestion holds four length-T complex128 buffers
+        # while the supplied state's physical and direction buffers remain live.
+        # Admit 64*T + state.manifest.payload_bytes + 65536 bytes. The state
+        # payload is at most 32*d bytes, and 65536 is the fixed bookkeeping allowance.
+        _check_bytes(
+            64 * target + state.manifest.payload_bytes + 65536,
+            max_bytes,
+            "eigenvalue padded preparation",
+        )
         vector = np.zeros(target, dtype=complex)
         vector[:d] = state.physical_vector()
         state = ingest_vector(vector, max_bytes=max_bytes)
@@ -294,9 +302,9 @@ def preparation_requirements(state):
     """Return (bytes, work) of materializing a state's length-d vector classically.
 
     A k-qubit dense gate applies 2**k products per full-state amplitude.
-    Only standard gates with known fixed action use this envelope; custom,
+    Only standard gates with known fixed action use this envelope. Custom,
     opaque or composite instruction simulation work remains unknown (None).
-    Host invocation is synchronous; this is not an SDK runtime or RSS bound.
+    Host invocation is synchronous. This is not an SDK runtime or RSS bound.
 
     Returns:
         (bytes, work). A product state needs 32*d bytes, the final and
@@ -364,7 +372,7 @@ def gershgorin_frame(operator, *, max_bytes):
     scalar value and zero half-width.
 
     Premises: the stored matrix is Hermitian with a real diagonal, finite
-    entries and canonical CSR/CSC coordinates when compressed; IEEE binary64
+    entries and canonical CSR/CSC coordinates when compressed. IEEE binary64
     with gradual underflow, round-to-nearest, and hypot relative error at
     most 2u on normal results. By the Gershgorin circle theorem every
     eigenvalue of a Hermitian A lies in the union of the real intervals

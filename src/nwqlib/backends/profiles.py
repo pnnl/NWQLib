@@ -1,7 +1,8 @@
-"""Stored machine, allocation and finite time-model data; no machine discovery.
+"""Stored machine, allocation and finite time-model data. Nothing discovers a machine.
 
-JSON/schema/identity use the shared Record owner. Sources and coefficients are
-supplied declarations. Loading any reference never opens it or loads code.
+JSON encoding, schemas and content hashes come from ``Record``. Sources and
+coefficients are supplied declarations. Loading any reference never opens it
+or loads code.
 """
 
 from datetime import datetime, timezone
@@ -114,8 +115,8 @@ class Allocation(Record):
             the grant is for. An assessment applies the grant's limits only when it
             matches the profile's configuration.
         locations: Required. Distinct names of the granted locations, the names
-            the Program's registers and workspaces use, such as
-            `"logical_device"`.
+            the [Program](../glossary.md#program)'s registers and workspaces
+            use, such as `"logical_device"`.
         topology: Required. `"single_device"` (exactly one location),
             `"independent_devices"`, `"distributed"`, or `None` when the placement
             is unknown.
@@ -169,7 +170,10 @@ class ModelDomain(Record):
     `max_measurements`, `max_classical_work` and `max_adaptive_rounds` each give
     the inclusive range from 0 to the maximum. A model calibrated without resets,
     for example, does not apply once resets are added, even when the gate counts
-    match. The [time-model section of the profiles guide](../profiles.md#finite-time-models)
+    match. `basis`, `rotation_precision`, `synthesis` and `batch_schedule` must
+    equal the `basis`, `precision`, `synthesis` and `batch_schedule` of the
+    [`ResourceContext`][nwqlib.resources.records.ResourceContext] of the
+    estimate. The [time-model section of the profiles guide](../profiles.md#finite-time-models)
     lists every domain check.
 
     Attributes:
@@ -186,18 +190,23 @@ class ModelDomain(Record):
         synthesis: Default `None`. Source of the synthesis rule the operation
             counts assume.
         batch_schedule: Required. `"unspecified"` or `"serial"`.
-        acquisition: Required. `"direct_observation"` or `"measurement_batch"`.
+        acquisition: Required. `"direct_observation"` for an experiment without
+            a measurement batch, or `"measurement_batch"` for an experiment with
+            one.
         runtime: Required. The runtime seed the model was measured with, as
             `RuntimeOptions(seed=...)`, or `"seed_independent"`. A whole-Plan
             forecast does not guess future seeds, so only a seed-independent model
             applies there.
-        population: Required. Readout population, `"unconditional"` or
-            `"native_conditioned"`.
+        population: Required. `"unconditional"` or `"native_conditioned"`,
+            which must equal the `population` of the assessed point's readout.
         readouts: Required. Distinct supported readouts: `"pauli_expectation"`,
             `"counts"`, `"probabilities"`, `"host_scalars"`, `"amplitudes"` or
             `"estimated_observable"`.
         selection_ids: Required. Distinct content hashes of the supported block
-            selections.
+            selections. A planned block that is controlled, adjoint or has no
+            gate decomposition is inside the domain only when its content hash
+            is listed here. Other blocks are checked gate by gate against
+            `primitive_gates`.
         primitive_gates: Required. Distinct supported primitive gates: `"x"`,
             `"h"`, `"z"`, `"sdg"`, `"cx"`, `"mc_z"` or `"phase"`.
         min_qubits: Required. Smallest supported qubit count.
@@ -213,7 +222,8 @@ class ModelDomain(Record):
             items.
         max_resets: Required. Largest supported reset count.
         max_measurements: Required. Largest supported measurement count.
-        max_classical_work: Required. Largest supported classical work.
+        max_classical_work: Required. Largest supported `classical_work` count
+            of the resource estimate.
         max_adaptive_rounds: Required. Largest supported number of adaptive
             rounds.
         bindings: Default `()`. Parameter values the model is restricted to, at
@@ -272,9 +282,10 @@ class TimeCoefficient(Record):
     `TimeCoefficient(feature="sampled_shots", seconds_per_unit=0.001, unit="s/shot")`,
     and pass it in `coefficients=` of
     [`TimeModel`][nwqlib.backends.profiles.TimeModel]. Every field is required.
-    The unit is kept exactly as supplied and never converted. A zero coefficient
-    states that the feature contributes nothing, which differs from leaving the
-    feature out.
+    The unit is kept exactly as supplied and never converted. A zero
+    coefficient states that the feature contributes nothing.
+    A feature left out adds no term either, but the model then makes no
+    statement about its coefficient.
 
     Attributes:
         feature: Required. `"invocations"`, `"sampled_shots"`,
@@ -312,8 +323,9 @@ class ModelUncertainty(Record):
     and pass it as `uncertainty=` to
     [`TimeModel`][nwqlib.backends.profiles.TimeModel]. Every field except
     `coverage` is required, and `coverage` is required for the two statistical
-    kinds. The residuals are added to the central prediction, so the example
-    gives the interval `[prediction - 0.25, prediction + 0.5]` seconds. The
+    kinds. The residuals are added to the central prediction `prediction`, with
+    the lower endpoint clipped at zero, so the example gives the interval
+    `[max(0, prediction - 0.25), prediction + 0.5]` seconds. The
     interval keeps the meaning its source states and is never an execution
     guarantee.
 
@@ -359,8 +371,9 @@ class CalibrationReference(Record):
     Build it with keyword arguments and pass it as `calibration=` to
     [`TimeModel`][nwqlib.backends.profiles.TimeModel]. Every field is required.
     Each Source names the exact data or procedure version. NWQLib never opens or
-    fetches a referenced source. A link to a parent record alone does not
-    establish which workloads trained the model.
+    fetches a referenced source. A `parent_id`, the content hash of the
+    record a record was revised from, does not establish which workloads
+    trained the model.
 
     Attributes:
         source: Required. Source of the calibration procedure.
@@ -380,8 +393,7 @@ class TimeModel(Record):
 
     Build it with keyword arguments and pass it in `models=` of
     [`DeviceProfile`][nwqlib.backends.profiles.DeviceProfile]. Every field except
-    `form`, `calibration` and `uncertainty` is required. The one supported form,
-    `acquisition_linear/1`, is
+    `calibration` and `uncertainty` is required. The model is
 
     ```text
     seconds = c_invocation * invocations + c_shot * sampled_shots
@@ -397,15 +409,16 @@ class TimeModel(Record):
     unavailable prediction with its reason.
 
     Attributes:
-        form: Default `"acquisition_linear/1"`, the only accepted value.
-            Arbitrary expressions and plugins are rejected.
         name: Required. Model name, unique within the profile.
         kind: Required. `"engineering"` for assumed coefficients or
             `"calibrated"` for coefficients from a supplied calibration.
-        scope: Required. What the seconds cover: `"selected_acquisition"`,
-            `"acquisition_overhead"` or `"native_call_wall"`. The first two
-            exclude planning, compilation, queue delay, analysis and whole-run
-            cost. `"native_call_wall"` covers the synchronous backend call,
+        scope: Required. What the seconds cover: `"selected_acquisition"`
+            (the seconds of the selected acquisition), `"acquisition_overhead"`
+            (the seconds of its overhead beyond that acquisition) or
+            `"native_call_wall"`. The library's own timings carry only
+            `"native_call_wall"`. The first two are scopes that a supplied
+            profile declares for its coefficients, and they exclude planning,
+            compilation, queue delay, analysis and whole-run cost. `"native_call_wall"` covers the synchronous backend call,
             including waiting and result extraction, and excludes preparation and
             saving. The scopes overlap, so their predictions must not be added,
             and none covers a whole run.
@@ -434,7 +447,6 @@ class TimeModel(Record):
             `kind`, or a calibrated model has no `uncertainty`.
     """
 
-    form: Literal["acquisition_linear/1"] = "acquisition_linear/1"
     name: Text
     kind: Literal["engineering", "calibrated"]
     scope: TimeScope

@@ -34,9 +34,10 @@ class ErrorFrame(Record):
 
     Every error bound and check carries one, and the frame of a Result's
     output is `result.plan.error_model.frame`. A value answers a claim only
-    when the two frames are compatible, which requires all six fields to
-    agree in meaning, with units compared by symbol and dimension and scopes
-    by kind and domain. A value for the projected problem or for a zero input therefore
+    when the two frames are compatible, which
+    requires `quantity`, `metric`, `conditioning` and `domain` to be equal
+    strings, units to agree in symbol and dimension, and scopes in kind
+    and domain. A value for the projected problem or for a zero input therefore
     cannot answer a claim about the target quantity, and missing context is
     never read as an absence of conditions. Build one with keyword arguments
     to state a value you supply. Every field except `domain` is required.
@@ -71,7 +72,10 @@ class ErrorFrame(Record):
 
     @classmethod
     def from_output(cls, problem, output):
-        """Use the scientific output owner without constructing an accuracy request."""
+        """Return `output.frame(problem)`, the output's own ErrorFrame, after checking its type.
+
+        No accuracy request is built.
+        """
         frame = output.frame(problem)
         if type(frame) is not cls:
             raise TypeError("output.frame(problem) must return its actual ErrorFrame")
@@ -121,11 +125,14 @@ class FramedFact(Record):
 
 
 class AssessmentContext(Record):
-    """Role-bearing lineage and point, admitted only by actual Plan readiness.
+    """Identities and parameter point of the data that an assessment refers to.
 
-    observation_id names the aggregate ObservationView; contribution_ids name
-    its chunks. Certificate preserves these roles and appends result_id.
-    subjects is derived; selected/result association still needs direct checks.
+    observation_id names the aggregate ObservationView, and contribution_ids
+    name its chunks. Certificate keeps these roles and appends result_id.
+    `admitted` is True only for a point the Plan has admitted, which
+    restricted evidence needs (see `compatible_point`). `subjects` is
+    derived from the identities. An association between the selected
+    construction and the Result still needs direct checks.
     """
 
     problem_id: ContentID
@@ -185,7 +192,11 @@ def compatible_point(bindings, context):
 
 
 def applicable(statement, *, frame, context):
-    """Central structural frame/point rule, separate from proposition support."""
+    """Return whether a FramedFact applies at the context's point.
+
+    A type or frame mismatch raises instead of returning False. Whether the
+    evidence supports a claim is decided separately by `supported`.
+    """
     if not isinstance(statement, FramedFact):
         raise TypeError("scientific evidence requires a FramedFact")
     if not statement.frame.compatible(frame):
@@ -221,14 +232,20 @@ def predicate_frame(frame):
 
 
 def predicate_value(statement, *, frame, context):
-    """Return supported True/False, or None; never promote receipt kind."""
+    """Return the supported True or False value, or None.
+
+    The receipt kind is never promoted.
+    """
     expected = predicate_frame(frame)
     valid = supported(statement, frame=expected, context=context)
     return statement.fact.value if valid and type(statement.fact.value) is bool else None
 
 
 def union_bindings(*groups):
-    """Union actually used restrictions; distinct declared values conflict."""
+    """Union the restrictions actually used.
+
+    Distinct values declared for one parameter conflict.
+    """
     values = {}
     for group in groups:
         for binding in group:
@@ -259,7 +276,10 @@ def _keep_premises(statement, conditions, inputs, context):
 
 
 def scalar(statement: FramedFact, arithmetic: ExactArithmetic) -> Fraction | None:
-    """Read finite real scalar evidence; booleans and complex values are not errors."""
+    """Read finite real scalar evidence.
+
+    Booleans and complex values are not errors.
+    """
     fact = statement.fact
     if fact.availability != "concrete":
         return None
@@ -282,8 +302,7 @@ class TargetReference(Record):
     the criterion `|error| <= r*|target|`, a proved lower bound
     `L <= |target|` gives the sufficient threshold `r*L`, and an exact
     nonzero target gives `r*|target|`. An upper bound on the magnitude or an
-    observed
-    estimate gives none, and neither does a reference whose failure
+    observed estimate gives none, and neither does a reference whose failure
     probability is unknown or whose evidence is not witnessed proved or
     certified support. The reference's failure probability joins the union
     bound of the assessment. Build it with keyword arguments. All three
@@ -332,7 +351,9 @@ class ErrorTerm(Record):
 
     Attributes:
         name: Name of the source, equal to `fact.fact.quantity`.
-        stage: Workflow stage where the error arises.
+        stage: Workflow stage where the error arises: `"planning"`,
+            `"preparation"`, `"execution"`, `"analysis"` or
+            `"verification"`.
         source: Where the bound comes from.
         formula: Text form of the bound.
         fact: The bound as a [`FramedFact`][nwqlib.evidence.error_model.FramedFact].
@@ -341,8 +362,9 @@ class ErrorTerm(Record):
             triangle inequality. The other roles, `"amplification"`,
             `"covariance_contribution"`, `"conditional_term"` and
             `"listed_only"`, are listed but not added.
-        conditions: Boolean predicates that must hold, in the dimensionless
-            predicate frame of this term.
+        conditions: Boolean predicates that must hold, in the predicate
+            frame of this term, which is its frame with `metric="predicate"`
+            and the dimensionless unit `"1"`.
         inputs: Values the bound depends on.
         failure_probability: Probability in `[0, 1)` that this bound fails,
             not a variance. `None` when unknown.
@@ -412,7 +434,7 @@ class ClaimAssessment(Record):
         absolute_fallback: Absolute tolerance used only when the relative
             scale cannot be established, or `None`.
         output_id: Content hash of the output whose error is assessed.
-        context: Identities of the Problem, circuit description, Plan,
+        context: Content hashes of the Problem, circuit description, Plan,
             observations and Result of the assessed data, with the parameter
             point.
         frame: The [`ErrorFrame`][nwqlib.evidence.error_model.ErrorFrame] of
@@ -467,7 +489,10 @@ class ClaimAssessment(Record):
         return self
 
     def validate_plan(self, plan):
-        """Check original acquisition identities without reassessing a criterion."""
+        """Check that this assessment belongs to `plan`: its error model, frame, output, Problem, Plan and base construction.
+
+        No criterion is reassessed.
+        """
         model = plan.error_model
         if (model is None or self.model_id != model.content_id
                 or not self.frame.compatible(ErrorFrame.from_output(plan.problem, plan.output))
@@ -557,8 +582,9 @@ class ErrorModel(Record):
 
         Args:
             accuracy (Accuracy): The criterion.
-            context (AssessmentContext): Identities and parameter point of
-                the assessed data. `Result.assess` builds it from the Result.
+            context (AssessmentContext): Content hashes and parameter point
+                of the assessed data. `Result.assess` builds it from the
+                Result.
             facts (tuple[FramedFact, ...]): Bounds that replace the model's
                 terms of the same name.
             reference (TargetReference | None): Scale of a relative
@@ -580,8 +606,9 @@ class ErrorModel(Record):
             ValueError: If the context belongs to another Problem or circuit
                 description, a supplied fact names no source or repeats one,
                 a bound does not apply in its frame or is a negative
-                additive bound, or `absolute_fallback` is not positive or
-                lacks a relative criterion.
+                additive bound, `absolute_fallback` is not positive or
+                lacks a relative criterion, or an exact intermediate value
+                needs more than `max_integer_bits` bits.
         """
         if type(accuracy) is not Accuracy or type(context) is not AssessmentContext:
             raise TypeError("assessment requires Accuracy and its actual AssessmentContext")
@@ -619,8 +646,6 @@ class ErrorModel(Record):
         failure_known = True
         for term in terms:
             statement = supplied.get(term.name, term.fact)
-            if statement.fact.quantity != term.name:
-                raise ValueError("supplied fact does not match the term source")
             matches = applicable(statement, frame=term.fact.frame, context=context)
             value = scalar(statement, arithmetic)
             conditions = tuple(predicate_value(c, frame=term.fact.frame, context=context) for c in term.conditions)
@@ -685,7 +710,11 @@ class ErrorModel(Record):
 
 
 def accuracy_threshold(accuracy, *, frame, reference, context, arithmetic, absolute_fallback=None):
-    """Use the selected absolute criterion or a justified nonzero relative scale.
+    """Return ``(threshold, reasons, reference_failure)`` for the criterion.
+
+    An absolute tolerance is used as given. Otherwise a supported reference
+    gives a relative threshold, then an explicit absolute fallback applies,
+    and without either the threshold is None with its reason.
 
     For |error| <= r*|target|, a proved lower bound L <= |target| supplies the
     sufficient threshold r*L. An upper bound or an observed estimate does not.
@@ -768,7 +797,10 @@ def exact_readout_sampling(plan, observations, *, random_draws):
 
 
 def result_context(result):
-    """Describe the actual attached experiment and contributing data, without replay."""
+    """Return the admitted AssessmentContext of a Result's attached Plan and data, after checking that they belong together.
+
+    Nothing is replayed.
+    """
     plan, data = result.plan, result.data
     result.validate_plan(plan)
     if data.trace.plan_id != plan.content_id or data.observations.content_id != result.observation_id:
@@ -797,7 +829,10 @@ def result_context(result):
 def assess_result(result, *, accuracy=None, absolute_tolerance=None, relative_tolerance=None,
                   confidence=.95, component="total", facts=(), reference=None,
                   absolute_fallback=None, max_integer_bits=DEFAULT_MAX_INTEGER_BITS):
-    """Assess a new explicit criterion on an existing Result; acquire nothing."""
+    """Assess a new explicit criterion on an existing Result.
+
+    Nothing is acquired.
+    """
     if accuracy is None:
         accuracy = Accuracy(absolute_tolerance=absolute_tolerance, relative_tolerance=relative_tolerance,
                             confidence=confidence, component=component)
@@ -824,14 +859,14 @@ class CheckDomain(Record):
     any status is decided. The fields below are read-only.
 
     Attributes:
-        lower: Inclusive lower end, or `None` for no lower end.
-        upper: Inclusive upper end, or `None` for no upper end.
-        integer: Whether the value must be a whole number, for example a
-            zero-one flag.
-        roundoff_tolerance: Absolute window at each end, in the check's
-            unit. A value outside the range by at most this amount is
-            compared at the end, and its raw value stays in the fact. Zero
-            means exact comparison. The code that sets a nonzero window must
+        lower: Default `None`, no lower end. Inclusive lower end.
+        upper: Default `None`, no upper end. Inclusive upper end.
+        integer: Default `False`. Whether the value must be a whole number,
+            for example a zero-one flag.
+        roundoff_tolerance: Default `0.0`, exact comparison. Absolute window
+            at each end, in the check's unit. A value outside the range by
+            at most this amount is compared at the end, and its raw value
+            stays in the fact. The code that sets a nonzero window must
             justify its scale, because a number alone does not bound
             rounding error. The built-in checks of nonnegative errors use
             zero.
@@ -884,6 +919,7 @@ class CheckSpec(Record):
         classical_work: Text form of its classical computation.
         reference_work: Text form of its reference computation.
         data_description: What the check stores.
+        schema_version: Format version of the record, 2.
     """
 
     schema_version: Literal[2] = 2
@@ -956,14 +992,21 @@ def assemble_check(check: CheckSpec, *, artifact_id: str, fact: FramedFact | Non
 
     Raises:
         ValueError: If the fact names another quantity or frame, was
-            produced by other options or for another check, or lies outside
-            the check's domain.
+            produced by other options or for another check, lies outside
+            the check's domain, or an exact intermediate value needs more
+            than `max_integer_bits` bits.
     """
     return _assemble_check(check, artifact_id=artifact_id, fact=fact, context=None, max_integer_bits=max_integer_bits)
 
 
 def _admit_check_value(check, value, arithmetic):
-    """Apply the selected quantity's domain before evidence/status decisions."""
+    """Apply the check's domain to a value before any evidence or status decision.
+
+    Return the value, moved to the domain endpoint when it lies outside by
+    at most the roundoff window, and the text that records that adjustment.
+    A value farther outside, or a non-integer value of an integer domain,
+    raises ValueError.
+    """
     if value is None:
         return value, ""
     domain = check.domain
@@ -1093,8 +1136,9 @@ class Certificate(Record):
 
         Raises:
             ValueError: If `result` is not the certified Result, a fact names
-                no check of `options` or repeats one, or a fact was produced
-                by other options or for another check.
+                no check of `options` or repeats one, a fact was produced by
+                other options or for another check, or an exact intermediate
+                value needs more than `max_integer_bits` bits.
         """
         plan = result.plan
         if self.plan_id != plan.content_id or self.result_id != result.content_id:

@@ -1,4 +1,8 @@
-"""Actual acquisition association and host declarations for eigenvalue methods."""
+"""Helpers shared by the eigenvalue methods and ExpectationMethod.
+
+They build the one-kernel classical construction and the unknown-error model
+of an eigenvalue Plan, and check that observed chunks match their Plan points.
+"""
 
 from nwqlib.blocks import SelectedConstruction
 from nwqlib.blocks.records import SelectedKernel
@@ -25,8 +29,8 @@ def host_construction(source, inputs, labels, *, work, description, frames=None,
         description: Short statement of what the kernel computes, stored in the observation's ``padding`` field.
         frames: Scalar frame per label, ``unit`` for every label when None.
         admission: ``(option, max_steps)`` of a Method that sets its Programs' admission
-            ceiling, such as ``("FixedGCIM.max_admission_steps", 1_000_000)``; the
-            shared ``AdmissionLimits`` default when None.
+            ceiling, such as ``("FixedGCIM.max_admission_steps", 1_000_000)``. None
+            uses the shared ``AdmissionLimits`` default.
 
     Returns:
         (construction, experiments): the SelectedConstruction and a
@@ -108,7 +112,7 @@ def eigen_error_model(plan, source):
 
 
 def matched_chunks(plan, data):
-    """Validate real readout/point associations, not merely shapes or family tags.
+    """Yield ``(chunk, construction)`` for each observed chunk after checking that it matches its Plan point and declared readout.
 
     Each chunk's point is selected once, through the Plan's construction
     memo. The Experiment and SelectedConstruction it returns give the

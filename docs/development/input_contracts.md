@@ -78,4 +78,4 @@ These rules are NWQLib's own design. The rules on snapshots and hashes, exact He
 | Invariant | Failure it prevents | Code |
 | --- | --- | --- |
 | Size and product formulas are checked before conversion, copying or multiplication | Memory or work limits discovered only after partial computation | `operators.access._check_bytes`, `_check_products`, `operators._factorized._sparse_chain_requirements` |
-| Structural refinement publishes exact rationals and a fresh receipt for each scan | A rounded value is reported as a certified bound, or reused facts are relabeled as a new zero-cost scan | `operators.refinement.refine_operator_facts` |
+| Structural refinement publishes exact rationals and a new entry in the report's `receipts` for each scan | A rounded value is reported as a certified bound, or reused facts are relabeled as a new zero-cost scan | `operators.refinement.refine_operator_facts` |

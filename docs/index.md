@@ -37,7 +37,7 @@ print(result.solution)
 [ 0.96006038-1.54102084e-12j -0.00513885+3.61167323e-13j]
 ```
 
-The default nine-qubit Aer calculation returns the physical vector, including its scale and phase. Its finite approximation does not certify total error. Replace A, the initial state and the time to use your own input. [Install and first result](quickstart.md) checks this answer against an independent reference and shows a finer construction.
+The default nine-qubit Aer calculation returns the physical vector, including its scale and phase. Its finite approximation comes with component error bounds, which do not bound the total error ([Install and first result](quickstart.md#check-the-answer)). Replace A, the initial state and the time to use your own input. [Install and first result](quickstart.md) checks this answer against an independent reference and shows a finer construction.
 
 ## Continue your workflow
 

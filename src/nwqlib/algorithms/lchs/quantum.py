@@ -68,6 +68,8 @@ def select_vector_preparation(name, target, *, method, decomposition=None, layer
         approximation=("ideal direct preparation of the selected normalized tensor" if decomposition is None
             else "selected layered MPS approximation; circuit fidelity not evaluated"),
         work_law="selected direct or layered MPS construction size",items=len(target),payload_bytes=known_bytes,work=work)
+    # Each MPS layer has at most max(0, q-1) two-qubit unitaries,
+    # each using at most three CX before routing.
     base = direct_preparation_cx_bound(q, complex_phases=bool(np.any(target.imag))) if decomposition is None else 3*layers*max(0,q-1)
     laws = [ResourceLaw(metric="cx", basis="cx", value=base,
         interpretation="upper_bound" if decomposition is None else "estimate",
@@ -241,7 +243,7 @@ def plan_quantum(method, problem, data, *, output, shots, rng):
         calls.append("coefficient_inverse")
     raw = lchs_quadrature_summary(data.quadrature,method=data.method,
         he_backend=method.hamiltonian_evolution_backend,final_time=problem.elapsed_time)
-    facts = selected_error_facts(data,method=method,problem=problem,output=output,raw=raw)
+    facts = selected_error_facts(data,problem=problem,raw=raw)
     return finish_quantum_plan(method,problem,rec,output=output,shots=shots,rng=rng,
         blocks=blocks,definitions=definitions,calls=calls,facts=facts,select_work=select_work,native_data=data,
         coefficient_plan=data.coefficient_plan if data.source is None else None)
@@ -253,7 +255,7 @@ def lchs_readout(output, terms, coordinates, *, dimension, shots, method):
     Returns ``(settings, groups, comparisons)``. A vector output reads its
     amplitudes and Samples one counts setting. With ``shots=None`` a scalar
     output has one exact ``projected_moments`` reduction. With shots,
-    NormSquared measures its physical mass; a Pauli observable measures one
+    NormSquared measures its physical mass. A Pauli observable measures one
     counts setting per first-fit qubit-wise commuting group of its nonzero
     nonidentity labels, whose label is the group's accumulated basis, and a
     padded normalized output adds the unrotated ``physical_mass`` setting.
@@ -281,13 +283,13 @@ def lchs_readout(output, terms, coordinates, *, dimension, shots, method):
     return settings,groups,comparisons
 
 
-def observed_bits(rec, output, setting):
-    """Return the qubits measured for one counts setting, in classical-bit order.
+def observed_bits(rec):
+    """Return the qubits that every counts setting measures, in classical-bit order.
 
     Every counts setting observes all success and system qubits, since the
     Program's classical layout is shared by all counts batches. A group
     setting decodes each label's parity from the coordinates of its support
-    and ignores the other measured coordinates; the physical-mass setting
+    and ignores the other measured coordinates. The physical-mass setting
     and Samples use every coordinate.
     """
     return rec.success_bits+rec.system_bits
@@ -322,9 +324,9 @@ def finish_quantum_plan(method,problem,rec,*,output,shots,rng,blocks,definitions
     A vector output reads its amplitudes. With ``shots=None`` a scalar output
     has one experiment: the coherent body and one ``projected_moments``
     reduction at its end, bound to the success bits, coordinates, original
-    dimension and stored observable; its bytes and work are admitted against
-    ``max_bytes`` and the remaining ``max_readout_work`` before native
-    acquisition (``LCHS.reduction_allowance``). With shots,
+    dimension and stored observable. Before native acquisition its bytes are
+    checked against ``max_bytes`` and its work against the full
+    ``max_readout_work`` (``LCHS.reduction_allowance``). With shots,
     each counts setting rotates its group basis and measures all success
     and system qubits. ``select_work`` is the max_select_work already
     charged by the construction.

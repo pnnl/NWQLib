@@ -82,7 +82,8 @@ def lower_qiskit(construction: SelectedConstruction, *, blocks: tuple[SelectedBl
                  max_synthesis_work=1_000_000_000) -> LogicalCircuit:
     """Build the Qiskit circuit of one experiment of a selected construction, after checking its size.
 
-    The construction's root must be one static experiment, for example from
+    The construction must be one static experiment, a Program that
+    describes exactly one circuit, for example from
     [`Program.select_experiment`][nwqlib.ir.records.Program.select_experiment].
     It supports sequences, bound repeats, block calls, coherent regions,
     allocation, release, computational measurement and reset. Reallocation and a
@@ -145,7 +146,7 @@ def _lower_qiskit(construction, *, blocks, max_operations=100_000, max_qubits=40
                   max_direct_amplitudes=DEFAULT_MAX_DIRECT_AMPLITUDES,
                   definition_cache=None, specialization_cache=None,
                   method_context=None, synthesis_charge=None, definition=None):
-    """One lowering owner with optional live-run definition and method reuse.
+    """Build the LogicalCircuit of a selected Program, optionally reusing a live Run's definition caches and method context.
 
     ``definition`` names the Program definition to lower, the Program's root by
     default. Another definition, such as the coherent tail or inverse of a
@@ -237,8 +238,6 @@ def _lower_qiskit(construction, *, blocks, max_operations=100_000, max_qubits=40
             selected[name] = block, arguments
             work = record.construction_work
         elif isinstance(node, Measure):
-            if node.basis != "computational":
-                raise ValueError("logical lowering supports computational measurement only")
             work = widths[node.wire]
         elif isinstance(node, Reset):
             work = widths[node.wire]
@@ -255,7 +254,7 @@ def _lower_qiskit(construction, *, blocks, max_operations=100_000, max_qubits=40
     visits, work = count(start)
     # Reserve only reachable native definitions, including base gates built once
     # for selected transforms. A transformed law may conservatively include base
-    # work too; this is a reservation, never an observed CPU/instruction census.
+    # work too. This is a reservation, never an observed CPU or instruction count.
     closure = {}
     pending = list(selected.values())
     while pending:

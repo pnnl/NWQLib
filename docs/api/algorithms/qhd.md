@@ -1,6 +1,6 @@
 # QHD
 
-<a id="qhd-api"></a>Reference for the QHD Method, its schedules and initial states, its readout and its fault-tolerant resource estimates. Import every name on this page from `nwqlib.algorithms.qhd`, for example `from nwqlib.algorithms.qhd import QHD, circuit_resources`.
+<a id="qhd-api"></a>Use an `Optimization` with `QHD` to find a candidate minimizer of an objective over a box, and use the entries below to choose its schedule and initial state, read the observed points and estimate fault-tolerant resources. Import every name on this page from `nwqlib.algorithms.qhd`, for example `from nwqlib.algorithms.qhd import QHD, circuit_resources`.
 
 The [QHD guide](../../algorithms/qhd.md) explains the model, the readout and the measured evidence, and its [source map](../../algorithms/qhd.md#source-map) gives the paper, version and equation behind each step. <a id="constrained-problems"></a><a id="box-refinement"></a>The augmented-Lagrangian layer for constrained problems and box refinement are on [QHD constrained problems and box refinement](qhd_constrained.md). The `QHD` entry below has a complete example.
 

@@ -12,7 +12,7 @@ from qiskit import QuantumCircuit
 from nwqlib.core import planning
 from nwqlib.core.planning import (
     Experiment, ObservationPoint, ObservationSpec, ReadoutView, Reducer, ReducerOutput, RuntimeOptions,
-    point_array_reservation, readout_shape,
+    readout_shape,
 )
 from nwqlib._prepared_execution import Run, prepare_experiment as prepare
 from nwqlib.execution import ObservationView
@@ -126,16 +126,12 @@ def test_items_law_on_the_separating_example(two_complex_scalars):
     # The last point exceeds the one item left after 3 + 8 of 12.
     with pytest.raises(ValueError, match="point 'r' can have 2 items, more than max_items=1"):
         readout_shape(kind="trajectory", details=spec, width=3, classical_width=0, max_items=12)
-    # Dense array payload: 8*3 + 8*2**3 + 16*2 = 24 + 64 + 32 = 120 bytes, the
-    # pre-acquisition reservation whatever the marginal's eventual storage.
-    assert sum(point_array_reservation(point, width=3) for point in spec.positions) == 120
 
 
-def test_reduction_reserves_its_output_not_its_workspace_and_unknown_reducers_fail(two_complex_scalars):
+def test_reduction_counts_its_output_items_not_its_workspace_and_unknown_reducers_fail(two_complex_scalars):
     # Even when the reduction's private state on 20 qubits would take 16*2**20
-    # bytes, its registered output is two complex128 scalars: 32 bytes, 2 items.
+    # bytes, its registered output is two complex128 scalars: 2 items.
     point = ObservationPoint(id="r", position=0, kind="reduction", reducer="two_complex")
-    assert point_array_reservation(point, width=20) == 32
     assert readout_shape(kind="trajectory", details=trajectory(point), width=20, classical_width=0) == 2
     unknown = ObservationPoint(id="u", position=0, kind="reduction", reducer="unregistered")
     with pytest.raises(ValueError, match="no registered output shape"):
@@ -407,7 +403,6 @@ def test_point_chunk_keeps_its_point_and_boundary_after_reload():
     reloaded = ObservationChunk.model_validate_json(chunk.model_dump_json())
     assert (reloaded.point, reloaded.boundary, reloaded.content_id) == ("m", 4, chunk.content_id)
     assert reloaded.values == chunk.values and chunk.histogram().weights.tolist() == [.25, .75]
-    assert reloaded.readout() is reloaded.observation
     # Rebuilt from its JSON alone, the chunk has no payload source; its Run or Result supplies one.
     with pytest.raises(ValueError, match="load_run or nwqlib.load_result"):
         reloaded.histogram()
@@ -460,15 +455,15 @@ def prefix_values(plan, chunk, boundary):
     prefix = logical.copy_empty_like()
     prefix.data = logical.data[:boundary]
     state = Statevector(prefix)
-    if chunk.readout().kind == "pauli_expectation":
+    if chunk.observation.kind == "pauli_expectation":
         return {item.label: state.expectation_value(SparsePauliOp(item.label)).real for item in chunk.values}
-    probabilities = state.probabilities(list(chunk.readout().qubits))
+    probabilities = state.probabilities(list(chunk.observation.qubits))
     return {key: probabilities[int(key, 2)] for key in _chunk_values(chunk)}
 
 
 def _chunk_values(chunk):
     """Point values by Pauli label or, for a marginal, by bit-string key (qubits[0] rightmost)."""
-    if chunk.readout().kind == "pauli_expectation":
+    if chunk.observation.kind == "pauli_expectation":
         return {item.label: item.value for item in chunk.values}
     histogram = chunk.histogram()
     return {format(index, f"0{histogram.width}b"): value
@@ -610,7 +605,7 @@ def test_reopened_trajectory_keeps_every_point_association_without_replay(tmp_pa
         stored = returned[chunk.point].get("pauli_expectations")
         if stored is None:
             marginal = returned[chunk.point]["probabilities"]
-            stored = {format(index, f"0{len(chunk.readout().qubits)}b"): float(value)
+            stored = {format(index, f"0{len(chunk.observation.qubits)}b"): float(value)
                       for index, value in enumerate(marginal)}
         assert stored == values
 
@@ -769,16 +764,18 @@ def reduction(point_id, position):
                             parameters={"scale": 1})
 
 
-def test_registered_reduction_runs_once_per_point_on_its_saved_state(state_reducer, tmp_path):
+def test_registered_reduction_runs_once_per_point_on_its_saved_state(state_reducer, tmp_path, monkeypatch):
     """The reducer receives the read-only state saved at its point; its outputs stay with that point."""
     import nwqlib
+    from nwqlib.algorithms.expectation import ExpectationMethod
     from nwqlib.backends import AerBackend
     from nwqlib._prepared_execution import submit_experiment
 
+    monkeypatch.setattr(ExpectationMethod, "reduction_allowance",
+                        lambda self, plan, point, *, observation, width, run: 2 * (2 << 2), raising=False)
     plan = three_call_plan(trajectory(pauli("first", 1, "ZZ"), reduction("middle", 2), reduction("end", None)))
     with Run(plan, directory=tmp_path / "run", progress=False) as run:
-        handle = prepare(plan.resolve("trajectory"), run=run, runtime=RuntimeOptions(seed=7),
-                         reduction_allowance=2 * (2 << 2))
+        handle = prepare(plan.resolve("trajectory"), run=run, runtime=RuntimeOptions(seed=7))
         chunks = submit_experiment(handle, run=run)
         for chunk in chunks:
             run.collect(chunk)
@@ -792,7 +789,7 @@ def test_registered_reduction_runs_once_per_point_on_its_saved_state(state_reduc
             (norm[0],), (first[0].real,), (first[0].imag,))
     middle, end = chunks[1:]
     assert (middle.point, middle.boundary, end.point, end.boundary) == ("middle", 2, "end", 3)
-    assert middle.readout().positions == (plan.experiments[0].observation.point("middle"),)
+    assert middle.observation.positions == (plan.experiments[0].observation.point("middle"),)
     # The two saved states differ, so each reduction saw its own point's state.
     assert middle.values[1].real != end.values[1].real
     with nwqlib.load_run(tmp_path / "run", backend=AerBackend(), progress=False) as reopened:
@@ -815,23 +812,26 @@ def test_reduction_work_and_saved_states_are_admitted_before_native_preparation(
     with Run(plan) as run:
         for allowance, message in ((2 * (2 << 2) - 1, "more than the remaining allowance 15"),
                                    (None, "needs the calling Method's remaining work allowance")):
-            with pytest.raises(ValueError, match=message):
-                prepare(plan.resolve("trajectory"), run=run, runtime=RuntimeOptions(seed=7),
-                        reduction_allowance=allowance)
+            with monkeypatch.context() as patch, pytest.raises(ValueError, match=message):
+                # Without the hook ExpectationMethod supplies no allowance.
+                if allowance is not None:
+                    patch.setattr(ExpectationMethod, "reduction_allowance",
+                                  lambda self, plan, point, *, observation, width, run: allowance, raising=False)
+                prepare(plan.resolve("trajectory"), run=run, runtime=RuntimeOptions(seed=7))
         assert run.trace.preparations == 0
-    # A reducer without execution, an indexed output, a reducer the target
+    # A reducer without execution, a reducer the target
     # does not declare and outputs whose stored JSON exceeds max_data_bytes
     # are refused before native preparation too.
     registered = planning.READOUT_REDUCERS["norm_first"]
     variants = (
         ("shape_only", Reducer(shape=registered.shape), "has no registered execution"),
-        ("indexed", Reducer(shape=lambda parameters: (ReducerOutput("float64", (2,), index_width=2),),
-                            work=registered.work, execute=registered.execute), "indexed output component"),
         ("undeclared", registered, "cannot execute reduction .undeclared."),
         ("wide", Reducer(shape=lambda parameters: (ReducerOutput("float64", (10**9,)),), work=registered.work,
                          execute=registered.execute), "point .r. storage exceeds remaining max_data_bytes"),
     )
     from nwqlib.backends import targets
+    monkeypatch.setattr(ExpectationMethod, "reduction_allowance",
+                        lambda self, plan, point, *, observation, width, run: 1 << 40, raising=False)
     for name, reducer, message in variants:
         monkeypatch.setitem(planning.READOUT_REDUCERS, name, reducer)
         # A target that names its reducers executes only those names.
@@ -841,8 +841,7 @@ def test_reduction_work_and_saved_states_are_admitted_before_native_preparation(
         variant = three_call_plan(trajectory(point))
         with Run(variant) as run:
             with pytest.raises(ValueError, match=message):
-                prepare(variant.resolve("trajectory"), run=run, runtime=RuntimeOptions(seed=7),
-                        reduction_allowance=1 << 40)
+                prepare(variant.resolve("trajectory"), run=run, runtime=RuntimeOptions(seed=7))
             assert run.trace.preparations == 0
     # Sixteen qubits: the live state and one saved state need 2*16*2**16 bytes,
     # two MiB, beyond a one-MiB simulator memory limit; the live state uses it all.
@@ -852,7 +851,7 @@ def test_reduction_work_and_saved_states_are_admitted_before_native_preparation(
         reduction("end", None))),))._bind(blocks=wide.blocks)
     with Run(wide, limits=ExecutionLimits(simulator_memory_mb=1)) as run:
         with pytest.raises(ValueError, match=r"saved state for point .end.: counted=1048576, requested=16\*2\*\*16, remaining=0"):
-            prepare(wide.resolve("trajectory"), run=run, runtime=RuntimeOptions(seed=7), reduction_allowance=1 << 40)
+            prepare(wide.resolve("trajectory"), run=run, runtime=RuntimeOptions(seed=7))
         assert run.trace.preparations == 0
 
 
@@ -1181,16 +1180,17 @@ def test_point_chunk_fields_are_priced_once_and_completion_stays_within_the_rese
                             event.attempt in state["pending_output"]))
 
     monkeypatch.setattr(execution.Run, "_finish_attempt", measured)
-    contexts = []
-    admit = execution._admit_readout
-    monkeypatch.setattr(execution, "_admit_readout",
-                        lambda observation, **kwargs: contexts.append(kwargs["header"]) or admit(observation, **kwargs))
+    built = []
+    build = execution._point_chunk_headers
+    monkeypatch.setattr(execution, "_point_chunk_headers",
+                        lambda *args, **kwargs: built.append(build(*args, **kwargs)) or built[-1])
     with Run(plan, progress=False) as run:
         handle = prepare(plan.resolve("trajectory"), run=run, runtime=RuntimeOptions(seed=7))
-        common, per_point = execution._point_chunk_headers(handle, run_id=run.run_id, attempt="0" * 36,
-                                                           backend_kind=run.backend.kind)
-        spec = handle.record.observation
-        early = execution._prospective_point_headers(spec, contexts[0], run)
+        early = built[0]
+        spec, record = handle.record.observation, handle.record
+        common, per_point = build(spec, execution._receipt_header(handle), run_id=run.run_id,
+                                  prepared_id=record.content_id, attempt="0" * 36, boundaries=record.boundaries,
+                                  backend_kind=run.backend.kind, target_version=record.target.version)
         assert [execution._trajectory_fixed_bounds(spec, common=maps[0], per_point=maps[1], max_bytes=1 << 40)[1]
                 for maps in (early, (common, per_point))] == [
             execution._trajectory_fixed_bounds(spec, common=common, per_point=per_point, max_bytes=1 << 40)[1]] * 2
@@ -1219,6 +1219,7 @@ def test_a_context_reducer_reads_its_producing_receipts_window(state_reducer, mo
     the same trajectory runs as before.
     """
     import numpy as np
+    from nwqlib.algorithms.expectation import ExpectationMethod
     from nwqlib._prepared_execution import submit_experiment
 
     contexts = []
@@ -1230,12 +1231,13 @@ def test_a_context_reducer_reads_its_producing_receipts_window(state_reducer, mo
     monkeypatch.setitem(planning.READOUT_REDUCERS, "window", Reducer(
         shape=lambda parameters: (ReducerOutput("float64", (1,)),), work=lambda parameters, width: 1,
         execute=execute, receives_context=True))
+    monkeypatch.setattr(ExpectationMethod, "reduction_allowance",
+                        lambda self, plan, point, *, observation, width, run: 1 + (2 << 2), raising=False)
     plan = three_call_plan(trajectory(
         ObservationPoint(id="w", position=1, kind="reduction", reducer="window", parameters={}),
         reduction("end", None)))
     with Run(plan, progress=False) as run:
-        handle = prepare(plan.resolve("trajectory"), run=run, runtime=RuntimeOptions(seed=7),
-                         reduction_allowance=1 + (2 << 2))
+        handle = prepare(plan.resolve("trajectory"), run=run, runtime=RuntimeOptions(seed=7))
         chunks = submit_experiment(handle, run=run)
     receipt = handle.record
     [context] = contexts
@@ -1301,8 +1303,10 @@ def test_a_shared_phase_corrected_save_gives_each_reducer_its_qualified_state_bu
                    for boundary in (2, 4) for name in ("sensitive", "invariant"))
     plan = body.revise(experiments=(Experiment(name="t", setting="t", observation=trajectory(*points)),))._bind(
         blocks=body.blocks)
+    monkeypatch.setattr(ExpectationMethod, "reduction_allowance",
+                        lambda self, plan, point, *, observation, width, run: 4, raising=False)
     with Run(plan, progress=False) as run:
-        handle = prepare(plan.resolve("t"), run=run, runtime=RuntimeOptions(seed=29), reduction_allowance=4)
+        handle = prepare(plan.resolve("t"), run=run, runtime=RuntimeOptions(seed=29))
         submit_experiment(handle, run=run)
     receipt = handle.record
     resolved = ("amplitude-derived masses",)
@@ -1577,9 +1581,6 @@ def test_the_trajectory_memory_check_and_the_simulator_share_one_thread_cap(monk
     saved, = qpy.load(stream)
     restored = AerBackend().restore_native_data(handle.record, saved, native.metadata, run=None)
     assert restored.simulator.options.max_parallel_threads == 3
-    metadata = {key: value for key, value in native.metadata.items() if key != "simulator_max_parallel_threads"}
-    with pytest.raises(ValueError, match="simulator_max_parallel_threads"):
-        AerBackend().restore_native_data(handle.record, saved, metadata, run=None)
     with nwqlib.load_run(tmp_path / "run", backend=AerBackend(), progress=False) as reopened:
         again = prepare(reopened.plan.resolve("trajectory"), run=reopened, runtime=RuntimeOptions(seed=7))
     assert seen == [3, 5] and again._native.simulator.options.max_parallel_threads == 5

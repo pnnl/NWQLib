@@ -110,7 +110,7 @@ def test_periodic_classical_model_matches_circulant_eigendecomposition(d, k):
     # The uniform start vector errs by 2u (initial_state.restricted_state_error).
     r = selected.reconstruction
     norms = owner._generator_norms(method.theory_flavor, method, owner._grid(selected),
-                                   r.support_values, r.steps, r.step_weights)
+                                   r.support_values, r.step_weights)
     delta = expm_multiply_state_error(norms, start=2.0)
     with mpmath.workdps(30):
         # The dyadic float entries convert to mpmath exactly.
@@ -166,7 +166,7 @@ def test_periodic_kinetic_ground_state_is_the_uniform_zero_energy_mode(d):
     overlap = np.vdot(start, state)
     r = selected.reconstruction
     norms = owner._generator_norms(method.theory_flavor, method, owner._grid(selected),
-                                   r.support_values, r.steps, r.step_weights)
+                                   r.support_values, r.step_weights)
     delta = expm_multiply_state_error(norms, start=2.0)
     assert np.linalg.norm(state * (np.conj(overlap) / abs(overlap)) - start) <= delta
 

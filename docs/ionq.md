@@ -1,6 +1,6 @@
 # IonQ
 
-<a id="ionq-execution"></a>`IonQBackend` runs NWQLib's circuits on an IonQ QPU through the IonQ v0.4 API. Construct a connection for one device and run with the steps in [Run on any backend](backends.md#run-on-any-backend). The example below is a template and is not run here, because it needs an IonQ API key:
+<a id="ionq-execution"></a>`IonQBackend` runs NWQLib's circuits on an IonQ QPU through the IonQ v0.4 API and returns raw sampled counts. Install `nwqlib[ionq]`, construct a connection for one `qpu.*` device and run with the steps in [Run on any backend](backends.md#run-on-any-backend). The example below is a template and is not run here, because it needs an IonQ API key:
 
 ```python
 from nwqlib.backends.ionq import IonQBackend
@@ -8,13 +8,14 @@ from nwqlib.backends.ionq import IonQBackend
 backend = IonQBackend(
     device="qpu.forte-1",
     gateset="qis",
-    debiasing=False,
     max_input_bytes=1_000_000,
     max_response_bytes=1_000_000,
 )
 ```
 
 The configuration cannot change after construction, and constructing it neither imports the provider SDK nor contacts IonQ. The byte values in the example are limits, not provider cost estimates. Choose `ExecutionLimits` for the intended workload.
+
+Before any conversion or request, the backend rejects readouts other than counts, the ideal simulator (which ignores the requested shots) and shot counts outside 1 to 1,000,000.
 
 ## Credentials
 
@@ -35,7 +36,7 @@ The flat circuit route requires final measurements and keeps each measured qubit
 
 ## Batches
 
-The lower-level `submit_detached((handle,), run=run)` submits several circuits as one job when their requested shots are equal. Single-circuit and batch submissions require `debiasing=False`. A batch holds at most 5,000 circuits and 150,000 gates in total, the multi-circuit limits of the [create-job reference](https://docs.ionq.com/api-reference/v0.4/jobs/create-job). NWQLib counts one gate per entry of a circuit's IonQ gate list and applies the same 150,000-gate total to a single-circuit job, for which the reference gives no gate limit.
+The lower-level `submit_detached((handle,), run=run)` submits several circuits as one job when their requested shots are equal. A batch holds at most 5,000 circuits and 150,000 gates in total, the multi-circuit limits of the [create-job reference](https://docs.ionq.com/api-reference/v0.4/jobs/create-job). NWQLib counts one gate per entry of a circuit's IonQ gate list and applies the same 150,000-gate total to a single-circuit job, for which the reference gives no gate limit.
 
 Each circuit receives a name made of its original submission and item. Each returned child job must have that name and the correct parent job, and its position in the returned list does not decide which measurement it is. The run folder saves the child job IDs before their individual observations, and keeps the raw result ID of each child before downloading it. Children are read once the parent job is no longer pending, and completed children can then be used while others are still pending. If a later status, download or decode fails, the run first saves the child and result IDs and the completed observations it has, then raises the original exception with its cause. Those completed observations stay available from their original attempts. Later refreshes skip results already saved and refuse to replace a known result ID. One batch remains one submitted job, with its own set of shots per child. Duplicate names, duplicate child IDs and changed associations are rejected before any result is downloaded.
 
@@ -45,7 +46,7 @@ The readout requires a [raw histogram result](https://docs.ionq.com/api-referenc
 
 For a histogram with `m` entries on `q` native qubits and `c` classical bits, decoding at `q,c<=64` checks `57*m + 8*min(m, 2**min(q,c))` bytes for live ndarray elements, including the returned index and count pair. The bytes of the count keys, `m*(c+16)`, are checked separately. Wider inputs use Python integers and bit-string keys within those key bytes. Public count records count against the run's stored-data limit. These per-decode checks do not bound Python object memory, transport buffers or the total memory of a batch.
 
-Requested debiasing and ideal-simulator counts are rejected before submission, and the ideal simulator ignores requested shots. Unexpected nested child jobs or debiasing variants are rejected before the results are saved. The [job schema](https://docs.ionq.com/api-reference/v0.4/jobs/get-job) gives variant IDs, shots and a nullable `qubit_map`, but does not define that map's direction or the coordinate convention of each variant result. Supporting variants would require keeping their separate sets of shots and establishing those conventions, and they cannot be pooled by assumption. These are limits of NWQLib's support, not a claim that IonQ lacks those service features.
+Every job, single-circuit or batch, is sent with debiasing disabled, and unexpected nested child jobs or debiasing variants are rejected before the results are saved. The [job schema](https://docs.ionq.com/api-reference/v0.4/jobs/get-job) gives variant IDs, shots and a nullable `qubit_map`, but does not define that map's direction or the coordinate convention of each variant result. Supporting variants would require keeping their separate sets of shots and establishing those conventions, and they cannot be pooled by assumption. These are limits of NWQLib's support, not a claim that IonQ lacks those service features.
 
 ## Retries and cancellation
 

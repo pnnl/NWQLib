@@ -1,9 +1,10 @@
 """Atomic SQLite run transitions with finite encoded data and a controller lock.
 
-A Run journal is one SQLite file with two tables. ``records(kind, key, payload,
-collected)`` holds one JSON row per durable fact, keyed by its kind (header,
-limits, rng, prepared, preparation, submission, event, chunk, checkpoint, cache
-and others) and its identity. ``collected`` is zero for everything except a chunk
+A Run journal is one SQLite file with two tables. ``records(kind, key, size,
+collected, payload)`` holds one JSON row per durable fact, keyed by its kind
+(header, limits, rng, prepared, preparation, submission, event, chunk,
+checkpoint, cache and others) and its identity, with the UTF-8 byte size of its
+JSON text in ``size``. ``collected`` is zero for everything except a chunk
 that the Method has consumed, which gets the next positive ordinal.
 ``binary(identity, ordinal, payload)`` holds native payloads and published arrays
 as ordered blocks of at most 1 MiB.
@@ -37,7 +38,7 @@ from nwqlib.operators.access import Count
 # A Method-owned Result field change may instead bump that Method's archive
 # format when load_run checks it before restoring the journal and validating
 # the concrete Result.
-RUN_FORMAT = "nwqlib.run/19"
+RUN_FORMAT = "nwqlib.run/20"
 
 
 def unsupported_run_format(found, where="saved run"):
@@ -115,7 +116,7 @@ class JSONBytesExceeded(ValueError):
 
 
 def _json_bound(value, max_bytes):
-    """Bound JSON bytes before encoding; reject unsupported/deep scalar trees.
+    """Bound JSON bytes before encoding, and reject unsupported or deep scalar trees.
 
     Strings use the encoder's escaped UTF-8 size and integers their decimal
     size. Finite binary64 values have a 32-byte envelope. Reading Record fields
@@ -202,7 +203,7 @@ def _json_bound(value, max_bytes):
 
 
 def _encode_admitted(value, max_bytes):
-    """Encode a value whose bound was already admitted; return its text and UTF-8 byte length.
+    """Encode a value whose bound was already admitted, and return its text and UTF-8 byte length.
 
     The compact separators and ``allow_nan=False`` give the spelling that
     ``_json_bound`` counts. Nonfinite floats raise instead of producing invalid
@@ -237,7 +238,7 @@ def _row_value(kind, value):
     trajectory declaration. A chunk row therefore grows with its JSON
     statistics but not again with the readout's labels or points. A
     probability chunk row holds its array manifests and scalar summaries,
-    whose size does not grow with the number of outcomes; the values are
+    whose size does not grow with the number of outcomes. The values are
     binary payload blocks. Other rows store their value unchanged.
     """
     from nwqlib.execution import ObservationChunk
@@ -279,6 +280,13 @@ def encode_records(records, max_bytes):
     encoded = tuple(_encode_admitted(value, max_bytes) for value in values)
     return _EncodedRecords(tuple((kind, key, text) for (kind, key, _), (text, _) in zip(records, encoded)),
                            tuple(size for _, size in encoded))
+
+
+def _write_bytes(connection, key, buffer, chunk_bytes):
+    """Copy an already admitted buffer into the caller's current transaction as ordered blocks."""
+    view = memoryview(buffer).cast("B")
+    for ordinal, start in enumerate(range(0, len(view), chunk_bytes)):
+        connection.execute("INSERT INTO binary VALUES (?,?,?)", (key, ordinal, view[start:start + chunk_bytes]))
 
 
 class LocalJournal:
@@ -373,9 +381,10 @@ class LocalJournal:
         the writes see one consistent database. Replaced rows are credited before
         the new size is checked. ``replaced`` maps each written or deleted
         ``(kind, key)`` to the stored size its caller already holds (``Run``
-        keeps them in ``data_sizes``); without it the ``size`` column is read. A binary payload whose identity is already stored
-        is not written again, which lets two acquisitions with identical array bytes
-        share one payload. Chunks named in ``collected`` get the next ordinals, in
+        keeps them in ``data_sizes``). Without it the ``size`` column is read. A
+        binary payload whose identity is already stored is not written again,
+        which lets two acquisitions with identical array bytes share one
+        payload. Chunks named in ``collected`` get the next ordinals, in
         the given order, only if they have none yet. Any error rolls the whole
         transition back, and the in-memory byte and ordinal counters change only
         after ``COMMIT``.
@@ -427,11 +436,12 @@ class LocalJournal:
             extra = sum(encoded.sizes) - replaced + binary_added
             self._check_size(extra)
             for reference, data in new_payloads:
-                from nwqlib._sqlite_bytes import write_bytes
                 # 1 MiB blocks keep each value far below SQLite's per-value length
-                # limit and bound the buffers of later chunked reads. ArtifactStore.get
-                # reads with the same block size. Revisit both together.
-                write_bytes(conn, reference.content_id, data, min(1024**2, self.max_bytes))
+                # limit and bound the buffers of later chunked reads.
+                # ``Run._saved_payload`` passes the reader its block size, which
+                # ``ArtifactStore._hydrate`` checks against every block, so change
+                # both together.
+                _write_bytes(conn, reference.content_id, data, min(1024**2, self.max_bytes // 16 * 16))
             for kind, key in removed:
                 conn.execute("DELETE FROM records WHERE kind=? AND key=?", (kind, key))
             for (kind, key, text), size in zip(encoded.rows, encoded.sizes, strict=True):
@@ -470,10 +480,8 @@ class LocalJournal:
 
         The block inventory is streamed, so the iterator's own metadata is
         O(1) instead of O(ceil(B/C)) for B payload bytes in C-byte blocks.
-        Each block's stored length is read before its bytes, the ordinals must
-        run 0, 1, ... without a gap and the lengths must not exceed the
-        reference's byte count; the loader (``ArtifactStore._hydrate``) checks
-        each block size and the complete total before it exposes any array. A
+        The loader (``ArtifactStore._hydrate``) checks the block order, each
+        block size and the complete total before it exposes any array. A
         yielded block is deleted when the consumer resumes the iterator, before
         the next block is read, so with a consumer that also releases its
         block the explicit block memory is one block. SQLite's own caches are
@@ -490,19 +498,13 @@ class LocalJournal:
             connection = sqlite3.connect(self.path.as_uri() + "?mode=ro", uri=True, check_same_thread=False)
             connection.execute("PRAGMA trusted_schema=OFF")
         try:
-            inventory = connection.execute("SELECT ordinal,length(payload) FROM binary WHERE identity=? "
-                                           "ORDER BY ordinal", (reference.content_id,))
-            total = 0
-            for index, (ordinal, size) in enumerate(inventory):
-                total += size
-                if ordinal != index or total > reference.bytes:
-                    raise ValueError("saved binary payload has missing or reordered chunks")
+            inventory = connection.execute("SELECT ordinal FROM binary WHERE identity=? ORDER BY ordinal",
+                                           (reference.content_id,))
+            for (ordinal,) in inventory:
                 data = connection.execute("SELECT payload FROM binary WHERE identity=? AND ordinal=?",
                                           (reference.content_id, ordinal)).fetchone()[0]
                 yield ordinal, data
                 del data
-            if total != reference.bytes:
-                raise ValueError("saved binary payload has missing or reordered chunks")
         finally:
             if connection is not self.connection:
                 connection.close()

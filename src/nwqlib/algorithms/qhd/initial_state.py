@@ -6,8 +6,10 @@ state is a product of nonnegative per-variable amplitude vectors on the
 Method's grid (``variable_amplitudes``). Planning evaluates them once, together
 with the construction error of the classical start vector (``evaluate``),
 and stores both in ``QHDReconstruction``. The classical routes start from
-the tensor product of the stored vectors in the lexicographic grid-index
-order of ``theory.restricted_basis`` (``restricted_state``), except for the
+the tensor product of the stored vectors in lexicographic grid order, the
+enumeration of ``(n_0, ..., n_(d-1))`` with each digit in ``0, ..., K-1`` and
+the last variable advancing fastest, so that variable 0 is most significant:
+``i = sum_(j=0)^(d-1) n_j * K**(d-1-j)`` (``restricted_state``), except for the
 uniform state and the kinetic ground state on the periodic grid, whose
 entries ``1/sqrt(K**d)`` are filled directly with their own construction
 term of 2u. The construction error (``restricted_state_error``) is the
@@ -122,35 +124,20 @@ class KineticGroundState(Record):
     [engineering constants](../../ENGINEERING_CONSTANTS.md#safety-factors-and-workflow-defaults)
     gives the reasons for this default and its limits.
 
-    On both Dirichlet grids the kinetic operator of one variable, restricted to the
-    grid, is `T/h**2` with the K-by-K tridiagonal matrix T of diagonal 1 and
-    off-diagonals -1/2. The interior grid and the grid with boundary points differ only
-    in the spacing h, so they share the eigenvectors of T. For
-    `v_i = sin(r pi (i + 1)/(K + 1))`, i = 0..K-1 and r = 1..K, the identity
-    `sin(a - b) + sin(a + b) = 2 sin(a) cos(b)` gives
-    `(T v)_i = v_i - (v_(i-1) + v_(i+1))/2 = (1 - cos(r pi/(K + 1))) v_i`, where the
-    missing neighbors `v_(-1) = sin(0)` and `v_K = sin(r pi)` vanish as the stencil
-    requires. The eigenvalues `2 sin(r pi/(2 (K + 1)))**2/h**2` increase with r, so r =
-    1 is the ground state, `sin(pi (i + 1)/(K + 1))` with every entry positive and
-    energy `2 sin(pi/(2 (K + 1)))**2/h**2`. The kinetic operator of d variables is the
-    sum of the one-variable operators on separate tensor factors, so its ground state is
-    the product of these vectors and its energy the sum of theirs. The relation is
-    standard linear algebra, derived here in full. On the grid with boundary points the
-    vector does not vanish at the box endpoints, because that grid's missing neighbors
-    lie outside the box.
+    On both Dirichlet grids the ground state of one variable is
+    `sin(pi (i + 1)/(K + 1))`, i = 0..K-1, with every entry positive and energy
+    `2 sin(pi/(2 (K + 1)))**2/h**2` for the grid spacing h. The kinetic operator of d
+    variables is the sum of the one-variable operators on separate tensor factors, so
+    its ground state is the product of these vectors and its energy the sum of theirs.
+    On the grid with boundary points the vector does not vanish at the box endpoints,
+    because that grid's missing neighbors lie outside the box.
 
-    On the periodic grid the operator is `C/h**2` with the circulant
-    `C = I - (S + S^T)/2` and the cyclic shift S. The Fourier vectors
-    `f_j = exp(2 pi i r j/K)` satisfy `(C f)_j = (1 - cos(2 pi r/K)) f_j`, so the
-    eigenvalues `2 sin(pi r/K)**2/h**2`, r = 0..K-1, are zero only for r = 0, whose
-    eigenvector is the constant vector. The ground state is therefore the uniform state
-    with energy zero, and this record then prepares exactly what
+    On the periodic grid the ground state is the uniform state with energy zero, and
+    this record then prepares exactly what
     [`UniformState`][nwqlib.algorithms.qhd.initial_state.UniformState] prepares. The
-    spectral kinetic model (`QHD.kinetic_model="spectral"`), which the Method accepts on
-    the periodic grid only, has the same Fourier eigenvectors with eigenvalues
-    `2 pi**2 q**2/L**2` for the signed frequency index q and period `L = K h`. They also
-    vanish only for q = 0, so the uniform state is the ground state under both periodic
-    kinetic models.
+    uniform state is the ground state under both periodic kinetic models, the
+    finite-difference stencil and the spectral model (`QHD.kinetic_model="spectral"`),
+    which the Method accepts on the periodic grid only.
 
     Attributes:
         kind: Default `"kinetic_ground"`, the only accepted value. Initial-state
@@ -172,6 +159,27 @@ class KineticGroundState(Record):
         with the one-ulp sine each entry errs by at most 5u, with ``u = 2**-53``.
         ``variable_errors`` adds the 3u of the normalization.
         """
+        # On both Dirichlet grids the kinetic operator of one variable, restricted to the
+        # grid, is T/h**2 with the K-by-K tridiagonal matrix T of diagonal 1 and
+        # off-diagonals -1/2. The interior grid and the grid with boundary points differ only
+        # in the spacing h, so they share the eigenvectors of T. For
+        # v_i = sin(r pi (i + 1)/(K + 1)), i = 0..K-1 and r = 1..K, the identity
+        # sin(a - b) + sin(a + b) = 2 sin(a) cos(b) gives
+        # (T v)_i = v_i - (v_(i-1) + v_(i+1))/2 = (1 - cos(r pi/(K + 1))) v_i, where the
+        # missing neighbors v_(-1) = sin(0) and v_K = sin(r pi) vanish as the stencil
+        # requires. The eigenvalues 2 sin(r pi/(2 (K + 1)))**2/h**2 increase with r, so r =
+        # 1 is the ground state, sin(pi (i + 1)/(K + 1)) with every entry positive and
+        # energy 2 sin(pi/(2 (K + 1)))**2/h**2.
+        #
+        # On the periodic grid the operator is C/h**2 with the circulant
+        # C = I - (S + S^T)/2 and the cyclic shift S. The Fourier vectors
+        # f_j = exp(2 pi i r j/K) satisfy (C f)_j = (1 - cos(2 pi r/K)) f_j, so the
+        # eigenvalues 2 sin(pi r/K)**2/h**2, r = 0..K-1, are zero only for r = 0, whose
+        # eigenvector is the constant vector. The ground state is therefore the uniform state
+        # with energy zero. The spectral kinetic model has the same Fourier eigenvectors with
+        # eigenvalues 2 pi**2 q**2/L**2 for the signed frequency index q and period L = K h.
+        # They also vanish only for q = 0, so the uniform state is the ground state under both
+        # periodic kinetic models.
         if grid.boundary == "periodic":
             return UniformState().variable_amplitudes(grid)
         k = grid.num_grid_points
@@ -480,10 +488,13 @@ class GaussianState(Record):
         vector plus the rounding of the normalization, `3u/(1 - 2u) + sqrt(K) 2**-1074`,
         evaluated upward with the factor `1 + 2**-40`. Here `u = 2**-53`. The subnormal
         allowance is representable, and its addition to the far larger terms rounds like
-        every other operation that the factor `1 + 2**-40` counts. The bound is infinite
-        where the direction bound is, namely when some exponents overflow and the smallest
-        exponent exceeds `2**1020`, or when the smallest exponent itself overflows and the
-        grid points nearest the center are tied or nearly tied.
+        every other operation that the factor `1 + 2**-40` counts.
+        The bound can be infinite when some exponents overflow and the smallest
+        exponent exceeds ``2**1020``, or when the smallest exponent itself overflows
+        and the grid points nearest the center are tied or nearly tied. Even with
+        finite exponents, it can be infinite if both evaluations of ``_gaussian_beta``
+        overflow, or if the smaller result overflows when doubled or converted to
+        units of u.
         """
         return self._errors(self._variables(grid), grid)
 
@@ -506,8 +517,10 @@ def restricted_state(state, grid: OneHotGrid, amplitudes=None) -> np.ndarray:
     """Return the initial state on the K**d valid grid points, in lexicographic grid-index order.
 
     The state is the tensor product of the per-variable vectors
-    ``amplitudes``, by default ``state.variable_amplitudes(grid)``, with
-    variable 0 most significant, the order of ``theory.restricted_basis``,
+    ``amplitudes``, by default ``state.variable_amplitudes(grid)``, in
+    lexicographic grid order, the enumeration of ``(n_0, ..., n_(d-1))`` with
+    each digit in ``0, ..., K-1`` and the last variable advancing fastest, so
+    that variable 0 is most significant: ``i = sum_(j=0)^(d-1) n_j * K**(d-1-j)``,
     so ``np.kron`` of the per-variable vectors in variable order gives it.
     The classical kernel passes the vectors that planning evaluated and
     stored (``evaluate``, ``QHDReconstruction.initial_amplitudes``), so it
@@ -763,7 +776,8 @@ def chain_selection(alpha) -> ChainSelection:
                        lambda theta=theta: Fraction(theta) / 2):
             k = len(alpha)
             root = math.isqrt(k) if math.isqrt(k) ** 2 == k else math.isqrt(k) + 1
-            # eta_K = 3u/(1 - 2u) + ceil(sqrt(K)) lambda and L_m = sum_(i >= m) alpha_i
+            # eta_K = 3u/(1 - 2u) + ceil(sqrt(K)) * 2**-1074, with u = 2**-53.
+            # The subnormal unit 2**-1074 is _TAU, and L_m = sum_(i >= m) alpha_i.
             eta = 3 * _U / (1 - 2 * _U) + root * _TAU
             tail = sum((Fraction(float(value)) for value in alpha[m:]), Fraction(0))
             # Delta = min(sqrt2_up, sqrt2_up L_m/(1 - eta_K))

@@ -13,7 +13,7 @@ from .access import DEFAULT_INPUT_BYTES, _check_bytes
 # engineering choice, not a scientific threshold. Changing C changes
 # storage, not labels, order or scientific records.
 _PAULI_TILE = 1024
-# i**e for e = 0..3, the same binary64 values the scalar product used.
+# i**e for e = 0..3, the same binary64 values as the Python powers 1j**e.
 _PHASES = np.array([1j ** power for power in range(4)], dtype=np.complex128)
 
 
@@ -97,7 +97,7 @@ def product_words(xa, za, xb, zb):
     """Ordered product ``P_a P_b = i**e P(xa ^ xb, za ^ zb)`` of packed rows.
 
     Inputs broadcast on all but their final uint64-word axis. Bit j of a
-    mask describes qubit j, the rightmost printed letter; x_j is set for
+    mask describes qubit j, the rightmost printed letter. x_j is set for
     X/Y and z_j for Z/Y. With ``y(x, z) = popcount(x & z)`` a row denotes
     ``P(x, z) = i**y X**x Z**z`` and ``P(x, z)|j> = i**y
     (-1)**popcount(j & z) |j XOR x>``. Moving the left Z factors through the
@@ -147,7 +147,7 @@ def pauli_product_requirements(left, right, words):
     envelope of ``64CW + 128C`` bytes covers two result masks,
     intermediate masks and popcounts, signed exponent vectors and
     coefficient temporaries of one candidate block, released before the
-    next. The reservation is ``2N(16W+16) + 64CW + 128C``; an empty product
+    next. The reservation is ``2N(16W+16) + 64CW + 128C``. An empty product
     reserves 0. PauliTerms.product checks this law, and
     FactorizedOperatorProduct.expansion_requirements charges it for each
     Pauli chain step, so the two cannot differ.
@@ -159,7 +159,9 @@ def pauli_product_requirements(left, right, words):
 
 @dataclass(frozen=True, eq=False, init=False, slots=True)
 class PauliTerms:
-    """Immutable native table; word j covers qubits 64*j through 64*j+63.
+    """Immutable packed Pauli table.
+
+    Word j covers qubits 64*j through 64*j+63.
 
     Raw layout is M*(16*W+16) bytes, W=ceil(q/64). Python object overhead
     is outside logical byte limits. Product tables keep pair order and
@@ -172,7 +174,7 @@ class PauliTerms:
     The packed fields are the public access for packed consumers, which
     should not call ``labels()``. The module-level kernels ``pc``,
     ``product_words``, ``anticommutes`` and ``qwc`` operate on rows of
-    ``x`` and ``z`` and broadcast over leading axes; ``apply_terms`` acts
+    ``x`` and ``z`` and broadcast over leading axes. ``apply_terms`` acts
     with a single-word table on a state or a block of state columns.
 
     Attributes:
@@ -313,18 +315,21 @@ class PauliTerms:
               limit_name="max_comparisons"):
         """Deterministic first-fit QWC or general commuting algebra partition.
 
-        Grouping keeps deterministic first-fit and original member order.
         QWC compares each term with the group's accumulated basis, while
-        general commutation compares it with each group member. Two words
-        commute exactly when ``popcount(x1 & z2) + popcount(z1 & x2)`` is
-        even (``anticommutes``). A word is qubit-wise compatible with a QWC
-        group when ``overlap & ((x ^ bx) | (z ^ bz))`` is zero in every word,
-        with ``overlap = (x | z) & (bx | bz)`` (``qwc``); on success the
-        basis ``(bx, bz)`` is updated by OR. General groups are algebraic
+        general commutation compares it with each group member. For two
+        words with packed X/Z masks (x1, z1) and (x2, z2), they commute
+        exactly when ``popcount(x1 & z2) + popcount(z1 & x2)`` is even
+        (``anticommutes``). A word with masks (x, z) is qubit-wise
+        compatible with a QWC group whose basis masks are (bx, bz) when
+        ``overlap & ((x ^ bx) | (z ^ bz))`` is zero in every word, with
+        ``overlap = (x | z) & (bx | bz)`` (``qwc``). On success the basis
+        ``(bx, bz)`` is updated by OR. General groups are algebraic
         partitions, not QWC measurement settings.
 
-        Grouping stores ordered member indices and QWC basis masks, then
-        tests bounded candidate tiles. Its logical buffer reserve is
+        Let M = L be the number of input terms, W the number of uint64
+        words per mask and t the candidate tile length. Grouping stores
+        ordered member indices and QWC basis masks, then tests bounded
+        candidate tiles. For M > 1 its logical buffer reserve is
         ``M*(16*W+16)+64*t*W+64*t+32*W`` bytes. QWC compares group masks,
         while general commuting groups compare members. ``comparison_count``
         counts every candidate actually evaluated.
@@ -332,27 +337,30 @@ class PauliTerms:
         Grouping admits each candidate tile before evaluating it.
         ``comparison_count`` counts all candidates in evaluated tiles. For L
         input terms it is at most L(L-1)/2. The next tile is admitted only if
-        ``C_so_far + charge <= max_comparisons``. A refusal names the work
-        already counted, the next charge and the limit. Later phases using
-        the same option are admitted separately. General
-        commuting grouping charges actual member-pair tests and can reach the
-        quadratic count even with one group; its evaluated members form a
-        disjoint partition of the preceding terms, so its total is also at
-        most ``L(L-1)/2``.
+        ``C_so_far + charge <= max_comparisons``, where ``C_so_far`` is the
+        count already admitted and charge is the next tile's candidate
+        count. A refusal names the work already counted, the next charge
+        and the limit. Later phases using the same option are admitted
+        separately. General commuting grouping charges actual member-pair
+        tests and can reach the quadratic count even with one group. The
+        groups partition the preceding terms, and each member is evaluated
+        at most once for each new term, so the total is at most ``L(L-1)/2``.
 
         The reserve covers two M-by-W basis arrays and two M-entry
-        membership sequences (``M(16W+16)``); four t-by-W uint64 candidate
-        arrays, their t-entry reductions and, for commuting groups, the
-        gathered member rows, masks and popcounts (``64tW + 64t``); and the
-        scalar term masks (``32W``). The tile ``t = min(M, C)`` is chosen
-        from ``max_bytes - M(16W+16) - 32W`` at ``64W + 64`` bytes per
-        candidate before any candidate is allocated, and a table that needs
-        a comparison is refused when one candidate cannot be funded. If term
-        i meets ``g_i`` groups (``g_0 = 0``), a full QWC pass costs
-        ``sum_i g_i`` comparisons. Forming all G groups as early as possible
-        maximizes every ``g_i``, giving ``0+1+...+(G-1)+(L-G)G``, so the
-        count is at most ``LG - G(G+1)/2 < LG``; ``g_i <= i`` gives
-        ``L(L-1)/2``. When every term fits one group the count is ``L-1``.
+        membership sequences (``M(16W+16)``). It also covers four t-by-W
+        uint64 candidate arrays, their t-entry reductions and, for commuting
+        groups, the gathered member rows, masks and popcounts
+        (``64tW + 64t``). The scalar term masks add ``32W``. With
+        C = ``_PAULI_TILE``, a table needing comparisons uses
+        ``t = min(M, C, floor((max_bytes - M*(16*W+16) - 32*W)/(64*W+64)))``.
+        A table is refused when one candidate cannot be funded. If ``g_i`` is
+        the number of groups present before term i, indexed from zero,
+        ``g_0 = 0`` and a QWC pass costs at most ``sum_i g_i`` comparisons.
+        Forming all G final groups as early as possible maximizes every
+        ``g_i``, giving ``0+1+...+(G-1)+(L-G)G``. For a nonempty table the
+        count is at most ``LG - G(G+1)/2 < LG``. The inequality ``g_i <= i``
+        gives ``L(L-1)/2``. When every term fits one group the count is
+        ``L-1``. An empty table makes no comparisons.
         A block that contains the first compatible group is still counted
         in full, so the count can exceed a scalar early-exit count: with
         ``j_i`` the zero-based first compatible group and t the tile, term i
@@ -424,7 +432,9 @@ class PauliTerms:
 
 @dataclass(frozen=True, slots=True)
 class PauliGrouping:
-    """Ordered algebra partition; comparison count is not measurement count.
+    """Ordered algebra partition of a Pauli table.
+
+    Its comparison count is not a measurement count.
 
     Attributes:
         groups: Original table indices, preserving first-fit and member order.
@@ -531,7 +541,7 @@ def pauli_action_requirements(rows, terms, flips, columns=1, *, complex_input=Fa
 
 
 def _grouped_pass(groups, rotated, phase_masks, columns, result, tile):
-    """Accumulate each flip group's tiled diagonal action into result; False after overflow.
+    """Accumulate each flip group's tiled diagonal action into result, and return False after overflow.
 
     For each group and coordinate tile the diagonal ``sum_t rotated[t] *
     (-1)**popcount(k & z_t)`` is summed in member order, the source rows
@@ -576,45 +586,57 @@ def apply_terms(
     original term order.
 
     ``terms`` is a single-word ``PauliTerms`` table or an iterable of
-    ``(label, value)`` pairs, which is packed once (32L bytes); each label
+    ``(label, value)`` pairs, which is packed once (32L bytes). Each label
     must be a string of exactly num_qubits letters from IXYZ, qubit zero
     rightmost, and any other label raises ValueError naming it. ``state``
-    has shape (N,) or (N, b) with ``N = 2**num_qubits`` and b >= 1; a
+    has shape (N,) or (N, b) with ``N = 2**num_qubits`` and b >= 1. A
     float input is converted to complex128 once. ``out`` must have the
-    same shape, a complex dtype and no overlap with the input; it is
+    same shape, a complex dtype and no overlap with the input. It is
     zero-filled and returned.
 
-    With ``P(x, z) = i**y X**x Z**z``, ``y = popcount(x & z)``, a term acts
-    as ``P|j> = i**y (-1)**popcount(j & z) |j XOR x>``. For each distinct
-    flip f the destination-coordinate diagonal is ``d_f(k) = sum_{t: x_t=f}
-    c_t (-i)**y_t (-1)**popcount(k & z_t)`` and ``(A V)[k, :] = sum_f
-    d_f(k) V[k XOR f, :]``, because the parity of ``(k XOR f) & z`` is that
-    of ``k & z`` plus ``f & z`` and ``popcount(f & z) = y``. A Y term on
-    ``|0>`` gives +i at destination 1. Groups are built once in
-    first-occurrence order and keep member order; each diagonal entry is
-    computed once per tile and shared by all b columns. For b = 1 the phase
-    sum still does O(LN) work; the saving is fewer state gathers and their
-    reuse across columns. Empty tables return zero; terms with f = 0 share
-    the identity permutation.
+    For a Pauli word with X/Z masks x and z, put ``y = popcount(x & z)``
+    and ``P(x, z) = i**y X**x Z**z``, with i the imaginary unit. On a basis
+    coordinate j it acts as ``P|j> = i**y (-1)**popcount(j & z) |j XOR x>``.
+    Let ``c_t`` be the coefficient of term t, with masks ``x_t``, ``z_t``
+    and Y count ``y_t``, and let A be their Pauli sum and V the input state
+    block. For each distinct flip f, the diagonal at destination coordinate
+    k is
+    ``d_f(k) = sum_{t: x_t=f} c_t (-i)**y_t (-1)**popcount(k & z_t)`` and
+    ``(A V)[k, :] = sum_f d_f(k) V[k XOR f, :]``, because the parity of
+    ``(k XOR f) & z`` is that of ``k & z`` plus ``f & z`` and
+    ``popcount(f & z) = y``. A Y term on ``|0>`` gives +i at destination 1.
+    Groups are built once in first-occurrence order and keep member order.
+    Each diagonal entry is computed once per tile and shared by all b
+    columns, with b, L and N as defined above. For b = 1 the phase sum
+    still does O(LN) work. The saving is fewer state gathers and their
+    reuse across columns. Empty tables return zero. Terms with f = 0
+    share the identity permutation.
 
-    Rounding: with u = 2**-53, ``gamma_r = r*u/(1-r*u)``, ``C1 = sum
-    abs(c_t)``, m* the largest group, ``mu = sqrt(2)*gamma_2``, finite
-    normal intermediate products, round to nearest and ``(L+G+m*)u < 1``,
-    ``||Y_old - AV||_F <= e_o*C1*||V||_F`` with ``e_o = (1+mu)(1+gamma_(L-1))
-    - 1`` and ``||Y_group - AV||_F <= e_g*C1*||V||_F`` with ``e_g =
-    (1+gamma_(m*-1))(1+mu)(1+gamma_(G-1)) - 1``, so the grouped and
+    Rounding for nonempty tables and complex128 output uses G as defined
+    above. With ``u = 2**-53``, ``gamma_r = r*u/(1-r*u)`` for a nonnegative
+    operation count r with ``r*u < 1``, ``C1 = sum abs(c_t)``,
+    ``m*`` the largest group size, ``mu = sqrt(2)*gamma_2``, finite
+    intermediate results, normal nonzero products, round to nearest and
+    ``(L+G+m*)u < 1``, let ``Y_old`` and ``Y_group`` be the termwise and
+    grouped results, respectively, and use the Frobenius norm ``||.||_F``.
+    Then ``||Y_old - AV||_F <= e_o*C1*||V||_F`` with
+    ``e_o = (1+mu)(1+gamma_(L-1)) - 1`` and
+    ``||Y_group - AV||_F <= e_g*C1*||V||_F`` with
+    ``e_g = (1+gamma_(m*-1))(1+mu)(1+gamma_(G-1)) - 1``, so the grouped and
     termwise results differ by at most ``(e_o+e_g)*C1*||V||_F`` (to first
-    order ``[L + m* + G - 3 + 4*sqrt(2)]u C1 ||V||``). Each group's diagonal
-    sum errs by at most ``gamma_(m_f-1)*sum_group abs(c_t)``, a permutation
-    preserves the state norm, the complex product adds mu, and the group
-    errors add by the triangle inequality; quarter turns and sign changes
-    are exact. Since ``m* + G - 2 <= L - 1``, ``e_g <= e_o``. With gradual
-    underflow add ``4*(L+G)*eta*sqrt(N*b)/(1-(L+G+4)*u)``, eta = 2**-1074,
-    per action (flush-to-zero excluded). Summing coefficients first can
-    overflow where the termwise products are finite (two ``DBL_MAX``
-    identity terms on amplitudes near 1e-308), so an overflow or invalid
-    result in grouped arithmetic retries the original ordered action once;
-    an ordered result that also overflows stays nonfinite.
+    order ``[L + m* + G - 3 + 4*sqrt(2)]u C1 ||V||_F``). For a group f
+    containing ``m_f`` terms, its diagonal sum errs by at most
+    ``gamma_(m_f-1)*sum_group abs(c_t)``. A permutation preserves the state
+    norm, the complex product adds mu, and the group errors add by the
+    triangle inequality. Quarter turns and sign changes are exact. Since
+    ``m* + G - 2 <= L - 1``, ``e_g <= e_o``. With gradual underflow and
+    ``(L+G+4)*u < 1``, add
+    ``4*(L+G)*eta*sqrt(N*b)/(1-(L+G+4)*u)``, ``eta = 2**-1074``, per action
+    (flush-to-zero excluded). Summing coefficients first can overflow
+    where the termwise products are finite (two ``DBL_MAX`` identity
+    terms on amplitudes near 1e-308), so an overflow or invalid result in
+    grouped arithmetic retries the original ordered action once. An
+    ordered result that also overflows stays nonfinite.
 
     Memory: the input and output of 16Nb bytes each, O(L) group metadata
     and at most ``(64+16b)C`` explicit scratch bytes per tile of length C

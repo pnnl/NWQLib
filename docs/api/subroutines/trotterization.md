@@ -28,7 +28,7 @@ The second-order coefficient of this `H` is `1/16`, and 8 is the smallest `r` wi
 - The first-order bound is Proposition 9, Eq. (120), and the second-order bound is Proposition 10, Eq. (121), of Childs, Su, Tran, Wiebe and Zhu, Phys. Rev. X 11, 011020 (2021), doi:10.1103/PhysRevX.11.011020. One application of the order-`o` formula obeys `bound(t) = W_up * t**(o + 1)`.
 - For an evolution at one supplied time, the step count is the smallest one allowed by the rule of their Sec. V B: with `r` steps the total is at most `r * bound(t / r)`.
 - The bound expands each commutator norm over Pauli strings by the triangle inequality, with `||[P, Q]|| = 2` when P and Q anticommute and `||[P, [Q, R]]|| = 4` when both commutators are nonzero. It is never smaller than the exact tail-sum norms of those equations. At second order the functions use the full Pauli-triangle expression by default, and `bound_variant="relaxed_prefix"` selects the suffix relaxation, which needs pair tests only, has a potentially larger coefficient and can select more steps.
-- The prefactor `W_up` is evaluated with scaled binary64 upper products and sums followed by rational rescaling, so it bounds the selected expression and can exceed it. The bound and the step inversion use exact rationals formed from `W_up` and the binary64 time and budget, so no intermediate rounds to zero or overflows. The selected count is minimal for `W_up`, and a published bound is rounded upward to binary64, which keeps a nonzero bound positive and a selected bound at most the budget.
+- The prefactor `W_up` is evaluated with scaled binary64 upper products and sums followed by rational rescaling, so it bounds the selected expression and can exceed it. The bound and the step inversion use exact rationals formed from `W_up` and the binary64 time and budget, so no intermediate rounds to zero or overflows. The selected count is minimal for `W_up`, and a returned bound is rounded upward to binary64, which keeps a nonzero bound positive and a selected bound at most the budget.
 
 ## Functions and records
 
@@ -44,11 +44,11 @@ The second-order coefficient of this `H` is `1/16`, and 8 is the smallest `r` wi
     options:
       heading_level: 3
 
-::: nwqlib.subroutines.trotterization.trotter_error_bound
+::: nwqlib.subroutines.trotterization.evaluate_trotter_bound
     options:
       heading_level: 3
 
-::: nwqlib.subroutines.trotterization.evaluate_trotter_bound
+::: nwqlib.subroutines.trotterization.dense_trotter_bound_coefficient
     options:
       heading_level: 3
 
@@ -61,12 +61,12 @@ The second-order coefficient of this `H` is `1/16`, and 8 is the smallest `r` wi
 - A coefficient or fixed-step bound above the largest binary64 number raises `ValueError`.
 - The keyword arguments `max_work` (default 1,000,000,000) and `max_bytes` (default 10,000,000,000) limit the tests of anticommuting Pauli pairs and triples. The pair stage is checked before label conversion. The requested expression is checked again with the actual pair count before the nested tests or the contraction.
 - The full second-order expression stores three intp indices per surviving triple and can require cubic storage in the number of terms. The contraction block limits coefficient-reduction scratch and does not limit the stored index count. If the requested expression does not fit, the function raises before the stage that would exceed the limits.
-- A refusal names the failed stage and reports sufficient complete limits for the requested order and variant. Its block-one byte value is a checked candidate, not a minimum over all block sizes, and a byte-fit failure is reported only when no checked candidate fits the current byte limit.
+- A work- or byte-limit refusal names the failed stage and reports its required work and the current `max_work` and `max_bytes`. A byte-fit failure is reported only when no checked contraction-block candidate fits the current byte limit.
 - An order-two refusal of the full expression also names `bound_variant="relaxed_prefix"` as an explicit alternative, which is checked against the same limits.
 
 ## Common time grid of QPE powers
 
-A QPE trajectory on a common time grid selects one step for all power positions and checks the emitted step against the structural allowance of every prefix. The [QPE implementation map](../../algorithms/qpe.md#implementation-map) lists where controlled product-formula powers use these bounds.
+A QPE trajectory on a common time grid selects one step for all power positions. At each requested power it checks the circuit prefix, meaning all steps up to that power position, against that power's allowance for the sum of the product-formula, pruning, time-displacement, identity-phase and rotation-angle error bounds. The [QPE implementation map](../../algorithms/qpe.md#implementation-map) lists where controlled product-formula powers use these bounds.
 
 - `val(tau)` denotes the exact real value of the stored binary64 time unit, and a nonnegative integer power `p` targets the time `p * val(tau)`.
 - If `h` is the exact real value of the emitted binary64 step and `r` is its cumulative count, the second-order product-formula bound is `r * W * abs(h)**3`. The discrepancy between `r * h` and the target contributes a separate operator bound.

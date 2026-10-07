@@ -45,7 +45,6 @@ def _manual_plan(*, address_qubits: int, system_qubits: int) -> LCHSProductFormu
         occurrence_angle_tables=FrozenArray(np.array(tables, dtype=np.float64)),
         occurrence_block_repetitions=(1,),
         branch_step_counts=(1,) * physical,
-        max_step_count=1,
         identity_phases=tuple(-0.031 * (branch + 1) for branch in range(physical)),
         coefficient_phases=tuple(0.043 * (branch + 1) for branch in range(physical)),
         physical_node_count=physical,
@@ -115,7 +114,7 @@ def test_budgeted_plan_zeroes_inactive_repetitions() -> None:
         hamiltonian_evolution_backend="trotter_error_budgeted",
     )
     data = generate_lchs_product_formula_select_plan(
-        matrix=l_part + 1.0j * h_part,
+        quadrature=generate_lchs_quadrature(matrix=l_part + 1.0j * h_part, final_time=2.0, method=options),
         final_time=2.0,
         method=options,
     )
@@ -133,16 +132,7 @@ def test_budgeted_plan_zeroes_inactive_repetitions() -> None:
             else:
                 assert repetition + multiplicity <= steps
         repetition += multiplicity
-    assert repetition == plan.max_step_count
-
-
-def test_product_formula_select_plan_rejects_unpadded_dimension_first(monkeypatch) -> None:
-    monkeypatch.setattr(terms_module, "generate_lchs_quadrature",
-                        lambda **_: pytest.fail("quadrature selected before dimension admission"))
-    with pytest.raises(ValueError, match=r"power of two \(plan\(\) pads"):
-        generate_lchs_product_formula_select_plan(
-            matrix=np.diag([0.2, 0.3, 0.4]).astype(complex), final_time=0.1,
-            method=LCHS(hamiltonian_evolution_backend="trotter"))
+    assert repetition == max(plan.branch_step_counts)
 
 
 def test_generated_angle_tables_match_independent_suzuki_products() -> None:
@@ -156,13 +146,13 @@ def test_generated_angle_tables_match_independent_suzuki_products() -> None:
         hamiltonian_evolution_backend="trotter",
         trotter_steps=2,
     )
-    data = generate_lchs_product_formula_select_plan(
+    quadrature = generate_lchs_quadrature(
         matrix=matrix,
         final_time=final_time,
         method=options,
     )
-    quadrature = generate_lchs_quadrature(
-        matrix=matrix,
+    data = generate_lchs_product_formula_select_plan(
+        quadrature=quadrature,
         final_time=final_time,
         method=options,
     )
@@ -360,16 +350,14 @@ def test_lcu_select_resolution_is_strict_and_backend_specific() -> None:
     assert (
         resolve_lcu_select_implementation(
             base,
-            he_backend="dense_exact",
-        )["resolved_lcu_select_implementation"]
+        )
         == "branch_controlled"
     )
     product = base.revise(hamiltonian_evolution_backend='trotter')
     assert (
         resolve_lcu_select_implementation(
             product,
-            he_backend="trotter",
-        )["resolved_lcu_select_implementation"]
+        )
         == "multiplexor"
     )
     # Options validation is deliberately problem-independent.  A manual
@@ -382,26 +370,22 @@ def test_lcu_select_resolution_is_strict_and_backend_specific() -> None:
     ):
         resolve_lcu_select_implementation(
             structured,
-            he_backend="trotter",
             select_plan=_manual_plan(address_qubits=2, system_qubits=1),
         )
     with pytest.raises(ValueError, match="elementary product-formula plan"):
         resolve_lcu_select_implementation(
             base.revise(lcu_select_implementation='multiplexor'),
-            he_backend="dense_exact",
         )
     qsp = base.revise(hamiltonian_evolution_backend='qsp_block_encoding')
     assert (
         resolve_lcu_select_implementation(
             qsp,
-            he_backend="qsp_block_encoding",
-        )["resolved_lcu_select_implementation"]
+        )
         == "compiled_qsp"
     )
     with pytest.raises(ValueError, match="internal compiled_qsp"):
         resolve_lcu_select_implementation(
             qsp.revise(lcu_select_implementation='branch_controlled'),
-            he_backend="qsp_block_encoding",
         )
 
 

@@ -7,7 +7,6 @@ _EXPORT_GROUPS = {
     "primary_records": ("LCHSAnalysis",),
     "verification": ("LCHSVerification",),
     "refinement": ("LCHSRefinement",),
-    "native": ("LCHS_HAMILTONIAN_EVOLUTION_IMPLEMENTATIONS", "resolve_hamiltonian_evolution_backend"),
     "time_independent_terms": ("cartesian_decomposition",),
     "provider_config": ("ProviderConfig", "ProviderParameter", "ResolvedProviderConfig"),
     "providers": (

@@ -414,13 +414,14 @@ def _setup(problem, qhd, options, refinement=None, stored=None):
     falls back to the grid point. Refinement checks each compared point
     at every level, including the two points that a stall split scores. A
     failure at a selected grid point or at a scored point follows the
-    existing failure path (_outer.inner_failure).
+    failure rule of ``_outer.inner_failure``.
 
     The same tables give, for every kept inequality, the bounds
     ``ell_j = c0 + sum_A min T_A`` and ``M_j = c0 + sum_A max T_A`` of
-    ``g_j/s_{g_j}`` on the grid (``_inequality_range``, Proposition 54, "A
-    lower bound from support tables"), which ``ConstraintPreprocessing``
-    records and the slack representation reads (``_round_problem``).
+    ``g_j/s_{g_j}`` on the grid (``_inequality_range``, Proposition 54 of
+    docs/mathematics.md, "A lower bound from support tables"), which
+    ``ConstraintPreprocessing`` records and the slack representation reads
+    (``_round_problem``).
 
     The monomial count of each expansion (``objective.monomial_bound``), the
     table work ``K**|A| (N_A + |A|)`` of each support with N_A tree nodes, as
@@ -475,8 +476,6 @@ def _setup(problem, qhd, options, refinement=None, stored=None):
     """
     from .validation import _lambdify_objective, _validate_qhd_problem_fields
 
-    if not isinstance(problem, ConstrainedOptimization):
-        raise TypeError("solve_augmented_lagrangian requires a ConstrainedOptimization")
     _validate_qhd_problem_fields(problem)
     _live_constraints(problem)
     equality_scales = _counted(options.equality_scales, len(problem.equalities), "equality_scales", 1.0)
@@ -522,12 +521,8 @@ def _setup(problem, qhd, options, refinement=None, stored=None):
     # Tree sizes are counted up to max_work + 1 nodes, so each count stays
     # within the work it admits.
     nodes = [node_count(expression, qhd.max_work) for _, expression, _ in named]
-    # One evaluation of f and every kept constraint at a point costs C units. A round without refinement
-    # evaluates at its point and, for mode_or_mean, at the mean, a C. With refinement each of at most L levels
-    # checks its grid point and, for mode_or_mean, its mean, each of at most B attempted stall splits checks its
-    # two scored points (_level_check), and the round evaluates its point once more, (a L + 2 B + 1) C. No
-    # split is attempted at the last allowed level, and a failed side check ends the refinement, so
-    # B = min(max_splits, max(L - 1, 0)) with splitting and 0 without (the docstring above).
+    # Round work is a C without refinement and (a L + 2 B + 1) C with refinement,
+    # using the counts and derivation in _setup's docstring.
     per_point, a = sum(n + d for n in nodes), 2 if options.inner_point == "mode_or_mean" else 1
     if refinement is None:
         round_work = a * per_point
@@ -567,8 +562,6 @@ def _setup(problem, qhd, options, refinement=None, stored=None):
                 or preprocessing.equalities != tuple(range(len(problem.equalities)))):
             raise ValueError("the saved constraint preprocessing differs from the problem's bound absorption")
         check_work, check_evaluations = stored["check_work"], stored["check_evaluations"]
-        if any(type(count) is not int or count < 0 for count in (check_work, check_evaluations)):
-            raise ValueError("the saved setup check counts are not nonnegative integers")
         _admit_layer_work(qhd, options, check_work, round_work)
         count = len(preprocessing.equalities)
         symbols = _slack_symbols(problem)
@@ -605,8 +598,8 @@ def _setup(problem, qhd, options, refinement=None, stored=None):
             check_work += tuples * (node_count(expression, limit) + width)
             check_evaluations += tuples
             _admit_layer_work(qhd, options, check_work, round_work, lower_bound=True)
-        # Coverage requests a proof of this original term. Until a companion
-        # has its own original-evaluation certificate, scan that companion too.
+        # An uncovered restriction asks for a check of the original term, so every distinct supplied
+        # summand of the term is scanned, since no summand has an original-evaluation certificate of its own.
         requested = tuple(records.values()) if uncovered else ()
         for summand in requested:
             tuples = k ** len(summand.support)
@@ -633,8 +626,8 @@ def _setup(problem, qhd, options, refinement=None, stored=None):
                 _admit_layer_work(qhd, options, check_work, round_work, grid=grid, scans=((summand, None),))
             for summand in missing:
                 maxima[summand.expression] = _domain_check(summand, variables, grid, qhd)
-            # With one supplied summand this is already the whole-term scan,
-            # independent of the raw scalar's eligibility for composition.
+            # With one supplied summand its scan is already the whole-term scan, so the
+            # addition certificate is not needed, whatever the raw result type.
             checked_original = len(expressions) == 1 or _addition_certificate(
                 tuple(maxima[expression] for expression in expressions))
             if not checked_original:
@@ -844,6 +837,12 @@ def _summands(expression):
 
 
 def _summand_records(term, variables, limit):
+    """Return ``(summands, records)`` for the top-level additive summands of ``term``.
+
+    ``summands`` lists them in order, and ``records`` holds one ``_Term`` per
+    distinct summand with its support and its tree size counted up to
+    ``limit`` (``objective.node_count``).
+    """
     expressions = _summands(term.expression)
     records = {}
     for expression in expressions:
@@ -859,10 +858,10 @@ def _domain_check(term, variables, grid, qhd):
 
     The scan evaluates the expression at the original coordinates of its
     support grid in C-order chunks (``compiler.chunk_coordinates``) with the
-    existing finite-real rule, and streams the maximum absolute value; no
-    table is kept. A failed call or a nonfinite or nonreal value raises
-    ValueError naming the first failing grid point. None means that the
-    values are finite and real but the raw result type does not support the
+    finite-real rule of ``coerce_real_scalar`` and streams the maximum
+    absolute value, and no table is kept. A failed call or a nonfinite or
+    nonreal value raises ValueError naming the first failing grid point.
+    None means that the values are finite and real but the raw result type does not support the
     binary64 addition certificate: raw float64 and complex128 outputs with
     zero imaginary part have the addition semantics used in the certificate,
     and a Python integer is composable only when exactly representable by
@@ -958,7 +957,7 @@ def _evaluation_chunks(term, grid, qhd, decomposer=None):
     """Return the chunk sizes of the array evaluations of ``term`` that the AL layer's grid check makes.
 
     With ``decomposer`` there is one chunk per support table of the term's
-    expansion (``_support_tables``); without it, one chunk for the scan of
+    expansion (``_support_tables``), and without it, one chunk for the scan of
     ``term``'s supplied expression on its support (``_domain_check``). Each
     chunk of b entries on s support variables is charged
     ``B_scan(b) = W_eval(b) + (8s + 64) b + H`` bytes
@@ -1079,19 +1078,9 @@ def _admit_layer_work(qhd, options, check_work, round_work, *, lower_bound=False
     can request a further whole-term scan, charged K**|S| (N + |S|) before
     it starts. A one-summand term has already received that scan.
 
-    One evaluation of a term with N tree nodes at a point of d
-    coordinates counts ``N + d`` units, and C is the sum over f and the kept
-    constraints. Without refinement each round evaluates every term once at
-    its chosen point and once more at the valid-mass mean for
-    ``mode_or_mean``, ``a C`` with ``a = 2`` for ``mode_or_mean`` and 1
-    otherwise. With refinement over at most L levels each level checks the
-    projection of its grid point and, for ``mode_or_mean``, of its mean,
-    each of at most B attempted stall splits checks the projections of its
-    two scored points (``_level_check``), and the round evaluates its point
-    once more, ``(a L + 2 B + 1) C``, with
-    ``B = min(max_splits, max(L - 1, 0))`` for
-    ``stall_split="best_region"`` and B = 0 otherwise (``_setup`` derives
-    it). For the stationarity diagnostic every nonzero partial
+    Round work is ``a C`` without refinement and ``(a L + 2 B + 1) C``
+    with refinement, using the counts a, C, L and B defined and derived in
+    ``_setup``. For the stationarity diagnostic every nonzero partial
     derivative is evaluated once per round. The admitted total is the check plus
     ``max_iterations`` rounds, the layer's work over the whole run, charged
     as one operation as QHD charges its table and compilation work
@@ -1603,7 +1592,7 @@ def _round_problem(setup, problem, qhd, execution, shots, child, lambda_bar, mu_
                                   unit=problem.unit), None
     if saved is not None:
         inner, identity = _inner_problem(setup, problem, saved.forms, saved.slacks, lambda_bar, mu_bar, penalty)
-        if identity != saved.inner_objective or saved.policy != policy:
+        if identity != saved.inner_objective:
             raise ValueError("the committed representation of the round in progress does not rebuild its inner "
                              "objective from the run's problem, multipliers and penalty")
         return saved, inner, None
@@ -1888,11 +1877,9 @@ def _level_check(setup, attempts):
     search model is the rounded image of the unit point. If an off-grid mean
     makes an original function nonfinite or undefined, the level records
     mean_unavailable and uses its valid grid point. A failure at the grid
-    point or at a scored point ends the refinement. The level's inner-value
-    comparison keeps its existing table and coordinate-transformation
-    conventions. Each call appends to ``attempts``, whether it succeeds or
-    not, and the round charges every attempt as ``_point_cost`` counts one
-    evaluation of f, h and g, within the reservation ``(a L + 2 B + 1) C``
+    point or at a scored point ends the refinement. Each call appends to
+    ``attempts``, whether it succeeds or not, and the round charges every
+    attempt as ``_point_cost`` counts one evaluation of f, h and g, within the reservation ``(a L + 2 B + 1) C``
     of ``_setup`` (``_admit_layer_work``).
     """
     d = setup.grid.num_variables
@@ -2283,11 +2270,9 @@ def solve_augmented_lagrangian(problem, *, qhd, options=AugmentedLagrangian(), r
     Args:
         problem (ConstrainedOptimization): The problem, with live SymPy expressions.
         qhd (QHD): The QHD configuration of every round.
-        options (AugmentedLagrangian): The layer's options. Default
-            `AugmentedLagrangian()`.
+        options (AugmentedLagrangian): The layer's options.
         refinement (BoxRefinement | None): Box refinement of every round's inner
-            objective, L_k or L(x, s), or None (the default) for one QHD solve per
-            round, which leaves every result as without this argument.
+            objective, L_k or L(x, s), or None for one QHD solve per round.
         backend (object | None): Passed to every round's `prepare`, as in
             `nwqlib.solve`.
         execution (str | None): `"quantum"` (the default) or `"classical"`, as in
@@ -2311,8 +2296,6 @@ def solve_augmented_lagrangian(problem, *, qhd, options=AugmentedLagrangian(), r
             `constrained_grid_minimum`.
 
     Raises:
-        TypeError: If `options` is not an `AugmentedLagrangian` or `refinement` is
-            neither a `BoxRefinement` nor None.
         ValueError: If `refinement.point_rule` differs from `options.inner_point`, if
             the refinement options ask for what the QHD configuration cannot carry out,
             or if the first round fails as described above.
@@ -2389,7 +2372,7 @@ def solve_augmented_lagrangian(problem, *, qhd, options=AugmentedLagrangian(), r
         `limits` stays cumulative over all rounds and levels, and each level's Run gets
         what the earlier rounds and levels left. The configuration fixes before the
         first round at most `max_iterations * refinement.max_levels` inner solves and the
-        host-work bound `AugmentedLagrangianRecord.admitted_work_bound`.
+        classical-work bound `AugmentedLagrangianRecord.admitted_work_bound`.
 
     Random streams:
         Every round's random streams come from `SeedSequence(seed).spawn`, as
@@ -2440,15 +2423,10 @@ def solve_augmented_lagrangian(problem, *, qhd, options=AugmentedLagrangian(), r
     """
     import numpy as np
 
-    if type(options) is not AugmentedLagrangian:
-        raise TypeError("options must be AugmentedLagrangian")
-    if refinement is not None:
-        if type(refinement) is not BoxRefinement:
-            raise TypeError("refinement must be BoxRefinement or None")
-        if refinement.point_rule != options.inner_point:
-            raise ValueError(f"refinement.point_rule={refinement.point_rule!r} differs from options.inner_point="
-                             f"{options.inner_point!r}. With refinement one rule reads every level, so set both "
-                             "to the same rule")
+    if refinement is not None and refinement.point_rule != options.inner_point:
+        raise ValueError(f"refinement.point_rule={refinement.point_rule!r} differs from options.inner_point="
+                         f"{options.inner_point!r}. With refinement one rule reads every level, so set both "
+                         "to the same rule")
     execution, limits = check_arguments(qhd, execution, shots, seed, limits)
     if refinement is not None:
         check_refinement_options(refinement, qhd, execution)
@@ -2503,8 +2481,7 @@ def plan_augmented_lagrangian(problem, *, qhd, options=AugmentedLagrangian(), ex
     Args:
         problem (ConstrainedOptimization): The problem, with live SymPy expressions.
         qhd (QHD): The QHD configuration of every round.
-        options (AugmentedLagrangian): The layer's options. Default
-            `AugmentedLagrangian()`.
+        options (AugmentedLagrangian): The layer's options.
         execution (str | None): `"quantum"` (the default) or `"classical"`, as in
             `solve_augmented_lagrangian`. Automatic selection converts inequalities on
             the quantum route only.
@@ -2525,8 +2502,6 @@ def plan_augmented_lagrangian(problem, *, qhd, options=AugmentedLagrangian(), ex
     """
     import numpy as np
 
-    if type(options) is not AugmentedLagrangian:
-        raise TypeError("options must be AugmentedLagrangian")
     execution, _ = check_arguments(qhd, execution, shots, seed, None, executed=False)
     setup = _setup(problem, qhd, options)
     child = np.random.SeedSequence(seed).spawn(1)[0]
@@ -2576,8 +2551,8 @@ def _solves(problem, plan, identity, representation):
     variables followed by the slack variables of ``representation`` as
     ``_slack_symbols`` names them, and the Plan's box. A Plan over other
     variables, slack symbols or box, or of another objective, gives another
-    identity. The archive loader and resume use it to bind a saved inner
-    Result to its round.
+    identity. Resume uses it to bind the reopened Run of the round in
+    progress to that round.
     """
     from .records import objective_reference
 
@@ -2625,7 +2600,7 @@ def _rounds(problem, qhd, setup, refinement, backend, execution, shots, root, li
     root.spawn(resumed)
     for k in range(resumed, options.max_iterations):
         lambda_bar, mu_bar, penalty, previous, used = _continuation(problem, setup, iterations)
-        funded, reason = round_limits(limits, used, execution, shots)
+        funded, reason = round_limits(limits, used, shots)
         if funded is None:
             termination, failure = "budget_exhausted", reason
             break
@@ -2896,7 +2871,10 @@ _COMPARED_TEXT = (
 
 @dataclass(frozen=True)
 class ConstrainedQHDResult:
-    """Result of an augmented-Lagrangian run: its record, live problem and inner QHD results.
+    """Result of an augmented-Lagrangian run: its record, its live problem and its inner QHD results.
+
+    The live problem is the `ConstrainedOptimization` with its SymPy expressions, which
+    the portable record describes but does not hold.
 
     `solve_augmented_lagrangian`, `resume_augmented_lagrangian` and
     `load_augmented_lagrangian` return it. The answer is `candidate`, the best point in
@@ -2925,41 +2903,26 @@ class ConstrainedQHDResult:
     results: tuple
 
     def __post_init__(self):
-        """Bind the record to its live problem and to the inner results it names, one per round or level.
-
-        The mode status that a level or a round's evaluation copied must be
-        its named inner Result's, the best level's for a refined round, so a
-        copy that disagrees with its Result is refused without re-execution.
-        """
+        """Bind the record to its live problem and to the inner results it names, one per round or level."""
         from .records import QHDAnalysis
 
         def named(result, identity):
             return isinstance(result, QHDAnalysis) and result.content_id == identity
 
-        def copied(evaluation, result):
-            return evaluation is None or evaluation.mode_status in (None, result.mode_status)
-
         def matches(result, item):
             if item.refinement is not None:
-                levels, best = item.refinement.levels, item.refinement.best_level
+                levels = item.refinement.levels
                 return type(result) is tuple and len(result) == len(levels) and all(
-                    named(inner, level.result_id) and level.mode_status == inner.mode_status
-                    for inner, level in zip(result, levels)) and (
-                    best is None or copied(item.evaluation, result[best - 1]))
+                    named(inner, level.result_id) for inner, level in zip(result, levels))
             return (result is None) == (item.result_id is None) and (
-                result is None or named(result, item.result_id) and copied(item.evaluation, result))
+                result is None or named(result, item.result_id))
 
-        if type(self.record) is not AugmentedLagrangianRecord or not isinstance(
-            self.problem, ConstrainedOptimization
-        ):
-            raise TypeError("ConstrainedQHDResult needs its AugmentedLagrangianRecord and live problem")
         if self.problem.content_id != self.record.problem.content_id:
             raise ValueError("the live problem differs from the record's problem")
         if type(self.results) is not tuple or len(self.results) != len(self.record.iterations) or not all(
             matches(result, item) for result, item in zip(self.results, self.record.iterations)
         ):
-            raise ValueError("inner results must be the ones the record names, one per round or level, with the "
-                             "mode status that the record copied from them")
+            raise ValueError("inner results must be the ones the record names, one per round or level")
 
     @property
     def termination(self):
@@ -3248,9 +3211,9 @@ class ConstrainedQHDResult:
         bounds for each level's backend-sampled distribution conditioned on valid decoding,
         with simultaneous 95% confidence by default. The horizon is
         `max_iterations * max_levels` for the whole run, including early termination.
-        Hoeffding and one-sided Clopper–Pearson bounds each use half the failure budget;
-        each level reports the larger available bound. The dimension includes its slack
-        coordinates. The sampling assumptions and binary64 evaluation are those of
+        Hoeffding and one-sided Clopper–Pearson bounds each use half the failure budget,
+        and each level reports the larger available bound. The dimension includes its
+        slack coordinates. The sampling assumptions and binary64 evaluation are those of
         [Proposition 49](../../mathematics.md#r49). Exact readout, no refinement, no completed
         counts levels, or explicit `None` gives `confidence=None`.
 
@@ -3350,12 +3313,8 @@ def load_augmented_lagrangian(path):
     SymPy classes only and compares rebuilt expressions with their stored descriptions.
     The attached problem must have the record's
     problem hash. Each inner Result is loaded with `load_result` and must have the
-    recorded result and Plan hashes, and its Plan's objective the recorded hash of L_k,
-    or of the inner objective of the round's representation over the problem's variables
-    and the slack variables. With refinement each level's Result must have the result
-    and Plan hashes of its `RefinementLevel`. A level Plan solves the level's own
-    objective, for the search model the normalized one on the unit box, so it is checked
-    by these hashes and not against the hash of L_k.
+    recorded result and Plan hashes. With refinement each level's Result must have the
+    result and Plan hashes of its `RefinementLevel`.
 
     Args:
         path (str | Path): The directory that `ConstrainedQHDResult.save` wrote.
@@ -3393,34 +3352,28 @@ def load_augmented_lagrangian(path):
             results.append(None)
             continue
         result = load_result(folder / "result")
-        if not _belongs(problem, item, result):
+        if not _belongs(item, result):
             raise ValueError(f"saved inner result of round {item.iteration} differs from the record")
         results.append(result)
     return ConstrainedQHDResult(record, problem, tuple(results))
 
 
-def _belongs(problem, item, result):
+def _belongs(item, result):
     """Whether the inner ``result`` of an unrefined round is the one that its ALIteration ``item`` records.
 
-    The Result and its Plan must have the recorded identities, and the Plan
-    must solve the recorded inner objective, L_k under the PHR policy and
-    the representation's inner objective otherwise, over the problem's
-    variables and the representation's slack variables (``_solves``).
+    The Result and its Plan must have the recorded identities.
     """
-    form = item.representation
-    return (result.content_id, result.plan.content_id) == (item.result_id, item.plan_id) and _solves(
-        problem, result.plan, item.effective_objective if form is None else form.inner_objective, form)
+    return (result.content_id, result.plan.content_id) == (item.result_id, item.plan_id)
 
 
-def _run_results(path, iterations, backend, problem):
+def _run_results(path, iterations, backend):
     """Read the inner Results of the recorded rounds of a durable run from their Runs (``_durable.saved_result``).
 
     One Result per round, None for a round without one, or with refinement
     the tuple of the Results of its completed levels, as
     ``ConstrainedQHDResult.results`` holds them. The Result of an unrefined
-    round must belong to its recorded Plan and inner objective
-    (``_belongs``), and ``ConstrainedQHDResult`` checks the identities of
-    level Results.
+    round must have its recorded Result and Plan identities (``_belongs``),
+    and ``ConstrainedQHDResult`` checks the identities of level Results.
     """
     results = []
     for item in iterations:
@@ -3432,7 +3385,7 @@ def _run_results(path, iterations, backend, problem):
             results.append(None)
         else:
             result = saved_result(folder / "run", backend=backend)
-            if not _belongs(problem, item, result):
+            if not _belongs(item, result):
                 raise ValueError(f"the Run of round {item.iteration} in {path} holds another inner result than "
                                  "the durable record")
             results.append(result)
@@ -3532,12 +3485,12 @@ def resume_augmented_lagrangian(directory, *, backend, progress=None, end_at_unf
         if saved["record"] is not None:
             record = AugmentedLagrangianRecord.model_validate(saved["record"])
             return ConstrainedQHDResult(record, problem,
-                                        _run_results(outer.path, record.iterations, backend, problem))
+                                        _run_results(outer.path, record.iterations, backend))
         qhd, options = QHD.model_validate(settings["qhd"]), AugmentedLagrangian.model_validate(settings["options"])
         refinement = None if settings["refinement"] is None else BoxRefinement.model_validate(settings["refinement"])
         iterations = tuple(ALIteration.model_validate(item) for item in saved["iterations"])
         setup = _setup(problem, qhd, options, refinement, stored=settings["setup"])
-        results = _run_results(outer.path, iterations, backend, problem)
+        results = _run_results(outer.path, iterations, backend)
         k = len(iterations)
         levels = tuple(RefinementLevel.model_validate(level) for level in saved["levels"])
         level_results = tuple(
@@ -3569,11 +3522,6 @@ def constrained_grid_minimum(result, *, max_work=GRID_MINIMUM_MAX_WORK, max_byte
     supplies neither a continuous optimum nor an expression-evaluation error
     certificate.
 
-    The reference evaluates the original functions in C-order slabs, streams constraint
-    values into the feasibility test and keeps the first feasible minimum. Its work
-    counts every evaluated function and its byte allowance includes expression
-    intermediates, coordinate arrays and masked-reduction buffers.
-
     Selection. Given a finite reference objective array f and a Boolean feasible mask,
     ``argmin(where(feasible, f, inf))`` returns the first feasible minimum in C order,
     which is the lexicographically first tuple. For each original equality value h and
@@ -3581,12 +3529,9 @@ def constrained_grid_minimum(result, *, max_work=GRID_MINIMUM_MAX_WORK, max_byte
     tolerance: the violation is ``max(max(abs(h/s_h)), max(max(g/s_g, 0)))``, with an
     empty maximum zero. All raw values must be finite and real, even at infeasible
     points. Division may overflow if a scale is tiny, which gives infinite infeasibility
-    and rejects that point as infeasible. Slabs are processed in increasing global C
-    order and the running minimum is updated only on a strictly smaller value, which
-    keeps the first tie across slab boundaries. Counts of feasible points use Python
-    integers across slabs. Vectorized expression evaluation may change the reference
-    table's entries relative to scalar evaluation and can change a minimum or
-    feasibility decision near a threshold, so this is one consistent array-evaluated
+    and rejects that point as infeasible. Vectorized expression evaluation may change
+    the reference table's entries relative to scalar evaluation and can change a minimum
+    or feasibility decision near a threshold, so this is one consistent array-evaluated
     reference table, and re-evaluating only the chosen point scalarly would not restore
     a scalar ranking.
 
@@ -3614,8 +3559,9 @@ def constrained_grid_minimum(result, *, max_work=GRID_MINIMUM_MAX_WORK, max_byte
     first of them, so a feasible minimum of that grid is not the finite-grid reference
     of the points the run compared, and the gap would mix points of different grids.
 
-    Before the first evaluation, the reference checks its work and slab bytes against
-    `max_work` and `max_bytes` by the laws in
+    Before the first evaluation, the reference checks its work and the bytes of one slab,
+    the block of grid points it evaluates at a time in C order, against `max_work` and
+    `max_bytes` by the laws in
     [Engineering constants](../../ENGINEERING_CONSTANTS.md#qhd-augmented-lagrangian-defaults).
     It keeps no reference table of all `K**d` grid points.
 
@@ -3632,7 +3578,6 @@ def constrained_grid_minimum(result, *, max_work=GRID_MINIMUM_MAX_WORK, max_byte
 
 
     Raises:
-        TypeError: If `result` is not a `ConstrainedQHDResult`.
         ValueError: If the run used box refinement, if the work or the bytes of a
             one-point slab exceed `max_work` or `max_bytes`, or if the original binary64
             evaluation fails at a grid point.
@@ -3642,8 +3587,6 @@ def constrained_grid_minimum(result, *, max_work=GRID_MINIMUM_MAX_WORK, max_byte
     from .compiler import H0, evaluate_chunk
     from .validation import _lambdify_objective
 
-    if type(result) is not ConstrainedQHDResult:
-        raise TypeError("constrained_grid_minimum requires a ConstrainedQHDResult")
     record, problem = result.record, result.problem
     if record.refinement is not None:
         raise ValueError("constrained_grid_minimum is the reference of the preprocessed box's grid, and a run with "
@@ -3662,6 +3605,9 @@ def constrained_grid_minimum(result, *, max_work=GRID_MINIMUM_MAX_WORK, max_byte
     # With M = max_work and complete tree sizes N_i, node_count returns
     # n_i = min(N_i, M+1). n_i <= M proves completion. Otherwise D*n_i > M
     # already proves refusal, and the displayed charge is only a lower bound.
+    # Here D = points = K**d. The reference's work counts every evaluated function and
+    # its byte allowance includes expression intermediates, coordinate arrays and
+    # masked-reduction buffers.
     work = points * (d + sum(nodes) + 8 * (len(named) - 1) + 12)
     fixed = 8 * d * k + H0
     rate = max(8 * (n + 2) for n in nodes) + 8 * d + 96
@@ -3688,6 +3634,11 @@ def constrained_grid_minimum(result, *, max_work=GRID_MINIMUM_MAX_WORK, max_byte
     support = tuple(range(d))
     objective, values, violation = np.empty(slab), np.empty(slab), np.empty(slab)
     feasible, minimum = 0, None
+    # The reference evaluates the original functions in C-order slabs, streams constraint
+    # values into the feasibility test and keeps the first feasible minimum. Slabs are
+    # processed in increasing global C order and the running minimum is updated only on a
+    # strictly smaller value, which keeps the first tie across slab boundaries. Counts of
+    # feasible points use Python integers across slabs.
     for start in range(0, points, slab):
         stop = min(points, start + slab)
         n = stop - start

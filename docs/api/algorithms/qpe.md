@@ -8,12 +8,12 @@ from nwqlib.algorithms import QCELS, RFE, RWPE, SPE
 from nwqlib.algorithms import QPEAnalysis, QPEVerification
 ```
 
-| Method | Paper | Estimate | `result.interval` |
-| --- | --- | --- | --- |
-| `QCELS` | Ding and Lin, arXiv:2211.11973v2 | Single-mode complex least-squares fit | None |
-| `SPE` | Wan, Berta and Campbell, arXiv:2110.12071v2 | First crossing of a Fourier-filtered CDF, the lowest value in the prepared spectrum | None |
-| `RFE` | Kshirsagar, Katabarwa and Johnson, arXiv:2209.11322v3 | Largest sampled Fourier coefficient | None |
-| `RWPE` | Granade and Wiebe, arXiv:2208.04526v1 | Mean of a Gaussian random walk, one bit per step | Nominal 95-percent Gaussian model interval |
+| Method and paper | Estimate | `result.interval` |
+| --- | --- | --- |
+| `QCELS`, Ding and Lin, arXiv:2211.11973v2 | Single-mode complex least-squares fit | None |
+| `SPE`, Wan, Berta and Campbell, arXiv:2110.12071v2 | First finite-grid crossing of the Fourier-filtered CDF at the declared overlap threshold, used to estimate the lowest value in the prepared spectrum | None |
+| `RFE`, Kshirsagar, Katabarwa and Johnson, arXiv:2209.11322v3 | Largest sampled Fourier coefficient | None |
+| `RWPE`, Granade and Wiebe, arXiv:2208.04526v1 | Mean of a Gaussian random walk, one bit per step | Nominal 95-percent Gaussian model interval |
 
 The [QPE guide](../../algorithms/qpe.md) explains the meaning and units of the result, the choice of estimator and the cost of each.
 
