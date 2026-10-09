@@ -43,7 +43,7 @@ print(source_result.solution)
 [ 0.9601867 -3.83384053e-17j -0.01971285-2.65777763e-18j]
 ```
 
-It evaluates a finite LCHS and Duhamel sum. The closed-form solution $e^{-AT}u_0+\left(\int_0^Te^{-As}\,ds\right)b$ is approximately $(0.96127277,-0.0195092)$, and the observed absolute L2 discrepancy is about `.00110499` ([measured values](#measured-values)). The default quantum plan of this problem instead needs 1836 branches, 2048 address slots and 12 qubits, more than `max_dense_select_slots=256`, so planning refuses it before any circuit is built.
+It evaluates a finite LCHS and Duhamel sum. The closed-form solution $e^{-AT}u_0+\left(\int_0^Te^{-As}\,ds\right)b$ is approximately $(0.96127277,-0.0195092)$, and the observed absolute L2 discrepancy is about `.00110499` ([measured values](#measured-values)). Its quantum plan needs 1836 branches, 2048 address slots and 12 qubits. Its SELECT phase has 42,558,888 work units and 266,359,472 known peak bytes, within the default construction limits. The classical route evaluates the finite sum directly.
 
 The linear dynamics notebook (`examples/lchs_linear_dynamics_intro.ipynb`) applies LCHS to advection-diffusion. It separates product-formula error from quadrature error and compares kernels, quadratures, and exact and MPS state preparation by their errors, success probabilities and gate counts. The LCHS scientific notebook (`examples/lchs_scientific.ipynb`) applies a constant source and imaginary boundary penalty to four-coordinate heat flow. Running its cells performs one ten-qubit quantum solve, within the 12 qubits that the example notebooks simulate at most, and separates LCHS approximation error from finite-penalty error. Its canonical source is `examples/generators/lchs_scientific.py`.
 
@@ -52,7 +52,7 @@ The linear dynamics notebook (`examples/lchs_linear_dynamics_intro.ipynb`) appli
 - $A$ and the source are time-independent. General time-dependent $A$ or source is not implemented ([open work](../ROADMAP.md#time-dependent-lchs)).
 - With $A$ given as a [periodic stencil](#periodic-stencils), the problem must have no source.
 - $L$ must be PSD. By default (`make_l_psd=True`) NWQLib shifts $L$ and restores the physical growth factor ([Inputs](#inputs)). With `make_l_psd=False`, a negative eigenvalue beyond the numerical window `psd_tolerance*||L||_2` is rejected.
-- The default `dense_exact` SELECT is refused above `max_dense_select_slots=256` padded address slots. Planning never changes the grid, `duhamel_nodes` or the tolerance to fit, because fewer Duhamel or k nodes would change the approximation. Each dense branch is a controlled, classically computed matrix exponential, so the slot limit bounds construction cost and memory. The refusal names the time, tolerance, limit or backend choices that you can change.
+- The default `dense_exact` SELECT is refused above `max_dense_select_slots=4096` padded address slots, independently of its work and byte limits. Planning never changes the grid, `duhamel_nodes` or the tolerance to fit, because fewer Duhamel or k nodes would change the approximation. Each dense branch is a controlled, classically computed matrix exponential. The refusal names the time, tolerance, limit or backend choices that you can change.
 - For dense $A$ with nonzero $L$, the spectral check accepts physical dimension at most 464 under the default `max_spectral_work=100_000_000`. A [periodic stencil](#periodic-stencils) has an analytically PSD $L$ with a known norm bound, so its compact construction does no dense spectral solve and this limit does not apply.
 - `approximation_tolerance` and the reported kernel and quadrature bounds are component bounds. They do not bound the total physical-output error, which also depends on input scaling, PSD recovery, preparation, evolution and numerical errors.
 
@@ -62,14 +62,14 @@ The [technical roadmap](../ROADMAP.md#lchs) lists the current limitations of LCH
 
 | Case | System qubits | Branches (address slots) or dimension | Default limit | Outcome |
 | --- | --- | --- | --- | --- |
-| First example, default settings | 1 | 204 (256), nine qubits in total | `max_dense_select_slots=256` | fits |
-| First example, `approximation_tolerance=.001` | 1 | 396 (512), ten qubits in total | `max_dense_select_slots=256` | refused |
-| Constant-source example, quantum | 1 | 1836 (2048), 12 qubits in total | `max_dense_select_slots=256` | refused, classical fits |
-| `dense_exact` SELECT on a signed-binary k grid, random dense $A$ with generic branches | 3, 4, 5, 6 | at most 128, 32, 8, 4 branches | `max_select_work=100_000_000` work units | 16 branches on 5 qubits (1.01e8 units) and 8 on 6 (2.16e8 units) are refused |
+| First example, default settings | 1 | 204 (256), nine qubits in total | `max_dense_select_slots=4096` | fits |
+| First example, `approximation_tolerance=.001` | 1 | 396 (512), ten qubits in total | `max_dense_select_slots=4096` | SELECT phase fits at 7,729,128 work units and 48,453,952 known peak bytes |
+| Constant-source example, quantum | 1 | 1836 (2048), 12 qubits in total | `max_dense_select_slots=4096` | SELECT phase fits, classical route also available |
+| `dense_exact` SELECT on a signed-binary k grid, dense $A$ with generic branches | 3, 4, 5, 6 | at most 1024, 256, 64, 16 power-of-two branch counts | `max_select_work=1_000_000_000`, `max_bytes=10_000_000_000`, 4096 slots | SELECT-phase upper limits, with the next branch count exceeding both work and bytes at q=5 and q=6, where bytes is reported first |
 | Spectral check of dense $A$ with nonzero $L$ (none for a [periodic stencil](#periodic-stencils)) | 8, or 9 after padding | physical dimension at most 464 | `max_spectral_work=100_000_000` | a power-of-two input reaches 256 coordinates, dimensions 257 to 464 pad to 512 |
-| Pauli decomposition of dense $L$ and $H$ for product formulas | at most 9 | 87,570,944 units at $d=512$, 385,888,256 at $d=1024$ | `max_select_work=100_000_000` | ten qubits are refused |
+| Pauli decomposition of dense $L$ and $H$ for product formulas | at most 10 | 385,888,256 units at $d=1024$, 1,686,179,840 at $d=2048$ | `max_select_work=1_000_000_000` | eleven qubits are refused at this stage |
 
-Work units are NWQLib's counts of planned classical operations, not timings. The SELECT figures depend on the system dimension, the node and branch counts and the address width, not on the norm of the branch generator, and they hold under the default `dense_control_route="auto"`. [Planning limits](#planning-limits) gives the work of each planning stage.
+Work units count planned classical operations and do not predict runtime. These stage limits reserve no arrays by themselves and do not guarantee complete execution. The generic dense SELECT rows have respective work counts 756,523,008, 702,578,688, 514,477,056 and 492,054,784, and known peak bytes 3,884,752,224, 3,308,166,112, 8,597,770,464 and 1,294,063,840. They exclude independent spectral and PREP checks. The figures depend on system dimension, node and branch counts and address width, and use `dense_control_route="auto"`. [Planning limits](#planning-limits) gives each stage's work.
 
 ## Inputs {#inputs}
 
@@ -100,7 +100,7 @@ When `time` equals `initial_time`, there is no evolution. Known input vectors an
 
 With `shots=None`, a scalar observable is evaluated exactly from one simulation of the circuit, with no finite-shot error. Circuit, observable-action and normalization rounding remain separate error contributions. With finite `shots`, Pauli terms that commute qubit-wise share a measurement basis, and `shots` is the number of shots per group. [Readout](#readout) gives the details, and [readout tolerance branches](../error_evidence.md#readout-tolerance-branches) explains how the masses of an exact readout are checked.
 
-`plan(...)` returns a `Plan`, the chosen construction and its costs, computed before any circuit exists. The fields `coefficient_l1_norm`, `physical_branches` and `padded_branches` of `plan.reconstruction` describe its coefficient table. These fields differ between the classical and quantum `Plan` objects of a constant-source problem. The classical `Plan` of the example above evaluates the initial state and each of the eight Duhamel nodes with the same 204 kernel coefficients, and it reports their dimensionless one-norm 1.40368 and 204 branches. A quantum `Plan` prepares all 1836 branches in one SELECT, each kernel coefficient multiplied by the initial-state norm or by a Duhamel weight times the source norm, so its one-norm, approximately 1.43507 with `max_dense_select_slots` raised to at least 2048 and the other settings left at their defaults, is in the solution's unit.
+`plan(...)` returns a `Plan`, the chosen construction and its costs, computed before any circuit exists. The fields `coefficient_l1_norm`, `physical_branches` and `padded_branches` of `plan.reconstruction` describe its coefficient table. These fields differ between the classical and quantum `Plan` objects of a constant-source problem. The classical `Plan` of the example above evaluates the initial state and each of the eight Duhamel nodes with the same 204 kernel coefficients, and it reports their dimensionless one-norm 1.40368 and 204 branches. A quantum `Plan` prepares all 1836 branches in one SELECT, each kernel coefficient multiplied by the initial-state norm or by a Duhamel weight times the source norm, so its one-norm, approximately 1.43507 at the defaults, is in the solution's unit.
 
 Each discretization bound is reported in two forms:
 
@@ -127,11 +127,17 @@ For the default kernel–quadrature pair, Q-point Gauss panels are selected with
 
 It holds for noncommuting $L$ and $H$ and has no dimension factor ([Proposition 27](../mathematics.md#r27)). The finite scalar search chooses the fewest nodes that satisfy this bound and builds only that grid. For each successive number $m$ of panels per half-axis, it chooses the least number $Q\ge2$ of Gauss nodes per panel that satisfies the bound, giving $2mQ\ge4m$ nodes in total. Once $4m$ exceeds the smallest total node count already found, neither this nor any larger $m$ can improve that count, so the search stops. The stored `h1` is that grid's panel width. Rules other than Gauss have no panel width. Bounds are binary64 evaluations, not interval arithmetic. Positive underflow is rounded upward, never labeled exact zero.
 
-For the first example, $K$ is about `27.51574`, the tail bound is `.005` and the quadrature bound is about `.00431140`. With this unit input and no PSD shift, the facts `kernel_approximation` and `k_quadrature` of the `Plan` equal these unit-input bounds. The observed absolute L2 discrepancy is about `.000821472`. Changing the tolerance to `.001` selects 396 branches, with tail and quadrature bounds about `.0005` and `.000450744`. Its classical finite sum has discrepancy about `.0000532605`. A dense quantum construction of that finer choice would need 512 address slots and ten qubits, more than the default 256-slot limit. The two component bounds do not bound the total physical-output error, which also depends on input scaling, PSD recovery, preparation, evolution and numerical errors.
+For the first example, $K$ is about `27.51574`, the tail bound is `.005` and the quadrature bound is about `.00431140`. With this unit input and no PSD shift, the facts `kernel_approximation` and `k_quadrature` of the `Plan` equal these unit-input bounds. The observed absolute L2 discrepancy is about `.000821472`. Changing the tolerance to `.001` selects 396 branches, with tail and quadrature bounds about `.0005` and `.000450744`. Its classical finite sum has discrepancy about `.0000532605`. That finer dense SELECT needs 512 address slots and ten qubits and fits the construction limits. The two component bounds do not bound the total physical-output error, which also depends on input scaling, PSD recovery, preparation, evolution and numerical errors.
+
+The quadrature bound can be conservative even when its numerical reference resolves the component error. For $L=.5I+.2Z$, $H=.3X$, $T=1$, $\beta=.75$ and tolerance `.01`, the 216-node rule uses $K=27.515743$, nine panels per half-axis and 12 points per panel. Its finite Gauss sum differs from an adaptive integral over $[-K,K]$ by about $1.41\times10^{-10}$ in operator norm, against the quadrature bound `.00416129`. The adaptive reference's error estimate is $1.65\times10^{-13}$, which is numerical resolution evidence rather than a deterministic enclosure. The same finite sum differs from $e^{-T(L+iH)}$ by `.000731460`, against the combined tail and quadrature bound `.00916129`. The finite-interval comparison isolates quadrature error, while the propagator comparison also includes the cutoff approximation.
 
 The component bounds describe the finite sum in exact arithmetic. The norms of its terms add up to $\alpha$ times the input norm, where $\alpha$ is the coefficient one-norm, while the exact solution of the shifted problem is no larger than the input norm. A large $\alpha$ therefore means cancellation, and binary64 evaluation carries rounding of order $u_{\rm fp}\alpha$ times the input norm, with unit roundoff $u_{\rm fp}=2^{-53}$. Because LCHS reports floating-point error as unknown, planning refuses a coefficient table whose $u_{\rm fp}\alpha$ exceeds 0.1 times `approximation_tolerance`, the error budget of each construction stage. This affects Low–Somma with a large shift $c$, whose $\alpha$ is close to $e^c\operatorname{erfc}(1/(2\gamma))$, with $\gamma$ the kernel width that [Theorem 2](https://arxiv.org/html/2508.19238v2) selects, about 1.2e16 at $c=50$.
 
+Low–Somma's node savings can increase coefficient mass. At the same $T=\|L\|=1$, tolerance $10^{-4}$ and symmetric trapezoidal rule, $c=1$ uses 203 nodes with $\alpha\approx2.26846$, while $c=5$ uses 79 with $\alpha\approx54.6904$. Their $1/\alpha^2$ scales are `.194329` and `.000334332`. For an ideal LCU with unit input and contractive target $x$, a finite vector error $\|\widehat x-x\|\le\eta$ implies $p_{\rm succ}\le\min(1,(1+\eta)^2/\alpha^2)$. The scale is not an equality, and sampled scalar discrepancies do not establish the vector-error premise uniformly over matrices.
+
 Error components fall into two classes. Discretization error (the kernel-integral error, k quadrature and, with a source, Duhamel quadrature) separates the exact propagator from the finite sum. Construction error (product-formula or QSP synthesis and approximate state preparation) separates that finite sum from the block the circuit applies. Each stage becomes a physical-vector bound by its own rule. The kernel-integral, k-quadrature and product-formula stages are weighted per application by the input norm, the Duhamel weight and `exp(shift*elapsed)`. QSP synthesis and coefficient preparation are scaled by the recovery scale of the prepared coefficient state. The Duhamel and input-preparation stages are already physical bounds. The available stages are summed once and then converted to the requested output, and each component is reported with its own value or the reason it is unavailable.
+
+For `NormalizedExpectation`, a complete physical L2 bound $\delta$, physical norm $r>\delta\ge0$ from exact readout and finite $w\ge\|O\|$ give the sharp bound $2w\delta/r$ for a Hermitian observable ([Proposition 30](../mathematics.md#r30)). Missing component, norm or observable evidence leaves that conversion unknown. A sampled norm estimate does not supply the radius required by this deterministic conversion. This ideal relation is evaluated with scalar rounding, with native numerical errors handled separately.
 
 Planning fixes the inputs of the kernel-integral, k-quadrature and budgeted product-formula bounds, so `plan(...).facts` already holds their values. A classical `Plan` lists these stages, and its Result records the same values as sums over the executed applications. A quantum `Plan` also lists the preparation stages and, for QSP, the QSP synthesis stage. For a dense $A$, the synthesis stage of fixed-step `trotter` and the Duhamel stage of a nonzero constant source stay unknown on both execution routes until `LCHSRefinement` evaluates them. Request them after the solve with `result.verify(checks=LCHSRefinement(components=("duhamel",)))` for the Duhamel stage or `components=("fixed_pf",)` for the product-formula stage, with `LCHSRefinement` imported from `nwqlib.algorithms.lchs`. Refinement evaluates them at the saved nodes and step counts and chooses no new grid or step count. The one exception is quantum `qsp_block_encoding` with $A=0$, whose constant Duhamel integrand gives an exactly zero Duhamel stage.
 
@@ -144,12 +150,14 @@ For heat flow on a ring, `plan(...).facts` gives every error bound before anythi
 ```python
 import numpy as np
 from scipy.linalg import expm
-from nwqlib import LinearDynamics, plan, solve
+from math import fsum
+from nwqlib import LinearDynamics, plan
 from nwqlib.algorithms import LCHS
+from nwqlib.algorithms.lchs import resolve_lchs_coefficient_plan
 from nwqlib.operators import PeriodicStencil
 from nwqlib.problems import ingest_occupation
 
-q = 3  # a ring of 2**q sites, small enough to simulate
+q = 3  # eight coordinates for the ideal finite-branch comparison
 heat = LinearDynamics(A=PeriodicStencil(q, mass=0.0, diffusion=0.25),
                       initial_state=ingest_occupation("0" * q, num_qubits=q),
                       time=1.0)
@@ -160,22 +168,36 @@ selected = plan(heat, method=method, seed=7)
 for item in selected.facts:
     print(item.fact.quantity, item.fact.value.value)
 
-heat_result = solve(selected)
-S = np.roll(np.eye(2**q), 1, axis=0)  # S e_j = e_(j+1 mod 2**q)
-exact = expm(-(2 * np.eye(2**q) - S - S.T) / 4)[:, 0]  # exp(-LT) e_0, T = 1
-print(np.linalg.norm(heat_result.solution - exact))
+coefficients = resolve_lchs_coefficient_plan(selected)
+r = selected.reconstruction.step_counts[0]
+n = 2**q
+I = np.eye(n)
+S = np.roll(I, 1, axis=0)
+E = I[np.arange(n) ^ 1]
+O = S @ E @ S.T
+terms = []
+for k, c in zip(coefficients.nodes, coefficients.coefficients, strict=True):
+    angle = k * .25 / r
+    half = np.cos(angle / 2) * I + 1j * np.sin(angle / 2) * E
+    full = np.cos(angle) * I + 1j * np.sin(angle) * O
+    step = half @ full @ half
+    terms.append(c * np.exp(-.5j * k) * np.linalg.matrix_power(step, r)[:, 0])
+ideal = np.array([complex(fsum(v[j].real for v in terms),
+                         fsum(v[j].imag for v in terms)) for j in range(n)])
+exact = expm(-(2 * I - S - S.T) / 4)[:, 0]
+print(np.linalg.norm(ideal - exact))
 ```
 
 ```text
 kernel_approximation 0.002499999999999994
 k_quadrature 0.002304654032281964
-trotter_synthesis 0.004992709890319826
+trotter_synthesis 0.004970884480827643
 lcu_coefficient_preparation 0.0
 initial_state_preparation 0.0
-0.00027535384494835184
+0.00026603733009987544
 ```
 
-The coefficient and initial-state preparation bounds are zero because both preparations are direct. The last line is the L2 distance between the quantum solution and the matrix exponential. `solve` ran the 12-qubit circuit on the default local Aer statevector, and the output above was printed with Python 3.12.14, NumPy 2.5.2, SciPy 1.18.1, Qiskit 2.5.2 and Aer 0.17.2 on an Apple M3 Max (macOS arm64).
+The coefficient and initial-state preparation bounds are zero because both preparations are direct. The last line is the numerical L2 discrepancy of the ideal finite-branch construction from the heat-equation solution. It sums the selected 270 branches with 8×8 matrices and compares the physical vector with `scipy.linalg.expm(-L)[:, 0]`. It includes finite kernel, quadrature and Strang approximations. Circuit formation, execution and sampling errors are outside this comparison. The value is about `.000266037` at 23 steps, evaluated with Python 3.12.14, NumPy 2.5.2 and SciPy 1.18.1 on macOS arm64.
 
 | Quantity | Value | How it is obtained |
 | --- | --- | --- |
@@ -186,26 +208,26 @@ The coefficient and initial-state preparation bounds are zero because both prepa
 | Coefficient 1-norm | 1.40522 | Sum of the branch-weight magnitudes, not a success probability |
 | Cutoff tail bound, `kernel_approximation` | 0.0025 | Closed-form bound from ACL Eq. (186), evaluated in binary64 |
 | Quadrature bound, `k_quadrature` | 0.00230465 | Bernstein-ellipse bound of Trefethen, ATAP Theorem 19.3, evaluated in binary64 |
-| Strang coefficient $B$ | 14.0245 | $r^2$ times the recorded bound at $r$ |
-| Strang steps $r$ | 53 | Smallest $r$ with $B/r^2\le0.005$ |
-| Strang bound, `trotter_synthesis`, at $r-1=52$ and at $r$ | 0.005187 and 0.004993 | $B/r^2$ in exact rational arithmetic, recorded rounded upward. 52 steps would exceed 0.005 |
+| Strang coefficient $B$ | 2.62960 | Weighted matching-commutator coefficient for $q\ge3$ |
+| Strang steps $r$ | 23 | Smallest $r$ with $B/r^2\le0.005$ |
+| Strang bound, `trotter_synthesis`, at $r-1=22$ and at $r$ | 0.00543305 and 0.00497088 | $B/r^2$ in exact rational arithmetic, recorded rounded upward. 22 steps exceed 0.005 |
 | Coefficient and initial-state preparation bounds | 0 and 0 | Direct preparation |
-| Sum of the bounds | 0.00979736 | Ideal L2 error bound of the physical vector for this unit input, against the target 0.01 |
-| Measured L2 error at $q=3$ | 0.000275354 | Quantum solve above, against `scipy.linalg.expm`. It also contains the rounding in the simulated circuit, which the bounds exclude |
+| Sum of the bounds | 0.00977554 | Ideal L2 error bound of the physical vector for this unit input, against the target 0.01 |
+| Numerical L2 discrepancy at $q=3$ | 0.000266037 | Ideal finite-branch action evaluated with 8×8 matrices, compared with $e^{-L}e_0$ |
 
-![Stacked horizontal bar of the cutoff tail bound 0.0025, the quadrature bound 0.0023 and the Strang bound 0.00499, which sum to 0.009797, against a dashed target line at 0.01, with a diamond below the bar at the measured error 0.000275 for q = 3](../assets/lchs_error_budget.svg)
+![Stacked bounds for cutoff tail 0.0025, quadrature 0.002305 and Strang 0.004971, totaling 0.009776 against target 0.01. A diamond marks the numerical L2 discrepancy 0.0002660 of the ideal finite-branch action at q=3, evaluated with eight-by-eight matrices](../assets/lchs_error_budget.svg)
 
-The diamond marks the measured error of the solve above. `docs/scripts/error_budget_figures.py` draws the figure from this example.
+The diamond marks the numerical discrepancy of the ideal action above. `docs/scripts/error_budget_figures.py` draws the figure from this calculation. Its ordinary invocation runs only the LCHS calculation, and `--qls` separately requests the QLS examples.
 
-The branches, step count and bounds depend on $T\lVert L\rVert=1$ and the diffusion coefficient, not on the ring size. Planning and resource estimation, which build no circuit, extend the example to rings of up to $2^{100}$ sites:
+For $q\ge3$, the branches, step count and bounds depend on $T\lVert L\rVert=1$ and the diffusion coefficient and are independent of ring size. The diffusion-only matchings commute at $q=1,2$, where the ideal synthesis component is zero and one step suffices. Planning and resource estimation build no circuit and extend the example to rings of up to $2^{100}$ sites:
 
 | System qubits $q$ | Total qubits | Branches (address slots) | Strang steps $r$ | Sum of the bounds | CX upper bound per attempt |
 | --- | --- | --- | --- | --- | --- |
-| 3 | 12 | 270 (512) | 53 | 0.00979736 | 84,846 |
-| 10 | 19 | 270 (512) | 53 | 0.00979736 | 105,198 |
-| 20 | 29 | 270 (512) | 53 | 0.00979736 | 169,858 |
-| 40 | 49 | 270 (512) | 53 | 0.00979736 | 426,378 |
-| 100 | 109 | 270 (512) | 53 | 0.00979736 | 2,213,538 |
+| 3 | 12 | 270 (512) | 23 | 0.00977554 | 37,686 |
+| 10 | 19 | 270 (512) | 23 | 0.00977554 | 46,518 |
+| 20 | 29 | 270 (512) | 23 | 0.00977554 | 74,578 |
+| 40 | 49 | 270 (512) | 23 | 0.00977554 | 185,898 |
+| 100 | 109 | 270 (512) | 23 | 0.00977554 | 961,458 |
 
 Each row plans the problem above at that q and counts its CX gates with `estimate(selected, context=ResourceContext(basis="cx"))` ([Resource inspection](#resource-inspection)). The CX upper bound counts the CX gates of one coherent attempt before gate cancellation or routing, with no repeat-until-success factor. `ResourceContext` is imported from `nwqlib.resources`.
 
@@ -246,9 +268,9 @@ When you change the backend of an existing Method to `"trotter"`, set `trotter_s
 
 ### Periodic stencils {#periodic-stencils}
 
-For $A$ given as a `PeriodicStencil`, planning keeps the compact input. This route has a homogeneous Strang construction only, so a problem with a source is refused (`periodic.plan_periodic`). The Strang path keeps the one-qubit double-wrap edge convention. Its synthesis bound for $r$ symmetric Strang steps is $B/r^2$ per unit input, with $B=T^3\sum_j|c_j|(2|k_j|\,\mathrm{diffusion}+|\mathrm{potential}|)^3/3$ over the nodes $k_j$ and coefficients $c_j$ (`periodic.select_periodic_parameters`). `trotter_steps` fixes $r$. `LCHS(hamiltonian_evolution_backend="trotter", trotter_steps=None, trotter_synthesis_tolerance=eps)` instead selects the smallest $r$ with $B/r^2\le$ `eps` once the grid and $B$ are known, then applies `max_trotter_steps` and the construction limits `max_bytes` and `max_select_work`. A Method that sets both fields, or neither, is refused, and other operators refuse the tolerance because their fixed-step routes have no planning bound to invert.
+For $A$ given as a `PeriodicStencil`, planning keeps the compact input. This route has a homogeneous Strang construction only, so a problem with a source is refused (`periodic.plan_periodic`). The Strang path keeps the one-qubit double-wrap edge convention. For $a_j=|k_j|\,\mathrm{diffusion}$ and $p=|\mathrm{potential}|$, its weighted unit-input synthesis bound is $B/r^2$, where $B=T^3\sum_j\overline c_j W_q(a_j,p)$, $\overline c_j\ge|c_j|$ and $W_q(a,p)=g_q a^3/2+4a^2p/3+ap^2/3$. Here $g_q=0$ for $q=1,2$ and one for $q\ge3$. The proof follows the emitted potential, even-matching, odd-matching order ([Proposition 36](../mathematics.md#r36)). The weighted bound concerns the finite physical action on a unit input. `trotter_steps` fixes $r$. `LCHS(hamiltonian_evolution_backend="trotter", trotter_steps=None, trotter_synthesis_tolerance=eps)` instead selects the smallest $r$ with $B/r^2\le$ `eps`, then applies `max_trotter_steps`, `max_bytes` and `max_select_work`. A Method that sets both count and tolerance, or neither, is refused. Other operators refuse this tolerance because their fixed-step routes have no planning bound to invert.
 
-For heat flow on a ring, `PeriodicStencil(q, mass=0.0, diffusion=0.25)` with $T=1$, `approximation_tolerance=0.005` and `trotter_synthesis_tolerance=0.005` give $B=14.02$ and $r=53$ at every $q$, with $B/53^2=0.00499$ and $B/52^2=0.00519$. The tolerance is in the same unit-input operator norm as `approximation_tolerance`. With the default kernel–quadrature pair, whose tail and quadrature bounds fit `approximation_tolerance`, the two tolerances together bound the ideal vector error of a unit input, before rounding in the circuit and sampling. Because the bound is sufficient and not tight, a smaller $r$ may also keep the synthesis error within the tolerance. [Error budget for heat flow on a ring](#error-budget) shows the three bounds of this example against the 0.01 target.
+For heat flow with `PeriodicStencil(q, mass=0.0, diffusion=0.25)`, $T=1$ and both tolerances `.005`, $q\ge3$ gives $B\approx2.62960$ and $r=23$. At $q=1,2$, the matchings commute and $B=0$, so automatic selection chooses one step. Nonzero potential keeps both cross terms at every width, and zero diffusion gives $W_q=0$ for every potential within the selector's existing domain `mass+4*diffusion>0`. A zero ideal product error leaves numerical formation, execution and readout errors separate. The two tolerances together bound the ideal vector error of a unit input, before circuit rounding and sampling. [Error budget for heat flow on a ring](#error-budget) shows the three components against the `.01` target.
 
 A periodic construction refusal reports its work and byte requirements alongside `max_select_work` and `max_bytes`. Raise the limiting budget or reduce the construction. A smaller fixed `trotter_steps`, or a larger `trotter_synthesis_tolerance` in automatic mode, can reduce the step count and construction cost, while increasing or preserving the Strang error bound. If even one step cannot fit, change the construction or its limits. In automatic mode, a step count above `max_trotter_steps` is refused before the construction limits are checked.
 
@@ -286,7 +308,7 @@ Checks are explicit extra computations. Choose the reference with `reference`:
 
 Every reference needs a dense physical `A` and never densifies one implicitly. `closed_form` evaluates one exponential of the augmented matrix `[[-A*T, b*T], [0, 0]]`, whose top-right block is the Duhamel term. It equals $A^{-1}(I-e^{-AT})b$ for invertible $A$, is defined for singular $A$ as well and avoids the cancellation of forming $I-e^{-AT}$ when $\|A\|T$ is small. The `expm` and `closed_form` references use `scipy.linalg.expm`, or `scipy.sparse.linalg.expm` for a triangular matrix, because SciPy's dense kernel loses accuracy on triangular input with close diagonal entries ([dependency issues](../dependency_issues.md#triangular-matrix-exponential)). A reference whose matrix has a one-norm above `2**37`, or whose exponential is not finite in binary64, is reported as unknown. The quantum `selected_grid` reference evolves the application vector through the decomposed branch circuit. Reference discrepancies are empirical numerical evidence, not a complete proven error bound. [Reference work](#reference-work) gives the work each reference counts.
 
-`LCHSRefinement` requests component-bound analysis with its own explicit limits. Its verification record contains all observations, while the returned `facts` contain only output-error facts suitable for assessment, so a request for `"spectral_norms"` alone leaves `facts` empty.
+`LCHSRefinement` requests component-bound analysis with its own explicit limits. Its default `max_structural_work=1_000_000_000` covers the shared count and node contractions, while `max_dense_work=100_000_000` separately limits requested dense validation. Its verification record contains all observations, while the returned `facts` contain only output-error facts suitable for assessment, so a request for `"spectral_norms"` alone leaves `facts` empty.
 
 `result.verify` returns the verification record `receipt` and the error facts `facts`. The check assessment above applies its threshold to the same facts and Result, without calling `verify` again. These facts answer only `checks`. Another threshold, metric or reference needs `result.verify(checks=...)` with the new options, which computes the reference again ([Check accuracy and verify a result](../verification.md#facts-belong-to-the-options-that-produced-them)). The aggregate accuracy assessment can independently remain INCONCLUSIVE. See [Check against a tolerance](../verification.md#check-against-a-tolerance).
 
@@ -327,7 +349,7 @@ The compiled SELECT of `qsp_block_encoding` is one QSP Hamiltonian evolution of 
 
 ## Planning limits and numerical scope {#planning-limits}
 
-The Method's work and byte limits have the defaults `max_select_work=100_000_000`, `max_spectral_work=100_000_000`, `max_quadrature_work=100_000_000`, `max_svd_work=100_000_000`, `max_readout_work=2_000_000_000` and `max_bytes=10_000_000_000`. Work units count planned classical operations, not timings.
+The Method's work and byte limits have the defaults `max_select_work=1_000_000_000`, `max_spectral_work=100_000_000`, `max_quadrature_work=100_000_000`, `max_svd_work=100_000_000`, `max_readout_work=2_000_000_000` and `max_bytes=10_000_000_000`. Work units count planned classical operations and do not predict runtime.
 
 `max_admission_steps` (default 1,000,000) limits the work of checking each planned circuit description and does not change the quantum operations. If planning refuses with this field, raise it at least to the reported count. A refused count of stored entries is complete, while a refused count of checking work is a lower bound that may need raising further, and later preparation can need more in either case ([planning work limit](../development/program_checks.md#planning-work-limit)).
 
@@ -343,20 +365,20 @@ The `dense_exact` route computes one Hermitian eigensystem for each distinct $kL
 
 ### Product-formula planning {#product-formula-planning}
 
-Dense product-formula planning decomposes $L$ and $H$ once with the recursive Pauli block transform. Its work and output conversion grow as $qd^2$ for $d=2^q$. Under the string-table work formula and the default `max_select_work=100_000_000`, the decomposition sets aside 87,570,944 units at $d=512$ and 385,888,256 at $d=1024$, so the decomposition stage accepts at most nine system qubits. At nine qubits, decomposition plus the conservative second-order relaxed SELECT coefficient-selection formula accepts 236 nonidentity union labels for 200 distinct nodes and 256 address slots, or 235 labels for 4096 address slots. These figures assume no identity coefficient, $p$ entries in each L/H support and the full pair upper bound. They include support alignment and the work set aside for the dropped mass. Angle-table work, the byte check and circuit construction remain separate limits on a complete `Plan`.
+Dense product-formula planning decomposes $L$ and $H$ once with the recursive Pauli block transform. Its work and output conversion grow as $qd^2$ for $d=2^q$. At `max_select_work=1_000_000_000`, decomposition sets aside 385,888,256 units at $d=1024$ and 1,686,179,840 at $d=2048$, accepting at most ten system qubits at this stage. At ten qubits, decomposition plus conservative second-order relaxed SELECT coefficient selection allows 1231 nonidentity union labels for 200 distinct nodes, with either 256 or 4096 address slots. These figures assume no identity coefficient, $p$ entries in each L/H support and the full pair upper bound. They include support alignment and the work set aside for dropped mass. Angle-table work, bytes and circuit construction remain separate limits on a complete `Plan`.
 
-Product-formula selection shares the ordered Pauli-label structure across k-nodes and evaluates each node's bound coefficient once. Initial and source applications reuse that coefficient at their own elapsed times, pruning bounds and step counts. The full Pauli-triangle count is used when its remaining work and storage fit. Otherwise selection uses the second-order suffix relaxation and records `bound_variant="relaxed_prefix"`, or stops before the refused stage. The remaining work always includes node-specific magnitude evaluation and the route's other work. The bound computation checks its pair and triple structures against the limits before construction. A shared ordered support pays the mask tests once, while every distinct active node pays its own magnitude contraction. The byte check includes combined-node records and other allocations that stay live during that phase. Padding slots do not create additional node counts.
+Product-formula selection shares the ordered Pauli-label structure across k-nodes and evaluates each node's bound coefficient once. Initial and source applications reuse that coefficient at their own elapsed times, pruning bounds and step counts. The full Pauli-triangle expression is used when its remaining work and storage fit. Otherwise selection uses the second-order degree-capped suffix relaxation `bound_variant="relaxed_prefix"`, or stops before the refused stage. For anticommuting i<j it uses `min(S_i,D_i+D_j-a_i)`, with later mass S_i and weighted anticommuting degree D_v. Degrees are rebuilt from each restricted ordered node table. A shared support pays packed pair tests once, while K distinct nodes each pay `2p+4E` contraction visits. The byte check includes combined-node records and live allocations. Padding slots add no nodes.
 
-For order two, consider 200 distinct active k-nodes, nine active applications and one shared sorted union of $p$ nonidentity labels, with no identity coefficient. Use $p$ entries in each L/H dictionary, $p$ kept terms at every node and the full pair and triple upper bounds. The preparation and counting work formulas, including support alignment and the work set aside for the dropped mass, reach the following largest $p$ under `100000000` units of planning work. The fixed-step bound computation reads each distinct node's stored coefficients with one visit per kept label and coefficient pair and two scalar visits for the identity coefficient and upper dropped mass. Its work also includes the preparation work of each stage that uses the count, the shared count itself and the application arithmetic.
+For order two, consider 200 distinct active k-nodes, nine active applications and one shared sorted union of $p$ nonidentity labels, with no identity coefficient. Use $p$ entries in each L/H dictionary and at every node, with full pair and triple upper bounds. The table uses one billion work units for each stage. Fixed-step refinement uses `LCHSRefinement.max_structural_work`, while the classical and SELECT stages use `LCHS.max_select_work`. For $P=p(p-1)/2$, $J=p(p-1)(2p-1)/6$ and these widths, the shared full count and contractions cost $201(P+J)$, and the relaxed count costs $P+200(2p+4P)$. Each stage adds its preparation and application work.
 
 | System qubits | Stage | Largest $p$, full / relaxed |
 | --- | --- | --- |
-| 20 | Proven fixed-step bounds | 111 / 557 |
-| 20 | Classical stage | 114 / 693 |
-| 20 | SELECT coefficient selection (4096 address slots) | 113 / 687 |
-| 9 | Proven fixed-step bounds | 112 / 630 |
-| 9 | Classical stage | 114 / 693 |
-| 9 | SELECT coefficient selection (4096 address slots) | 114 / 693 |
+| 20 | Proven fixed-step bounds | 244 / 1498 |
+| 20 | Classical stage | 246 / 1573 |
+| 20 | SELECT coefficient selection (4096 address slots) | 246 / 1570 |
+| 9 | Proven fixed-step bounds | 245 / 1540 |
+| 9 | Classical stage | 246 / 1573 |
+| 9 | SELECT coefficient selection (4096 address slots) | 246 / 1573 |
 
 These are work-only stage upper limits, before decomposition, the classical actions, SELECT angle tables and circuit construction. The full limit check also includes the live data and the storage of the count, so these figures do not imply that a complete dense `Plan` fits. In particular, the current dense arrays at 20 qubits exceed the default byte limit. A homogeneous 200-node SELECT uses 256 address slots, while the field-padded layout with an initial state and eight source applications uses 4096. Padding adds slot records and angle storage but no new k-node count. The work and byte formulas of the Pauli-triangle count are applied to the shared structure and distinct node contractions, adding 9 bytes per row of the larger of the pair and reserved triple counts for one node's row selection ([Engineering constants](../ENGINEERING_CONSTANTS.md#other-numerical-guards)). Each caller adds its own preparation and application work.
 
@@ -425,7 +447,7 @@ ACL is An, Childs and Lin, arXiv:2312.03916v2. Low–Somma is arXiv:2508.19238v2
 | Shared product-formula schedule and repetition blocks | NWQLib, on Qiskit's Lie-1 and Suzuki-2 templates | per-slot angle `m*t_j*c_P(k_j)/r_j` | `time_independent_terms._build_product_formula_select_plan`, `time_independent_terms._repetition_blocks` |
 | Structured SELECT on the signed-binary grid | NWQLib | `k_j` affine in the address bits, so each angle table is affine | `time_independent_terms._attach_affine_pauli_structure` |
 | Classical Pauli actions | NWQLib | `exp(-iaP) = cos(a) I - i sin(a) P` | `host_pf.apply_node` |
-| Periodic Strang bound | CSTWZ, relaxed by NWQLib | Proposition 10, Eq. (121) | `periodic.select_periodic_parameters` |
+| Periodic Strang bound | CSTWZ, specialized by NWQLib to matching-operator commutators | Proposition 10, Eq. (121), emitted potential/even/odd order, [Proposition 36](../mathematics.md#r36) | `periodic.select_periodic_parameters` |
 | Periodic Strang step count from `trotter_synthesis_tolerance` | CSTWZ smallest-r rule, applied by NWQLib to the weighted periodic bound | Sec. V B, `r = ceil(sqrt(ceil(B/eps)))` in exact rational arithmetic | `periodic.select_periodic_parameters`, `subroutines/trotterization/error_budget._smallest_step_count` |
 | Joint-generator SELECT for QSP | Pocrnic et al., arXiv:2506.20760v2, adapted to separate L and H encodings | Section IV, Eqs. (61)-(65) | `parameters.select_parameters`, `compiled_selection._compiled_select_qsp_plan` |
 | Source elapsed times in the QSP diagonals | NWQLib | `D_L = (t_j/T) k_j`, `D_H = t_j/T` | `parameters.select_parameters` |
@@ -434,4 +456,4 @@ ACL is An, Childs and Lin, arXiv:2312.03916v2. Low–Somma is arXiv:2508.19238v2
 | CX formula of the controlled dense branches | NWQLib, from that synthesis's gate count and Qiskit 2.5.2's `add_control` | `_dense_synthesis.py` recursion and Qiskit 2.5.2 `qiskit/circuit/_add_control.py::apply_basic_controlled_gate`, derivation in the docstring | `native.dense_branch_select_cx` |
 | Constant-source closed-form reference | ACL, integrated by NWQLib for constant A | Eq. (2): `exp(-AT)u0 + (integral_0^T exp(-As) ds) b`, which is `A^{-1}(I - exp(-AT))b` for invertible A, evaluated as `expm([[-AT, bT], [0, 0]])` | `references.closed_form_reference` |
 | Matrix exponential of the `expm` and `closed_form` references | Al-Mohy and Higham, SIAM J. Matrix Anal. Appl. 31, 970 (2009), doi:10.1137/09074721X | Algorithm 5.1, and Code Fragment 2.1 for triangular input | `references._exponential` |
-| Propagation of the component errors to the requested output | NWQLib | triangle inequality, relations in the docstring | `solution_error_budget.propagate_physical_error` |
+| Propagation of the component errors to the requested output | NWQLib | Norm inequalities and sharp projector trace-norm bridge in [Proposition 30](../mathematics.md#r30) | `solution_error_budget.propagate_physical_error` |

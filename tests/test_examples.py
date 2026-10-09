@@ -191,9 +191,9 @@ assert 32 <= K <= 33 and 0.48 < asinh(1.8 / (K / 9)) < 0.49
 (_, B_ind, B_lib, _), (_, D_ind, D_lib, _), (_, tail_ind, tail_lib, _), (_, gauss_ind, gauss_lib, _) = lchs_bound_checks
 assert all(isfinite(value) and value > 0 for value in (B_ind, B_lib, D_ind, D_lib, tail_ind, tail_lib, gauss_ind, gauss_lib))
 # Strang coefficient, recorded by a one-step plan. Owner: algorithms/lchs/periodic.py::select_periodic_parameters,
-# which forms B_up = T**3/3 * sum_j M_j (|k_j|/2)**3 exactly with M_j = periodic._magnitude_up(c_j) and records
+# which forms B_up = T**3/2 * sum_j M_j (|k_j|/4)**3 exactly with M_j = periodic._magnitude_up(c_j) and records
 # B_lib = error_budget._upward_float(B_up), the least binary64 number >= B_up. T = 1, diffusion 1/4 and potential 0
-# here, and scaling a node by 2 and then by 1/4 is exact.
+# here at q >= 3, and scaling a node by 1/4 and dividing by 2 is exact.
 # Magnitude allowance for periodic._magnitude_up under the premises above.
 # Write |c| = s*sqrt(1+t**2), t = min(|Re c|,|Im c|)/s, and M = s*R.
 # Set A=(1+u)(1+2u), the upper factor for a normal RN-plus-nextafter step.

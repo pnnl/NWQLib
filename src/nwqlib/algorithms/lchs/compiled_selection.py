@@ -152,7 +152,7 @@ def _compiled_qsp_part_plans(
     *,
     l_norm: float | None = None,
     max_bytes=DEFAULT_MAX_BYTES,
-    max_select_work=100_000_000,
+    max_select_work=1_000_000_000,
 ) -> tuple[BlockEncodingPlan, BlockEncodingPlan, float, int]:
     """Classify both QSP children with one shared relative Pauli cutoff.
 
@@ -181,9 +181,11 @@ def _compiled_qsp_part_plans(
     child reconstructed as a dense matrix and _dense_norm_work(d, False)
     for a norm it computes. For two full-support children these add to
     654,924, 5,777,014, 60,033,772 and 735,289,238 units at q = 4 to 7, so
-    the planning stages admit q = 6 and refuse q = 7 under
-    max_select_work=100_000_000. An empty H child is not classified. These
-    units are admission proxies, not timings or equal-cost CPU operations.
+    these preprocessing stages admit all four under the default
+    max_select_work=1_000_000_000 and max_bytes=10_000_000_000. Later
+    SELECT stages have separate remaining-work checks. An empty H child is
+    not classified. These units are admission proxies, not timings or
+    equal-cost CPU operations.
     """
 
     from nwqlib._validation import integer

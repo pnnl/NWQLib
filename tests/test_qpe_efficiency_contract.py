@@ -274,33 +274,33 @@ def test_census_preselection_selects_full_relaxed_or_refuses_before_structure(mo
         ).evaluation
 
     # p = 3 terms on q = 1 qubit, every pair anticommuting: P = 3, E = 3 and N = J = 5. The full
-    # census charges 2pq + w(P+N) + E + N = 22 work and the relaxed one 2pq + wP + p + 2E = 18
+    # census charges 2pq + w(P+N) + E + N = 22 work and the relaxed one 2pq + wP + 2p + 4E = 27
     # (error_budget.census_work). In bytes (error_budget.census_bytes) the relaxed envelope needs
-    # 67912 at its largest fitting block and the full one at least 69768 at every checked block.
+    # 68056 at its largest fitting block b=3 and the full one at least 69768 at every checked block.
     full = census(max_work=22)
     assert full.bound_variant == "exact_census"
     assert (full.pair_commutation_checks, full.nested_commutation_checks) == (3, 5)
     # p = 8 commuting terms on q = 4 qubits: before the pair structure the full envelope (E = P = 28,
-    # N = F = J = 140) charges 400 and the relaxed one 156. The built structure has E = N = 0, and the
-    # full census then charges 92, so max_work=156 admits the relaxed envelope first and then selects
+    # N = F = J = 140) charges 400 and the relaxed one 220. The built structure has E = N = 0, and the
+    # full census then charges 92, so max_work=220 admits the relaxed envelope first and then selects
     # the full expression from the actual counts.
     commuting = ("ZIII", "IZII", "IIZI", "IIIZ", "ZZII", "IZZI", "IIZZ", "ZIIZ")
     upgraded = powers.select_powers(
         target=SimpleNamespace(manifest=SimpleNamespace(basis=SimpleNamespace(dimension=16))),
         base=None, tau=0.1, labels=commuting, coefficients=(0.1,) * 8, identity=0.0,
         pruned_mass=0.0, powers=(0,), backend="trotter_error_budgeted",
-        config=QCELS(max_work=156), route="rwpe",
+        config=QCELS(max_work=220), route="rwpe",
     ).evaluation
     assert (upgraded.bound_variant, upgraded.pair_commutation_checks,
             upgraded.nested_commutation_checks) == ("exact_census", 28, 0)
     monkeypatch.setattr(error_budget, "triple_structure", forbid)
-    assert error_budget.choose_census_block(3, 1, 3, 5, 68000, order=2, variant="exact_census") is None
-    for limits in (dict(max_work=21), dict(max_bytes=68000)):
+    assert error_budget.choose_census_block(3, 1, 3, 5, 68100, order=2, variant="exact_census") is None
+    for limits in (dict(max_bytes=68100),):
         relaxed = census(**limits)
         assert (relaxed.bound_variant, relaxed.nested_commutation_checks) == ("relaxed_prefix", 0)
         assert relaxed.coefficient >= full.coefficient
     monkeypatch.setattr(error_budget, "pack_labels", forbid)
-    for limits, named in ((dict(max_work=17), "max_work=17"),
+    for limits, named in ((dict(max_work=21), "max_work=21"),
                           (dict(max_bytes=67000), "max_bytes=67000")):
         # RWPE reserves no common step, so the header names the census alone.
         with pytest.raises(ValueError, match=f"^QPE census admission: .*{named}"):
@@ -802,19 +802,17 @@ def test_census_reserves_the_common_step_before_choosing_its_variant(monkeypatch
 
     problem = Eigenproblem(A=ingest_pauli(_six_qubit_ring(), num_qubits=6))
     method = RFE(initial_state=np.eye(64)[5], num_samples=4)
-    for work, variant in ((63_858, "relaxed_prefix"), (63_929, "relaxed_prefix"),
-                          (63_930, "exact_census")):
-        rec = plan(problem, method=method.revise(max_work=work), seed=7).reconstruction
-        assert rec.bound_variant == variant and rec.common_step is not None
-    assert plan(problem, method=method.revise(max_work=63_929, max_bytes=125_872),
-                seed=7).reconstruction.bound_variant == "relaxed_prefix"
+    rec = plan(problem, method=method.revise(max_work=64_002), seed=7).reconstruction
+    assert rec.bound_variant == "exact_census" and rec.common_step is not None
+    assert plan(problem, method=method.revise(max_work=64_002, max_bytes=125_872),
+                seed=7).reconstruction.bound_variant == "exact_census"
     monkeypatch.setattr(error_budget, "pack_labels", forbid)
     with pytest.raises(ValueError, match="QPE census and common-step admission.*max_work"):
-        plan(problem, method=method.revise(max_work=63_857), seed=7)
+        plan(problem, method=method.revise(max_work=64_001), seed=7)
     with pytest.raises(ValueError, match="QPE census and common-step admission.*max_bytes"):
-        plan(problem, method=method.revise(max_work=63_929, max_bytes=125_871), seed=7)
+        plan(problem, method=method.revise(max_work=64_002, max_bytes=125_871), seed=7)
     with pytest.raises(ValueError, match="QPE census and common-step admission"):
-        plan(problem, method=method.revise(max_work=63_857, max_bytes=125_871), seed=7)
+        plan(problem, method=method.revise(max_work=64_001, max_bytes=125_871), seed=7)
     labels, coefficients = zip(*_six_qubit_ring())
     with pytest.raises(ValueError, match="^QPE census admission"):
         powers._census(labels, coefficients, 6, RWPE(initial_state=np.eye(64)[5], tau=0.1, max_work=1),

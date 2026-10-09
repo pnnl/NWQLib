@@ -60,39 +60,34 @@ def uncentered_objective(expression: sp.Expr, variables, centers) -> sp.Expr:
     return expression.xreplace(shifts) if shifts else expression
 
 
-def monomial_bound(node: sp.Expr, admit) -> int:
-    """Return an upper bound on the monomial count of ``sp.expand(node)``, calling ``admit`` on every partial count.
+def expansion_term_charge(node: sp.Expr, admit) -> int:
+    """Return the nominal expansion-term charge, admitting every partial count.
 
-    A sum has at most the sum of its children's counts and a product at most
-    the product of its factors' counts. In a power ``b**e`` let ``r`` be the
-    rational term of ``e``, ``e`` itself when it is rational. ``sp.expand``
-    can write an exponent sum ``r + s`` as the product ``b**r * b**s``, and
-    for ``|r| >= 1`` it expands the integer power ``b**floor(|r|)``. The rest
-    of the power multiplies each monomial, and in a product the rests of
-    several powers of one base can combine into a further integer power, as
-    ``sqrt(b)**2 = b`` does. The bound therefore counts the power as
-    ``b**m`` with ``m = ceil(|r|)``. An ``n``-term ``b`` gives ``b**m`` at
-    most ``C(n+m-1, m)`` monomials, the number of size-m multisets of n
-    terms, and ``C(n+a-1, a) C(n+c-1, c) >= C(n+a+c-1, a+c)``, so the counts
-    of the factors in a product bound the count of their combined power. The
-    loop forms ``C(n+m-1, j)`` with ``j = min(n-1, m)``, equal by the
-    symmetry ``C(N, m) = C(N, N-m)``, as a running product that is an exact
-    integer binomial after every step. For a negative ``r`` the expanded
-    power becomes one denominator, so the power counts as one term once its
-    expansion is admitted. Any other node counts as one term, and its
-    arguments are still visited, so an expansion inside a function argument
-    is bounded too. The count bounds the number of monomials, not the digits
-    of their coefficients or the product of denominators that a product of
-    negative powers forms.
+    For the grammar of numeric constants, symbols, Add, Mul and nonnegative
+    integer Pow, this bounds the formal expanded term count by induction.
+    An atom contributes one, Add sums child counts and Mul multiplies them.
+    An m-th power of an n-term base has at most C(n+m-1, m) distinct
+    products, the number of size-m multisets. Coinciding monomials and
+    cancellations can only reduce that count. The loop uses the symmetric
+    binomial with j = min(n-1, m) and an exact integer running product.
 
-    ``admit(count)`` receives every partial count before the next factor
-    multiplies it and raises to refuse, so a refusal stops the traversal
-    before a large count is formed. QHD planning admits each count with an
-    untuned 16 bytes per monomial (``method.QHD._admit_symbolic_work``), and
-    the augmented-Lagrangian layer charges it to its own work admission
-    (``constrained._setup``).
+    Outside this grammar, the current rational/exponent-sum/negative-power
+    rules are early-refusal heuristics. In b**e, r is the sum of rational
+    exponent terms and the charge uses m = ceil(abs(r)). A negative r
+    returns one after admitting its denominator's partial counts. Other
+    nodes return one after visiting their arguments. These rules do not
+    account for new additions or powers from function rewriting, combined
+    denominator populations, or all constructor evaluation during sp.expand.
+    Even the polynomial term-count bound does not bound coefficient digits,
+    temporary copies, all symbolic work or process memory.
+
+    ``admit(count)`` can refuse each reached partial count before traversal
+    continues. QHD assigns an untuned nominal 16-byte charge per term
+    (``method.QHD._admit_symbolic_work``); the augmented-Lagrangian layer
+    adds the term charge to its counted preprocessing work
+    (``constrained._setup``). Neither charge bounds arbitrary SymPy expansion.
     """
-    values = [monomial_bound(child, admit) for child in node.args]
+    values = [expansion_term_charge(child, admit) for child in node.args]
     if isinstance(node, sp.Add):
         count = sum(values)
     elif isinstance(node, sp.Mul):

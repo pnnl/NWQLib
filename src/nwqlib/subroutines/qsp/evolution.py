@@ -92,11 +92,12 @@ if TYPE_CHECKING:
 #   phases.py, so 3e-3 is an unused fallback there. The cost is only the
 #   recorded quadratic OAA amplitude deficit (~6*(margin/2)^2). Revisit if
 #   the solver or the target scale changes.
-# - QSP_EVOLUTION_BESSEL_TAIL_TERMS 200: the adaptive finite-suffix search may extend
-#   through ceil(tau) + 200.  It stops at the first terminal that certifies a
-#   degree, keeping the analytic remainder representable whenever binary64
-#   permits.  The constant is a preprocessing search horizon, not a tail
-#   truncation.
+# - QSP_EVOLUTION_BESSEL_TAIL_TERMS 200: the finite-suffix search extends through
+#   H = min(ceil(tau), max_degree) + 200. The terminal exclusion proved in
+#   jacobi_anger_expansion leaves at most 202 candidates. Usable certificates
+#   compete by degree, complete tail and earlier terminal. With this fixed
+#   horizon offset, suffix scans cost O(202*(H+1)); raising it changes that
+#   work law. The constant bounds the search, not the infinite Bessel tail.
 QSP_EVOLUTION_TARGET_MARGINS = (1.0e-3, 3.0e-3)
 QSP_EVOLUTION_BESSEL_TAIL_TERMS = 200
 # Paper constant, not an engineering choice: 3-step robust OAA multiplies
@@ -241,10 +242,11 @@ class JacobiAngerExpansion:
     Attributes:
         tau: Effective evolution time `alpha * t`.
         epsilon: Requested truncation tolerance for the combined expansion.
-        degree: Smallest degree at or above the `min_degree` supplied to
-            `jacobi_anger_expansion` whose computed combined tail meets
-            `epsilon` at the selected `analysis_terminal`, defined below.
-            This is not a global minimum over all possible terminals.
+        degree: Smallest degree at or above the supplied `min_degree` among
+            usable certificates inside the finite horizon of
+            `jacobi_anger_expansion`. Ties choose the smaller computed complete
+            tail, then the earlier `analysis_terminal`. The polynomial fallback
+            with None tail bounds carries no certified-degree minimality claim.
         cos_degree: Even-part polynomial degree.
         sin_degree: Odd-part polynomial degree.
         cos_coefficients: Chebyshev coefficients of the truncated cosine.
@@ -302,20 +304,23 @@ def _analytic_jacobi_anger_remainder(tau: float, terminal: int) -> float:
     """Return the positive-order suffix bound after ``terminal``.
 
     Returns ``R >= sum_{k > T} |J_k(tau)|`` with ``T = terminal``. NWQLib
-    derives it from the power series of ``J_k``: ``(m+k)!/k! >= (k+1)^m``
-    gives ``|J_k(tau)| <= (tau/2)^k exp(tau^2/(4(k+1))) / k!``, and
-    consecutive terms of that bound shrink by at most
-    ``q = tau/(2(T+2)) < 1`` for ``k > T``. Summing the geometric series,
-    ``R = (tau/2)^(T+1) exp(tau^2/(4(T+2))) / ((T+1)! (1-q))``.
-    [GSLW] arXiv:1806.01838v1, Eq. (55), gives the smaller real-argument bound
-    ``|J_m(t)| <= (t/2)^m / m!``. The same geometric sum built from Eq. (55)
-    is smaller than ``R`` by the factor ``exp(tau^2/(4(T+2)))``, so ``R`` is
-    a conservative choice.
+    derives it for finite real ``tau > 0`` from
+    ``|J_k(tau)| <= (tau/2)^k/k!`` ([GSLW] arXiv:1806.01838v1, Eq. (55)).
+    In the Poisson integral (DLMF 10.9.4, https://dlmf.nist.gov/10.9.E4),
+    the prefactor is ``(tau/2)^k/(sqrt(pi)*Gamma(k+1/2))``. Bound
+    ``|cos(tau*cos(theta))|`` by one. The remaining integral of
+    ``sin(theta)^(2k)`` is ``sqrt(pi)*Gamma(k+1/2)/Gamma(k+1)``, cancelling
+    its prefactor except for ``(tau/2)^k/k!``. For ``a_k=(tau/2)^k/k!``,
+    ``a_(k+1)/a_k=tau/(2(k+1)) <= q=tau/(2(T+2)) < 1`` for ``k >= T+1``.
+    Summing the geometric suffix gives
+    ``R=(tau/2)^(T+1)/((T+1)!*(1-q))`` for integer ``T >= 0`` with q < 1.
 
     The logarithm stays internal so a binary64 underflow is never presented
     as a usable logarithmic certificate alongside a zero ordinary bound.
-    Callers keep the zero as an unusable-certificate marker and do not
-    replace it by an arbitrary tiny value.
+    ``log(tau)-log(2)`` keeps a positive subnormal tau from underflowing
+    before the logarithm. Final exp underflow returns an unusable zero marker;
+    callers preserve polynomial-only results with None tail bounds. Overflow
+    returns infinity. The libm evaluation is not outward rounded.
     """
 
     remainder_ratio = tau / (2.0 * (terminal + 2))
@@ -323,9 +328,8 @@ def _analytic_jacobi_anger_remainder(tau: float, terminal: int) -> float:
         raise ValueError("Jacobi-Anger analysis terminal must satisfy q < 1")
     first_analytic_order = terminal + 1
     log_remainder = (
-        first_analytic_order * math.log(tau / 2.0)
+        first_analytic_order * (math.log(tau) - math.log(2.0))
         - math.lgamma(first_analytic_order + 1)
-        + tau**2 / (4.0 * (first_analytic_order + 1))
         - math.log1p(-remainder_ratio)
     )
     try:
@@ -353,27 +357,44 @@ def jacobi_anger_expansion(
     (Eqs. (53)-(54)).
     The bound adds the Bessel magnitudes through the selected terminal
     ``T``, the last order included in its finite sum, and bounds the rest by
-    an analytic remainder (NWQLib's power-series bound, for which [GSLW]
-    Eq. (55) is the sharper real-argument form). For each tested terminal,
-    the search considers degrees from ``min_degree`` through
-    ``min(max_degree, T - 1)``. It chooses the first tested terminal whose
-    computed combined tail permits one of those degrees at tolerance ``epsilon``.
-    Each parity tail carries the whole analytic suffix, so the combined
-    ``tail_bound`` counts it twice, which is conservative.
+    the real-argument analytic remainder
+    ``R_T=(tau/2)^(T+1)/((T+1)!*(1-tau/(2(T+2))))``. Its derivation from
+    [GSLW] Eq. (55), DLMF 10.9.4 and a geometric suffix is in
+    ``_analytic_jacobi_anger_remainder``. For eligible degrees
+    ``min_degree <= d <= min(max_degree, T - 1)``, the complete combined
+    bound is ``C(d,T)=2 sum_{k=d+1..T} |J_k(tau)| + 4R_T``. Each parity
+    tail contains its omitted finite orders and ``2R_T`` for the whole
+    analytic suffix, so their sum conservatively counts the suffix twice.
+
+    Inside ``H=min(ceil(tau),max_degree)+200``, usable positive remainders
+    with finite ``C(d,T)<=epsilon`` compete by ``(d,C(d,T),T)``: smallest
+    degree, then smallest complete tail, then earlier terminal. For T>=3,
+    ``T<=tau`` implies ``R_T>1/4`` whenever q<1, hence cannot meet epsilon<1.
+    Only T=2 needs a separate candidate when min_degree=1 and tau<3.
+    The proof below leaves at most 202 terminals. The minimum is over these
+    usable certificates in H, evaluated with ordinary binary64 sums and
+    special functions; it is not a global or outward-rounded minimum.
+
+    If every passing remainder underflows to zero, return the first passing
+    terminal and its first degree as a polynomial, with all tail bounds and
+    ``tail_slack`` set to None. A positive usable certificate takes priority
+    over this fallback. If neither exists, the bounded search raises.
     The scaling of [GSLW] arXiv:1806.01838v1, Cor. 60,
     ``d = Theta(tau + log(1/eps)/log(e + log(1/eps)/tau))``, is the
     documented reference form for the resulting degree. ``min_degree`` floors the selected
     degree. The phase solver needs ``min_degree=2`` so the even (cos) part
     is never a constant.
-    ``max_degree`` bounds the returned polynomial degree, while the finite
-    search evaluates at most ``max_degree + 201`` distinct Bessel orders,
-    from zero through at most ``max_degree + 200``. ``max_bytes``
-    bounds known numerical arrays, not special-function workspaces or
-    process memory.
+    ``max_degree`` bounds the returned polynomial degree. The Bessel magnitude
+    table is evaluated once through H, at most ``max_degree + 201`` orders, and the
+    fixed candidate limit keeps suffix work O(202*(H+1)). Scalar remainder
+    checks reject impossible searches before Bessel allocation. ``max_bytes``
+    bounds the known numerical-array envelope ``96*(H+1)``, separately from
+    NumPy's addressable-array limit. It excludes bounded Python bookkeeping,
+    special-function workspaces and process memory.
 
     Args:
-        tau (float): Effective evolution time `alpha * t`.
-        epsilon (float): Truncation tolerance for the combined expansion.
+        tau (float): Finite positive real effective evolution time `alpha * t`.
+        epsilon (float): Combined truncation tolerance, strictly between 0 and 1.
         min_degree (int): Default `1`. Smallest returned degree.
         max_degree (int): Default `256`. Largest returned degree.
         max_bytes (int): Default 10 GB (decimal, `10_000_000_000` bytes).
@@ -381,7 +402,13 @@ def jacobi_anger_expansion(
 
     Returns:
         expansion (JacobiAngerExpansion): Cosine and sine Chebyshev
-            coefficients with their tail bounds and `tail_slack`.
+            coefficients with complete tail bounds and `tail_slack`, or a
+            polynomial with None tail evidence when the suffix underflows.
+
+    Raises:
+        ValueError: If the numerical domain or controls are invalid, the
+            arrays exceed the byte or representation limit, or no eligible
+            degree meets epsilon inside the bounded search.
     """
 
     tau = finite_real(tau, "tau")
@@ -395,34 +422,67 @@ def jacobi_anger_expansion(
     terminal_limit = min(math.ceil(tau), max_degree) + QSP_EVOLUTION_BESSEL_TAIL_TERMS
     # 96 bytes (twelve 8-byte slots) per Bessel order 0..terminal_limit. The
     # arrays alive together need fewer slots: order indices, Bessel values and
-    # magnitudes, the reversed cumulative sums and doubled suffix tails of two
-    # consecutive terminals, the two coefficient tables and the parity gathers.
+    # magnitudes, current/previous suffix temporaries, retained winner/fallback
+    # tails, coefficient tables and parity gathers. At most 202 scalar pairs
+    # add bounded Python bookkeeping outside this numerical-array envelope.
     _check_bytes(96 * (terminal_limit + 1), max_bytes, "Jacobi-Anger selection")
-    # The analytic remainder needs q = tau/(2(T+2)) < 1.
-    first_terminal = min_degree + 1
-    while first_terminal <= terminal_limit and tau / (2.0 * (first_terminal + 2)) >= 1.0:
-        first_terminal += 1
-    if first_terminal > terminal_limit:
+
+    # R_T(tau) increases in tau for 0<tau<2(T+2). At tau=T, write
+    # g_T=(T/2)^(T+1)/(T+1)! * 2(T+2)/(T+4). For integer T>=3,
+    # g_(T+1)/g_T=(1+1/T)^(T+1)*(T+1)/(2(T+2))
+    #                *(T+3)*(T+4)/((T+5)*(T+2)) > 1:
+    # the first factor exceeds 5/2 from its first three binomial terms,
+    # the second is at least 2/5, and the last exceeds one (numerators
+    # differ by two). Thus g_T>=g_3=135/448>1/4. If T<=tau and q<1,
+    # C(d,T)>=4R_T>1>epsilon; if q>=1 the terminal is inadmissible.
+    # All usable T>=3 therefore satisfy T>tau. T=2 remains eligible only
+    # when min_degree=1 and tau<3, since R_2(3)=9/10>1/4.
+    # The ordinary range has at most 200 entries at integer tau, otherwise
+    # 201, and the T=2 exception adds at most one. This exclusion is
+    # analytic; it does not use a sampled Bessel lower bound.
+    candidate_start = max(min_degree + 1, 3, math.floor(tau) + 1)
+    candidate_terminals = [2] if min_degree == 1 and tau < 3 and terminal_limit >= 2 else []
+    candidate_terminals.extend(range(candidate_start, terminal_limit + 1))
+    if not candidate_terminals:
         raise ValueError(f"no Jacobi-Anger degree within max_degree={max_degree} can be certified by the bounded search")
+    if terminal_limit + 1 > np.iinfo(np.intp).max // np.dtype(np.float64).itemsize:
+        raise ValueError("Jacobi-Anger arrays exceed NumPy addressable size")
+
+    # 4R<=epsilon is necessary before any finite Bessel terms are added.
+    # R=0 marks final underflow and remains eligible only for the polynomial
+    # fallback. Empty scalar candidates refuse before Bessel work.
+    remainders = []
+    for candidate_terminal in candidate_terminals:
+        candidate_remainder = _analytic_jacobi_anger_remainder(tau, candidate_terminal)
+        if (
+            math.isfinite(candidate_remainder)
+            and candidate_remainder >= 0.0
+            and 4.0 * candidate_remainder <= epsilon
+        ):
+            remainders.append((candidate_terminal, candidate_remainder))
+    if not remainders:
+        raise ValueError(
+            f"no Jacobi-Anger degree within max_degree={max_degree} reaches eps={epsilon} in the bounded search"
+        )
     all_magnitudes = np.abs(
         scipy.special.jv(np.arange(terminal_limit + 1), tau)
     )
-    degree = None
-    analysis_terminal = None
-    analytic_remainder = None
-    suffix_tails = None
-    magnitudes = None
-    for candidate_terminal in range(first_terminal, terminal_limit + 1):
-        candidate_remainder = _analytic_jacobi_anger_remainder(
-            tau,
-            candidate_terminal,
-        )
+    best = None
+    fallback = None
+    # In real arithmetic, at fixed d, C(d,T) strictly decreases with T:
+    # n=T+1, a_n=(tau/2)^n/n!, q=a_(n+1)/a_n and q'=a_(n+2)/a_(n+1)<q
+    # give R_T-R_(T+1)=a_n/(1-q)-q*a_n/(1-q')>=a_n. Therefore
+    # C(d,T+1)-C(d,T)<=2|J_n|-4*a_n<=-2*a_n<0. Floating-point sums can
+    # flatten that decrease, so all eligible terminals compete and an exact
+    # computed-tail tie chooses the earlier T.
+    for candidate_terminal, candidate_remainder in remainders:
+        combined_candidate_tail = 4.0 * candidate_remainder
         # Every candidate degree is below this terminal T, so its combined tail
         # contains at least the order-T term 2|J_T| plus the analytic term 4R.
         # No degree can pass at T when that lower bound already exceeds eps.
         if (
             2.0 * float(all_magnitudes[candidate_terminal])
-            + 4.0 * candidate_remainder
+            + combined_candidate_tail
             > epsilon
         ):
             continue
@@ -432,40 +492,43 @@ def jacobi_anger_expansion(
         candidate_suffix_tails = (
             2.0 * np.cumsum(candidate_magnitudes[::-1])[::-1]
         )
-        # Each parity tail carries 2R for the whole analytic suffix R, so the
-        # combined tail carries 4R.
-        combined_candidate_tail = 4.0 * candidate_remainder
+        # C(d,T) is nonincreasing in d. Only the first degree meeting epsilon
+        # at a terminal can win the primary degree objective. Positive usable
+        # certificates compete lexicographically; zero R retains only the
+        # first passing polynomial fallback and never displaces a certificate.
         for candidate in range(min_degree, min(candidate_terminal, max_degree + 1)):
             complete_tail = (
                 float(candidate_suffix_tails[candidate + 1])
                 + combined_candidate_tail
             )
-            if complete_tail <= epsilon:
-                degree = candidate
+            if math.isfinite(complete_tail) and complete_tail <= epsilon:
+                selected = (
+                    (candidate, complete_tail, candidate_terminal),
+                    candidate_remainder,
+                    candidate_suffix_tails,
+                    candidate_magnitudes,
+                )
+                if candidate_remainder > 0.0:
+                    if best is None or selected[0] < best[0]:
+                        best = selected
+                elif fallback is None:
+                    fallback = selected
                 break
-        if degree is None:
-            continue
-        analysis_terminal = candidate_terminal
-        analytic_remainder = candidate_remainder
-        suffix_tails = candidate_suffix_tails
-        magnitudes = candidate_magnitudes
-        break
-    if degree is None:
+    selected = best if best is not None else fallback
+    if selected is None:
         raise ValueError(
             f"no Jacobi-Anger degree within max_degree={max_degree} reaches eps={epsilon} in the bounded search"
         )
-    assert analysis_terminal is not None
-    assert analytic_remainder is not None
-    assert suffix_tails is not None
-    assert magnitudes is not None
+    (
+        (degree, selected_complete_tail, analysis_terminal),
+        analytic_remainder,
+        _suffix_tails,
+        magnitudes,
+    ) = selected
     parity_analytic_tail = 2.0 * analytic_remainder
     combined_analytic_tail = 2.0 * parity_analytic_tail
-    analytic_tail_usable = combined_analytic_tail > 0.0
-    tail_bound = (
-        float(suffix_tails[degree + 1]) + combined_analytic_tail
-        if analytic_tail_usable
-        else None
-    )
+    analytic_tail_usable = analytic_remainder > 0.0
+    tail_bound = selected_complete_tail if analytic_tail_usable else None
 
     cos_degree = degree if degree % 2 == 0 else degree - 1
     sin_degree = degree if degree % 2 == 1 else degree - 1

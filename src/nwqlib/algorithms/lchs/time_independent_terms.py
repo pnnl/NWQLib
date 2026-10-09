@@ -571,9 +571,11 @@ def _pauli_decomposition_requirements(dimension):
     With q = log2(d), N = d**2 and h = q//2, the half-label widths are (h,)
     for even q and (h, q-h) for odd q. The work is (34*q+28)*N + 2*H and the
     peak bytes (104+2*q)*N + T, with T the sum of j*4**j and H the sum of
-    (j+1)*4**j over those widths. At the default max_select_work=100_000_000
-    the decomposition work is 87,570,944 at d = 512 and 385,888,256 at
-    d = 1024.
+    (j+1)*4**j over those widths. At the default max_select_work=1_000_000_000,
+    the decomposition stage admits d = 1024 (q = 10), charging 385,888,256
+    work units and 130,028,544 bytes. At d = 2048 (q = 11), its
+    1,686,179,840 work units exceed that limit. Later SELECT stages and
+    their bytes have separate reservations within the shared limits.
     """
     if dimension < 1 or dimension & (dimension - 1):
         raise ValueError("dimension must be a positive power of two")
@@ -623,6 +625,11 @@ def _admit_pauli_decomposition(dimension: int, *, max_bytes, max_select_work) ->
     operations. The law is the block identity of
     operators._pauli.pauli_coefficients counted by
     _pauli_decomposition_requirements.
+
+    The default max_select_work=1_000_000_000 admits this stage through
+    d = 1024 (385,888,256 work units and 130,028,544 bytes); d = 2048 needs
+    1,686,179,840 work units. This is a decomposition-stage boundary, not
+    a guarantee that a complete dense Plan at q = 10 fits every limit.
 
     Args:
         dimension: Positive power-of-two order d after any selected padding.
@@ -950,7 +957,7 @@ def _lchs_census_choice(p, q, nodes, E, N, *, order, max_work, max_bytes, census
     distinct active k-node. With w = ceil(q/64), P = p(p-1)/2, E pairs, N
     nested tests and F <= N triples,
 
-        G = wP + 1_D*wN,   V = E (order 1), p+2E (order 2, relaxed_prefix),
+        G = wP + 1_D*wN,   V = E (order 1), 2p+4E (order 2, relaxed_prefix),
                                E+F (order 2, exact_census),
 
     and the shared work is G + K_n*V: census_work prices one structural
@@ -971,7 +978,15 @@ def _lchs_census_choice(p, q, nodes, E, N, *, order, max_work, max_bytes, census
 
         B0 = B_held + 80p + 16pw + 32E + 48F + H_chunks + max(R_row, C_contract),
         w = ceil(q/64),  H_chunks = 384[p+1+I_exact2(E+1)],
-        R_row = 32pw+64p+32w+65536,  C_contract = 56p+64b+48H(b)+65536.
+        R_row = 32pw+64p+32w+65536,
+        C_contract = 56p+64b+48H(b)+65536 (order one or exact_census),
+                     72p+96b+48H(b)+65536 (order two, relaxed_prefix).
+
+    H(b) is ceil(E/b) at order one, ceil(E/b)+ceil(F/b) for full order two,
+    and 2 ceil(E/b) for relaxed order two. The relaxed extra 16p funds the
+    node-specific degree vector and outward publication; 32b funds bounded
+    endpoint gathers, remainder, union and minimum. Degree publication
+    releases its raw buffer, and every degree gather is block-bounded.
 
     32E+48F already funds the builders' overlapping original chunks and
     concatenated tables. After the builders finish only 16E+24F of shared
@@ -999,13 +1014,13 @@ def _lchs_census_choice(p, q, nodes, E, N, *, order, max_work, max_bytes, census
     census, so it adds 9*max(E, F_cap) to census_held at every candidate,
     refusal candidates included. For E = F = 0 it adds zero. Position
     construction, the kept mask and the magnitude arrays fit the existing
-    80p input and 56p contraction allowances, and the remap's iterator
+    80p input and 56p/72p contraction allowances, and the remap's iterator
     overhead belongs to H0.
 
     Block. The largest fitting block of choose_census_block is replaced by
     65536 when it exceeds 65536 and the complete envelope at 65536 also
     fits, and the recomputed 65536 envelope is returned. Lowering b reduces
-    64b but can increase 48H(b), so the clamp checks the entire law. The
+    64b or 96b but can increase 48H(b), so the clamp checks the entire law. The
     block changes how the outward partial sums are grouped: W_up remains an
     upper bound under coefficient_up's arithmetic premises but need not be
     bitwise equal to the result at another block, and a separate node
@@ -1125,6 +1140,11 @@ def _node_bound_coefficients(
     Eqs. (120)-(121), via error_budget.coefficient_up). The restriction
     keeps row order, so the outward reductions are those of that separate
     census at the same block.
+
+    For relaxed_prefix, coefficient_up rebuilds D_v from this node's
+    restricted pair rows and magnitudes, then uses
+    U_ij = min(sum_{k>i}|c_k|, D_i+D_j-|c_i|). The degree vector is not
+    shared across nodes with different weights or pruned supports.
 
     Admission (_lchs_census_choice) happens before any packing: the
     complete conservative candidates use E = P and N = J. If neither fits,
@@ -1408,7 +1428,7 @@ def _fixed_trotter_certificate_records(
     dense_validation: bool = False,
     max_bytes=DEFAULT_MAX_BYTES,
     max_dense_work=100_000_000,
-    max_structural_work=100_000_000,
+    max_structural_work=1_000_000_000,
     max_steps=100_000,
     counts=None,
     held_bytes: int = 0,
@@ -1452,6 +1472,11 @@ def _fixed_trotter_certificate_records(
     are admission proxies, not timings or equal-cost CPU operations. All
     node work accumulates in the supplied counters, and first evaluations
     carry the census tests.
+
+    The default max_structural_work is 1_000_000_000 logical visits,
+    matching the selected-table construction scale. It governs this
+    explicitly requested structural refinement independently of
+    max_dense_work, whose default is 100_000_000.
 
     Returns:
         One record list per application, in quadrature-position order.
@@ -2292,7 +2317,7 @@ def _build_product_formula_select_plan(
     address_structure: Mapping[str, Any],
     max_steps: int | None = None,
     max_bytes=DEFAULT_MAX_BYTES,
-    max_select_work=100_000_000,
+    max_select_work=1_000_000_000,
     grid_k_values: Sequence[float] | None = None,
     work_ledger: dict | None = None,
 ) -> tuple[LCHSProductFormulaSelectPlan, tuple[_LCHSTrotterNodeRecord, ...], LCHSProductFormulaNodes]:
@@ -2611,7 +2636,7 @@ def generate_lchs_product_formula_select_plan(
     method: LCHS,
     max_steps: int | None = None,
     max_bytes=DEFAULT_MAX_BYTES,
-    max_select_work=100_000_000,
+    max_select_work=1_000_000_000,
     work_ledger: dict | None = None,
 ) -> LCHSProductFormulaSelectData:
     """Build one common product-formula SELECT plan for a homogeneous circuit.

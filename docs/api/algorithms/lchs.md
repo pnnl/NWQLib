@@ -109,7 +109,7 @@ Every entry on this page imports from `nwqlib.algorithms.lchs`, except the resul
 - A and the source are constant in time. General time-dependent A or source is not implemented.
 - The Hermitian part L of A must be positive semidefinite, or the default `make_l_psd=True` shifts it and restores the growth factor.
 - `approximation_tolerance` and the kernel-integral and k-quadrature bounds are component bounds. They do not bound the total error of the physical output, and floating-point, backend and model errors remain separate.
-- The default `dense_exact` backend computes its branch matrices classically and accepts at most `max_dense_select_slots=256` padded addresses.
+- The default `dense_exact` backend computes its branch matrices classically and accepts at most `max_dense_select_slots=4096` padded addresses, subject to separate work and byte checks.
 - Reference checks need a dense A and a physical solution vector.
 
 [Limitations and open work](../../ROADMAP.md#lchs) lists the open items. The [LCHS source map](../../algorithms/lchs.md#source-map) gives the paper, equation and implementing function of each step. To add a method of your own, see [Extending NWQLib](../extending.md).

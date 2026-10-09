@@ -53,12 +53,16 @@ class AdmissionLimits(Record):
     work is counted.
 
     Attributes:
-        max_definitions: Default `16384`. Positive limit on the stored
+        max_definitions: Default `1_000_000`. Positive limit on the stored
             definitions, expressions, parameters, registers, classical values and
-            signatures together. 16,384 is the smallest power of two with at least
-            a twofold margin over the 5,951 of a sampled FixedGCIM Plan with a
-            12-qubit, 200-term observable and four basis states (the Program
-            inventory row of [Engineering constants](../ENGINEERING_CONSTANTS.md)).
+            signatures together. The declaration ceiling covers a sampled FixedGCIM
+            plan with three basis states and a 20-qubit, 8,083-term molecular
+            Hamiltonian in 1,285 measurement groups, with 11,565 circuits and 25,731
+            declarations. It has over sixfold margin over the 161,691 declarations
+            of singleton grouping (the Program inventory row of
+            [Engineering constants](../ENGINEERING_CONSTANTS.md)). Stored-field and
+            checking-work limits apply independently, and no space is reserved from
+            this ceiling alone.
         max_depth: Default `128`, also the largest accepted value. Limit on the
             longest chain of references, which is also the recursion limit of the
             lifecycle check.
@@ -70,7 +74,7 @@ class AdmissionLimits(Record):
 
     # Reasons and revisit conditions: ENGINEERING_CONSTANTS.md, "Shared Program
     # admission limits". They bound the stored planning inventory, not dynamic work.
-    max_definitions: PositiveInt = 16384
+    max_definitions: PositiveInt = 1_000_000
     max_depth: Annotated[PositiveInt, Field(le=128)] = 128
     max_steps: PositiveInt = 100000
     max_integer_bits: PositiveInt = 4096

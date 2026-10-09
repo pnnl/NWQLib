@@ -649,8 +649,10 @@ class ALResources(Record):
             original-expression numerical scans of the grid check before the first
             round.
         layer_work: Their work, one unit per expression-tree node and per coordinate of
-            each evaluation, and in a run's total one unit per monomial of the grid
-            check's expansions.
+            each evaluation, and in a run's total the nominal term charge of the grid
+            check's expansions (`objective.expansion_term_charge`). Its term-count
+            guarantee applies to numeric constants, symbols, sums, products and
+            nonnegative integer powers, with general SymPy rewriting outside it.
         refinement_evaluations: Evaluations of the round's inner objective by box
             refinement at its level points
             (`RefinementResources.objective_evaluations`), zero without refinement. The
@@ -1111,7 +1113,7 @@ class AugmentedLagrangianRecord(Record):
         inequality_scales: s_{g_j} of the inequalities the rounds use.
         feasibility_tolerance: Resolved epsilon_f on normalized residuals.
         complementarity_tolerance: Resolved epsilon_c.
-        admitted_work_bound: Upper bound on the run's counted planning work,
+        admitted_work_bound: Upper bound on the run's nominal counted planning work,
             `(a * M * L + t * M + 1) * qhd.max_work`, fixed before the first round. The
             Work and byte bounds note below defines a, t, M and L and what the bound
             covers.
@@ -1135,12 +1137,15 @@ class AugmentedLagrangianRecord(Record):
 
 
     Work and byte bounds:
-        `admitted_work_bound` is fixed before the first round and bounds the counted QHD
-        work categories and the layer's own counted work. Write M for
+        `admitted_work_bound` is fixed before the first round and bounds the nominal QHD
+        work categories and the layer's own counted work. The symbolic category uses a
+        term charge that bounds formal term count for numeric constants, symbols, sums,
+        products and nonnegative integer powers. It does not bound general SymPy rewriting,
+        coefficient storage or symbolic temporaries. Write M for
         `options.max_iterations`, L for `refinement.max_levels`, and `a = 6` for
         search-model or `a = 4` for physical refinement. The bound is
         `(a * M * L + t * M + 1) * qhd.max_work`. Without refinement, L = 1 and a = 4.
-        An ordinary Plan has at most four category bounds: the symbolic expansion, the
+        An ordinary Plan has at most four category bounds: the nominal symbolic term charge, the
         running total (the initial state's evaluation and the table, compiled-block
         and schedule-integral work), the optional kept state, and the classical evolution
         or circuit construction. Planning checks the first part of the running total,

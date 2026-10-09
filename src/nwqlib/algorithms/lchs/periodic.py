@@ -136,30 +136,36 @@ def select_periodic_parameters(operator, *, elapsed, method):
 
     Each branch generator k*L + H splits into an identity part
     k*(mass + 2*diffusion), applied as an address phase, and three Strang
-    terms. They are the even bonds -k*diffusion*X_0, the odd bonds (the
-    shift-conjugated copy of that term, identical to it when q = 1, which
-    gives the double-wrap edge) and potential*Z_0. The synthesis bound
-    T**3*sum_j |c_j|*(2*|k_j|*diffusion + |potential|)**3/(3*r**2) follows
-    from Childs et al., Phys. Rev. X 11, 011020,
-    doi:10.1103/PhysRevX.11.011020, Proposition 10, Eq. (121),
-    after relaxing each nested commutator by ||[X, Y]|| <= 2*||X||*||Y||.
-    That relaxation gives t**3*Lambda**3/3 per step with Lambda the sum of
-    term norms, and r steps of t = T/r give the bound. The relaxation is
-    NWQLib's.
+    terms, applied chronologically as potential*Z_0 half, -k*diffusion*E
+    half, -k*diffusion*O full, -k*diffusion*E half, potential*Z_0 half.
+    E pairs each even site with the next odd site and O = S E S†, with
+    S the cyclic shift. E, O and Z_0 are Hermitian involutions, and Z_0
+    anticommutes with E and O. The q = 1 case has E = O and preserves the
+    double-wrap edge.
 
-    Derivation of t**3*Lambda**3/3. With term norms a_i, the relaxed
-    Eq. (121) is t**3*((1/3)*sum_{i<j} a_i*a_j**2 + (1/6)*sum_{i<j} a_i**2*a_j
-    + (2/3)*sum_{i<j<k} a_i*a_j*a_k), and every monomial appears in
-    Lambda**3/3 with a coefficient at least as large (1, 1 and 2).
-    The even-bond term has norm |k|*diffusion, the odd-bond term the same,
-    and potential*Z_0 has norm |potential|, so Lambda = 2*|k|*diffusion + |potential|.
+    Put a = |k|*diffusion, p = |potential| and g = 0 for q = 1,2 or 1 for
+    q >= 3. The ordered second-order theorem of Childs et al., Phys. Rev.
+    X 11, 011020, doi:10.1103/PhysRevX.11.011020, Proposition 10, Eq. (121)
+    (arXiv:1912.08854v3, Proposition 16, Eq. (152)), gives the branch
+    coefficient W_q(a,p) = g*a**3/2 + 4*a**2*p/3 + a*p**2/3.
+
+    In the cell Fourier basis theta = 2*pi*l/2**(q-1), E is sigma_x and
+    O its off-diagonal reflection with phases exp(+/-i theta). Thus
+    ||E+O|| = 2, ||[E,O]|| = 2*max_l|sin(theta_l)|, and both nested
+    matching commutators have norm 4*max_l|sin(theta_l)|. That maximum is
+    zero for q = 1,2 and one for q >= 3. In the emitted order H_1=vZ_0,
+    H_2=-bE, H_3=-bO, with signed b=k*diffusion and v=potential, the first
+    tail is -b(E+O). Anticommutation gives nested norms 16*a**2*p and
+    8*a*p**2 there, and 4*g*a**3 for each nested norm at the second term.
+    Hence W = (16*a**2*p+4*g*a**3)/12 + (8*a*p**2+4*g*a**3)/24.
+    Telescoping r unitary steps bounds each branch by W_q*T**3/r**2.
 
     The weighted branch sum follows from the triangle inequality. The LCU
     applies sum_j c_j*U_j, so replacing each U_j by its r-step Strang
     product S_j changes the operator by at most sum_j |c_j|*||U_j - S_j||,
     which is the bound above for a unit input.
 
-    Step count. Write B = T**3*sum_j |c_j|*Lambda_j**3/3, so the bound is
+    Step count. Write B = T**3*sum_j |c_j|*W_q(a_j,p), so the bound is
     B/r**2. With ``trotter_steps`` given, r is that value. With
     ``trotter_synthesis_tolerance`` eps instead, r is the smallest positive
     integer with B/r**2 <= eps, which is r = ceil(sqrt(n)) with
@@ -169,11 +175,11 @@ def select_periodic_parameters(operator, *, elapsed, method):
     max_bytes and max_select_work) are applied.
 
     Evaluation. B is an exact rational: T, the diffusion and potential
-    coefficients and the nodes k_j are binary64 values read exactly, Lambda_j
-    and the cubes are formed exactly, and |c_j| is replaced by the exact
+    coefficients and the nodes k_j are binary64 values read exactly, a_j
+    and the polynomial are formed exactly, and |c_j| is replaced by the exact
     upper value of ``_magnitude_up``. No intermediate can round to zero or
-    overflow, and a float Lambda_j need not be representable for
-    T**3*Lambda_j**3 to be. The inversion is exact rational arithmetic on B
+    overflow, and a float a_j need not be representable for T**3*W_q to be.
+    The inversion is exact rational arithmetic on B
     and eps (trotterization.error_budget._smallest_step_count, shared with
     the step rule of Childs et al., Sec. V B), so for r > 1, B/(r - 1)**2
     exceeds eps. The recorded bound is B/r**2 rounded upward, so it is at
@@ -181,6 +187,13 @@ def select_periodic_parameters(operator, *, elapsed, method):
     largest binary64 number is recorded as unavailable. The bound is
     sufficient and not tight, so a smaller r may also keep the actual
     synthesis error within eps.
+
+    Diffusion-only branches have B = 0 at q = 1,2 and select one step;
+    nonzero potential retains both cross terms. Zero diffusion gives W = 0
+    at every q, while selection still requires finite positive
+    mass+4*diffusion. Signed generators and the identity phase are retained.
+    A zero ideal product-formula component does not bound phase/angle,
+    execution or readout roundoff, which have separate components.
     """
     parameters = operator.periodic_stencil()
     if (method.hamiltonian_evolution_backend != "trotter" or method.trotter_order != 2
@@ -200,10 +213,13 @@ def select_periodic_parameters(operator, *, elapsed, method):
         problem_context=LCHSProblemContext(final_time=elapsed,epsilon=method.approximation_tolerance,
             l_norm=l_norm))
     a = (len(plan.coefficients)-1).bit_length()
-    # B = T**3/3 * sum_j |c_j|*Lambda_j**3 with Lambda_j = 2*|k_j|*diffusion + |potential|, exactly.
+    # B = T**3 * sum_j |c_j|*W_q(a_j,p), exactly relative to stored floats.
     diffusion, potential = Fraction(parameters.diffusion), abs(Fraction(parameters.potential))
-    exact = Fraction(elapsed)**3/3*sum((_magnitude_up(complex(c))*(2*abs(Fraction(k))*diffusion+potential)**3
-        for k,c in zip(plan.nodes,plan.coefficients,strict=True)), Fraction(0))
+    exact = Fraction(elapsed)**3*sum((_magnitude_up(complex(c))*
+        ((node_diffusion**3/2 if q >= 3 else 0)
+         + 4*node_diffusion**2*potential/3 + node_diffusion*potential**2/3)
+        for k,c in zip(plan.nodes,plan.coefficients,strict=True)
+        for node_diffusion in (abs(Fraction(k))*diffusion,)), Fraction(0))
     steps = method.trotter_steps
     if steps is None:
         # Smallest r >= 1 with B/r**2 <= tolerance.

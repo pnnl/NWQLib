@@ -1983,10 +1983,10 @@ def test_the_grid_reference_keeps_the_first_feasible_minimum_across_admitted_sla
 def test_automatic_selection_expands_each_candidate_objective_once():
     # The cost comparison of automatic selection admits each candidate's symbolic work, and the candidate's
     # planning reuses that admission and its decomposer (constrained._planned_costs), so the current PHR form
-    # and the one slack trial each expand and bound their objective once.
+    # and the one slack trial each expand and charge their objective once.
     from nwqlib.algorithms.qhd import method as owner
 
-    with patch.object(owner, "monomial_bound", side_effect=owner.monomial_bound) as bounded:
+    with patch.object(owner, "expansion_term_charge", side_effect=owner.expansion_term_charge) as bounded:
         _, auto, _ = plan_augmented_lagrangian(_affine_family(8), qhd=BINARY, execution="quantum",
                                                options=AugmentedLagrangian(inequality_form="auto"), seed=7)
     assert len(auto.trials) == 1 and bounded.call_count == 2

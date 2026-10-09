@@ -261,15 +261,15 @@ def test_the_route_is_part_of_the_plan():
         LCHS(dense_control_route="whole")
 
 
-@pytest.mark.parametrize(("num_qubits", "branches"), [(3, 128), (4, 32), (5, 8), (6, 4)])
+@pytest.mark.parametrize(("num_qubits", "branches"), [(3, 1024), (4, 256), (5, 64), (6, 16)])
 def test_auto_admits_the_stated_lchs_dense_boundaries(num_qubits, branches):
     # The largest power-of-two branch counts that the default max_select_work
-    # admits for these test problems, from the spectral branch law
+    # and max_bytes admit for these test problems, from the spectral branch law
     # (time_independent_terms._spectral_branch_requirements) and the
     # synthesis and control laws.
     problem, selected = _lchs_dense_plan(num_qubits, branches.bit_length() - 1, "auto")
     assert selected.reconstruction.physical_branches == branches
-    with pytest.raises(ValueError, match="max_select_work"):
+    with pytest.raises(ValueError, match="max_select_work|max_bytes"):
         _lchs_dense_plan(num_qubits, branches.bit_length(), "auto")
 
 

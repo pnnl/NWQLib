@@ -62,7 +62,7 @@ class LCHSRefinement(Record):
             limit on the known arrays of this call.
         max_dense_work: Default `1e8` (`100_000_000`). Upper limit on the
             counted dense work of this call.
-        max_structural_work: Default `1e8`. Upper limit on the counted work
+        max_structural_work: Default `1e9`. Upper limit on the counted work
             of reading the stored node table, preparing the count of Pauli
             commutator terms and evaluating them.
         max_node_evaluations: Default `4096`. Upper limit on the number of
@@ -80,7 +80,7 @@ class LCHSRefinement(Record):
     dense_validation: StrictBool = False
     max_bytes: PositiveInt = DEFAULT_MAX_BYTES
     max_dense_work: PositiveInt = 100_000_000
-    max_structural_work: PositiveInt = 100_000_000
+    max_structural_work: PositiveInt = 1_000_000_000
     max_node_evaluations: PositiveInt = 4096
     max_steps: PositiveInt = 100_000
 

@@ -55,7 +55,7 @@ def test_dense_dilation_query_uses_complete_qsd_bound(system_qubits, expected):
     ) == expected
 
 
-def test_outer_qsp_classification_gate_admits_six_and_refuses_seven_full_support_qubits():
+def test_outer_qsp_classification_gate_matches_its_work_and_byte_limits():
     """The outer QSP gate's charge functions give the documented full-support planning ledger.
 
     The integer-law evaluations stated at compiled_selection.
@@ -69,11 +69,13 @@ def test_outer_qsp_classification_gate_admits_six_and_refuses_seven_full_support
     charge functions run here.
     """
     from types import SimpleNamespace
+    from nwqlib.algorithms import LCHS
     from nwqlib.algorithms.lchs.compiled_selection import _qsp_outer_bytes
     from nwqlib.algorithms.lchs.time_independent_terms import _pauli_decomposition_requirements
     from nwqlib.subroutines.block_encoding.core import _admit_pauli_plan, _dense_norm_work
     works=(654_924,5_777_014,60_033_772,735_289_238)
     sizes=(42_168_320,161_732_608,637_289_984,2_528_890_880)
+    method = LCHS()
     for q,work,size in zip(range(4,8),works,sizes,strict=True):
         d=1<<q
         n=d*d
@@ -81,7 +83,7 @@ def test_outer_qsp_classification_gate_admits_six_and_refuses_seven_full_support
             max_bytes=10**15,max_work=10**12,classify=True)
         ledger=_pauli_decomposition_requirements(d)[0]+32*n+2*(child+n*d*d+_dense_norm_work(d,False))
         assert ledger==work and _qsp_outer_bytes(q,(n,n))==size
-        assert (ledger<=100_000_000 and size<=10_000_000_000)==(q<=6)
+        assert ledger <= method.max_select_work and size <= method.max_bytes
 
 
 def test_outer_qsp_gate_passes_one_remaining_work_budget_and_live_bytes_to_its_children(monkeypatch):

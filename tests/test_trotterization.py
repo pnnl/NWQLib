@@ -398,7 +398,8 @@ def test_selection_record_round_trips_through_json() -> None:
     # The relaxed census performs the P = 3 pair tests and no nested test.
     assert relaxed["bound_variant"] == "relaxed_prefix"
     assert relaxed["algebraic_work_counts"]["nested_commutation_checks"] == 0
-    assert "S_i = sum_{k > i} |c_k|" in relaxed["bound_formula"]
+    assert ("U_ij = min(S_i, D_i + D_j - |c_i|)" in relaxed["bound_formula"]
+            and "D_v = sum_{k: P_v*P_k = -P_k*P_v} |c_k|" in relaxed["bound_formula"])
 
 
 def test_huge_times_select_steps_and_raise_for_an_unrepresentable_fixed_bound() -> None:
@@ -535,12 +536,15 @@ def _exact_triangle(terms, order):
 
     W_1 = sum_A a_i a_j and W_2 = sum_T a_i a_j a_k / 3 + sum_A a_i^2 a_j / 6, with A the anticommuting
     i < j and T the (i, j, k) with (i, j) in A, k > i (k = j included) and P_k anticommuting with P_i P_j,
-    which by bilinearity is anticommutation with exactly one of P_i, P_j. W_2,rel replaces the nested
-    indicator by one (error_budget module comment and coefficient_up).
+    which by bilinearity is anticommutation with exactly one of P_i, P_j. W_2,rel caps its nested mass
+    by min(S_i, D_i+D_j-a_i), with S_i the suffix and D_v all anticommuting-neighbor magnitudes
+    (error_budget module comment and coefficient_up). Neighbor parity is evaluated from characters.
     """
     labels = [label for label, _ in terms]
     a = [abs(Fraction(value)) for _, value in terms]
     p = len(a)
+    degree = [sum((a[k] for k in range(p) if _anticommute(labels[v], labels[k])), Fraction(0))
+              for v in range(p)]
     first = relaxed = second = Fraction(0)
     pair_tests = nested_tests = 0
     for i in range(p):
@@ -550,7 +554,8 @@ def _exact_triangle(terms, order):
                 continue
             first += a[i] * a[j]
             second += a[i] ** 2 * a[j] / 6
-            relaxed += a[i] ** 2 * a[j] / 6 + a[i] * a[j] * sum(a[i + 1:], Fraction(0)) / 3
+            cap = min(sum(a[i + 1:], Fraction(0)), degree[i] + degree[j] - a[i])
+            relaxed += a[i] ** 2 * a[j] / 6 + a[i] * a[j] * cap / 3
             for k in range(i + 1, p):
                 nested_tests += 1
                 if _anticommute(labels[k], labels[i]) != _anticommute(labels[k], labels[j]):
@@ -571,11 +576,13 @@ def test_outward_census_dominates_the_exact_rational_triangle(width) -> None:
         labels = [label for label in _labels(rng, width, 7) if set(label) != {"I"}]
         coefficients = list(rng.uniform(-1.0, 1.0, size=len(labels)))
         draws.append(list(zip(labels, coefficients, strict=True)))
-    # A duplicate term, an exact zero and a 1e-300 coefficient beside unit-scale ones, and an
-    # anticommuting pair whose only nested triple is k = j.
+    # A duplicate term, an exact zero and a 1e-300 coefficient beside unit-scale ones.
     base = draws[0]
     draws.append(base + [base[0], (base[1][0], 0.0), (base[2][0], 1.0e-300)])
-    draws.append([("X" + "I" * (width - 1), 0.5), ("Z" + "I" * (width - 1), -0.25)])
+    # XI and ZI anticommute; six later IZ commute with both. coefficient_up's degree cap
+    # has U_01=1, giving W_rel=1/3+1/6=1/2, versus suffix W=7/3+1/6=5/2.
+    cap_terms = [(label + "I" * (width - 2), 1.0) for label in ("XI", "ZI") + ("IZ",) * 6]
+    draws.append(cap_terms)
     # Every magnitude tiny, so every monomial is far below the binary64 range.
     draws.append([(label, 1.0e-300 * value) for label, value in base])
     for terms in draws:
@@ -593,6 +600,8 @@ def test_outward_census_dominates_the_exact_rational_triangle(width) -> None:
                 )
                 assert relaxed >= exact and loose.coefficient >= relaxed
                 assert loose.nested_commutation_checks == 0
+                if terms is cap_terms:
+                    assert loose.coefficient < Fraction(5, 2)
 
 
 def test_relaxed_prefix_step_relation_on_the_xyz_witness() -> None:

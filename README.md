@@ -103,7 +103,7 @@ If you use NWQLib in your work, please cite it through its Zenodo record, which 
   author  = {Zheng, Muqing and Liu, Chenxu and Song, Zhixin and Wu, Zeguan and Li, Xiangyu and Li, Mingze and Bauman, Nicholas P. and Stein, Samuel A. and M{\"u}lmenst{\"a}dt, Johannes and Chen, Yousu and Wiebe, Nathan and Li, Ang and Kowalski, Karol},
   title   = {NWQLib},
   year    = {2026},
-  version = {1.0.2},
+  version = {1.0.2.post1},
   doi     = {10.5281/zenodo.23074265},
   url     = {https://github.com/pnnl/NWQLib}
 }

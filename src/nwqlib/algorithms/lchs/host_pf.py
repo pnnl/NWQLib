@@ -243,8 +243,9 @@ def select_actions(data, *, elapsed, source_nodes, source_weights, has_initial):
     Application count affects step records and actions, not repeated
     coefficient preparation or table storage. With full support, K = 200
     and M = 9, W_coeff alone is 21,547,072, 86,790,720, 349,573,184 and
-    1,407,991,872 units at q = 6 to 9, so full-support q = 8 is refused
-    under max_select_work=100_000_000 while sparse supports may fit. These
+    1,407,991,872 units at q = 6 to 9, so W_coeff alone refuses full-support
+    q = 9 under the default max_select_work=1_000_000_000 while sparse
+    supports may fit. Decomposition and later action work are additional. These
     units are admission proxies, not timings or equal-cost CPU operations.
     """
     method, d = data.method, len(data.initial)

@@ -619,10 +619,10 @@ Let $\alpha$ be the target coefficient vector, $\beta(\theta)$ the realized one,
 
 **Provenance: Derived in NWQLib. Evidence: proved conditional on the child and phase residual bounds.**
 
-The Jacobi–Anger expansions of [Gilyén et al., Lemma 57, Eqs. (53)–(54)][GSLW] separate cosine and sine into even and odd Chebyshev polynomials. For $\tau>0$ and a terminal $T$ with $q=\tau/[2(T+2)]<1$, the uncomputed Bessel suffix satisfies
+The Jacobi–Anger expansions of [Gilyén et al., Lemma 57, Eqs. (53)–(54)][GSLW] separate cosine and sine into even and odd Chebyshev polynomials. For finite real $\tau>0$ and an integer terminal $T\ge0$ with $q=\tau/[2(T+2)]<1$, the uncomputed Bessel suffix satisfies
 
 ```math
-\sum_{k>T}|J_k(\tau)|\le R_T:=\frac{(\tau/2)^{T+1}e^{\tau^2/[4(T+2)]}}{(T+1)!(1-q)}.
+\sum_{k>T}|J_k(\tau)|\le R_T:=\frac{(\tau/2)^{T+1}}{(T+1)!(1-q)}.
 ```
 
 If the pre-amplification block differs from $aV$ by at most $e_B$, where $V$ is unitary and $0<a\le1/2$, the three-step oblivious amplitude-amplification block $3B-4BB^\dagger B$ differs from $(3a-4a^3)V$ by at most
@@ -631,7 +631,27 @@ If the pre-amplification block differs from $aV$ by at most $e_B$, where $V$ is 
 r_{\rm OAA}=3e_B(1+4a^2)+12ae_B^2+4e_B^3\le6e_B+6e_B^2+4e_B^3.
 ```
 
-**Proof.** The Bessel power series and $(k+m)!/k!\ge(k+1)^m$ give $|J_k(\tau)|\le(\tau/2)^ke^{\tau^2/[4(k+1)]}/k!$. The ratio of consecutive majorants for $k>T$ is at most $q$, so their sum is bounded by $R_T$. This is conservative relative to the sharper real-argument inequality in Gilyén et al., Eq. (55). A finite suffix sum must include a bound on this infinite remainder, even when its floating-point value underflows.
+**Proof.** For real $\tau$, [Gilyén et al., Eq. (55)][GSLW] gives $|J_k(\tau)|\le(\tau/2)^k/k!$. In the [Poisson integral, DLMF 10.9.4](https://dlmf.nist.gov/10.9.E4), bounding the real cosine by one leaves the integral $\sqrt\pi\,\Gamma(k+1/2)/\Gamma(k+1)$, which cancels the prefactor except for $(\tau/2)^k/k!$. Consecutive factorial majorants after order $T$ have ratio at most $q$, proving the geometric suffix bound.
+
+For a degree $d$, the complete combined tail is $C(d,T)=2\sum_{k=d+1}^{T}|J_k(\tau)|+4R_T$. If $d_c$ is the largest even degree at most $d$ and $d_s$ the largest odd degree at most $d$, the parity bounds are
+
+```math
+B_c=2\sum_{\substack{d_c\lt k\le T\\k\ \mathrm{even}}}|J_k(\tau)|+2R_T,\qquad B_s=2\sum_{\substack{d_s\lt k\le T\\k\ \mathrm{odd}}}|J_k(\tau)|+2R_T.
+```
+
+Their sum counts the whole analytic suffix twice conservatively. Independently rounded parity records need not sum bit for bit to the separately evaluated combined record.
+
+The selector searches inside $H=\min(\lceil\tau\rceil,\texttt{max_degree})+200$, with $\texttt{min_degree}\le d\le\min(\texttt{max_degree},T-1)$ and $0<\epsilon<1$. Among positive finite remainders whose finite complete tail meets $\epsilon$, it minimizes $(d,C(d,T),T)$ lexicographically. Degree has priority, followed by tail and then earlier terminal. This minimum concerns usable certificates in this finite horizon, evaluated with ordinary binary64 sums and special functions.
+
+The candidate set is bounded analytically. For $T\ge3$, let $g_T=R_T(T)=(T/2)^{T+1}2(T+2)/[(T+1)!(T+4)]$. Its consecutive ratio is
+
+```math
+\frac{g_{T+1}}{g_T}=\left(1+\frac1T\right)^{T+1}\frac{T+1}{2(T+2)}\frac{(T+3)(T+4)}{(T+5)(T+2)}>1.
+```
+
+The first factor exceeds $5/2$ by its first three binomial terms, the second is at least $2/5$, and the last exceeds one. Thus $g_T\ge g_3=135/448>1/4$. Since $R_T(\tau)$ increases with $\tau$ where $q<1$, $T\le\tau$ cannot satisfy $4R_T\le\epsilon$. The ordinary candidates therefore start at $\max(\texttt{min_degree}+1,3,\lfloor\tau\rfloor+1)$ and end at $H$. The sole additional candidate is $T=2$ when $\texttt{min_degree}=1$ and $\tau<3$, since $R_2(3)=9/10>1/4$. There are at most 202 candidates, so suffix work is $O(202(H+1))$ and Bessel values are computed through $H$ once.
+
+The logarithmic evaluation uses $(T+1)(\log\tau-\log2)-\log\Gamma(T+2)-\log(1-q)$, preserving positive subnormal arguments before the logarithm. A final exponential underflow is an unusable zero marker. If only such candidates pass the finite-tail check, the first passing terminal and degree provide a polynomial with all tail bounds and slack `None`. A positive usable certificate takes priority. If neither candidate type exists, the finite search refuses. The known-array limit is $96(H+1)$ bytes, with a separate NumPy addressability check. These evaluations are not outward-rounded enclosures. Degree has priority, so the selected certificate can report a larger complete tail than an eligible higher-degree certificate.
 
 For amplification, set $B=aV+D$, $\|D\|\le e_B$. Expanding $BB^\dagger B$ gives three linear terms of norm at most $a^2e_B$, three quadratic terms of norm at most $ae_B^2$, and one cubic term of norm at most $e_B^3$. Adding $3D$ proves the bound. For QSP evolution, one may take
 
@@ -730,12 +750,16 @@ Suppose all required stage bounds have been converted into one physical vector e
 If $r>\delta$, then $x\ne0$, and
 
 ```math
-\left\|\frac{x}{\|x\|}-\frac{y}{r}\right\|\le\frac{2\delta}{r},\qquad \left|\frac{x^\dagger Ox}{\|x\|^2}-\frac{y^\dagger Oy}{r^2}\right|\le\frac{4w\delta}{r}.
+\left\|\frac{x}{\|x\|}-\frac{y}{r}\right\|\le\frac{2\delta}{r},\qquad \left|\frac{x^\dagger Ox}{\|x\|^2}-\frac{y^\dagger Oy}{r^2}\right|\le\frac{2w\delta}{r}.
 ```
 
-**Proof.** The reverse triangle inequality gives $|\|x\|-r|\le\delta$ and $\|x\|\le r+\delta$. Factor the difference of squared norms. Expanding the quadratic-form difference as $(x-y)^\dagger Ox+y^\dagger O(x-y)$ proves its bound. For normalization, add and subtract $x/r$. The two resulting distances are at most $\delta/r$ each. For unit vectors $u,v$, the same quadratic-form expansion bounds their expectation difference by $2w\|u-v\|$.
+**Proof.** The reverse triangle inequality gives $|\|x\|-r|\le\delta$ and $\|x\|\le r+\delta$. Factor the difference of squared norms. Expanding the quadratic-form difference as $(x-y)^\dagger Ox+y^\dagger O(x-y)$ proves its bound. For the phase-sensitive unit-vector distance, add and subtract $x/r$. Each resulting distance is at most $\delta/r$.
+
+For normalized expectation, set $u=x/\|x\|$, $v=y/r$, $c=u^\dagger v$ and $s=\sqrt{1-|c|^2}$. Projection gives $\|x-y\|^2=|\|x\|-rc|^2+r^2s^2$, hence $s\le\delta/r$. The Hermitian matrix $D=uu^\dagger-vv^\dagger$ has trace zero and $\operatorname{tr}(D^2)=2s^2$, so its possible nonzero eigenvalues are $\pm s$ and $\|D\|_1=2s$. Trace duality gives $|\operatorname{tr}(OD)|\le\|O\|\|D\|_1\le2w\delta/r$. Complex vectors are allowed, and the public observable is Hermitian. The factor two is sharp. For $0<t<1$, choose $y=(1,0)^T$, $x=(1-t^2,it\sqrt{1-t^2})^T$ and $O=(uu^\dagger-yy^\dagger)/t$. Then $r=w=1$, $\|x-y\|=t$ and the expectation difference is $2t$.
 
 Every component must have the same physical frame before summation. A missing component prevents a complete bound. Applying these nonlinear frame conversions separately to each component and then adding them need not reproduce a bound for the combined error.
+
+The normalized relations require finite $r>\delta\ge0$ and finite nonnegative $w$. Missing, negative or nonfinite components, an empty component set or an overflowing sum make the complete budget unavailable. Normalized expectation uses exponent-scaled multiplication to avoid intermediate range loss. True zero $\delta$ or $w$ gives zero, while a positive final result outside binary64 gives `None`. Ordinary scalar evaluation is separate from native rounding and is not a fully outward-rounded certificate.
 
 ## 9. Block encodings and state preparation
 
@@ -847,12 +871,14 @@ r_1=\max(1,\lceil B_1/\epsilon\rceil),\qquad r_2=\max(1,\lceil\sqrt{\lceil B_2/\
 
 ```math
 W_2=\frac13\sum_Ta_i a_j a_k+\frac16\sum_Aa_i^2a_j
-\le W_{2,\mathrm{rel}}=\frac13\sum_Aa_i a_jS_i+\frac16\sum_Aa_i^2a_j.
+\le W_{2,\mathrm{rel}}=\frac13\sum_Aa_i a_jU_{ij}+\frac16\sum_Aa_i^2a_j,\qquad U_{ij}=\min(S_i,D_i+D_j-a_i),\quad D_v=\sum_{k:P_vP_k=-P_kP_v}a_k.
 ```
 
-Either second-order coefficient bounds the error of r symmetric steps by $W|t|^3/r^2$, under the ordering and Hermiticity premises of [Childs et al., Eq. (121)][Trotter]. The relaxed expression uses pair tests and suffix sums, so a fresh evaluation takes $O(p^2\lceil q/64\rceil)$ work on packed q-qubit labels. The full triple structure can take cubic work.
+Either second-order coefficient bounds the error of r symmetric steps by $W|t|^3/r^2$, under the ordering and Hermiticity premises of [Childs et al., Eq. (121)][Trotter]. The relaxed expression uses pair tests, suffix sums and weighted anticommutation degrees, so a fresh evaluation takes $O(p^2\lceil q/64\rceil)$ work on packed q-qubit labels. The full triple structure can take cubic work.
 
-**Proof.** A nonzero Pauli commutator has norm two and a surviving nested commutator has norm four. Expansion of the tail sums gives $C_{12}^{\triangle}=4\sum_Ta_i a_j a_k$ and $C_{24}^{\triangle}=4\sum_Aa_i^2a_j$. Replacing the nested anticommutation indicator by one increases a sum of nonnegative terms and yields the stated relaxation. Unitary telescoping gives the factor $r^{-2}$. For the same positive time and allowance, define $r_{\mathrm{exact}}$ and $r_{\mathrm{rel}}$ by exact inversion of $W_2$ and $W_{2,\mathrm{rel}}$, respectively. If $W_2>0$ and $\alpha=\sqrt{W_{2,\mathrm{rel}}/W_2}$, these integers satisfy $r_{\mathrm{exact}}\le r_{\mathrm{rel}}\le\lceil\alpha r_{\mathrm{exact}}\rceil$. When the coefficient is zero the selected count is one. This comparison concerns the mathematical coefficients before outward numerical evaluation.
+**Proof.** A nonzero Pauli commutator has norm two and a surviving nested commutator has norm four. Expansion gives $C_{12}^{\triangle}=4\sum_Ta_i a_j a_k$ and $C_{24}^{\triangle}=4\sum_Aa_i^2a_j$. Let $s_{ki}$ be the anticommutation parity. Bilinearity gives $s_{k,ij}=s_{ki}\mathbin{\mathrm{XOR}}s_{kj}\le s_{ki}+s_{kj}$. For $(i,j)\in A$, the nested mass $M_{ij}=\sum_{k>i}a_k s_{k,ij}$ is at most $S_i$ and at most $D_i+D_j-a_i$, because the second endpoint sum excludes $i$ and $s_{ij}=1$. The legal index $k=j$ remains included. All weights are nonnegative, proving $W_2\le W_{2,\mathrm{rel}}\le W_{2,\mathrm{suffix}}$, where the suffix expression replaces $U_{ij}$ by $S_i$. The full triangle coefficient itself upper-bounds the theorem's tail norms and is not the actual evolution error. Unitary telescoping gives $r^{-2}$. For the same positive time and allowance, exact inversion gives $r_{\mathrm{exact}}\le r_{\mathrm{rel}}\le\lceil\sqrt{W_{2,\mathrm{rel}}/W_2}\,r_{\mathrm{exact}}\rceil$ when $W_2>0$. A zero coefficient selects one step. This comparison precedes outward numerical evaluation.
+
+For $P=p(p-1)/2$, $E=|A|$ and packed width $w=\lceil q/64\rceil$, relaxed work is $wP+2p+4E$. Its contraction scratch at block size $b$ is $72p+96b+96\lceil E/b\rceil+65536$ bytes, within the complete input, mask, pair and row-test limit. Weighted degrees are rebuilt for each restricted ordered node table, since differently weighted k-nodes cannot share them.
 
 The production coefficient is evaluated with scaled binary64 upper products and sums, followed by rational rescaling. Its value $W_{\mathrm{up}}$ bounds the selected triangle expression. For formula order $o\in\{1,2\}$, time multiplication, division by $r^o$ and integer step inversion use exact rationals formed from $W_{\mathrm{up}}$ and the stored binary64 time. Reported bounds are rounded upward. This preserves a positive bound below the binary64 range and reports a range error above it. The selected count is minimal for $W_{\mathrm{up}}$, which can exceed the exact triangle coefficient. The record names the full or relaxed expression. Pruning consumes its allowance before step selection, and a zero remaining allowance permits only a zero coefficient.
 
@@ -863,16 +889,18 @@ Let $S_2(h)$ be one fixed ordered second-order step with one-step operator bound
 For periodic LCHS, write the diffusion coefficient as $\zeta\ge0$ and the coefficient of $Z_0$ as $v$. At quadrature node $k_j$, the two matching terms have norm $|k_j|\zeta$ each, including the coincident-neighbor case on two sites, and the potential term has norm $|v|$. The identity term is applied separately. Set
 
 ```math
-\Lambda_j=2|k_j|\zeta+|v|,\qquad B_{\rm per}=\frac{T^3}{3}\sum_j\overline c_j\Lambda_j^3,\qquad \overline c_j\ge|c_j|.
+a_j=|k_j|\zeta,\quad p_v=|v|,\quad W_q(a,p_v)=\frac{g_q a^3}{2}+\frac{4a^2p_v}{3}+\frac{ap_v^2}{3},\quad g_q=\begin{cases}0&q=1,2,\\1&q\ge3,\end{cases}\qquad B_{\rm per}=T^3\sum_j\overline c_jW_q(a_j,p_v),\quad\overline c_j\ge|c_j|.
 ```
 
-Then the weighted $r$-step Strang error is at most $B_{\rm per}/r^2$. To derive this, let $a_i$ be the norms of the ordered terms of a branch. Replacing each nested commutator by four times the product of its term norms gives the coefficient
+Then the weighted physical-action error for a unit input is at most $B_{\rm per}/r^2$. Let $E$ pair each even site with the following odd site, $O=SES^\dagger$ and $Z=Z_0$. The chronological step is $vZ$ half, $-k\zeta E$ half, $-k\zeta O$ full, followed by the reverse half steps. In the cell Fourier basis, $E$ and $O$ are two-by-two reflections, $\|E+O\|=2$ and the matching double-commutator norms are $4g_q$. They commute for $q=1,2$, while $q\ge3$ includes a Fourier angle $\pi/2$. Both matchings anticommute with $Z$. In the theorem's labeling, $H_1=vZ$ acts first, $H_2=-k\zeta E$ and $H_3=-k\zeta O$. The $j=1$ summands have double-commutator norms $16a^2p_v$ and $8ap_v^2$, and both $j=2$ summands have norm $4g_qa^3$. Consequently
 
 ```math
-\frac13\sum_{i\lt j}a_i a_j^2+\frac16\sum_{i\lt j}a_i^2a_j+\frac23\sum_{i\lt j\lt k}a_i a_j a_k\le\frac13\left(\sum_i a_i\right)^3.
+W_q=\frac{16a^2p_v+4g_q a^3}{12}+\frac{8ap_v^2+4g_q a^3}{24}.
 ```
 
 Unitary telescoping gives the $r^{-2}$ factor, and the triangle inequality for $\sum_jc_jU_j$ gives the weighted sum. The implementation constructs rational upper magnitudes $\overline c_j$ by outward scaled square-root evaluation, then evaluates $B_{\rm per}$ exactly from these values and the stored inputs. A tolerance selects $r=\max(1,\lceil\sqrt{\lceil B_{\rm per}/\epsilon\rceil}\rceil)$ before construction limits are applied. With a supplied fixed step count, a bound exceeding binary64 is reported as unavailable. These bounds concern the selected product formulas, with coefficient, gate-formation, and execution errors accounted for separately.
+
+For diffusion-only rings at $q=1,2$, the ideal product error is zero and automatic selection chooses one step. Nonzero potential keeps both cross terms at every width. Zero diffusion gives $W_q=0$ for every potential, provided the selector's existing domain $\mathrm{mass}+4\zeta>0$ holds. Ideal zero product error leaves numerical formation, execution and readout errors separate.
 
 ## 11. Quantum Hamiltonian descent
 
@@ -2190,7 +2218,7 @@ B_{{\rm slab},S}(b)=8b(N_S+2)+(8\lvert S\rvert+64)b+256(N_S+2)+H_0,
 
 with the chunk $b_S$ chosen from the bytes left in `QHD.max_bytes` after reserving space for the initial state, schedule rows, compiled blocks, any binary-compilation arrays, the final support tables, the centered coordinate vectors and their metadata (`compiler.support_chunk_size`). The serialization workspace $I=H_{\rm json,arrays}+Q+q_{\max}+12J$ covers the first identity computation of the tables and the initial vectors, with $Q$ the sum and $q_{\max}$ the largest of their padded-base64 lengths and $J$ their JSON length (`method._support_table_bytes`). The evaluator term $8b(N_S+2)$ and the header allowances are engineering allowances ([Budgets and mechanical bounds](ENGINEERING_CONSTANTS.md#budgets-and-mechanical-bounds)). For $(x+y+z+w-1)^{10}$ at $K=16$ this is $1.7\times10^8$ units, and degree 9 needs $9.9\times10^7$.
 
-The `max_work` default is a fuse against runaway planning work, sized so that no example or test workload in the repository reaches it. On $[-1,1]^4$ the degree-10 tables took 1.6 to 1.7 s to evaluate (Python 3.12.14 and SymPy 1.14.0 on an Apple M3 Max). The monomial bound admitted before the expansion counts monomials, not the digits of their coefficients. The default therefore admits $(x+y)^{1000000}$, whose expansion forms about a million binomial coefficients of up to about 301,000 digits.
+The `max_work` default is a fuse on counted planning categories. On $[-1,1]^4$ the degree-10 tables took 1.6 to 1.7 s to evaluate (Python 3.12.14 and SymPy 1.14.0 on an Apple M3 Max). Before expansion, `objective.expansion_term_charge` computes a nominal charge. For the grammar of numeric constants, symbols, Add, Mul and nonnegative integer Pow, atoms contribute one, sums add, products multiply and an m-th power of an n-term base has at most $\binom{n+m-1}{m}$ formal products. Coinciding monomials and cancellations can lower the count. Induction proves this polynomial term bound, but it does not bound symbolic operations, coefficient digits, temporary expressions or process memory. The 16-byte-per-term allowance has the same nominal scope. Function rewrites, combined denominators and Sum/Product range lengths are outside that guarantee, and the expanded-node table check occurs after expansion. For example, the default accepts $(x+y)^{1000000}$, whose middle binomial coefficients have about 301,000 decimal digits. General preprocessing containment remains [open](ROADMAP.md#qhd-objective-expansion-check).
 
 Every coefficient rule charges the step rows before any row exists, 2 units per midpoint step for its two point values or the schedule's `interval_work` per integrated step for its interval integrals (129 for the cubic schedule's quadrature and 2 for the closed forms of the other two), and `_STEP_BYTES` per step, and each compiled block occurrence is charged `_BLOCK_BYTES` (`QHD._admit_symbolic_work`, [Budgets and mechanical bounds](ENGINEERING_CONSTANTS.md#budgets-and-mechanical-bounds)).
 
@@ -2252,13 +2280,13 @@ Code locations below are paths in the NWQLib repository. A name after a double c
 | [21. QSP conventions](#r21) | R | `src/nwqlib/subroutines/qsp/phases.py::wx_phases_to_reflection`, `src/nwqlib/subroutines/qsp/evolution.py::build_qsvt_circuit` | `tests/test_qsp_evolution.py`, zero-phase and reflection identities | Standard polynomial calculus |
 | [22. Norming correction](#r22) | I | `src/nwqlib/subroutines/qsp/phases.py::chebyshev_norming_sup_bound` | `tests/test_qsp_evolution.py::test_chebyshev_grid_norming_bound_covers_polynomial_suprema`, exact counterexample above | Correction with a minimal analytic counterexample |
 | [23. Phase Newton step](#r23) | I | `src/nwqlib/subroutines/qsp/phases.py::_symmetric_problem`, `src/nwqlib/subroutines/qsp/phases.py::_damped_newton` | `tests/test_qsp_evolution.py`, fitted coefficients and boundary targets | Explicit Jacobian and equivalence on an oversampled grid |
-| [24. QSP error budget](#r24) | D | `src/nwqlib/subroutines/qsp/evolution.py::_analytic_jacobi_anger_remainder`, `src/nwqlib/subroutines/qsp/evolution.py::qsp_evolution_error_terms` | `tests/test_qsp_evolution.py`, complete tail, child error, and exponential comparisons | Finite stage composition, not a sharper Bessel bound |
+| [24. QSP error budget](#r24) | D | `src/nwqlib/subroutines/qsp/evolution.py::_analytic_jacobi_anger_remainder`, `src/nwqlib/subroutines/qsp/evolution.py::qsp_evolution_error_terms` | `tests/test_qsp_evolution.py`, complete tail, child error, and exponential comparisons | Real-argument suffix, bounded finite-horizon selection and finite stage composition |
 | [25. LCHS identity](#r25) | R | `src/nwqlib/algorithms/lchs/providers.py::eq7_coefficient`, `src/nwqlib/algorithms/lchs/providers.py::low_somma_fhat_2` | `tests/test_lchs_providers.py`, kernel profiles | Standard representations |
 | [26. LCHS tail](#r26) | I | `src/nwqlib/algorithms/lchs/providers.py::eq7_tail_bound` | `tests/test_lchs_providers.py::test_closed_tail_bound_keeps_small_cutoff_domain_and_positive_underflow` | Finite closed form and extended cutoff domain |
 | [27. Gauss selector](#r27) | I | `src/nwqlib/algorithms/lchs/providers.py::_ellipse_rule` | `tests/test_lchs_providers.py::test_quadrature_work_limit_refuses_before_grid_allocation` | Analytic selector applicable at short dissipative times |
 | [28. Source remainder](#r28) | I | `src/nwqlib/algorithms/lchs/inhomogeneous_theory.py::_duhamel_quadrature_error_bound` | `tests/test_lchs_numerics.py::test_duhamel_remainder_uses_physical_growth_and_exact_zero_routes` | Dimension-free vector remainder in original physical units |
 | [29. Structured SELECT](#r29) | D | `src/nwqlib/algorithms/lchs/time_independent_terms.py::_attach_affine_pauli_structure`, `src/nwqlib/algorithms/lchs/parameters.py::select_parameters` | `tests/test_lchs_qsp_source.py`, `tests/test_lchs_compiled_select.py` | Structure-dependent circuit reduction and source-time consistency |
-| [30. Output frames](#r30) | D | `src/nwqlib/algorithms/lchs/solution_error_budget.py::propagate_physical_error` | `tests/test_lchs_verification.py::test_refinement_propagates_all_physical_components_once_without_vector` | Standard norm inequalities assembled into one physical budget |
+| [30. Output frames](#r30) | D | `src/nwqlib/algorithms/lchs/solution_error_budget.py::propagate_physical_error` | `tests/test_lchs_verification.py::test_refinement_propagates_all_physical_components_once_without_vector` | One physical budget, norm inequalities and sharp normalized-expectation trace-norm bridge |
 | [31. Dilation](#r31) | D | `src/nwqlib/subroutines/block_encoding/core.py::_dense_dilation_encoding`, `src/nwqlib/subroutines/lcu/core.py::build_lcu_circuit` | `tests/test_block_encoding.py`, `tests/test_lcu_subroutines.py` | Singular-frame construction and compatible padding, based on standard LCU |
 | [32. Circulant certificate](#r32) | I | `src/nwqlib/subroutines/block_encoding/core.py::_detect_banded_pauli_structure`, `src/nwqlib/subroutines/block_encoding/banded.py::build_banded_block_encoding` | `tests/test_block_encoding.py::test_circulant_frobenius_certificate_rounds_outward` | Coefficient-domain certification including absent labels |
 | [33. TT-SVD fidelity](#r33) | I | `src/nwqlib/subroutines/state_preparation/mps.py::analyze_mps_state_compression` | `tests/test_mps_state_preparation.py` | Exact-arithmetic fidelity consequence of the discarded-weight argument |

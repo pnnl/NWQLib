@@ -57,8 +57,10 @@ def test_periodic_scalar_selection_has_no_system_expansion(monkeypatch):
     np.testing.assert_allclose(np.abs(narrow.amplitudes)**2, [5/11, 5/22, 1/11, 5/22], rtol=5e-16, atol=0.)
     assert narrow.half_angles == (0., -1/16, 1/8, 1/16)
     assert narrow.phases == (0., -.75, 1.5, .75)
-    # Direct finite sum: T^3/(3r^2) * [(.3)^3+(.8)^3+(1.3)^3/5]/pi.
-    assert narrow.synthesis_bound == pytest.approx(1223 / (120000 * pi), rel=8e-16, abs=0.)
+    # select_periodic_parameters: q2 has only the cross terms, giving 111/(64000*pi).
+    # q80 adds T^3/r^2 * [(1/4)^3+(1/2)^3/5]/(2*pi) = 13/(20480*pi).
+    assert (narrow.synthesis_bound, wide.synthesis_bound) == pytest.approx(
+        (111 / (64000 * pi), 1213 / (512000 * pi)), rel=8e-16, abs=0.)
     assert wide_counts["construction_work"] < 100_000_000
     with pytest.raises(ValueError):
         narrow.amplitudes.setflags(write=True)
@@ -78,7 +80,8 @@ def test_periodic_scalar_selection_has_no_system_expansion(monkeypatch):
     np.testing.assert_allclose(alternate.coefficient_plan.coefficients, coefficients, rtol=tolerance, atol=0.)
     np.testing.assert_allclose([cexp(1j*value) for value in alternate.phases],
         [c/abs(c)*cexp(-.75j*k) for c,k in zip(coefficients,nodes,strict=True)], rtol=tolerance, atol=0.)
-    expected = sum(abs(c)*(.5*abs(k)+.3)**3 for c,k in zip(coefficients,nodes,strict=True))/96
+    expected = sum(abs(c)*(4*(abs(k)/4)**2*.3/3+(abs(k)/4)*.3**2/3)
+        for c,k in zip(coefficients,nodes,strict=True))/32
     assert alternate.synthesis_bound == pytest.approx(expected, rel=tolerance, abs=0.)
 
 
@@ -114,8 +117,8 @@ def test_periodic_construction_limits_refuse_the_selected_workload(automatic, bi
     chosen = plan(problem, method=method, output=NormSquared(), seed=7)
     limits = {}
     if binding == 'work':
-        # _construction_law(2, 2, r) charges 969*r + 486 work units, so this limit admits at most 5 steps.
-        limits['max_select_work'] = 5331
+        # _construction_law(2, 2, r) charges 969*r + 486 work units, so this limit admits at most 4 steps.
+        limits['max_select_work'] = 4362
     if binding == 'bytes':
         limits['max_bytes'] = 4096  # Admits the four coefficient nodes, but not one step's circuit slots.
     assert chosen.reconstruction.step_counts
@@ -125,41 +128,41 @@ def test_periodic_construction_limits_refuse_the_selected_workload(automatic, bi
 
 def test_periodic_step_cap_refuses_the_required_synthesis():
     method = LCHS(hamiltonian_evolution_backend='trotter', trotter_steps=None,
-        trotter_synthesis_tolerance=1e-4, max_trotter_steps=8,
+        trotter_synthesis_tolerance=1e-4, max_trotter_steps=4,
         lchs_kernel='cauchy_density', k_quadrature=ProviderConfig(
             implementation='signed_binary_uniform', parameters={'num_qubits': 2, 'lsb_position': 0}))
     problem = LinearDynamics(A=PeriodicStencil(num_qubits=2, mass=1., diffusion=.25, potential=.3),
         initial_state=ingest_occupation((0, 0), num_qubits=2), time=.5)
-    # The independent B/r**2 calculation in the next test selects 12 steps.
+    # The independent B/r**2 calculation in the next test selects 5 steps.
     with pytest.raises(ValueError) as refused:
         plan(problem, method=method, output=NormSquared())
     message = str(refused.value)
-    assert '12 steps' in message and 'max_trotter_steps=8' in message
-    admitted = plan(problem, method=method.revise(max_trotter_steps=12), output=NormSquared())
-    assert admitted.reconstruction.step_counts == (12,) * 4
+    assert '5 steps' in message and 'max_trotter_steps=4' in message
+    admitted = plan(problem, method=method.revise(max_trotter_steps=5), output=NormSquared())
+    assert admitted.reconstruction.step_counts == (5,) * 4
 
 
 
 def test_periodic_synthesis_tolerance_selects_the_smallest_strang_step_count():
     from nwqlib.algorithms.protocol import ApplicabilityError
     # periodic_plan's grid: the one-step coefficient of select_periodic_parameters is
-    # B = T^3/3 * [(.3)^3 + 2*(.8)^3/2 + (1.3)^3/5]/pi = 1223/(30000*pi) at T = .5.
-    # B/r^2 <= 1e-4 first holds at r = 12: B/144 = 9.0e-5 and B/121 = 1.07e-4.
+    # B = T^3*sum |c_j|*(4*a_j^2*p/3+a_j*p^2/3) = 111/(16000*pi) at T = .5.
+    # B/r^2 <= 1e-4 first holds at r = 5: B/25 = 8.83e-5 and B/16 = 1.38e-4.
     method=LCHS(hamiltonian_evolution_backend='trotter',trotter_steps=None,trotter_synthesis_tolerance=1e-4,
         lchs_kernel='cauchy_density',k_quadrature=ProviderConfig(implementation='signed_binary_uniform',
             parameters={'num_qubits':2,'lsb_position':0}))
     problem=LinearDynamics(A=PeriodicStencil(num_qubits=2,mass=1.,diffusion=.25,potential=.3),
         initial_state=ingest_occupation((0,0),num_qubits=2),time=.5)
     chosen=plan(problem,method=method,output=NormSquared())
-    assert chosen.reconstruction.step_counts==(12,)*4
+    assert chosen.reconstruction.step_counts==(5,)*4
     bound=next(f.fact.value.value for f in chosen.facts if f.fact.quantity=='trotter_synthesis')
-    assert bound<=1e-4<1223/(30000*pi)/11**2
-    # With diffusion 1e100, T = 1e-110 and the default kernel, B is about 7.9e-28, while the binary64 T**3
+    assert bound<=1e-4<111/(16000*pi)/4**2
+    # With q3, diffusion 1e100, T = 1e-110 and the default kernel, B is about 1.5e-28, while binary64 T**3
     # is 0, so B must be formed exactly. The recorded bound is positive and at most the tolerance, and in
     # exact arithmetic, with each |c_j| enclosed between rationals, B/r**2 <= 1e-34 < B/(r - 1)**2.
     extreme=LCHS(hamiltonian_evolution_backend='trotter',trotter_steps=None,trotter_synthesis_tolerance=1e-34)
-    stencil=PeriodicStencil(num_qubits=2,mass=1.,diffusion=1e100)
-    chosen=plan(LinearDynamics(A=stencil,initial_state=ingest_occupation((0,0),num_qubits=2),time=1e-110),
+    stencil=PeriodicStencil(num_qubits=3,mass=1.,diffusion=1e100)
+    chosen=plan(LinearDynamics(A=stencil,initial_state=ingest_occupation((0,0,0),num_qubits=3),time=1e-110),
         method=extreme,output=NormSquared())
     bound=next(f.fact.value.value for f in chosen.facts if f.fact.quantity=='trotter_synthesis')
     (steps,)=set(chosen.reconstruction.step_counts)
@@ -172,9 +175,9 @@ def test_periodic_synthesis_tolerance_selects_the_smallest_strang_step_count():
         for _ in range(2):
             below,above=nextafter(below,0.),nextafter(above,inf)
         assert Fraction(below)**2<=square<=Fraction(above)**2
-        cube=(2*abs(Fraction(k))*Fraction(stencil.diffusion))**3
+        cube=(abs(Fraction(k))*Fraction(stencil.diffusion))**3
         low,high=low+Fraction(below)*cube,high+Fraction(above)*cube
-    scale,tolerance=Fraction(1e-110)**3/3,Fraction(1e-34)
+    scale,tolerance=Fraction(1e-110)**3/2,Fraction(1e-34)
     assert steps==payload.steps>1 and 0<bound<=1e-34
     assert scale*high/steps**2<=tolerance<scale*low/(steps-1)**2
     # A fixed count and a tolerance cannot both be given, and a dense A has no

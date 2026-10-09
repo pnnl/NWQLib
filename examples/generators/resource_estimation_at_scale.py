@@ -3,7 +3,7 @@
 #
 # No state-vector simulator can hold 100 qubits, whose amplitudes alone occupy $2\times10^{31}$ bytes. This notebook plans five quantum algorithms at that size in seconds, builds and simulates no circuit for them, and labels every count as exact, an upper bound, an estimate or unavailable.
 #
-# Install with `python -m pip install "nwqlib[aer,notebook]"`. To work on NWQLib itself, run `python -m pip install -e ".[aer,notebook]"` in a clone of the repository instead. Planned circuits reach 109 logical qubits and compiled checks 25, and the notebook runs in about 22 s on an Apple M3 Max with 36 GiB of memory (Python 3.12.14, Qiskit 2.5.2, Aer 0.17.2).
+# Install with `python -m pip install "nwqlib[aer,notebook]"`. To work on NWQLib itself, run `python -m pip install -e ".[aer,notebook]"` in a clone of the repository instead. Planned circuits reach 109 logical qubits and compiled checks 25, and compilation cells build them explicitly. Planning numbers are distinct from those optional compiled comparisons.
 #
 # > **How to read this notebook.** The overview and "Before committing" come first, and the explanation starts at Section 1.
 # >
@@ -469,12 +469,12 @@ show_table(ledger, headers=("Plan at q = 100", "Logical qubits", "CX gates", "Sh
                             "Construction work, units", "Planning time, s"))
 
 # %% [markdown]
-# **Will it run?** Planning checks each workload against a named limit before it builds anything. The next cell plans the heat flow of Section 2 with a construction-work limit just below what that plan needs. Planning stops and names the limit and the amount.
+# **Will it run?** Planning checks each workload against a named limit before it builds anything. The next cell plans the heat flow of Section 2 with a construction-work limit below what that plan needs. Planning stops and names the limit and the amount.
 #
 # Appendix D lists the limits that bind near these sizes.
 
 # %%
-tight = lchs_method.revise(max_select_work=60_000_000)  # the 100-qubit construction needs more than this
+tight = lchs_method.revise(max_select_work=20_000_000)  # the 100-qubit construction needs 30,047,903
 try:
     plan(heat_flow[100], method=tight, output=NormSquared(), seed=7)
 except ValueError as refusal:
@@ -954,9 +954,11 @@ show_table([
 #
 # since the occupation preparation, the Hadamard gates and the phases cost no CX gates.
 #
-# **LCHS bounds.** With $C_\beta=2\pi e^{-2^\beta}$ and $x=\cos(\beta\pi/2)K^\beta$, the kernel tail beyond $|k|=K$ is at most $2e^{-x}/(\beta C_\beta x)$, from An, Childs and Lin (arXiv:2312.03916v2, Eqs. (185)–(186)) with $E_1(x)\le e^{-x}/x$. Each Gauss panel of width $h$ with $Q$ points obeys the analytic bound of Trefethen's *Approximation Theory and Approximation Practice* (ISBN 978-1-61197-239-9, Theorem 19.3, Eq. (19.8), with $n=Q-1$) in the strip $|\operatorname{Im}k|\le0.9$, where the kernel is at most $1/(0.1C_\beta)$ and the evolution at most $e^{0.9T\lVert L\rVert}$. Mapping that strip to the panel's Bernstein ellipse $\rho=e^{\operatorname{asinh}(1.8/h)}$ and summing over the panels gives $64Ke^{0.9T\lVert L\rVert}/\bigl(15\cdot0.1\,C_\beta(\rho^2-1)\rho^{2(Q-1)}\bigr)$. For the Strang product, relaxing each nested commutator with $\lVert[X,Y]\rVert\le2\lVert X\rVert\lVert Y\rVert$ in Childs et al. (arXiv:1912.08854v3, Prop. 16, Eq. (152)), telescoping the $r$ unitary steps and summing the branch errors with the weights $|c_j|$ gives, for diffusion coefficient $\delta_L=1/4$,
+# **LCHS bounds.** With $C_\beta=2\pi e^{-2^\beta}$ and $x=\cos(\beta\pi/2)K^\beta$, the kernel tail beyond $|k|=K$ is at most $2e^{-x}/(\beta C_\beta x)$, from An, Childs and Lin (arXiv:2312.03916v2, Eqs. (185)–(186)) with $E_1(x)\le e^{-x}/x$. Each Gauss panel of width $h$ with $Q$ points obeys the analytic bound of Trefethen's *Approximation Theory and Approximation Practice* (ISBN 978-1-61197-239-9, Theorem 19.3, Eq. (19.8), with $n=Q-1$) in the strip $|\operatorname{Im}k|\le0.9$, where the kernel is at most $1/(0.1C_\beta)$ and the evolution at most $e^{0.9T\lVert L\rVert}$. Mapping that strip to the panel's Bernstein ellipse $\rho=e^{\operatorname{asinh}(1.8/h)}$ and summing over the panels gives $64Ke^{0.9T\lVert L\rVert}/\bigl(15\cdot0.1\,C_\beta(\rho^2-1)\rho^{2(Q-1)}\bigr)$. For the Strang product, using the periodic matching-commutator specialization of Childs et al. (arXiv:1912.08854v3, Prop. 16, Eq. (152)), telescoping the $r$ unitary steps and summing the branch errors with the weights $|c_j|$ gives, for diffusion coefficient $\delta_L=1/4$,
 #
-# $$B=\frac{T^3}{3}\sum_j|c_j|\,(2|k_j|\delta_L)^3,\qquad E_{\rm Strang}(r)\le B/r^2.$$
+# $$B=\frac{T^3}{2}\sum_j|c_j|\,(|k_j|\delta_L)^3,\qquad E_{\rm Strang}(r)\le B/r^2,\qquad q\ge3.$$
+#
+# At q=1,2 the diffusion-only matchings commute, so the ideal product error is zero and automatic selection chooses one step. The emitted potential/even/odd order gives the general coefficient $g_q a^3/2+4a^2p/3+ap^2/3$, with $a=|k|\delta_L$, $p=|v|$ and $g_q=0$ at q=1,2 and one above. Numerical construction and readout errors remain separate.
 #
 # **QPE commutator coefficient.** For ordered Pauli terms of equal coefficient magnitude $g$, two terms anticommute when their supports overlap on an odd number of sites with different Pauli letters. Every surviving commutator of Pauli terms has norm 2, and every surviving nested commutator norm 4. With $C_{24}$ the number of anticommuting pairs $i<j$ and $C_{12}$ the number of triples $i<j$, $k>i$ with $H_i,H_j$ anticommuting and $H_k$ anticommuting with exactly one of them, the second-order bound of Childs et al. (arXiv:1912.08854v3, Prop. 16, Eq. (152)) becomes $Wr_p|h|^3$ for $r_p$ steps of time $h$, with the subscripts naming the prefactors 1/12 and 1/24 of that bound,
 #
@@ -1012,7 +1014,7 @@ K, T, L_norm = rule.range_k, record.elapsed_time, record.l_norm
 C_beta = 2 * pi * exp(-2**beta)
 x = cos(beta * pi / 2) * K**beta
 rho = exp(asinh(1.8 / (K / rule.interval_count_each_side)))
-B_independent = T**3 * fsum(abs(c) * (2 * abs(k) * 0.25) ** 3 / 3 for k, c in zip(coefficients.nodes, coefficients.coefficients))
+B_independent = T**3 * fsum(abs(c) * (abs(k) * 0.25) ** 3 / 2 for k, c in zip(coefficients.nodes, coefficients.coefficients))
 one_step = plan(heat_flow[100], method=lchs_method.revise(trotter_steps=1, trotter_synthesis_tolerance=None),
                 output=NormSquared(), seed=7)  # records B itself, since its bound is B/1²
 B = next(item.fact.value.value for item in one_step.facts if item.fact.quantity == "trotter_synthesis")
@@ -1041,7 +1043,7 @@ print(f"With the independent B the smallest r with B/r² ≤ {STRANG_ALLOWANCE:g
       f"{B_independent / steps**2:.6g} at r = {steps}. The three independent bounds sum to {lchs_budget_independent:.6g}.")
 
 
-def exact_census(terms, *, order=2, variant="exact_census"):
+def exact_census(terms, *, order=2):
     masks, a = [], []
     for label, coefficient in terms:
         x = z = 0
@@ -1051,10 +1053,7 @@ def exact_census(terms, *, order=2, variant="exact_census"):
         masks.append((x, z))
         a.append(abs(Q(float(coefficient))))
     p = len(a)
-    suffix = [Q(0)] * p
-    for i in range(p - 2, -1, -1):
-        suffix[i] = suffix[i + 1] + a[i + 1]
-    pair_sum = square_sum = triple_sum = relaxed_sum = Q(0)
+    pair_sum = square_sum = triple_sum = Q(0)
     E = F = N = 0
     for i, (xi, zi) in enumerate(masks):
         for j in range(i + 1, p):
@@ -1065,7 +1064,6 @@ def exact_census(terms, *, order=2, variant="exact_census"):
             N += p - i - 1
             pair_sum += a[i] * a[j]
             square_sum += a[i]**2 * a[j]
-            relaxed_sum += a[i] * a[j] * suffix[i]
             for k in range(i + 1, p):
                 xk, zk = masks[k]
                 if ((xk & (zi ^ zj)).bit_count() + (zk & (xi ^ xj)).bit_count()) % 2:
@@ -1074,11 +1072,11 @@ def exact_census(terms, *, order=2, variant="exact_census"):
     if order == 1:
         W = pair_sum
     else:
-        W = (triple_sum if variant == "exact_census" else relaxed_sum)/3 + square_sum/6
+        W = triple_sum/3 + square_sum/6
     return W, E, N, F
 
-def census_delta(magnitudes, E, F, block, *, order=2, variant="exact_census"):
-    p, d = len(magnitudes), order + 1
+def census_delta(magnitudes, E, F, block, *, order=2):
+    d = order + 1
     positive = [Q(float(v)) for v in magnitudes if v > 0]
     if not positive or E == 0:
         return Q(0)
@@ -1090,8 +1088,8 @@ def census_delta(magnitudes, E, F, block, *, order=2, variant="exact_census"):
     if xmin**d < normal:
         scale += 3*eta/(2*xmin)
         mul += (Q(3, 2) + u)*eta/xmin**d
-    def reduction(n, *, suffix=False):
-        if n <= 1 and not suffix:
+    def reduction(n):
+        if n <= 1:
             return Q(1)
         k = max(0, n - 1)
         assert 2*k*u < 1
@@ -1100,10 +1098,8 @@ def census_delta(magnitudes, E, F, block, *, order=2, variant="exact_census"):
         return reduction(min(block, n))*reduction((n+block-1)//block)
     if order == 1:
         factor = scale**2*mul*blocked(E)
-    elif variant == "exact_census":
-        factor = scale**3*mul**2*max(blocked(E), blocked(F))
     else:
-        factor = scale**3*mul**2*blocked(E)*reduction(p - 1, suffix=True)
+        factor = scale**3*mul**2*max(blocked(E), blocked(F))
     return factor - 1
 
 def upward(value):
@@ -1371,18 +1367,18 @@ show_table(capacity, headers=("Selected plan", "Circuit width n", "State-vector 
 #
 # ### D. Limits at this scale
 #
-# The instances above fit NWQLib's default planning limits. Each limit bounds a specified planning or construction workload before it starts. The QLS and LCHS limit cases, the QPE work counts and the QCELS grid refusal below come from separate planning runs with Python 3.12.14, NumPy 2.5.2, SciPy 1.18.1, SymPy 1.14.0 and Qiskit 2.5.2 on the Apple M3 Max named at the top.
+# The instances above use NWQLib's default planning limits. Each check bounds a specified planning or construction category. The scalar LCHS rows below use the selected quadrature and periodic construction formula, and the commutator limits use integer stage formulas. They establish no execution time or allocation at their largest widths.
 #
 # The largest term counts that the commutator count accepts are calculated from `census_work` and `choose_census_block`, which evaluate integer formulas without constructing or planning a Hamiltonian of that size.
 #
 # - **QLS planning limit.** QLS checks its quantum program against `QLS(max_admission_steps=1_000_000)`. At q = 100, κ = 2 and tolerance 0.001, the default output and a `NormSquared()` output each need 50,228 units. With `PeriodicStencil(q, mass=1.0, diffusion=1.0)`, κ = 5, and the default output selects degrees 17, 27, 39 and 51 for tolerances 0.1 to 0.0001 at q = 80, 90 and 100. Its largest case, degree 51 at q = 100, needs 111,140 units and plans at the default. A degree-39 plan takes about 2.4 s.
-# - **LCHS planning limit.** Planning counts the future elementary construction against `max_select_work=100_000_000`. With `approximation_tolerance=0.01` and a Strang allowance of 0.001, the step count 112 is accepted at q = 80 and rejected at q = 90 and 100, at 92,840,136, 116,859,686 and 143,701,636 units. The main design counts 69,127,013 units at q = 100.
-# - **QPE planning limits.** Planning checks the work of each QPE stage against `max_work=1_000_000_000` before the stage starts. The work of the commutator count of $L$ Pauli terms on q qubits is checked twice, each time including the $2Lq$ label reads for the term masks and for the support sum that the CX formula reads. Before any pair is tested, the work of the full Pauli-triangle count is checked at the upper bound that $L$ and q give, 8,039,800 units for the 100-qubit Ising chain and 27,059,700 for the Heisenberg chain. Once the anticommuting pairs are known, it is checked again at the observed numbers of pairs and nested tests, 140,591 and 424,746 units, and planning uses the full expression when that work fits and the relaxation otherwise. At q = 100, the commutator count alone allows initial full and relaxed bounds of at most 851 and 22,310 kept nonidentity terms. These are scalar calculations with the stated input shapes, not Plans constructed at those term counts. The sampled settings of Section 3 set aside no common-step work. Before the exact per-power check of their 33 powers, planning checks the work of that check as a stage of its own, 702,784 units for the 100-qubit Ising chain and 811,584 for the Heisenberg chain. The [QPE guide](../docs/algorithms/qpe.md) gives the work formula of this stage. Storage and step-count limits apply separately.
+# - **LCHS planning limit.** The default `max_select_work=1_000_000_000` limits selected construction work. The main .005 quadrature/.005 Strang grid has 270 nodes, nine address bits and r=23, with q100 work 30,047,903 and bytes 152,327,488. The distinct .01 quadrature/.001 Strang grid has 216 nodes, eight address bits and r=49, with q80/q90/q100 work 40,641,549 / 51,150,119 / 62,893,489 and bytes 206,202,624 / 259,577,504 / 319,224,384. All fit the current default. On the .005 grid, synthesis .001 instead gives r=52. These are matched scalar construction projections.
+# - **QPE planning limits.** Planning checks the work of each QPE stage against `max_work=1_000_000_000` before the stage starts. The work of the commutator count of $L$ Pauli terms on q qubits is checked twice, each time including the $2Lq$ label reads for the term masks and for the support sum that the CX formula reads. Before any pair is tested, the work of the full Pauli-triangle count is checked at the upper bound that $L$ and q give, 8,039,800 units for the 100-qubit Ising chain and 27,059,700 for the Heisenberg chain. Once the anticommuting pairs are known, it is checked again at the observed numbers of pairs and nested tests, 140,591 and 424,746 units, and planning uses the full expression when that work fits and the relaxation otherwise. At q = 100, the commutator count alone allows initial full and relaxed bounds of at most 851 and 18,224 kept nonidentity terms. The relaxed initial law is `200*p+6*P+2*p=3*p**2+199*p`, with `P=p*(p-1)/2`, and includes its weighted-degree contraction. These are scalar calculations with the stated input shapes, not Plans constructed at those term counts. The sampled settings of Section 3 set aside no common-step work. Before the exact per-power check of their 33 powers, planning checks the work of that check as a stage of its own, 702,784 units for the 100-qubit Ising chain and 811,584 for the Heisenberg chain. The [QPE guide](../docs/algorithms/qpe.md) gives the work formula of this stage. Storage and step-count limits apply separately.
 # - **QCELS analysis grid.** The default 4096-point grid with these 33 times needs 281,153,664 work units, which the same limit accepts. Section 3 requests 256 points to keep the run short. The effective grid has 257 points because QCELS uses at least $8P+1$ for the maximum power $P$. It is a finite workload, not an accuracy guarantee.
 #
 # ### E. Accuracy of the estimates
 #
-# **Do the resource formulas count what the circuit builder builds?** The overview planned the constructions of Sections 1 and 2 at 4, 6, 8, 12 and 16 system qubits and the two chains of Section 3 on 4 and 8 spins, with the same accuracy controls, prepared each circuit, compiled it with Qiskit and compared the CX counts.
+# **Do the resource formulas count what the circuit builder builds?** Run the overview's compilation cells to compare the constructions of Sections 1 and 2 at 4, 6, 8, 12 and 16 system qubits and the Section 3 chains at 4 and 8 spins, using the same accuracy controls. They prepare and compile circuits without simulation.
 #
 # For a QPE plan, `prepare(plan, settings="all")` builds the circuit of each of the 66 settings without submitting anything, and the compiled count weights each circuit by the shots of its setting.
 #
@@ -1406,16 +1402,15 @@ def show_accuracy_panel(checks, optimized):
 
 Let $R=C_{{\\rm formula}}/C_{{\\rm compiled}}$ for the same circuit and stated compiler settings. A ratio of 1 means count agreement in that comparison. For an upper bound, $R-1$ measures its slack relative to the compiled count. For an estimate, it is the signed relative difference. It is not the numerical error of the computed solution. A ratio below 1 would refute an upper bound within its claimed compilation context, while an estimate may fall on either side.
 
-The existing notebooks give the following comparisons with Qiskit 2.5.2 at optimization level 1, using CX and arbitrary single-qubit gates. These are their stored outputs, not executed here. The values come from the QLS introduction, the LCHS introduction, the LCHS scientific example and the QHD introduction in this repository, all executed with Python 3.12.14 and Qiskit 2.5.2. The table was checked against those notebook files.
+The following saved comparisons use Qiskit 2.5.2 at optimization level 1, with CX and arbitrary single-qubit gates. They come from the QLS introduction, LCHS scientific example and QHD introduction, executed with Python 3.12.14 and Qiskit 2.5.2.
 
 | Existing notebook | Label | CX from the formula | Compiled CX | Ratio R | $100(R-1)$ |
 | --- | --- | ---: | ---: | ---: | ---: |
 | [QLS introduction](qls_linear_system_intro.ipynb) | Estimate | 7,846 | 7,710 | 1.01764 | 1.76% |
 | [QHD introduction](qhd_optimization_intro.ipynb) | Upper bound | 13,790 | 13,790 | 1.00000 | 0% |
-| [LCHS introduction](lchs_linear_dynamics_intro.ipynb) | Estimate | 79,712 | 79,680 | 1.000402 | 0.0402% |
 | [LCHS scientific example](lchs_scientific.ipynb) | Upper bound | 1,322,108 | 622,076 | 2.12532 | 112.5% |
 
-The QLS and introductory LCHS estimates are close to their compiled counts. The QHD bound is attained in this example. The scientific LCHS bound is about 2.13 times its compiled count. Its formula sums gate-level controlled-synthesis bounds, which need not be tight for the complete circuit. This is bound slack for that dense branch construction. It does not measure the tightness of the periodic LCHS construction below. The eigenvalue notebook has no CX comparison, and `qls_scientific` has no complete CX formula for its construction. Neither supplies a ratio.
+The QLS estimate is close to its compiled count. The QHD bound is attained in this example. The scientific LCHS bound is about 2.13 times its compiled count. Its formula sums gate-level controlled-synthesis bounds, which need not be tight for the complete circuit. This is bound slack for that dense branch construction. It does not measure the tightness of the periodic LCHS construction below. The eigenvalue notebook has no CX comparison, and `qls_scientific` has no complete CX formula for its construction. Neither supplies a ratio.
 
 For this notebook's periodic constructions, only the system width is reduced. QLS keeps degree {qls_small['plan'].reconstruction.degree} and inverse tolerance {qls_small['plan'].method.epsilon_inv:g}. LCHS keeps {lchs_small['plan'].reconstruction.physical_branches} branches, {lchs_small['plan'].reconstruction.padded_branches} address slots and {lchs_small['plan'].reconstruction.step_counts[0]} Strang steps for the same component error allowances. The new comparisons use Qiskit {qiskit.__version__}, `basis_gates=["cx", "u"]`, optimization level 0, seed 7 and `approximation_degree=1.0`, without routing. The QLS and LCHS rows count a complete coherent attempt, including preparation and ancillas, with no repeat-until-success multiplier. The QPE rows use the chains of Section 3 on 4 and 8 spins with the same schedule, per-power allowance and {SHOTS} shots per setting. Their compiled count weights the compiled CX gates of each of the 66 prepared circuits by the shots of its setting, because the estimate counts every shot. `prepare(plan, settings="all")` built these circuits without running them.
 
@@ -1520,7 +1515,7 @@ show_table([(k, QHD_ENCODINGS[encoding], row["width"], row["cx_law"], row["cx"],
 print("The stored potential tables and constant equal the quadratic at every grid point:", qhd_objective_matches)
 
 # %% [markdown]
-# The compiled CX counts equal their formulas. The one-hot rotation formula equals the emitted arbitrary rotations. The binary formulas exceed them by design, because they bound rotation slots before classification, including the exact T angles and, at $K=8$, rotation slots that the dense diagonal leaves unused.
+# Compare the compiled CX counts with their formulas in the table above. The one-hot rotation formula counts emitted arbitrary rotations. The binary formulas bound rotation slots before classification, including exact T angles and, at $K=8$, slots that the dense diagonal leaves unused.
 #
 # The $K=4$ binary circuit selects Walsh rotations for its kinetic tables and has no dense diagonal, so its `diagonal_wrap` source is `not_applicable`, while the $K=8$ circuit has dense diagonals and an `unavailable` wrap error.
 
@@ -1580,7 +1575,7 @@ print(f"{my_plan.reconstruction.step_counts[0]} Strang steps, "
       f"at most {my_resources.quantity('cx').fact.value.numerator:,} CX gates per attempt")
 
 # %% [markdown]
-# **A Hamiltonian as Pauli terms.** QPE takes a dense matrix or a list of `(label, coefficient)` pairs with real coefficients, where the rightmost label character acts on qubit 0. At q = 100 the default commutator-count limits are 851 terms for the initial full bound and 22,310 for the relaxation, after identity and pruned terms are removed (Appendix D).
+# **A Hamiltonian as Pauli terms.** QPE takes a dense matrix or a list of `(label, coefficient)` pairs with real coefficients, where the rightmost label character acts on qubit 0. At q = 100 the default commutator-count limits are 851 terms for the initial full bound and 18,224 for the relaxation, after identity and pruned terms are removed (Appendix D).
 #
 # The exact per-power check has its own work check, and this cell's Ising chain counts 702,784 work units for it. The cell prints the steps of the longest power, the total shots and the CX gates over all shots. Replacing `"ising"` by `"heisenberg"` gives the Heisenberg chain of Section 3.
 

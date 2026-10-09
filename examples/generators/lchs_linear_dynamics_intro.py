@@ -3,7 +3,7 @@
 #
 # A dye pulse circulates in a closed channel, carried by the flow and spread by diffusion, and on 8 grid points its concentration solves the linear ODE $du/dt=-Au$. This notebook computes $u(T)$ with NWQLib's Linear Combination of Hamiltonian Simulation (LCHS) on a quantum circuit and checks it against `scipy.linalg.expm`.
 #
-# Install with `python -m pip install "nwqlib[aer,notebook,tensor]"` and add `scikit_tt`, which is not on PyPI, with `python -m pip install "scikit_tt @ git+https://github.com/PGelss/scikit_tt.git"`. To work on NWQLib itself, run `python -m pip install -e ".[aer,notebook,tensor]"` in a clone of the repository instead of the first command. The notebook simulates at most 12 qubits and runs in about 22 s on an Apple M3 Max with 36 GiB of memory (Python 3.12.14, Qiskit 2.5.2, Aer 0.17.2).
+# Install with `python -m pip install "nwqlib[aer,notebook,tensor]"` and add `scikit_tt`, which is not on PyPI, with `python -m pip install "scikit_tt @ git+https://github.com/PGelss/scikit_tt.git"`. To work on NWQLib itself, run `python -m pip install -e ".[aer,notebook,tensor]"` in a clone of the repository instead of the first command. The notebook simulates at most 12 qubits. Its result card reports the runtime and resource limits of the executed plan.
 #
 # > **How to read this notebook.** The next cells solve the channel and show the answer with its cost.
 # >

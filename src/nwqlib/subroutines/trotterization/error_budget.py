@@ -33,7 +33,7 @@ magnitudes.  Norm subadditivity plus ``||[P, Q]|| = 2`` and
 ``||[P, [Q, R]]|| = 4`` for surviving Pauli commutators makes these
 triangle expansions certified upper bounds on the tail-sum spectral norms
 in Props. 9-10. At order 2 a caller can select the full triangle
-expression or its suffix relaxation, which needs pair tests only
+expression or its degree-capped suffix relaxation, which needs pair tests only
 (``_pauli_bound_coefficient_from_terms``).
 
 Outward evaluation. The production coefficient is evaluated with scaled
@@ -137,11 +137,12 @@ _VARIANT_BOUND_FORMULAS = {
         f"an upper bound on {_SECOND_ORDER_TAIL} {_PROP10}"
     ),
     (2, "relaxed_prefix"): (
-        "W_up * t^3 / r^2 with W_up >= W_2,rel = sum_{(i,j) in A} |c_i*c_j|*S_i / 3 "
-        "+ sum_{(i,j) in A} c_i^2*|c_j| / 6, S_i = sum_{k > i} |c_k|, "
-        "A = {(i,j): i < j, P_i*P_j = -P_j*P_i}; NWQLib's suffix inequality W_2 <= W_2,rel "
-        "replaces the nested anticommutation indicator of the Pauli-triangle expansion "
-        f"by one, so W_up is an upper bound on {_SECOND_ORDER_TAIL} {_PROP10}"
+        "W_up * t^3 / r^2 with W_up >= W_2,rel = sum_{(i,j) in A} |c_i*c_j|*U_ij / 3 "
+        "+ sum_{(i,j) in A} c_i^2*|c_j| / 6, U_ij = min(S_i, D_i + D_j - |c_i|), "
+        "S_i = sum_{k > i} |c_k|, D_v = sum_{k: P_v*P_k = -P_k*P_v} |c_k|, "
+        "A = {(i,j): i < j, P_i*P_j = -P_j*P_i}; the nested mass is at most S_i and "
+        "D_i + D_j - |c_i| by symplectic XOR <= the sum of endpoint parities, so "
+        f"W_2 <= W_2,rel bounds {_SECOND_ORDER_TAIL} {_PROP10}"
     ),
 }
 _VARIANT_STEP_FORMULAS = {
@@ -245,7 +246,7 @@ class TrotterStepSelection:
             selection, zero for relaxed_prefix or reused structure.
         bound_variant: Selected Pauli-triangle expression, "exact_census" for
             the full pair/triple indicator structure or "relaxed_prefix" for
-            the second-order suffix relaxation. Order 1 uses "exact_census".
+            the second-order degree-capped suffix relaxation. Order 1 uses "exact_census".
         common_tau: Stored finite positive binary64 time unit. The exact
             target time at integer power p is p times its represented value.
         common_g: Greatest common divisor of the positive requested integer
@@ -782,15 +783,21 @@ def _binary64(value, name):
 # O(E) index storage. Triple structure takes O(wN) further work and O(F)
 # index storage (16E and 24F bytes with 64-bit indices).
 #
-# Relaxation. With S_i = sum_(k=i+1)^(p-1) a_k, all summands are
-# nonnegative, so replacing the nested indicator by one gives
-#   C12_triangle <= C12_rel = 4 sum_A a_i a_j S_i,
-#   W_2,rel = (1/3) sum_A a_i a_j S_i + (1/6) sum_A a_i^2 a_j >= W_2,
-# over exactly the range above, including k = j. The theorem's tail-norm
-# coefficient is at most W_2, so it is also at most W_2,rel, under the same
-# ordered Hermitian Pauli decomposition and pruning choice. Order one uses
-# only pair tests and needs no relaxation. Suffix sums are a reversed
-# cumulative sum, not total-prefix, which would cancel. For the same positive
+# Relaxation. Put S_i = sum_(k=i+1)^(p-1) a_k and
+# D_v = sum_(k:s_vk=1) a_k. The exact nested mass
+# M_ij = sum_(k>i) a_k*(s_ki XOR s_kj) is at most S_i. Symplectic
+# bilinearity also gives s_ki XOR s_kj <= s_ki+s_kj, hence M_ij <=
+# D_i+D_j-a_i: the second degree sum excludes i and s_ij=1. Its remainder
+# is nonnegative, j is still in the nested range, and no a_j is subtracted.
+# With U_ij = min(S_i,D_i+D_j-a_i),
+#   W_2,rel = (1/3) sum_A a_i a_j U_ij + (1/6) sum_A a_i^2 a_j,
+#   tail-norm coefficient <= W_2 <= W_2,rel <= W_2,suffix.
+# This uses one scalar degree vector and the pair table alone, under the
+# same ordered Hermitian Pauli decomposition and pruning choice. Order one
+# needs no relaxation. Degrees include earlier neighbors and the union
+# includes shared neighbors whose XOR cancels, so this remains a relaxation.
+# Suffix sums use a reversed cumulative sum, not total-prefix subtraction,
+# which would cancel. For the same positive
 # time and allowance, r_exact <= r_rel <= ceil(alpha*r_exact) with
 # alpha = sqrt(W_2,rel/W_2) when W_2 > 0. The order X,Y,Z with unit
 # magnitudes gives W_2 = 3/2 and W_2,rel = 13/6, and at t = 1, epsilon = 3/2
@@ -929,7 +936,15 @@ def coefficient_up(magnitudes, pairs, *, order, variant, triples=None, block=655
     """Return a rational upper bound on the selected Pauli-triangle W.
 
     variant is exact_census or relaxed_prefix. At order 1 both use A only.
-    At order 2 exact_census uses T, and relaxed_prefix uses all k>i.
+    At order 2 exact_census uses T, and relaxed_prefix uses
+    U_ij = min(S_i, D_i+D_j-a_i), with S_i = sum_{k>i} a_k and
+    D_v = sum_{k: P_v P_k = -P_k P_v} a_k. Symplectic bilinearity gives
+    s_{k,ij} = s_ki XOR s_kj <= s_ki+s_kj. Thus the exact nested mass over
+    k>i is at most S_i and D_i+D_j-a_i, since (i,j) anticommutes and the
+    range excludes i but includes j. The selected coefficient is
+    sum_A a_i*a_j*U_ij/3 + sum_A a_i**2*a_j/6, between the full triangle
+    coefficient and its pure suffix relaxation (CSTWZ
+    doi:10.1103/PhysRevX.11.011020, Prop. 10, Eq. (121)).
     Weights and reductions are outward. The power-of-two scale and the
     divisors 3 and 6 are combined as Fractions once after each reduction.
     This certifies W, without claiming exact evaluation of that W.
@@ -943,6 +958,14 @@ def coefficient_up(magnitudes, pairs, *, order, variant, triples=None, block=655
     monomials underflow after normalization. ``block`` is a scratch-size
     choice (``choose_census_block``), not a tolerance. The bound holds for
     every positive block size, and no p*p*p array is allocated.
+
+    Degree rows sum at most p-1 enclosed weights. _sum_factor encloses
+    each row's addition tree before publication. For a pair, the enclosed
+    D_j includes a_i, so upward D_j-a_i encloses a nonnegative remainder.
+    The subtraction, union sum and minimum remain outward and monotone in
+    the enclosed weights. A negative remainder violates the pair premise.
+    Degree weights are rebuilt for this term table, including a restricted
+    node's own magnitudes; only pair blocks are gathered.
     """
     a, e = scaled_magnitudes(magnitudes)
     if order not in (1, 2) or variant not in ("exact_census", "relaxed_prefix"):
@@ -953,6 +976,14 @@ def coefficient_up(magnitudes, pairs, *, order, variant, triples=None, block=655
     if order == 2 and variant == "relaxed_prefix" and len(a) > 1:
         raw = np.cumsum(a[:0:-1], dtype=np.float64)[::-1]
         suffix[:-1] = mul_up(raw, _sum_factor(len(a) - 1))
+        del raw
+    if order == 2 and variant == "relaxed_prefix":
+        degree = np.zeros(len(a), dtype=np.float64)
+        for start in range(0, len(pairs), block):
+            i, j = pairs[start:start + block].T
+            np.add.at(degree, i, a[j])
+            np.add.at(degree, j, a[i])
+        degree = mul_up(degree, _sum_factor(max(1, len(a) - 1)))
     part1, part24, part12 = [], [], []
     for start in range(0, len(pairs), block):
         i, j = pairs[start:start + block].T
@@ -962,7 +993,11 @@ def coefficient_up(magnitudes, pairs, *, order, variant, triples=None, block=655
         else:
             part24.append(sum_up(mul_up(ij, a[i])))
             if variant == "relaxed_prefix":
-                part12.append(sum_up(mul_up(ij, suffix[i])))
+                remainder = np.nextafter(degree[j] - a[i], np.inf)
+                union = np.nextafter(degree[i] + remainder, np.inf)
+                cap = np.minimum(suffix[i], union)
+                part12.append(sum_up(mul_up(ij, cap)))
+                del remainder, union, cap
     if order == 1:
         return Fraction(sum_up(part1)) * Fraction(2) ** (2 * e)
     if variant == "exact_census":
@@ -999,14 +1034,17 @@ def census_work(p, q, *, order, variant, pairs, nested=0, triples=0):
     evaluated, with linear passes charged separately:
 
         G_1 = wP,  G_C = wP,  G_D = w(P+N);
-        V_1 = E,   V_C = p+2E, V_D = E+F.
+        V_1 = E,   V_C = 2p+4E, V_D = E+F.
 
     Here C is relaxed_prefix and D exact_census at order 2, E = ``pairs``,
     N = ``nested`` and F = ``triples``. Before any structure exists use E = P
     and N = F = J (``census_sizes``). Before T exists use V_D <= E+N, that
     is F = N. The fixed number of float products, outward operations and
     additions per contribution is bundled in a visit. This is an explicit
-    engineering convention, an admission proxy and not a runtime
+    engineering convention: the suffix pass and outward degree publication
+    cost 2p visits, endpoint-weight additions 2E, and the two contribution
+    reductions 2E. Neighbor subtraction, union and min are bundled into
+    each contribution visit. It is an admission proxy and not a runtime
     measurement. A caller adds its own linear passes, for QPE ``2*p*q``.
     """
     if min(p, q, pairs, nested, triples) < 0:
@@ -1018,7 +1056,7 @@ def census_work(p, q, *, order, variant, pairs, nested=0, triples=0):
     if order == 1:
         return w * total_pairs + pairs
     if variant == "relaxed_prefix":
-        return w * total_pairs + p + 2 * pairs
+        return w * total_pairs + 2 * p + 4 * pairs
     return w * (total_pairs + nested) + pairs + triples
 
 
@@ -1027,23 +1065,29 @@ def census_bytes(p, q, pairs, triples, block, *, order, variant, held=0):
 
     With w = ceil(q/64), E = ``pairs``, F = ``triples``, b = ``block`` and
     H0 = 65536 bytes of scalar bookkeeping, ndarray headers, iterators and
-    fixed sort stacks on a 64-bit CPython/NumPy stack whose versions were
-    not recorded:
+    fixed sort stacks on the qualified 64-bit CPython/NumPy stack:
 
         B = B_held + 80p + 16pw + 32E + 48F + H_chunks
             + max(R(p,w)+H0, C(p,E,F,b)),
         R(p,w) = 32pw+64p+32w,
         H_chunks = 384[p+1 + I_D(E+1)],
-        C(p,E,F,b) = 56p+64b+48H(b)+H0,
+        C_1,D(p,E,F,b) = 56p+64b+48H(b)+H0,
+        C_C(p,E,b) = 72p+96b+48H(b)+H0,
 
-    with H(b) = ceil(E/b) at order 1, 2 ceil(E/b) for relaxed_prefix and
+    C is relaxed_prefix and D exact_census at order two, with
+    H(b) = ceil(E/b) at order 1, 2 ceil(E/b) for relaxed_prefix and
     ceil(E/b)+ceil(F/b) for exact_census at order 2, and I_D = 1 only for
     the order-2 exact_census builder. F = 0 for order one or relaxed_prefix.
     80p prices the census inputs formed from borrowed labels and
     coefficients, 16pw the masks, 32E and 48F pair and triple storage during
     concatenation, R one row test (never a p^3 broadcast cube), 384 bytes a
-    chunk object, 56p the linear contraction scratch, 64b one block's
-    gathers and products, and 48 bytes each partial sum kept between blocks.
+    chunk object, 56p the order-one/full linear contraction scratch, 64b
+    their block gathers and products, and 48 bytes each partial sum kept
+    between blocks. Relaxed order two adds 16p for the degree vector and
+    simultaneous outward publication, and 32b for bounded endpoint gathers,
+    remainder, union and minimum while pair products remain live. The raw
+    degree vector is released on publication; no E-sized degree gather is
+    made. H0 follows the qualified CPython 3.12.14 / NumPy 2.5.2 convention.
     Before any structure work use E = P and, for D, F = J. After the pairs
     exist, F = N reserves the triple scan. H0 is an engineering allowance, not a
     universal interpreter or process-RSS theorem.
@@ -1064,7 +1108,8 @@ def census_bytes(p, q, pairs, triples, block, *, order, variant, held=0):
         partials = 2*pair_blocks
     objects = 384*(p+1+(pairs+1 if exact2 else 0))
     row = 32*p*w+64*p+32*w+65536
-    contraction = 56*p+64*block+48*partials+65536
+    contraction = ((72*p+96*block) if order == 2 and not exact2 else (56*p+64*block))
+    contraction += 48*partials+65536
     return (held+80*p+16*p*w+32*pairs+48*F+objects
             +max(row, contraction))
 
@@ -1102,8 +1147,11 @@ def _pauli_bound_coefficient_from_terms(
     sum_T |c_i*c_j*c_k|/3 + sum_A |c_i|**2*|c_j|/6. Here T contains
     (i,j,k) with (i,j) in A, k>i, and P_k anticommuting with P_i*P_j.
     The range includes k=j. The relaxed_prefix variant replaces the
-    inner sum over such k by the full suffix sum of coefficient magnitudes.
-    It therefore gives an upper bound using pair structure alone.
+    inner sum over such k by U_ij = min(S_i, D_i+D_j-|c_i|), with S_i the
+    full suffix mass and D_v the mass of all anticommuting neighbors of v.
+    Symplectic XOR is at most the sum of endpoint parities, so the nested
+    mass is at most D_i+D_j-|c_i| as well as S_i. This gives an upper bound
+    using pair structure alone, rebuilding degrees from each term table.
 
     These are triangle expansions of Childs et al.,
     doi:10.1103/PhysRevX.11.011020, Eqs. (120)-(121). The selected
@@ -1204,8 +1252,8 @@ def _bound_coefficient_evaluation(
     block limits coefficient-reduction scratch and does not limit the
     stored index population. If the requested expression does not fit, the
     helper raises before the unadmitted stage. At order two, the explicitly
-    selected suffix relaxation uses pair structure and a potentially larger
-    error coefficient.
+    selected degree-capped suffix relaxation uses pair structure and a
+    potentially larger error coefficient.
 
     Admission is staged. With p terms on q qubits, the operator supplies p
     and q before ``hamiltonian.to_list()``. The label/term conversion
@@ -1331,12 +1379,13 @@ def trotter_bound_coefficient(
             2 (second-order Suzuki).
         bound_variant (str): Default `"exact_census"`, the full
             Pauli-triangle expression. At order 2, `"relaxed_prefix"` selects
-            the suffix relaxation, which needs pair tests only and can give a
-            larger bound.
-        max_work (int): Default `1_000_000_000`. Work limit of the pair and
-            triple tests.
+            the degree-capped suffix relaxation, which needs pair tests only
+            and can give a larger bound.
+        max_work (int): Default `1_000_000_000`. Work limit of label
+            preparation, pair/triple tests and coefficient contraction.
         max_bytes (int): Default 10 GB (decimal, `10_000_000_000` bytes).
-            Byte limit of the tests and their index tables.
+            Byte limit of label conversion, index tables and bounded
+            coefficient-reduction scratch.
 
     Returns:
         coefficient (float): `W_up`, rounded upward to binary64.
@@ -1425,11 +1474,12 @@ def evaluate_trotter_bound(
         order (int): Default `1`. Product-formula order, 1 (Lie-Trotter) or
             2 (second-order Suzuki).
         bound_variant (str): Default `"exact_census"`, or `"relaxed_prefix"`
-            for the second-order suffix relaxation.
-        max_work (int): Default `1_000_000_000`. Work limit of the pair and
-            triple tests.
+            for the second-order degree-capped suffix relaxation.
+        max_work (int): Default `1_000_000_000`. Work limit of label
+            preparation, pair/triple tests and coefficient contraction.
         max_bytes (int): Default 10 GB (decimal, `10_000_000_000` bytes).
-            Byte limit of the tests and their index tables.
+            Byte limit of label conversion, index tables and bounded
+            coefficient-reduction scratch.
 
     Returns:
         bound (float): The total bound, rounded upward to binary64.
@@ -1502,12 +1552,13 @@ def select_trotter_step_count(
             2 (second-order Suzuki).
         bound_variant (str): Default `"exact_census"`, the full
             Pauli-triangle expression. At order 2, `"relaxed_prefix"` selects
-            the suffix relaxation, which needs pair tests only and can give a
-            larger bound.
-        max_work (int): Default `1_000_000_000`. Work limit of the pair and
-            triple tests.
+            the degree-capped suffix relaxation, which needs pair tests only
+            and can give a larger bound.
+        max_work (int): Default `1_000_000_000`. Work limit of label
+            preparation, pair/triple tests and coefficient contraction.
         max_bytes (int): Default 10 GB (decimal, `10_000_000_000` bytes).
-            Byte limit of the tests and their index tables.
+            Byte limit of label conversion, index tables and bounded
+            coefficient-reduction scratch.
 
     Returns:
         selection (TrotterStepSelection): `selection.step_count` is the

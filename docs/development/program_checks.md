@@ -111,7 +111,7 @@ Each kept expression and declared width evaluates once per distinct binding cont
 
 The limits table, with defaults and the error each refusal raises, is in [Describe a circuit as a Program](../ir.md#limits). This section records how the check counts.
 
-`AdmissionLimits` caps top-level definitions and declarations (`max_definitions`, default 16384), graph depth (`max_depth`, default and maximum 128), the kept record and tuple field inventory and the context evaluation and lifecycle work (each capped by `max_steps`, default 100000), and integer result bit length (`max_integer_bits`, default 4096). Multiplication checks prospective integer growth before constructing an oversized result. Work depends on kept structure and bounded distinct contexts, not on Repeat multiplicity. A heavily shared graph with many different lifecycle contexts can reach `max_steps` and reject explicitly.
+`AdmissionLimits` caps top-level definitions and declarations (`max_definitions`, default 1000000), graph depth (`max_depth`, default and maximum 128), the kept record and tuple field inventory and the context evaluation and lifecycle work (each capped by `max_steps`, default 100000), and integer result bit length (`max_integer_bits`, default 4096). Multiplication checks prospective integer growth before constructing an oversized result. Work depends on kept structure and bounded distinct contexts, not on Repeat multiplicity. A heavily shared graph with many different lifecycle contexts can reach `max_steps` and reject explicitly.
 
 A `max_definitions` refusal raises `AdmissionDefinitionsExceeded` with the complete count and the ceiling. Both `max_steps` refusals raise `AdmissionStepsExceeded`, a ValueError subclass in `ir/validation.py` that carries the refused stage, its count and the ceiling. Raised inside Program construction, each reaches the caller wrapped in Pydantic's ValidationError, whose `errors()` entry keeps it as `ctx["error"]`. The kept record and tuple field inventory is counted to its end before any table is built, so its count is complete and a `max_steps` of that value passes the inventory. The admission-work count is the one reached when the check stopped, a lower bound. Later admission, preparation and lowering can need more than either count. A Method whose `max_admission_steps` field sets the ceiling (QLS, FixedGCIM, ExpectationMethod, LCHS) refuses naming that field, as the [planning work limit](#planning-work-limit) describes.
 
@@ -119,7 +119,7 @@ Material collection work is charged (counted against `max_steps`) before buildin
 
 ## Planning work limit {#planning-work-limit}
 
-`ExpectationMethod`, `LCHS`, `FixedGCIM` and `QLS` have a field `max_admission_steps`, default 1,000,000, which sets `AdmissionLimits.max_steps` of each Program the Method builds. It bounds two counts of planning work, which is NWQLib's bookkeeping while it checks a Program's structure, not quantum operations, CPU time or bytes:
+`ExpectationMethod`, `LCHS` and `QLS` have `max_admission_steps=1_000_000` by default, while `FixedGCIM` uses `10_000_000`. The field sets `AdmissionLimits.max_steps` of each Program the Method builds. It bounds two counts of planning work, NWQLib's bookkeeping while checking a Program's structure, independently of quantum operations, CPU time and bytes:
 
 - the kept field slots of the Program, and
 - the admission work of one check of that Program (its expression evaluations and lifecycle steps).

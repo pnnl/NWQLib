@@ -1,22 +1,23 @@
 #!/usr/bin/env python
-"""Error-budget figure and table values of the LCHS and QLS guides.
+"""LCHS error-budget figure and table values, with optional QLS values.
 
-Run from the repository root after ``python -m pip install -e ".[aer,notebook]"``::
+Run from the repository root after ``python -m pip install -e ".[notebook]"``::
 
     python docs/scripts/error_budget_figures.py
 
 The script writes ``docs/assets/lchs_error_budget.svg`` and prints every
-value of the error-budget sections of ``docs/algorithms/lchs.md`` and
-``docs/algorithms/qls.md``, followed by the versions that produced them.
+value of the error-budget section of ``docs/algorithms/lchs.md``, followed
+by the numerical environment. ``--preview PATH`` saves the same plot as PNG.
 
 LCHS: heat flow ``du/dt = -L u`` with ``L = (2I - S - S†)/4`` on a ring of
 ``2**q`` sites, a unit point source at site 0 and ``T = 1``, planned with
 ``approximation_tolerance=0.005`` and ``trotter_synthesis_tolerance=0.005``
 at every q of ``HEAT_FLOW_SIZES``. Planning and resource estimation build
-no circuit. At ``MEASURED_Q`` the plan is also solved once on the local Aer
-statevector and compared with ``scipy.linalg.expm``.
+no circuit. At ``ILLUSTRATION_Q`` the ideal finite-branch physical action is
+evaluated with 8-by-8 matrices and compared with ``scipy.linalg.expm``.
 
-QLS: the first example of the guide, ``A = [[1.1, .1], [.1, .9]]`` and
+With ``--qls`` and the Aer extra, the first QLS example,
+``A = [[1.1, .1], [.1, .9]]`` and
 ``b = [1, .25]`` with ``QLS()``, solved once on the local Aer statevector
 and checked with ``QLSVerification``. Then the compact ring of the guide's
 "Plan and estimate beyond simulation" example is planned and estimated for
@@ -26,13 +27,12 @@ every tolerance of ``QLS_TOLERANCES`` at every q of ``QLS_SIZES``.
 from __future__ import annotations
 
 import argparse
+from math import fsum
 import platform
 import sys
 from pathlib import Path
 
 import numpy as np
-import qiskit
-import qiskit_aer
 import scipy
 from scipy.linalg import expm
 
@@ -50,7 +50,7 @@ CX = ResourceContext(basis="cx")
 SEED = 7
 
 HEAT_FLOW_SIZES = (3, 10, 20, 40, 100)  # system qubits q of the ring
-MEASURED_Q = 3                          # 12 qubits in total, simulated once
+ILLUSTRATION_Q = 3                     # ideal finite-branch action on eight coordinates
 TARGET = 0.01                           # sum of the two tolerances of LCHS_METHOD
 LCHS_METHOD = LCHS(hamiltonian_evolution_backend="trotter", approximation_tolerance=0.005,
                    trotter_steps=None, trotter_synthesis_tolerance=0.005)
@@ -60,7 +60,7 @@ QLS_TOLERANCES = (0.1, 0.01, 0.001, 0.0001)
 
 # Okabe-Ito colors, distinguishable with the common color-vision deficiencies.
 COLORS = {"kernel_approximation": "#56B4E9", "k_quadrature": "#009E73",
-          "trotter_synthesis": "#D55E00", "measured": "#000000"}
+          "trotter_synthesis": "#D55E00", "illustration": "#000000"}
 
 
 def heat_flow(q):
@@ -80,7 +80,7 @@ def fact_values(item):
 
 
 def lchs_values():
-    """Plan and estimate the heat flow at every size, and solve it once at MEASURED_Q."""
+    """Plan the heat flow and evaluate its small ideal finite-branch action."""
     rows = []
     for q in HEAT_FLOW_SIZES:
         selected = plan(heat_flow(q), method=LCHS_METHOD, seed=SEED)
@@ -95,24 +95,41 @@ def lchs_values():
             steps=selected.reconstruction.step_counts[0],
             cx=number(cx.fact.value), cx_kind=cx.interpretation,
         ))
-    measured_row = next(row for row in rows if row["q"] == MEASURED_Q)
-    result = solve(measured_row["plan"])
-    n = 2**MEASURED_Q
-    shift = np.roll(np.eye(n), 1, axis=0)  # S e_j = e_(j+1 mod n)
-    reference = expm(-(2 * np.eye(n) - shift - shift.T) / 4)[:, 0]  # exp(-L T) e_0 with T = 1
-    measured = float(np.linalg.norm(result.solution - reference))
-    return rows, measured
+    illustration_row = next(row for row in rows if row["q"] == ILLUSTRATION_Q)
+    coefficients = resolve_lchs_coefficient_plan(illustration_row["plan"])
+    r = illustration_row["steps"]
+    n = 2**ILLUSTRATION_Q
+    identity = np.eye(n)
+    shift = np.roll(identity, 1, axis=0)  # S e_j = e_(j+1 mod n)
+    even = identity[np.arange(n) ^ 1]
+    odd = shift @ even @ shift.T
+    terms = []
+    # The emitted E-half/O-full/E-half product and separate identity phase
+    # implement the selected heat branch. Raw complex weights recover the
+    # physical vector without division by their L1 mass.
+    for node, coefficient in zip(coefficients.nodes, coefficients.coefficients, strict=True):
+        angle = node * .25 / r
+        half = np.cos(angle / 2) * identity + 1j * np.sin(angle / 2) * even
+        full = np.cos(angle) * identity + 1j * np.sin(angle) * odd
+        step = half @ full @ half
+        terms.append(coefficient * np.exp(-.5j * node)
+                     * np.linalg.matrix_power(step, r)[:, 0])
+    ideal = np.array([complex(fsum(v[j].real for v in terms),
+                             fsum(v[j].imag for v in terms)) for j in range(n)])
+    reference = expm(-(2 * identity - shift - shift.T) / 4)[:, 0]
+    ideal_discrepancy = float(np.linalg.norm(ideal - reference))
+    return rows, ideal_discrepancy
 
 
-def print_lchs(rows, measured):
-    """Print the LCHS budget table, the measured error and the scaling table."""
+def print_lchs(rows, ideal_discrepancy):
+    """Print the LCHS bounds, ideal-action discrepancy and scalar size table."""
     row = rows[-1]
     coefficients = resolve_lchs_coefficient_plan(row["plan"])
     rule = coefficients.quadrature
     bounds, steps = row["bounds"], row["steps"]
     strang = bounds["trotter_synthesis"]
     total = bounds["kernel_approximation"] + bounds["k_quadrature"] + strang
-    print("LCHS heat flow, budget at every q (shown for q = %d)" % row["q"])
+    print("LCHS heat flow, budget for q >= 3 (shown for q = %d)" % row["q"])
     print("  kernel", coefficients.resolved_lchs_kernel.implementation,
           coefficients.resolved_lchs_kernel.parameters)
     print("  cutoff K", f"{rule.range_k:.6g}")
@@ -126,7 +143,7 @@ def print_lchs(rows, measured):
     print("  Strang bound at r - 1 and r", f"{strang * steps**2 / (steps - 1)**2:.6g}",
           f"{strang:.6g}")
     print("  sum of the three bounds", f"{total:.6g}", "target", TARGET)
-    print(f"  measured L2 error at q = {MEASURED_Q}: {measured!r}")
+    print(f"  ideal finite-branch L2 discrepancy at q = {ILLUSTRATION_Q}: {ideal_discrepancy!r}")
     print("LCHS heat flow, sizes: q, total qubits, branches (slots), steps, sum of bounds, CX")
     for row in rows:
         b = row["bounds"]
@@ -136,8 +153,8 @@ def print_lchs(rows, measured):
     return bounds, total, steps
 
 
-def write_lchs_figure(bounds, total, steps, measured, path):
-    """Draw the stacked bounds against the target, with the measured error beside them."""
+def write_lchs_figure(bounds, total, steps, ideal_discrepancy, path, preview=None):
+    """Draw the bounds and ideal-action discrepancy, with an optional PNG preview."""
     import matplotlib
 
     matplotlib.use("Agg")
@@ -162,12 +179,14 @@ def write_lchs_figure(bounds, total, steps, measured, path):
         left += value
     handles.append(ax.axvline(TARGET, color="black", linestyle="--", linewidth=1.2,
                               label=f"Target {TARGET:g}"))
-    handles.extend(ax.plot([measured], [0], linestyle="none", marker="D", markersize=7,
-                           color=COLORS["measured"],
-                           label=f"Measured at q = {MEASURED_Q}: {measured:.3g}"))
-    ax.annotate(f"{measured:.3g}", (measured, 0), textcoords="offset points", xytext=(8, -4))
+    handles.extend(ax.plot([ideal_discrepancy], [0], linestyle="none", marker="D", markersize=7,
+                           color=COLORS["illustration"],
+                           label=f"Ideal finite-branch discrepancy, q = {ILLUSTRATION_Q}: "
+                                 f"{ideal_discrepancy:.3g}"))
+    ax.annotate(f"{ideal_discrepancy:.3g}", (ideal_discrepancy, 0),
+                textcoords="offset points", xytext=(8, -4))
     ax.set(xlim=(0, 0.0115), ylim=(-0.6, 1.6), yticks=[0, 1],
-           yticklabels=[f"Measured, q = {MEASURED_Q}", "Bounds, every q"],
+           yticklabels=[f"Ideal finite-branch action, q = {ILLUSTRATION_Q}", "Bounds, q ≥ 3"],
            xlabel="L2 error of the physical vector, unit input",
            title=f"Sum of the three bounds: {total:.4g}")
     # Matplotlib fills legend columns first, so this order puts the three bounds in the first row.
@@ -176,6 +195,11 @@ def write_lchs_figure(bounds, total, steps, measured, path):
                ncol=3, fontsize=8.5, loc="outside lower center", frameon=False)
     path.parent.mkdir(parents=True, exist_ok=True)
     fig.savefig(path, format="svg", facecolor="white", metadata={"Date": None})
+    path.write_text("\n".join(line.rstrip() for line in path.read_text(encoding="utf-8").splitlines())
+                    + "\n", encoding="utf-8")
+    if preview is not None:
+        preview.parent.mkdir(parents=True, exist_ok=True)
+        fig.savefig(preview, format="png", dpi=160, facecolor="white")
     plt.close(fig)
 
 
@@ -188,6 +212,9 @@ def qls_problem(q):
 
 def print_qls():
     """Print the QLS first-example budget and the tolerance table of the compact ring."""
+    import qiskit
+    import qiskit_aer
+
     result = solve(LinearSystem(A=[[1.1, .1], [.1, .9]], b=[1., .25]), method=QLS(), seed=SEED)
     rec = result.plan.reconstruction
     receipt, _ = result.verify(checks=QLSVerification(comparisons=("inverse_relative_error",)))
@@ -219,20 +246,23 @@ def print_qls():
                   f"{rec.phase_error:.2g}",
                   workload.quantity("logical_width", location="logical_device").fact.value.numerator,
                   f"{number(cx.fact.value):,.0f}", cx.interpretation)
+    print(f"QLS SDKs: Qiskit {qiskit.__version__}, Aer {qiskit_aer.__version__}")
 
 
 def main(argv=None):
-    """Write the LCHS figure and print the values of both guides."""
+    """Write the LCHS figure and optionally execute the QLS calculation."""
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     parser.add_argument("--figure", type=Path, default=FIGURE, help="SVG path to write")
+    parser.add_argument("--preview", type=Path, help="PNG preview of the same figure")
+    parser.add_argument("--qls", action="store_true", help="also run the QLS guide calculations")
     args = parser.parse_args(argv)
-    rows, measured = lchs_values()
-    bounds, total, steps = print_lchs(rows, measured)
-    write_lchs_figure(bounds, total, steps, measured, args.figure)
+    rows, ideal_discrepancy = lchs_values()
+    bounds, total, steps = print_lchs(rows, ideal_discrepancy)
+    write_lchs_figure(bounds, total, steps, ideal_discrepancy, args.figure, args.preview)
     print("wrote", args.figure)
-    print_qls()
+    if args.qls:
+        print_qls()
     print(f"Python {platform.python_version()}, NumPy {np.__version__}, SciPy {scipy.__version__}, "
-          f"Qiskit {qiskit.__version__}, Aer {qiskit_aer.__version__}, "
           f"{platform.system()} {platform.machine()}")
     return 0
 

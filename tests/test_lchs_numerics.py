@@ -237,7 +237,7 @@ def test_shared_census_admits_the_relaxed_expression_or_refuses_before_its_struc
 
     Forty labels on six qubits at order 2: the exact expression's census
     bytes (error_budget.census_bytes at block 1 with F = N) exceed the limit
-    while the suffix relaxation fits, so time_independent_terms.
+    while the degree-capped suffix relaxation fits, so time_independent_terms.
     _node_bound_coefficients records relaxed_prefix without a triple table.
     Below the relaxed envelope it refuses before any pair or triple structure.
     """

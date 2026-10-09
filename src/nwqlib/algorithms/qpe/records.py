@@ -313,7 +313,7 @@ class QPEReconstruction(Record):
             performed, zero for ``relaxed_prefix``.
         bound_variant: Selected Pauli-triangle expression, "exact_census" for
             the full pair/triple indicator structure or "relaxed_prefix" for
-            the second-order suffix relaxation. None without a census.
+            the second-order degree-capped suffix relaxation. None without a census.
         bound_coefficient: Exact (numerator, denominator) of the upper
             coefficient W_up of the selected bound_variant expression,
             evaluated with scaled binary64 products and sums rounded upward

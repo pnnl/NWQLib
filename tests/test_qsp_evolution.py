@@ -46,9 +46,9 @@ from nwqlib.subroutines.qsp.phases import (
     chebyshev_norming_sup_bound,
 )
 
-# Four libm terms as large as lgamma(85) ~= 291 give a roughly 2.6e-13
-# relative ceiling; 1e-11 leaves about 40x platform headroom and remains
-# at least nine orders below a formula-scale regression.
+# These cases have H<=250, so the logarithmic terms have scale at most
+# lgamma(252)<1150. A few binary64 rounding errors give order-1e-12 relative
+# error after exp; 1e-11 keeps platform headroom without masking the formula.
 JACOBI_ANGER_ANALYTIC_REMAINDER_RTOL = 1.0e-11
 
 
@@ -382,7 +382,9 @@ def test_jacobi_anger_degree_anchors_with_recorded_slack() -> None:
     flip the integers (FRAMEWORK platform-quantities rule).
     """
 
-    for tau, epsilon, expected_degree in ((1.5, 1.0e-6, 8), (0.72, 1.0e-2, 3)):
+    # The 31.4 anchor distinguishes the bounded-horizon minimum degree from
+    # the degree permitted by the first passing terminal.
+    for tau, epsilon, expected_degree in ((31.4, 1.0e-6, 49), (0.72, 1.0e-2, 3)):
         expansion = jacobi_anger_expansion(tau, epsilon)
         assert expansion.tail_slack >= 2.0
         assert expansion.degree == expected_degree
@@ -409,10 +411,11 @@ def test_jacobi_anger_records_complete_finite_and_analytic_tail(
     terminal = expansion.analysis_terminal
     first = terminal + 1
     ratio = tau / (2.0 * (terminal + 2))
+    # Reconstruct the real factorial/geometric suffix derived by
+    # evolution._analytic_jacobi_anger_remainder, using SciPy's gamma kernel.
     log_remainder = (
-        first * np.log(tau / 2.0)
+        first * (np.log(tau) - np.log(2.0))
         - scipy.special.gammaln(first + 1)
-        + tau**2 / (4.0 * (first + 1))
         - np.log1p(-ratio)
     )
     magnitudes = np.abs(scipy.special.jv(np.arange(terminal + 1), tau))
@@ -424,19 +427,6 @@ def test_jacobi_anger_records_complete_finite_and_analytic_tail(
         abs=0.0,
     )
     shared_remainder = expansion.analytic_infinite_tail_bound / 4.0
-    previous_terminal = terminal - 1
-    previous_first = previous_terminal + 1
-    previous_ratio = tau / (2.0 * (previous_terminal + 2))
-    previous_log_remainder = (
-        previous_first * np.log(tau / 2.0)
-        - scipy.special.gammaln(previous_first + 1)
-        + tau**2 / (4.0 * (previous_first + 1))
-        - np.log1p(-previous_ratio)
-    )
-    previous_best_tail = 2.0 * abs(float(scipy.special.jv(previous_terminal, tau))) + 4.0 * float(
-        np.exp(previous_log_remainder)
-    )
-    assert previous_best_tail > epsilon
     even_finite = 2.0 * float(
         np.sum(magnitudes[np.arange(expansion.cos_degree + 2, terminal + 1, 2)])
     )

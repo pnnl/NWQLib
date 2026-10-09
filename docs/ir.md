@@ -115,9 +115,9 @@ The structural check bounds its own work and memory, so it refuses a very large 
 
 | Limit | Default | What it counts | Error raised | Method field that raises it |
 | --- | --- | --- | --- | --- |
-| `max_definitions` | 16384 | Definitions, expressions, parameters, registers, classical values and signatures, the complete count | `AdmissionDefinitionsExceeded` | None. Build a smaller construction |
+| `max_definitions` | 1000000 | Definitions, expressions, parameters, registers, classical values and signatures, the complete count | `AdmissionDefinitionsExceeded` | None. Build a smaller construction |
 | `max_depth` | 128, also the largest allowed value | Longest chain of references between definitions | `ValueError`, "definition depth exceeds admission limit" | None |
-| `max_steps` | 100000 | Two counts, each against this limit: the fields stored in the Program (stage `"stored field inventory"`), counted completely, and the planning work of one check (stage `"admission work"`), counted until the check stops | `AdmissionStepsExceeded`, naming the stage | `max_admission_steps` of `ExpectationMethod`, `LCHS`, `FixedGCIM` and `QLS`, default 1,000,000 |
+| `max_steps` | 100000 | Two counts, each against this limit: the fields stored in the Program (stage `"stored field inventory"`), counted completely, and the planning work of one check (stage `"admission work"`), counted until the check stops | `AdmissionStepsExceeded`, naming the stage | `max_admission_steps`, default 1,000,000 for `ExpectationMethod`, `LCHS` and `QLS`, and 10,000,000 for `FixedGCIM` |
 | `max_integer_bits` | 4096 | Bit length of every integer value and computed integer | `ValueError`, "integer growth exceeds max_integer_bits" | None |
 
 A Method with a `max_admission_steps` field reports a refusal as a `ValueError` that names the field, the refused stage and its count. [Planning work limit](development/program_checks.md#planning-work-limit) explains what the count means and how far to raise the field. The limits count NWQLib's checking work, not quantum operations, and `Repeat` counts are not expanded, so binding a `Repeat` count to one trillion costs no more to check than binding it to one. Raising a limit lets the check accept a larger Program and runs nothing.

@@ -101,7 +101,7 @@ print(np.linalg.norm(refined.solution - reference))
 5.3260455987202175e-05
 ```
 
-For this input, the finer construction uses 396 nodes and has absolute L2 discrepancy about `.0000532605`. Its dense quantum circuit would need 512 address slots and ten total qubits, which exceeds the default `max_dense_select_slots=256`, so this comparison evaluates the finite sum classically. These two observations do not establish monotonic convergence for every input. Each branch of the dense SELECT is a classically computed matrix exponential. Larger systems need a supported structured construction with its own limit check.
+For this input, the finer construction uses 396 nodes and has absolute L2 discrepancy about `.0000532605`. This comparison evaluates its finite sum classically. A dense quantum construction needs 512 address slots and ten total qubits, within the default `max_dense_select_slots=4096`. These two observations do not establish monotonic convergence for every input. Each branch of the dense SELECT is a classically computed matrix exponential. Larger systems need a supported structured construction with its own limit check.
 
 ## See the cost before running {#inspect-or-select-work-before-running-it}
 

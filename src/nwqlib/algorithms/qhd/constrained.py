@@ -114,7 +114,7 @@ from ._durable import (
     unrecoverable,
 )
 from .grid import OneHotGrid
-from .objective import ObjectiveDecomposer, centered_objective, expansion_centers, monomial_bound, node_count
+from .objective import ObjectiveDecomposer, centered_objective, expansion_centers, expansion_term_charge, node_count
 from .potential import coerce_real_scalar
 from .refinement import _refine, check_refinement_options
 from .refinement_records import BoxRefinement, RefinementLevel
@@ -423,15 +423,18 @@ def _setup(problem, qhd, options, refinement=None, stored=None):
     ``ConstraintPreprocessing`` records and the slack representation reads
     (``_round_problem``).
 
-    The monomial count of each expansion (``objective.monomial_bound``), the
+    The nominal term charge of each expansion (``objective.expansion_term_charge``), the
     table work ``K**|A| (N_A + |A|)`` of each support with N_A tree nodes, as
     QHD planning counts it (``QHD._admit_symbolic_work``), the
     work ``K**|S_j| (N_j + |S_j|)`` for each distinct supplied summand
     scanned on its support S_j, any additional whole-term fallback work
     ``K**|S| (N + |S|)``, and every later evaluation by the layer are admitted
-    against ``qhd.max_work`` before the work they count
-    (``_admit_layer_work``). Write C for the work of evaluating f and every
-    kept constraint at one point, ``C = sum_t (N_t + d)`` over those terms t
+    against ``qhd.max_work`` before their respective stages
+    (``_admit_layer_work``). The expansion charge bounds term count only for
+    numeric constants, symbols, Add, Mul and nonnegative integer Pow; general
+    SymPy rewriting work and storage are outside it. Write C for the work of
+    evaluating f and every kept constraint at one point,
+    ``C = sum_t (N_t + d)`` over those terms t
     with ``N_t`` tree nodes, and ``a = 2`` for ``mode_or_mean`` and 1
     otherwise. Without box refinement (``refinement`` None) a round evaluates
     f, h and g at its point and, for ``mode_or_mean``, at the mean, and
@@ -569,14 +572,14 @@ def _setup(problem, qhd, options, refinement=None, stored=None):
                       feasibility, complementarity, unavailable, check_evaluations, check_work,
                       tuple(symbols[j] for j in kept))
     centers = expansion_centers(box)
-    # Admit every expansion, support table and structurally requested summand scan with the reserved
-    # round work before evaluation. The later range check admits any further scans before they run.
+    # Charge each expansion nominally, then admit support tables and requested scans with the
+    # reserved round work before evaluation. Later range checks admit further scans before they run.
     check_work = check_evaluations = 0
     decompositions = []
     for term in terms:
         centered = centered_objective(term.expression, variables, centers)
         try:
-            check_work += monomial_bound(centered,
+            check_work += expansion_term_charge(centered,
                                          lambda count: _admit_layer_work(qhd, options, check_work + count, round_work,
                                                                          lower_bound=True))
         except ValueError as error:
@@ -1065,12 +1068,14 @@ def _inequality_range(constant, tables, scale):
 
 
 def _admit_layer_work(qhd, options, check_work, round_work, *, lower_bound=False, grid=None, scans=()):
-    """Raise before the layer's own work would exceed ``qhd.max_work``, or a requested evaluation ``qhd.max_bytes``.
+    """Admit the layer's nominal work total and each requested evaluation's bytes.
 
-    The check of _setup counts one unit per monomial of each term's
-    expansion (objective.monomial_bound) and K**|A| (N_A + |A|) for each
+    The check of _setup uses the nominal expansion term charge
+    (objective.expansion_term_charge) and K**|A| (N_A + |A|) for each
     support table with N_A tree nodes (objective.node_count), as QHD
     planning counts its tables (QHD._admit_symbolic_work). Each
+    expansion charge bounds formal term count for the helper's polynomial
+    grammar, not general SymPy preprocessing work or storage. Each
     original-summand scan costs K**|S_j| (N_j + |S_j|), using its supplied
     tree and support. A scan shared by structural coverage and the range
     check runs and is counted once. All scans in each requested batch are
@@ -1111,19 +1116,19 @@ def _admit_layer_work(qhd, options, check_work, round_work, *, lower_bound=False
 
 
 def _admitted_bounds(qhd, options, refinement, execution, kept):
-    """Return ``(work, bytes)``, the host work and array bytes that the run can admit, fixed before its first round.
+    """Return ``(work, bytes)``, the nominal category allowances fixed before the first round.
 
     QHD planning admits its work in categories, each at most W =
     ``qhd.max_work`` units and B = ``qhd.max_bytes`` bytes. An ordinary Plan
-    has at most four category envelopes: the symbolic expansion, whose
-    monomial count is admitted with 16 bytes per monomial
+    has at most four category envelopes: the nominal symbolic term charge,
+    admitted with 16 nominal bytes per term
     (``QHD._admit_symbolic_work``), one running total of the initial
     state's evaluation and the table, compiled-block and schedule-integral
     work with its byte allowance (the same owner and ``QHD.plan``), the
     optional kept state with 16 bytes per amplitude (``QHD.plan``), and the
     classical evolution or the native construction
     (``QHD._host_construction``, ``QHD._select_native``). "Four" counts
-    category envelopes, not calls of ``QHD._admit``: the recursive monomial
+    category envelopes, not calls of ``QHD._admit``: the recursive term
     checks and the checks of successive running totals call it many times,
     and their intermediate arguments are not separate work populations. The
     initial-state check that ``QHD.plan`` makes before evaluating the state
@@ -1160,8 +1165,10 @@ def _admitted_bounds(qhd, options, refinement, execution, kept):
 
         work <= (a M L + t M + 1) W,    bytes <= (a M L + t M) B,
 
-    sums of the selected category allowances over attempts, not a peak
-    memory. Nothing else in a level admits against W or B. Refinement
+    sums of the selected nominal category allowances over attempts, not a
+    general preprocessing-work or peak-memory bound. The symbolic category
+    has the polynomial term-count scope of ``objective.expansion_term_charge``.
+    Nothing else in a level admits against W or B. Refinement
     geometry, the marginals, interval and next box, and the joint-mass scan
     of the observations or kept state, with its decoding of a native state,
     lie outside the bounds, as do ``refinement._tabulated_objective``'s
@@ -1469,7 +1476,7 @@ def _planned_costs(problem, qhd, shots, child):
     """Return ``(work, cx, planned, evaluated)``: the costs of a quantum inner Plan and its evaluated tables.
 
     The host work is the admitted work of QHD's symbolic and table stage
-    (``QHD._admit_symbolic_work``: the monomial bound, the initial state,
+    (``QHD._admit_symbolic_work``: the nominal term charge, the initial state,
     the step rows, the support tables and the compilation) plus the selected
     native construction's work (``SelectedDefinition.construction_work``),
     and the CX count is the selected construction's CX law
@@ -2372,7 +2379,7 @@ def solve_augmented_lagrangian(problem, *, qhd, options=AugmentedLagrangian(), r
         `limits` stays cumulative over all rounds and levels, and each level's Run gets
         what the earlier rounds and levels left. The configuration fixes before the
         first round at most `max_iterations * refinement.max_levels` inner solves and the
-        classical-work bound `AugmentedLagrangianRecord.admitted_work_bound`.
+        nominal counted-work envelope `AugmentedLagrangianRecord.admitted_work_bound`.
 
     Random streams:
         Every round's random streams come from `SeedSequence(seed).spawn`, as
@@ -2471,8 +2478,9 @@ def plan_augmented_lagrangian(problem, *, qhd, options=AugmentedLagrangian(), ex
     Plan. Later rounds' multipliers and penalties depend on the points that executed
     rounds read, so their representations, Plans and costs are not known here. The
     structural bounds of a whole run, at most `options.max_iterations` rounds within the
-    work and byte bounds of `AugmentedLagrangianRecord.admitted_work_bound`, hold for
-    every round. They are upper bounds, not an executed trajectory or the exact costs of
+    nominal work and byte envelopes of `AugmentedLagrangianRecord.admitted_work_bound`, hold for
+    every round. They bound the recorded categories, with the symbolic term-count scope
+    described there, rather than general preprocessing execution or the exact costs of
     later rounds. Box refinement is not planned here. A refined round keeps the PHR form
     where the branch tests do not apply, and its first level plans the inner problem on
     the same box with the physical scaling, or its unit-box normalization with the
@@ -3175,7 +3183,7 @@ class ConstrainedQHDResult:
         lines.append(f"Acquisition: {counts['circuit_attempts']} circuit attempts, {counts['shots']} shots, "
                      f"{counts['data_bytes']} data bytes. Host work: {counts['table_evaluations']} table "
                      f"evaluations, {counts['evolution_work']} evolution units, {counts['layer_work']} layer units; "
-                     f"the configuration admits at most {record.admitted_work_bound} host work units over the run")
+                     f"the configuration admits at most {record.admitted_work_bound} nominal counted work units over the run")
         lines += self._statements()
         lines.extend(coverage_lines(confidence))
         return lines

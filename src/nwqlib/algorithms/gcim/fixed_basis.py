@@ -1846,7 +1846,7 @@ class FixedGCIM(Method):
             conversion.
         max_conversion_work: Default `100_000_000`. Limit on the work of an
             explicitly chosen operator conversion.
-        max_admission_steps: Default `1_000_000`. Upper limit on the
+        max_admission_steps: Default `10_000_000`. Upper limit on the
             planning work of checking each `Program` that the method builds
             (NWQLib's description of a circuit as named steps). It caps the
             number of stored fields of a `Program` and the work units of one
@@ -1886,7 +1886,7 @@ class FixedGCIM(Method):
     max_classical_products: PositiveInt = 100_000_000
     input_conversion: Literal["auto", "dense_pauli"] = "auto"
     max_conversion_work: PositiveInt = DEFAULT_CONVERSION_WORK
-    max_admission_steps: PositiveInt = 1_000_000
+    max_admission_steps: PositiveInt = 10_000_000
     result_type: ClassVar[type] = FixedGCIMResult
 
     descriptor: ClassVar[AlgorithmDescriptor] = DESCRIPTOR

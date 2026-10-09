@@ -167,18 +167,22 @@ class LCHS(Method):
             `"qsp_block_encoding"` apply no product formula, so they treat
             any value as 1, and planning warns about a value other than 1.
         trotter_synthesis_tolerance: Default `None`. Positive tolerance on
-            the Strang synthesis bound of a `PeriodicStencil` A, in the same
-            unit-input operator norm as `approximation_tolerance`. Planning
+            the weighted Strang synthesis bound of a `PeriodicStencil` A, in the
+            same unit-input norm as `approximation_tolerance`. Planning
             chooses the smallest step count r with ``B/r**2`` at most this
-            value, where T is the elapsed time and
-            ``B = T**3 sum_j |c_j| (2 |k_j| diffusion + |potential|)**3 / 3``
-            over the quadrature nodes ``k_j`` and coefficients ``c_j``. Here
-            diffusion and potential are the corresponding stencil parameters.
-            NWQLib relaxes the nested commutators of Childs et al.
-            (doi:10.1103/PhysRevX.11.011020, Proposition 10, Eq. (121))
-            using ``||[X, Y]|| <= 2 ||X|| ||Y||`` for operators X and Y,
-            then bounds the resulting sum by one third of the cube of
-            the sum of term norms. It requires
+            value, where T is the elapsed time, q is the system-qubit count,
+            ``a_j = |k_j| diffusion``, ``p = |potential|`` and
+            ``B = T**3 sum_j |c_j| W_q(a_j, p)`` over the quadrature nodes
+            and coefficients. The matching-operator commutators give
+            ``W_q(a, p) = g a**3/2 + 4 a**2 p/3 + a p**2/3``, with g = 0
+            for q = 1, 2 and g = 1 for q >= 3, in the emitted potential,
+            even-matching, odd-matching order (Childs et al.,
+            doi:10.1103/PhysRevX.11.011020, Proposition 10, Eq. (121),
+            or arXiv:1912.08854v3, Proposition 16, Eq. (152)).
+            The bound covers the selected finite weighted action on a unit input;
+            input scaling and other error components are handled separately. With
+            zero potential the ideal synthesis error is zero at q = 1, 2.
+            It requires
             `hamiltonian_evolution_backend="trotter"` and
             `trotter_steps=None`, and other inputs refuse it.
         trotter_order: Default `2`. Order of the product formula of the
@@ -226,7 +230,7 @@ class LCHS(Method):
             truncation threshold of the coefficient-state compression.
         mps_num_layers: Default `2`, positive. Number of layers of the
             coefficient-state MPS circuit.
-        max_dense_select_slots: Default `256`. Upper limit on the padded
+        max_dense_select_slots: Default `4_096`. Upper limit on the padded
             address count, a power of two, of the dense SELECT circuit of
             `"dense_exact"`. Planning refuses a larger construction and never
             changes the grid, Duhamel nodes or tolerance to fit.
@@ -245,7 +249,7 @@ class LCHS(Method):
             of building the k nodes and weights. For `"composite_gauss"` it
             covers the completed panel search plus the construction of the
             chosen rule, not every scalar probe.
-        max_select_work: Default `1e8`. Upper limit on the counted work of
+        max_select_work: Default `1e9`. Upper limit on the counted work of
             building the SELECT circuit, including the branch matrices and
             their synthesis for `"dense_exact"` and the Pauli decomposition
             of the product-formula backends. The
@@ -310,12 +314,12 @@ class LCHS(Method):
     lcu_mps_max_bond_dim: PositiveInt | None = None
     lcu_mps_threshold: Annotated[Real, Field(gt=0)] = 1e-14
     mps_num_layers: PositiveInt = 2
-    max_dense_select_slots: PositiveInt = 256
+    max_dense_select_slots: PositiveInt = 4_096
     max_bytes: PositiveInt = DEFAULT_MAX_BYTES
     max_svd_work: PositiveInt = 100_000_000
     max_spectral_work: PositiveInt = 100_000_000
     max_quadrature_work: PositiveInt = 100_000_000
-    max_select_work: PositiveInt = 100_000_000
+    max_select_work: PositiveInt = 1_000_000_000
     max_readout_work: PositiveInt = 2_000_000_000
     max_qsp_degree: PositiveInt = 256
     max_qsp_evaluations: PositiveInt = 20_000

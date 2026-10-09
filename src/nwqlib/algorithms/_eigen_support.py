@@ -29,7 +29,7 @@ def host_construction(source, inputs, labels, *, work, description, frames=None,
         description: Short statement of what the kernel computes, stored in the observation's ``padding`` field.
         frames: Scalar frame per label, ``unit`` for every label when None.
         admission: ``(option, max_steps)`` of a Method that sets its Programs' admission
-            ceiling, such as ``("FixedGCIM.max_admission_steps", 1_000_000)``. None
+            ceiling, such as ``("FixedGCIM.max_admission_steps", 10_000_000)``. None
             uses the shared ``AdmissionLimits`` default.
 
     Returns:

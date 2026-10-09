@@ -37,7 +37,7 @@ print(np.round(block.real, 6))
 
 ## Hamiltonian evolution and circuit construction
 
-`build_qsvt_circuit` and `build_real_chebyshev_encoding` apply given Wx phases to a block encoding. `build_qsp_evolution_encoding` builds a block encoding of `exp(-i t A)` from one of a Hermitian `A`. Without Qiskit, `jacobi_anger_expansion` computes its polynomial with degree at most `max_degree` and evaluates Bessel functions only through order `max_degree + 200`. Its reported tail bound includes an analytic bound on the infinite suffix beyond the selected finite sum. If that positive analytic term underflows, the tail bound is `None`. `prepare_qsp_evolution` solves its phases within one evaluation limit. `qsp_evolution_error_terms` gives its error terms without a circuit. The [assumptions and limits](#assumptions-and-limits-of-the-evolution-builders) below apply to the evolution builders.
+`build_qsvt_circuit` and `build_real_chebyshev_encoding` apply given Wx phases to a block encoding. `build_qsp_evolution_encoding` builds a block encoding of `exp(-i t A)` from one of a Hermitian `A`. Without Qiskit, `jacobi_anger_expansion` computes its polynomial for finite real `tau>0` and `0<epsilon<1`, with degree at most `max_degree`. Inside `H=min(ceil(tau),max_degree)+200`, usable certificates compete by degree, complete tail and then earlier terminal. The real-argument remainder and analytical exclusion leave at most 202 candidates, with Bessel values computed through `H` once. The tail includes omitted finite orders and the infinite suffix, with `2R_T` per parity. If the passing analytic remainders underflow, the first passing polynomial has `None` tail bounds and slack, without a certified-minimum-degree claim. The search can refuse within its finite horizon. The `96*(H+1)` known-array byte limit and NumPy addressability check precede allocation. The bound is evaluated with ordinary binary64 arithmetic. `prepare_qsp_evolution` solves phases within one evaluation limit, and `qsp_evolution_error_terms` gives error terms without a circuit. The [assumptions and limits](#assumptions-and-limits-of-the-evolution-builders) below apply to the builders.
 
 ::: nwqlib.subroutines.qsp.evolution
     options:
@@ -90,7 +90,7 @@ The evolution steps follow Gilyén, Su, Low and Wiebe, arXiv:1806.01838v1. The [
 | Step | Location in GSLW | Code |
 | --- | --- | --- |
 | Jacobi-Anger expansion of `cos(tau x)` and `sin(tau x)`, parity tails | Lemma 57, Eqs. (53)-(54) | `jacobi_anger_expansion` |
-| Bessel remainder beyond the analysis terminal | NWQLib power-series bound. Eq. (55) is the sharper real-argument form. | `jacobi_anger_expansion` |
+| Bessel remainder beyond the analysis terminal | Real-argument inequality in Eq. (55), derived from DLMF 10.9.4 and summed as a geometric suffix in [Proposition 24](../../mathematics.md#r24) | `jacobi_anger_expansion` |
 | Parity combination with coefficients `(1/2, -i/2)` and 3-step OAA | Proof of Theorem 58, and Theorem 28 with `n = 3` | `build_qsp_evolution_encoding` |
 | Child encoding error in physical time | Lemma 61 | `qsp_evolution_error_terms` |
 | OAA residual and amplitude-deficit bound | NWQLib derivation in the docstring | `qsp_evolution_error_terms` |

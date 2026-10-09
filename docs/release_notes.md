@@ -1,5 +1,19 @@
 # Release notes
 
+## v1.0.2.post1 (2026-10-08)
+
+Relative to 1.0.2, this maintenance release tightens sufficient error bounds, improves scalar range handling and raises five planning limits. Saved format labels are unchanged. Replanning can select different step counts, polynomial degrees, census variants and content identities. Loading a saved selection preserves its stored choices.
+
+- Periodic LCHS uses the matching-operator Strang coefficient for its emitted factor order. Pure diffusion on one or two system qubits has zero ideal product-formula synthesis error and selects one step. For larger grids its coefficient is no larger than the previous norm-cubed bound. It bounds the weighted finite-branch synthesis component. Kernel, quadrature, angle and execution components need their own error evidence.
+- The pair-only `relaxed_prefix` Pauli bound uses weighted anticommutation degrees to limit nested mass. It encloses the full Pauli-triangle expression and is no larger than the previous suffix relaxation. Its work and live-storage charges include the added degree passes and pair contraction. Because the relaxed count includes its degree passes, a configuration near `max_work` or `max_bytes` that 1.0.2 planned with `relaxed_prefix` can be refused. The full triangle expression can still exceed the actual evolution error.
+- The normalized-expectation error bridge uses the sharp factor `2*w*delta/r`, for a complete supplied physical-vector budget `delta < r` and an observable norm bound `w`. Scale composition prevents avoidable intermediate overflow and false zero from underflow. A positive result outside the representable range has unavailable error evidence. This scalar propagation uses ordinary floating-point rounding, and unknown input components remain unknown. A new analysis of saved LCHS observations uses the factor-2 normalized-expectation bridge.
+- Jacobi–Anger selection uses a real-argument Bessel remainder and chooses the smallest usable degree within its existing finite horizon, then the smallest computed complete tail and the earliest terminal. The search examines at most 202 terminals. A lower degree can have a larger reported tail. Tail evaluation has ordinary floating-point premises. If a selected polynomial's tail certificate is unrepresentable, the polynomial remains available with unknown tail evidence. Phase fitting and its convergence scope are unchanged.
+- `AdmissionLimits.max_definitions` increases from 16,384 to 1,000,000, `FixedGCIM.max_admission_steps` from 1,000,000 to 10,000,000, `LCHS.max_select_work` from 100,000,000 to 1,000,000,000, `LCHS.max_dense_select_slots` from 256 to 4,096, and `LCHSRefinement.max_structural_work` from 100,000,000 to 1,000,000,000. Corresponding helper defaults agree. These limits allow more declarations, checking work, SELECT slots or counted construction work. Independent byte, native and execution limits still apply, and a planning count does not establish feasible execution.
+- QHD's pre-expansion estimate is described as a nominal polynomial-skeleton charge. Its term-count proof covers constants, symbols, addition, multiplication and nonnegative integer powers. General SymPy rewriting, coefficient storage, symbolic temporaries and `Sum`/`Product` range work remain outside that proof. The symbolic decomposition and its scientific semantics are unchanged.
+- Mathematical and algorithm documentation distinguishes quadrature-component looseness from total finite-action error, a hypothetical shot-based Gram cutoff from sampled data, and Low–Somma node count from coefficient mass and postselection probability.
+
+Package and citation source versions are `1.0.2.post1`, with the project concept DOI.
+
 ## v1.0.2 (2026-10-07)
 
 Relative to 1.0.1.post1, this release simplifies the library's internals, rewrites its documentation, and changes ten saved formats and the public names, arguments, fields and keys listed below.

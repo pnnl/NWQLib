@@ -264,6 +264,12 @@ def _census_envelope(count, width, config, variant, pairs, nested, triples):
     Work is ``2*p*q + G + V`` (``error_budget.census_work``): p*q label reads
     for the packed masks and p*q for the support sum of ``suzuki_step_cx``,
     plus the structure and contraction charges of one selected term table.
+    With w = ceil(q/64), P = p(p-1)/2, E the pair count and b the block,
+    relaxed_prefix has G = wP and V = 2p+4E: the suffix and outward
+    degree passes cost 2p, endpoint-weight additions 2E and the two
+    contribution reductions 2E, with fixed arithmetic bundled per visit.
+    It builds no nested/triple structure. Its contraction scratch is
+    72p+96b+96 ceil(E/b)+65536 bytes, within census_bytes' complete envelope.
     The census does not repeat over powers. Bytes are
     ``error_budget.census_bytes`` at the largest checked block that fits
     ``max_bytes`` (``choose_census_block``). ``_admit`` is a per-step
@@ -300,6 +306,11 @@ def _census(labels, coefficients, width, config, *, reservation):
     either coefficient representation and every checked contraction block.
     No later common-step work gate can refuse an admitted candidate.
     Step-count and error checks remain.
+
+    The relaxation contracts U_ij = min(S_i,D_i+D_j-|c_i|), where S_i is
+    the ordered suffix mass and D_v the anticommuting-neighbor mass for
+    this term table. It gathers degree weights only within the admitted
+    block and retains no nested or triple table.
 
     Returns:
         (evaluation, block, work), with work counting the census only.
@@ -374,13 +385,16 @@ def _census_coefficient_bits(count, lower_exponent, scale_exponent):
 
     For every reduction length <= 2**50, sum_up is at most four times
     the exact nonnegative sum. Normalized magnitudes are <= 1. Products
-    for the pair term are <= 4, the relaxed suffix <= 4L, and its cubic
+    for the pair term are <= 4, the relaxed cap is <= its suffix <= 4L, and its cubic
     contributions <= 16L. The block and outer sums therefore give each
     final reduction <= 256L(P+1), P=L(L-1)/2. Their strict magnitude
     exponent is U=8+bit_length(L)+bit_length(P+1). For larger populations
     use the finite-binary64 exponent U=1024. Nonfinite reductions already
     fail coefficient formation. W=(2*A12+A24)*2**(3e)/(6*2**s), so its
     reduced component widths do not exceed the returned integer.
+    The intermediate neighbor-degree vector is bounded by the same
+    nonnegative population envelope; the cap never exceeds the matched
+    stored suffix, so it needs no larger coefficient-width reservation.
     """
     if count < 2 or lower_exponent is None:
         return 1
@@ -777,7 +791,7 @@ def select_powers(*, target, base, tau, labels, coefficients, identity, pruned_m
     Prop. 16, Eq. (152)), from the Pauli-triangle expansion in
     trotterization.error_budget. The census uses the full Pauli-triangle
     expression when its work plus any reserved common-step work and its
-    storage fit, and otherwise the second-order suffix relaxation
+    storage fit, and otherwise the second-order degree-capped suffix relaxation
     (``_census``).
 
     Product formula, exact static trajectory. The exact static trajectory

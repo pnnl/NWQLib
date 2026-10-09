@@ -120,18 +120,37 @@ def propagate_physical_error(output, components, *, radius, observable_norm=None
     Solution or physical StateVector keeps delta unchanged. The triangle
     inequality gives delta*(2*r + delta) for NormSquared,
     w*delta*(2*r + delta) for QuadraticForm, 2*delta/r for a unit StateVector
-    and 4*w*delta/r for NormalizedExpectation. For the last two the code
-    requires r > delta, which keeps the exact vector nonzero. NWQLib derives
-    these relations (see Derivation below). Any missing, negative or
-    nonfinite component yields None, never a partial sum.
+    and 2*w*delta/r for NormalizedExpectation. For the last two the code
+    requires finite r > delta >= 0, which keeps both vectors nonzero. The
+    observable norm w must be finite and nonnegative. NWQLib derives these
+    relations below. Any missing, negative or nonfinite component, an empty
+    component set or an overflowing sum yields None, never a partial sum.
 
     Derivation. Let x be the exact vector and y the computed one, with
     ||x - y|| <= delta and ||y|| = r, so ||x|| <= r + delta. Then
     abs(||x||**2 - ||y||**2) = abs(||x|| - ||y||)*(||x|| + ||y||) <= delta*(2r + delta)
     and abs(x†Ox - y†Oy) <= ||O||*(||x|| + ||y||)*||x - y||. For the unit
-    outputs, the distance between x/||x|| and y/||y|| is at most
-    2*||x - y||/||y||, and abs(u†Ou - v†Ov) <= 2*||O||*||u - v|| for unit
-    vectors u and v.
+    StateVector output, the phase-sensitive distance between x/||x|| and
+    y/||y|| is at most 2*||x - y||/||y||.
+
+    For NormalizedExpectation, put u = x/||x||, v = y/r and c = u†v.
+    Projection onto the complex line spanned by u gives
+    ||x-y||**2 = abs(||x||-r*c)**2 + r**2*(1-abs(c)**2), so
+    s = sqrt(1-abs(c)**2) <= delta/r. The Hermitian matrix D = uu†-vv†
+    has rank at most two, trace zero and tr(D**2) = 2*s**2. Its possibly
+    nonzero eigenvalues are +s and -s, hence its trace norm is 2*s.
+    Trace duality then gives abs(u†Ou-v†Ov) = abs(tr(O*D)) <=
+    ||O||*||D||_1 <= 2*w*delta/r. The public observable is Hermitian;
+    the vectors may be complex. The factor 2 is sharp: for 0<t<1, take
+    y=(1,0), x=(1-t**2, i*t*sqrt(1-t**2)) and O=(uu†-yy†)/t. Then
+    r=w=1, ||x-y||=t and the expectation difference is 2*t.
+
+    These are exact-arithmetic relations evaluated with ordinary scalar
+    rounding. NormalizedExpectation reuses compose_recovery to avoid
+    intermediate overflow or underflow in the positive product. A true zero
+    delta or w gives zero; a positive final bound outside binary64 gives None.
+    This evaluation is not a fully outward-rounded certificate. No vector,
+    observable norm solve or spectral enclosure is computed here.
 
     Args:
         output: Requested output record, which selects the frame change.
@@ -141,10 +160,12 @@ def propagate_physical_error(output, components, *, radius, observable_norm=None
 
     Returns:
         The bound in the output's own frame and units, or None when any input
-        needed for that frame is missing or the result is not finite.
+        needed for that frame is missing or the result is not finite. For
+        NormalizedExpectation, a positive result underflowing to zero is None.
     """
     from nwqlib.problems.records import (Solution, StateVector, NormSquared,
                                         QuadraticForm, NormalizedExpectation)
+    from nwqlib.problems.inputs import compose_recovery
 
     values = tuple(components)
     if not values or any(value is None or not isfinite(value) or value < 0 for value in values):
@@ -164,7 +185,9 @@ def propagate_physical_error(output, components, *, radius, observable_norm=None
             if isinstance(output,StateVector):
                 bound = 2*delta/radius
             elif isinstance(output,NormalizedExpectation) and observable_norm is not None:
-                bound = 4*observable_norm*delta/radius
+                if isfinite(observable_norm) and observable_norm >= 0:
+                    bound = (0.0 if delta == 0 or observable_norm == 0 else
+                             compose_recovery(2.0, observable_norm, (delta, radius)).as_float())
         return bound if bound is None or (isfinite(bound) and bound >= 0) else None
     except OverflowError:
         return None

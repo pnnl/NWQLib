@@ -118,7 +118,7 @@ from .initial_state import (
     InitialState, KineticGroundState, UniformState, chain_links, chain_selection, evaluate as evaluate_initial_state,
     start_vector_work, stored_amplitudes,
 )
-from .objective import ObjectiveDecomposer, centered_objective, expansion_centers, monomial_bound, node_count
+from .objective import ObjectiveDecomposer, centered_objective, expansion_centers, expansion_term_charge, node_count
 from .potential import coerce_real_scalar
 from .schedules import QuadraticSchedule, Schedule
 from .validation import DEFAULT_ROTATION_THRESHOLD
@@ -2862,7 +2862,10 @@ class QHD(Method):
         max_work: Default `1_000_000_000`. Positive limit on the counted work of
             objective tables, products and classical evolution, in planning work units,
             the scalar and array operations that planning declares. A work unit is not a
-            measured CPU operation or a time. A refusal names the stage and the amount
+            measured CPU operation or a time. Symbolic expansion uses a nominal term
+            charge that bounds term count only for numeric constants, symbols, sums,
+            products and nonnegative integer powers; it does not bound general SymPy
+            rewriting work or coefficient storage. A refusal names the stage and the amount
             to set ([cost](../../algorithms/qhd.md#cost-and-existing-evidence)).
 
     Encodings:
@@ -3259,7 +3262,7 @@ class QHD(Method):
         )
 
     def _admit_symbolic_work(self, problem, compact):
-        """Raise before SymPy expansion, table evaluation or block compilation exceeds the limits.
+        """Admit a nominal expansion charge, then counted table and block work before it runs.
 
         One running total of work covers the initial state, the step rows,
         the tables and the compiled blocks of a Plan. It starts with the
@@ -3274,11 +3277,13 @@ class QHD(Method):
         ``refinement_records.BoxRefinementResult.max_plannings``) therefore
         counts the initial state inside this admission.
 
-        The monomial bound (``objective.monomial_bound``) runs on the
+        The nominal term charge (``objective.expansion_term_charge``) runs on the
         unexpanded tree of the objective centered as the compiler expands it
-        (``objective.centered_objective``), so the number of monomials that
-        the expansion forms is admitted before it runs, with an untuned 16
-        bytes per monomial. After the expansion,
+        (``objective.centered_objective``), with an untuned 16-byte charge per
+        term before ``sp.expand``. It bounds formal term count only for the
+        numeric-constant, symbol, Add, Mul and nonnegative-integer-Pow grammar.
+        General function rewriting, denominator populations, coefficient digits
+        and symbolic temporaries are outside this resource guarantee. After the expansion,
         each support group S has
         ``K**|S|`` grid tuples. At each of them the compiler forms |S|
         coordinates and evaluates the lambdified support expression
@@ -3420,7 +3425,7 @@ class QHD(Method):
             ``(E, decomposer, work, chunks)``, the number of grid tuples
             evaluated across all support tables, the expanded
             ObjectiveDecomposer whose support expressions were counted, for
-            the compiler to evaluate, the admitted work: the monomial bound
+            the compiler to evaluate, the admitted work: the nominal term charge
             plus the final running total of the initial state, the step rows,
             the tables and the compilation, and the entries per evaluation
             chunk of each support (``compiler.QHDCompiler``). Automatic slack
@@ -3444,8 +3449,8 @@ class QHD(Method):
         # The compiler expands the objective about expansion_centers, so the
         # bounds and the table groups follow that centered expression.
         centers = expansion_centers(problem.bounds)
-        # 16 bytes per formed monomial is an untuned allowance.
-        monomials = monomial_bound(
+        # The nominal 16-byte term charge does not bound general symbolic storage.
+        monomials = expansion_term_charge(
             centered_objective(problem.objective, problem.variables, centers),
             lambda count: self._admit(count, 16 * count, stage="symbolic expansion", lower_bound=True))
         decomposer = ObjectiveDecomposer(problem.objective, problem.variables, centers)

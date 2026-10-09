@@ -374,8 +374,8 @@ def test_max_admission_steps_reaches_each_program_and_the_plan_identity(family, 
     # planning as a ValueError naming the field and the complete stored field
     # inventory, which an independent count of the selected Program's record
     # fields and tuple items reproduces. That value passes the inventory, so a
-    # retry at it can only be refused by a later stage. The default admits,
-    # and the field enters the saved Plan's identity.
+    # retry at it can only be refused by a later stage. The explicit 1_000_000
+    # setting admits, and the field enters the saved Plan's identity.
     import re
     from nwqlib._choice_archive import ArchiveFiles, load_plan, save_plan
 

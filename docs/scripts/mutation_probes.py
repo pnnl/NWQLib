@@ -508,7 +508,7 @@ PROBES = (
     single_replacement_probe(
         name="qhd_expansion_bound_integer_powers_only",
         module="nwqlib.algorithms.qhd.objective",
-        qualname="monomial_bound",
+        qualname="expansion_term_charge",
         old="        r = sum((a for a in sp.Add.make_args(node.exp) if a.is_Rational), sp.S.Zero)\n",
         new="        r = node.exp if node.exp.is_Integer and node.exp >= 0 else sp.S.Zero\n",
         pytest_args=(
@@ -1586,14 +1586,14 @@ PROBES = (
             "tests/test_lchs_qsp_source.py::test_actual_qsp_source_binds_elapsed_diagonals_recovery_and_physical_phase",
         ),
     ),
-    # The periodic Strang bound is B/r**2 with B one third of the weighted
-    # branch sum. B without the third selects too many steps.
+    # Removing the third from the potential/diffusion cross term changes
+    # the independently checked coefficient and its selected step count.
     single_replacement_probe(
         name="lchs_periodic_strang_step_selection_drops_third",
         module="nwqlib.algorithms.lchs.periodic",
         qualname="select_periodic_parameters",
-        old="    exact = Fraction(elapsed)**3/3*sum(",
-        new="    exact = Fraction(elapsed)**3*sum(",
+        old="         + 4*node_diffusion**2*potential/3 + node_diffusion*potential**2/3)\n",
+        new="         + 4*node_diffusion**2*potential + node_diffusion*potential**2/3)\n",
         pytest_args=(
             "tests/test_lchs_periodic.py::test_periodic_synthesis_tolerance_selects_the_smallest_strang_step_count",
         ),
