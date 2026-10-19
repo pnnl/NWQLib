@@ -3,7 +3,7 @@
   "description": "NWQLib applies quantum algorithms to scientific inputs and returns the computed quantities with their methods, resources and evidence. It covers linear systems, linear dynamics, eigenvalue and phase estimation, Pauli expectation values and box-constrained optimization, with resource estimates admitted before any circuit is built and execution on simulators and quantum providers.",
   "upload_type": "software",
   "access_right": "open",
-  "license": "BSD-2-Clause",
+  "license": "bsd-2-clause",
   "keywords": [
     "quantum computing",
     "quantum algorithms",

@@ -1,5 +1,35 @@
 # Release notes
 
+## v1.0.3 (2026-10-19)
+
+Relative to v1.0.2, this release includes the mathematical and planning updates first published in `1.0.2.post1` and the complete BSD-2-Clause license with the PNNL/DOE disclaimer.
+
+### License and distribution
+
+The root `LICENSE` contains the Battelle copyright notice, the two BSD redistribution conditions, and the PNNL/DOE disclaimer. Source and wheel distributions carry this file unchanged. The publishing workflow compares the packaged license with the repository file byte for byte before uploading to PyPI. Zenodo metadata uses the explicit `bsd-2-clause` license identifier.
+
+### Mathematical and planning changes
+
+- Periodic LCHS uses a Strang error coefficient derived for the emitted operator order. When steps are selected from a synthesis tolerance, pure diffusion on one or two system qubits selects one step with zero ideal product-formula synthesis error. Other error components, including quadrature and execution, remain separate.
+- The `relaxed_prefix` Pauli bound uses weighted anticommutation degrees to tighten the previous suffix relaxation. Its work and memory charges include the additional degree passes and contraction work. A plan close to `max_work` or `max_bytes` can therefore be refused where v1.0.2 admitted it.
+- The normalized-expectation error bound changes from `4*w*delta/r` to the sharp `2*w*delta/r`, where `r` is the norm of the computed physical vector, `delta < r` is its complete error budget, and `w` bounds the observable norm. Scaled evaluation avoids intermediate overflow and false zero from underflow. An unrepresentable positive bound is reported as unavailable evidence.
+- Jacobi–Anger selection uses a tighter real-argument Bessel remainder and chooses the smallest usable polynomial degree within its finite search horizon. Ties select the smaller computed complete tail, then the earlier terminal. The search examines at most 202 terminals. A lower degree can have a larger reported tail. When the only passing candidates have an analytic remainder that underflows to zero, the polynomial remains available with unknown tail evidence. Phase fitting is unchanged.
+- Five default planning limits increase as shown below. Independent byte and execution limits still apply, so admission of a plan does not establish feasible execution.
+
+| Planning limit | v1.0.2 | v1.0.3 |
+| --- | ---: | ---: |
+| `AdmissionLimits.max_definitions` | 16,384 | 1,000,000 |
+| `FixedGCIM.max_admission_steps` | 1,000,000 | 10,000,000 |
+| `LCHS.max_select_work` | 100,000,000 | 1,000,000,000 |
+| `LCHS.max_dense_select_slots` | 256 | 4,096 |
+| `LCHSRefinement.max_structural_work` | 100,000,000 | 1,000,000,000 |
+
+### Documentation and compatibility
+
+The QHD documentation scopes the pre-expansion term-count bound to constants, symbols, addition, multiplication and nonnegative integer powers. General SymPy rewriting work and storage are outside that bound. The mathematics and algorithm guides clarify the distinction between component bounds and total error, and the LCHS introduction and resource-estimation notebooks have updated outputs.
+
+Saved-format labels are unchanged from v1.0.2. Loading a saved selection preserves its stored choices. Replanning can change step counts, polynomial degrees, census variants and content identities. Reanalyzing saved LCHS observations uses the factor-2 normalized-expectation bound. Scalar error propagation and Bessel-tail evaluation use ordinary floating-point rounding.
+
 ## v1.0.2.post1 (2026-10-08)
 
 Relative to 1.0.2, this maintenance release tightens sufficient error bounds, improves scalar range handling and raises five planning limits. Saved format labels are unchanged. Replanning can select different step counts, polynomial degrees, census variants and content identities. Loading a saved selection preserves its stored choices.
