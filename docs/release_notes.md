@@ -2,7 +2,7 @@
 
 ## v1.0.3.post1 (2026-10-21)
 
-Relative to v1.0.3, this maintenance release changes the test suite, the documentation, two extension interfaces and the shared Run and Result archive formats. It cannot load Run or Result archives written by v1.0.3. Defaults are unchanged.
+Relative to v1.0.3, this maintenance release changes the test suite, the documentation, two extension interfaces, the shared Run and Result archive formats and the error for a missing compiler extra. It cannot load Run or Result archives written by v1.0.3. Defaults are unchanged.
 
 The test suite holds 1,501 tests, against 3,259 in v1.0.3. It keeps the checks of computed quantities against independent references, the resource limits that refuse work before it starts, the normal save, load and resume paths, the checks against installed SDKs, the example notebooks and every test that the mutation probes or the documentation name. Tests were removed when they were judged to check only message wording, printed text, internal records and helper calls, the rejection of misuse such as unknown options or edited saved files, or a case that another current test covers.
 
@@ -22,6 +22,8 @@ Two extension interfaces and the shared archive formats change:
 - NWQLib passes `settings` to the Method's `prepare(plan, *, run, settings)` hook on every call, so an override of that hook must accept the keyword. In v1.0.3, NWQLib passed `settings` only for `"all"`, and the inherited `Method.prepare_all_refusal` refused `"all"` for an override without the keyword. The inherited `Method.prepare_all_refusal` now returns `None`, so a Method that cannot prepare every setting in advance overrides it, as [Adaptive Methods](algorithm_protocol.md#adaptive-methods) describes.
 - The `prepares_from_templates` attribute of backend adapters and the `template_seed` fields of `NativePreparation` and `PreparedArtifact` are removed. No backend included with NWQLib set that attribute. An adapter that set it no longer receives the `construction_id`, `backend_context` and `template_seed` keyword arguments at `prepare` or `prepare_local`. These arguments have no replacement.
 - Because preparation records change, the shared archive formats are `nwqlib.run/21` and `nwqlib.result/14`. This release cannot load earlier shared formats, including those written by v1.0.3. Keep the writer's NWQLib version available to read old results or finish pending runs, or replan and rerun with this release to create new archives. This also applies to Result and Run subfolders of QHD refinement and augmented-Lagrangian archives.
+
+Without the `nwqec` extra, `compile_logical` raises `ModuleNotFoundError` with the install command before it starts its child process, and so does `estimate_physical` without the `qre` extra. In v1.0.3, the child process failed instead, and the error arrived as a `RuntimeError` that contained the child's traceback.
 
 Package and citation source versions are `1.0.3.post1`, with the project concept DOI.
 

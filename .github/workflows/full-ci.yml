@@ -42,6 +42,12 @@ jobs:
           allow-prereleases: false
           cache: pip
           cache-dependency-path: pyproject.toml
+      # h5py, which openfermion needs, publishes no wheel for the newest Python yet, so pip
+      # builds it from source against the system HDF5 library. Remove this step once h5py
+      # ships wheels for the Python that this job selects.
+      - name: Install the HDF5 library for building h5py
+        if: matrix.environment == 'latest'
+        run: sudo apt-get update && sudo apt-get install -y --no-install-recommends libhdf5-dev
       - name: Install validated dependencies
         if: matrix.environment == 'stable'
         run: |

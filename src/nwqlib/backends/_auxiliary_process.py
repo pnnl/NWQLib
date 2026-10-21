@@ -6,6 +6,7 @@ internal allocations. Each operation owns its finite scientific workload.
 
 from __future__ import annotations
 
+from importlib.util import find_spec
 import os
 from pathlib import Path
 import selectors
@@ -15,7 +16,11 @@ from tempfile import TemporaryDirectory
 import time
 
 from nwqlib._choice_archive import ArchiveFiles
+from nwqlib._optional import optional_import
 from nwqlib._validation import finite_real, integer
+
+# The package that each operation's child imports, and the extra that installs it.
+_PACKAGES = {"nwqec": ("nwqec", "nwqec"), "qre": ("qdk", "qre")}
 
 
 def run_auxiliary(operation, request, *, max_bytes, timeout_seconds, files=()):
@@ -34,6 +39,10 @@ def run_auxiliary(operation, request, *, max_bytes, timeout_seconds, files=()):
     only after a zero exit status, so a partial result is never published.
     QDK telemetry is switched off in the child environment.
 
+    The parent first checks that the operation's package is installed, so a
+    missing extra raises the usual ``ModuleNotFoundError`` with its install
+    hint in the caller's process instead of a child failure.
+
     Returns:
         The decoded result mapping with the captured diagnostics, and the
         elapsed wall time in seconds.
@@ -42,8 +51,11 @@ def run_auxiliary(operation, request, *, max_bytes, timeout_seconds, files=()):
     timeout_seconds = finite_real(timeout_seconds, "timeout_seconds")
     if timeout_seconds <= 0:
         raise ValueError("timeout_seconds must be positive")
-    if operation not in {"nwqec", "qre"}:
+    if operation not in _PACKAGES:
         raise ValueError("unsupported auxiliary operation")
+    package, extra = _PACKAGES[operation]
+    if find_spec(package) is None:
+        optional_import(package, extra=extra)
     with TemporaryDirectory(prefix="nwqlib-auxiliary-") as directory:
         archive = ArchiveFiles(directory, max_bytes)
         archive.write_json("request.json", request)
