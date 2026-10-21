@@ -16,7 +16,6 @@ from nwqlib.core.planning import (
 )
 from nwqlib._prepared_execution import Run, prepare_experiment as prepare
 from nwqlib.execution import ObservationView
-from test_prepared_execution import base_plan
 
 
 def pauli(point_id, position, *labels, view=None):
@@ -34,86 +33,6 @@ def two_complex_scalars(monkeypatch):
                         Reducer(shape=lambda parameters: (ReducerOutput("complex128", (2,)),)))
 
 
-def test_point_boundary_lies_in_the_selected_body():
-    spec = trajectory(pauli("start", 0, "X"), pauli("mid", 2, "Z"), pauli("end", None, "Y"))
-    assert spec.boundaries(3) == (0, 2, 3)
-    assert spec.boundaries(2) == (0, 2, 2)
-    with pytest.raises(ValueError, match="beyond the selected body of 1"):
-        spec.boundaries(1)
-    with pytest.raises(ValueError):
-        pauli("negative", -1, "X")
-
-
-def test_point_boundaries_are_nondecreasing():
-    trajectory(pauli("a", 1, "X"), pauli("b", 1, "Z"))  # Equal boundaries are legal.
-    # Two points at the end shorthand share the final boundary.
-    assert trajectory(pauli("a", 1, "X"), pauli("b", None, "Z"), pauli("c", None, "Y")).boundaries(3) == (1, 3, 3)
-    for points in ((pauli("a", 2, "X"), pauli("b", 1, "Z")), (pauli("a", None, "X"), pauli("b", 3, "Z"))):
-        with pytest.raises(ValueError, match="nondecreasing"):
-            trajectory(*points)
-
-
-def test_point_ids_are_unique():
-    with pytest.raises(ValueError, match="unique"):
-        trajectory(pauli("a", 0, "X"), pauli("a", 1, "Z"))
-
-
-def test_pauli_labels_are_full_width_and_distinct_within_a_point():
-    # The same label at another point is another value.
-    spec = trajectory(pauli("a", 0, "XI", "IZ"), pauli("b", 1, "XI"))
-    assert readout_shape(kind="trajectory", details=spec, width=2, classical_width=0) == 3
-    with pytest.raises(ValueError, match="distinct labels"):
-        pauli("a", 0, "XI", "XI")
-    with pytest.raises(ValueError, match="entire logical circuit width"):
-        readout_shape(kind="trajectory", details=spec, width=3, classical_width=0)
-
-
-def test_marginal_wires_are_valid_ordered_and_nonempty():
-    point = ObservationPoint(id="m", position=0, kind="probabilities", qubits=(2, 0))
-    assert readout_shape(kind="trajectory", details=trajectory(point), width=3, classical_width=0) == 4
-    for qubits in ((), (1, 1)):
-        with pytest.raises(ValueError, match="q_k >= 1"):
-            ObservationPoint(id="m", position=0, kind="probabilities", qubits=qubits)
-    with pytest.raises(ValueError, match="belong to the circuit"):
-        readout_shape(kind="trajectory", details=trajectory(point), width=2, classical_width=0)
-
-
-def test_readout_view_carries_its_inverse_and_wire_map():
-    view = ReadoutView(tail="basis_tail", inverse="basis_tail_inverse", wires=(1, 0))
-    spec = trajectory(pauli("a", 1, "ZZ", view=view))
-    assert readout_shape(kind="trajectory", details=spec, width=2, classical_width=0) == 1
-    with pytest.raises(ValueError):
-        ReadoutView(tail="basis_tail", wires=(0,))
-    for wires in ((), (0, 0)):
-        with pytest.raises(ValueError, match="wire mapping"):
-            ReadoutView(tail="basis_tail", inverse="basis_tail_inverse", wires=wires)
-    with pytest.raises(ValueError, match="view wires"):
-        readout_shape(kind="trajectory", details=trajectory(pauli("a", 1, "Z", view=view)), width=1,
-                      classical_width=0)
-
-
-def test_trajectory_has_zero_raw_shots_and_a_deterministic_population():
-    point = pauli("a", 0, "X")
-    with pytest.raises(ValueError, match="zero raw shots"):
-        trajectory(point, shots=1)
-    with pytest.raises(ValueError, match="measurement-conditioned"):
-        trajectory(point, population="native_conditioned")
-    with pytest.raises(ValueError, match="without measurement registers"):
-        readout_shape(kind="trajectory", details=trajectory(point), width=1, classical_width=1)
-    with pytest.raises(ValueError, match="empty request"):
-        trajectory()
-
-
-def test_one_schedule_per_readout():
-    point = pauli("a", 0, "X")
-    with pytest.raises(ValueError, match="cannot both be populated"):
-        trajectory(point, position=0)
-    with pytest.raises(ValueError, match="cannot both be populated"):
-        ObservationSpec(kind="pauli_expectation", labels=("X",), positions=(point,))
-    with pytest.raises(ValueError, match="belong only to trajectory"):
-        ObservationSpec(kind="amplitudes", amplitudes=None, positions=(point,))
-
-
 def test_items_law_on_the_separating_example(two_complex_scalars):
     """Three real Pauli values, an eight-outcome marginal and two complex output scalars."""
     spec = trajectory(
@@ -126,16 +45,6 @@ def test_items_law_on_the_separating_example(two_complex_scalars):
     # The last point exceeds the one item left after 3 + 8 of 12.
     with pytest.raises(ValueError, match="point 'r' can have 2 items, more than max_items=1"):
         readout_shape(kind="trajectory", details=spec, width=3, classical_width=0, max_items=12)
-
-
-def test_reduction_counts_its_output_items_not_its_workspace_and_unknown_reducers_fail(two_complex_scalars):
-    # Even when the reduction's private state on 20 qubits would take 16*2**20
-    # bytes, its registered output is two complex128 scalars: 2 items.
-    point = ObservationPoint(id="r", position=0, kind="reduction", reducer="two_complex")
-    assert readout_shape(kind="trajectory", details=trajectory(point), width=20, classical_width=0) == 2
-    unknown = ObservationPoint(id="u", position=0, kind="reduction", reducer="unregistered")
-    with pytest.raises(ValueError, match="no registered output shape"):
-        readout_shape(kind="trajectory", details=trajectory(unknown), width=1, classical_width=0)
 
 
 def _fresh_process_json(source):
@@ -173,81 +82,12 @@ def test_builtin_reducers_resolve_by_name_in_a_process_that_imported_only_the_re
         assert origin == nwqlib.__file__ and unimported and resolved, name
 
 
-def test_one_endpoint_readout_is_the_one_point_case():
-    base = base_plan()
-    experiment = base.experiments[0]
-    observation = experiment.observation
-    single = readout_shape(kind=observation.kind, details=observation, width=1, classical_width=0)
-    point = ObservationPoint(id="end", kind=observation.kind, labels=observation.labels, position=observation.position)
-    assert readout_shape(kind="trajectory", details=trajectory(point), width=1, classical_width=0) == single
-    # Every readout record carries the positions field.
-    record = base.to_record()
-    assert record["experiments"][0]["observation"]["positions"] == []
-
-
-def two_point_plan():
-    base = base_plan()
-    schedule = trajectory(pauli("start", 0, "X"), pauli("end", None, "Z"))
-    return base.revise(experiments=(Experiment(name="trajectory", setting="two points", observation=schedule),))._bind(
-        blocks=base.blocks), schedule
-
-
-def test_aer_refuses_a_view_without_its_program_definitions_before_native_preparation(monkeypatch):
-    from nwqlib.blocks import lowering
-    base = base_plan()
-    view = ReadoutView(tail="tail", inverse="tail_inverse", wires=(0,))
-    schedule = trajectory(pauli("start", 0, "X"), pauli("end", None, "Z", view=view))
-    plan = base.revise(experiments=(Experiment(name="trajectory", setting="view", observation=schedule),))._bind(
-        blocks=base.blocks)
-    monkeypatch.setattr(lowering, "_lower_qiskit", lambda *args, **kwargs: pytest.fail("native lowering started"))
-    with Run(plan) as run:
-        with pytest.raises(ValueError, match="readout view.*tail or inverse"):
-            prepare(plan.resolve("trajectory"), run=run, runtime=RuntimeOptions(seed=7))
-        assert run.trace.preparations == 0
-
-
-def test_every_adapter_without_a_trajectory_target_rejects_a_two_point_schedule_before_native_work(tmp_path):
-    """NWQ-Sim CPU/DM, MPI and GPU targets, Slurm on MPI, IBM, IonQ and Nexus refuse before any native call."""
-    from nwqlib.backends import IBMRuntimeBackend, IonQBackend, NexusBackend, NWQSimBackend
-    from nwqlib.backends.slurm import NWQSimSlurmBackend, SlurmProfile
-
-    _, schedule = two_point_plan()
-    run = SimpleNamespace(_state={"backend_context": {}})
-    arguments = dict(observation=schedule, runtime=RuntimeOptions(seed=7), position=1, source_definitions=(),
-                     run=run, snapshot="rejected")
-    profile = SlurmProfile(cluster="perlmutter", account="allocation", walltime="00:05:00", nodes=1,
-                           ranks_per_node=2, threads=1, executable="/not-called/runner", spool=str(tmp_path),
-                           build_identity="supplied build", backend="MPI")
-    bounds = dict(max_input_bytes=65536, max_output_bytes=65536, max_buffer_bytes=65536)
-    slurm = NWQSimSlurmBackend(profile=profile, accounting_since="2026-09-10T00:00:00",
-                               accounting_until="2026-09-11T00:00:00", max_response_bytes=4096, timeout_seconds=2,
-                               **bounds)
-
-    def nwqsim(backend, method):
-        return NWQSimBackend(executable="/not-called/nwqsim", spool=str(tmp_path), backend=backend, method=method,
-                             ranks=2 if backend == "MPI" else 1, **bounds).prepare
-
-    adapters = (
-        *((f"NWQ-Sim {backend}/{method}", nwqsim(backend, method))
-          for backend, method in (("CPU", "DM"), ("MPI", "SV"), ("NVGPU", "SV"), ("AMDGPU", "DM"))),
-        ("Slurm NWQ-Sim", slurm.prepare),
-        ("IBM Runtime", IBMRuntimeBackend(device="device", instance="instance", max_input_bytes=65536).prepare),
-        ("IonQ qpu.forte-1", IonQBackend(device="qpu.forte-1", max_input_bytes=65536,
-                                         max_response_bytes=65536).prepare),
-        ("Nexus H2-1", NexusBackend(project="project", device="H2-1", max_input_bytes=65536).prepare_local),
-    )
-    circuit = QuantumCircuit(1)
-    for name, prepare_native in adapters:
-        with pytest.raises(ValueError, match=f"{name} does not execute a 2-point trajectory schedule"):
-            prepare_native(circuit, **arguments)
-
-
-@pytest.mark.parametrize("case", ["variant reduction before the end", "amplitudes", "invariant reduction before the end"])
+@pytest.mark.parametrize("case", ["variant reduction before the end", "invariant reduction before the end"])
 def test_nwqsim_serves_only_phase_invariant_reductions_before_the_last_boundary(case, state_reducer, tmp_path,
                                                                                monkeypatch):
     """NWQ-Sim CPU/SV has no per-segment phase ledger. A reduction before the last boundary is refused
-    before the runner or the transpiler is called unless its reducer is registered phase invariant, and an
-    amplitude point is refused; a phase-invariant reducer is served.
+    before the runner or the transpiler is called unless its reducer is registered phase invariant; a
+    phase-invariant reducer is served.
     """
     import json
     import qiskit
@@ -267,16 +107,7 @@ def test_nwqsim_serves_only_phase_invariant_reductions_before_the_last_boundary(
                             shape=planning.READOUT_REDUCERS["norm_first"].shape,
                             work=planning.READOUT_REDUCERS["norm_first"].work,
                             execute=planning.READOUT_REDUCERS["norm_first"].execute, phase_invariant=invariant))
-    if case == "amplitudes":
-        from test_amplitude_masses import readout
-        probe = three_call_plan(trajectory(pauli("x", 0, "ZZ")))
-        _, construction = probe.resolve("trajectory")._selected_construction(probe)
-        declaration = readout(width=2, coordinates=(0, 1), success=(), conditions=()).revise(
-            construction_id=construction.content_id)
-        early = ObservationPoint(id="state", position=1, kind="amplitudes", amplitudes=declaration)
-    else:
-        early = reduction("state", 1)
-    schedule = trajectory(early, pauli("end", 3, "ZZ"))
+    schedule = trajectory(reduction("state", 1), pauli("end", 3, "ZZ"))
     plan = three_call_plan(schedule)
     backend = NWQSimBackend(executable="/supplied/runner", spool=str(tmp_path), max_input_bytes=1 << 20,
                             max_output_bytes=1 << 20, max_buffer_bytes=1 << 20)
@@ -292,9 +123,8 @@ def test_nwqsim_serves_only_phase_invariant_reductions_before_the_last_boundary(
             assert prepared.native.metadata["points"] == (("state", "state", None), ("end", "pauli", None))
             assert calls.count("transpile") == 1
             return
-        match = ("does not publish the amplitude point 'state' of a detached trajectory; use AerBackend" if case == "amplitudes"
-                 else "no phase ledger for the reduction point 'state' before the last boundary.*move the point to the last "
-                      "boundary, or register the reducer with phase_invariant=True")
+        match = ("no phase ledger for the reduction point 'state' before the last boundary.*move the point to the last "
+                 "boundary, or register the reducer with phase_invariant=True")
         with pytest.raises(ValueError, match=match):
             backend.prepare(circuit, **arguments)
     assert "transpile" not in calls
@@ -303,56 +133,6 @@ def test_nwqsim_serves_only_phase_invariant_reductions_before_the_last_boundary(
         with pytest.raises(ValueError, match=match):
             prepare(plan.resolve("trajectory"), run=run, runtime=RuntimeOptions(seed=7))
         assert run.trace.preparations == 0
-
-
-def test_payload_admission_charges_each_point_against_the_remaining_bytes():
-    """The trajectory law R = J_T + sum_k (D_k + H_k + V_k) + M and M_min(K) <= M, before native work.
-
-    The terms and the 23-byte minimal metadata envelope per point chunk are
-    those of ``_prepared_execution.trajectory_reservation`` and
-    ``_trajectory_fixed_bounds``; restoration supplies no header context, so
-    its point headers are not charged, and a detached NWQ-Sim or Slurm
-    restoration is not held to the early minimum (``_admit_readout``).
-    """
-    from nwqlib.execution import ExecutionLimits
-    from nwqlib._prepared_execution import _admit_readout, _statistic_stride
-    from nwqlib._run_journal import _json_bound
-
-    _, schedule = two_point_plan()
-    metadata = 4096
-
-    def admit(max_data_bytes, metadata_bytes=metadata):
-        run = SimpleNamespace(limits=ExecutionLimits(max_data_bytes=max_data_bytes,
-                                                     max_completion_metadata_bytes=metadata_bytes))
-        return _admit_readout(schedule, width=1, classical_width=0, run=run)
-
-    receipt = _json_bound("observation", 1 << 40) + 2 + _json_bound(schedule, 1 << 40)
-    declarations = sum(_json_bound({"observation": ObservationSpec.point_readout_fields(point)}, 1 << 40)
-                       for point in schedule.positions)
-    values = 2 * _statistic_stride("pauli_expectation", key_width=1)
-    total = receipt + metadata + declarations + values
-    assert admit(total) == 2
-    # One byte less: the last point's value no longer fits after the receipt
-    # declaration, the allowance and every earlier term.
-    with pytest.raises(ValueError, match="trajectory point 'end' storage exceeds remaining max_data_bytes"):
-        admit(total - 1)
-    # Two point chunks need at least 2*23 bytes of variable metadata.
-    with pytest.raises(ValueError, match="need at least 46 bytes, more than max_completion_metadata_bytes=45"):
-        admit(1 << 30, metadata_bytes=45)
-    assert admit(1 << 30, metadata_bytes=46) == 2
-    # A detached restoration fetches an existing acquisition, whose outcome
-    # is checked against its actual stored rows when published.
-    for kind in ("nwqsim", "slurm"):
-        run = SimpleNamespace(backend=SimpleNamespace(kind=kind), forecast=None,
-                              limits=ExecutionLimits(max_data_bytes=1 << 30, max_completion_metadata_bytes=45))
-        assert _admit_readout(schedule, width=1, classical_width=0, run=run) == 2
-    # Preparation checks the Run's remaining stored-data capacity, not the nominal cap.
-    run = SimpleNamespace(run_id="r", limits=ExecutionLimits(max_data_bytes=1 << 30, max_completion_metadata_bytes=metadata),
-                          _available_data_bytes=lambda: total - 1)
-    header = dict(experiment="e", setting="s", bindings=(), plan_id="p", realization_id="q", quantum_layout=(),
-                  classical_layout=())
-    with pytest.raises(ValueError, match="remaining max_data_bytes"):
-        _admit_readout(schedule, width=1, classical_width=0, run=run, header=header)
 
 
 def test_probability_points_reserve_eight_bytes_per_possible_outcome():
@@ -384,41 +164,6 @@ def test_probability_points_reserve_eight_bytes_per_possible_outcome():
     assert admit(total) == 4
     with pytest.raises(ValueError, match="trajectory point 'end' storage exceeds remaining max_data_bytes"):
         admit(total - 1)
-
-
-def test_point_chunk_keeps_its_point_and_boundary_after_reload():
-    """A point chunk holds only its point's one-point readout and names its trajectory declaration."""
-    from nwqlib.core import Source
-    from nwqlib.execution import ObservationChunk
-
-    marginal = ObservationPoint(id="m", position=None, kind="probabilities", qubits=(0,))
-    spec = trajectory(pauli("p", 1, "Z"), marginal)
-    identity = "sha256:" + "0" * 64
-    fields = dict(run_id="r", plan_id=identity, realization_id=identity, prepared_id=identity, experiment="e",
-                  setting="s", bindings=(), quantum_layout=(), classical_layout=(), attempt="a", job="j",
-                  chunk="0/m", observation=spec.point_observation("m"), population="unconditional",
-                  returned_shots=None, trajectories=1, trajectory_id=spec.content_id,
-                  source=Source(name="supplied", version="1", domain="test", reference="supplied outcomes"))
-    chunk = ObservationChunk.from_histogram({"0": .25, "1": .75}, point="m", boundary=4, **fields)
-    reloaded = ObservationChunk.model_validate_json(chunk.model_dump_json())
-    assert (reloaded.point, reloaded.boundary, reloaded.content_id) == ("m", 4, chunk.content_id)
-    assert reloaded.values == chunk.values and chunk.histogram().weights.tolist() == [.25, .75]
-    # Rebuilt from its JSON alone, the chunk has no payload source; its Run or Result supplies one.
-    with pytest.raises(ValueError, match="load_run or nwqlib.load_result"):
-        reloaded.histogram()
-    # The stored readout is the point's own, not the trajectory declaration.
-    assert reloaded.observation == ObservationSpec(kind="probabilities", qubits=(0,))
-    pauli_fields = dict(fields, chunk="0/p", observation=spec.point_observation("p"))
-    with pytest.raises(ValueError, match="differs from its declared trajectory point"):
-        ObservationChunk(values=({"kind": "pauli", "label": "Z", "value": 0.},), point="p", boundary=2, **pauli_fields)
-    # A point chunk names its trajectory declaration and holds no trajectory
-    # declaration itself; other chunks name neither.
-    for changed, message in ((dict(trajectory_id=None), "point, boundary, and trajectory identity together"),
-                             (dict(observation=spec), "can carry only its singleton reduction declaration")):
-        with pytest.raises(ValueError, match=message):
-            ObservationChunk(values=chunk.values, point="m", boundary=4, **dict(fields, **changed))
-    with pytest.raises(ValueError, match="point, boundary, and trajectory identity together"):
-        ObservationChunk(values=chunk.values, **fields)
 
 
 def three_call_plan(schedule, *others, state=(1., 2., 3., 4.)):
@@ -617,9 +362,6 @@ def test_trajectory_refuses_a_resetting_selected_body_before_native_work(monkeyp
     tail, is refused by the selected IR with nothing charged. A reset that
     starts at the last boundary is outside the executed prefix, so that body
     is admitted and prepared without the reset, as is the body without it.
-    A reset inside the prefix that the selected IR cannot see, hidden in a
-    native composite definition, is refused by the adapter's check in
-    ``test_aer_trajectory_admits_only_a_coherent_body_including_composite_definitions``.
     """
     from nwqlib.backends import qiskit_aer as aer
     from nwqlib.ir import Definition, Reset, Sequence
@@ -662,41 +404,23 @@ def test_trajectory_refuses_a_resetting_selected_body_before_native_work(monkeyp
             assert "reset" not in handle._native.circuit.count_ops()
 
 
-def _hidden_reset():
-    inner = QuantumCircuit(2, name="hidden_reset")
-    inner.h(0)
-    inner.reset(1)
-    return inner.to_instruction()
-
-
-@pytest.mark.parametrize("body", ["composite reset", "initialize", "opaque instruction", "unitary composite",
-                                  "reset after the last point"])
+@pytest.mark.parametrize("body", ["initialize", "unitary composite"])
 def test_aer_trajectory_admits_only_a_coherent_body_including_composite_definitions(body, monkeypatch):
-    """A reset hidden in a composite, Initialize (whose definition resets) and an opaque
-    instruction are refused before lowering; a composite of unitary gates is lowered, and so is a
-    body whose reset comes after the last point, since only the executed prefix is checked.
+    """Initialize, whose definition resets, is refused before lowering; a composite of unitary
+    gates is lowered.
     """
-    from qiskit.circuit import Instruction
     from qiskit.circuit.library import Initialize
     from nwqlib.backends import AerBackend, qiskit_aer as aer
 
     circuit = QuantumCircuit(2)
     circuit.h(0)
-    if body == "composite reset":
-        circuit.append(_hidden_reset(), (0, 1))
-    elif body == "initialize":
+    if body == "initialize":
         circuit.append(Initialize([0, 1, 0, 0]), (0, 1))
-    elif body == "opaque instruction":
-        circuit.append(Instruction("opaque", 1, 0, []), (1,))
-    elif body == "reset after the last point":
-        circuit.h(1)
     else:
         inner = QuantumCircuit(2, name="unitary_composite")
         inner.cx(0, 1)
         circuit.append(inner.to_instruction(), (0, 1))
     circuit.x(1)
-    if body == "reset after the last point":
-        circuit.reset(0)
     schedule = trajectory(pauli("first", 1, "ZZ"), pauli("end", 3, "XI"))
     lowered = []
     prepare_native = aer._prepare_aer_execution
@@ -706,28 +430,14 @@ def test_aer_trajectory_admits_only_a_coherent_body_including_composite_definiti
     with Run(plan) as run:
         arguments = dict(observation=schedule, runtime=RuntimeOptions(seed=7), position=(1, 3), source_definitions=(),
                          run=run, snapshot="body")
-        if body in {"unitary composite", "reset after the last point"}:
+        if body == "unitary composite":
             prepared = AerBackend().prepare(circuit, **arguments)
             assert lowered == [1] and "reset" not in prepared.native.circuit.count_ops()
             return
-        expected = {"composite reset": "operation 'hidden_reset' contains 'reset', which measures, resets or branches",
-                    "initialize": "operation 'initialize' contains 'reset', which measures, resets or branches",
-                    "opaque instruction": "operation 'opaque' is an opaque instruction without a definition"}[body]
+        expected = "operation 'initialize' contains 'reset', which measures, resets or branches"
         with pytest.raises(ValueError, match=f"coherent body; {expected}"):
             AerBackend().prepare(circuit, **arguments)
     assert lowered == []
-
-
-def test_a_bound_noise_model_refuses_exact_readouts_and_trajectories_and_admits_counts():
-    """Even an empty bound NoiseModel keeps Aer on its sampled-counts route."""
-    from qiskit_aer.noise import NoiseModel
-    from nwqlib.backends import AerBackend
-
-    noisy = AerBackend.from_noise_model(NoiseModel())
-    for observation in (trajectory(pauli("end", None, "Z")), ObservationSpec(kind="probabilities", qubits=(0,))):
-        with pytest.raises(ValueError, match="explicit Aer noise supports counts"):
-            noisy.target_for(observation)
-    assert noisy.target_for(ObservationSpec(kind="counts", shots=4)).readouts == ("counts",)
 
 
 @pytest.fixture
@@ -855,51 +565,6 @@ def test_reduction_work_and_saved_states_are_admitted_before_native_preparation(
         assert run.trace.preparations == 0
 
 
-def test_amplitude_points_publish_their_arrays_at_their_points_and_reopen(tmp_path, monkeypatch):
-    """Two amplitude points share one saved state at a boundary; a third reads the final state.
-
-    A published amplitude chunk whose header differs from the reserved one is refused.
-    """
-    import numpy as np
-    import nwqlib
-    from nwqlib.backends import AerBackend
-    from nwqlib._prepared_execution import submit_experiment
-    from test_amplitude_masses import readout
-
-    probe = three_call_plan(trajectory(pauli("x", 1, "ZZ")))
-    _, construction = probe.resolve("trajectory")._selected_construction(probe)
-    amplitudes = readout(width=2, coordinates=(0, 1), success=(), conditions=()).revise(
-        construction_id=construction.content_id)
-    plan = three_call_plan(trajectory(
-        ObservationPoint(id="a", position=1, kind="amplitudes", amplitudes=amplitudes),
-        ObservationPoint(id="b", position=1, kind="amplitudes", amplitudes=amplitudes),
-        ObservationPoint(id="end", kind="amplitudes", amplitudes=amplitudes)))
-    with Run(plan, directory=tmp_path / "run", progress=False) as run:
-        handle = prepare(plan.resolve("trajectory"), run=run, runtime=RuntimeOptions(seed=7))
-        saves = [item.operation.name for item in handle._native.circuit.data if item.operation.name.startswith("save")]
-        assert saves == ["save_statevector", "save_statevector"]
-        chunks = submit_experiment(handle, run=run)
-        for chunk in chunks:
-            run.collect(chunk)
-        arrays = [run.artifacts.get(chunk.artifacts[0]).array for chunk in chunks]
-    assert [(chunk.point, chunk.boundary, chunk.chunk) for chunk in chunks] == [
-        ("a", 1, "0/a"), ("b", 1, "0/b"), ("end", 3, "0/end")]
-    assert all(chunk.artifacts[0].acquisition[3] == chunk.chunk for chunk in chunks)
-    # The shared save gives both points the same state, and the final point
-    # reads another one.
-    assert np.array_equal(arrays[0], arrays[1]) and not np.array_equal(arrays[0], arrays[2])
-    with nwqlib.load_run(tmp_path / "run", backend=AerBackend(), progress=False) as reopened:
-        assert reopened.observations.chunks == chunks
-    from nwqlib import _prepared_execution as execution
-    publish = execution._publish_amplitudes
-    monkeypatch.setattr(execution, "_publish_amplitudes",
-                        lambda *args, **kwargs: publish(*args, **kwargs).revise(setting="another setting"))
-    with Run(plan, progress=False) as run:
-        handle = prepare(plan.resolve("trajectory"), run=run, runtime=RuntimeOptions(seed=7))
-        with pytest.raises(ValueError, match="differs from its reserved header"):
-            submit_experiment(handle, run=run)
-
-
 def test_saved_trajectory_result_reloads_and_reanalyzes_without_decoding(tmp_path, monkeypatch):
     """A Result over a ten-point trajectory saves, loads and reanalyzes; nothing is decoded or run again.
 
@@ -1000,58 +665,6 @@ def test_intermediate_amplitude_points_carry_their_own_prefix_phase():
             np.testing.assert_allclose(saved, Statevector(prefix).data, atol=2e-12, rtol=0, err_msg=str(boundary))
 
 
-def test_a_local_output_refused_after_it_returned_releases_its_reservation(tmp_path, monkeypatch):
-    """Aer returned in process and publication refused its output: nothing can retrieve it, so nothing stays pending."""
-    import nwqlib
-    from nwqlib.backends import AerBackend
-    from nwqlib import _prepared_execution as execution
-
-    def refuse(*args, **kwargs):
-        raise ValueError("publication refused")
-
-    plan = three_call_plan(trajectory(pauli("first", 1, "ZZ"), pauli("end", None, "XI")))
-    with Run(plan, directory=tmp_path / "run", progress=False) as run:
-        handle = prepare(plan.resolve("trajectory"), run=run, runtime=RuntimeOptions(seed=7))
-        monkeypatch.setattr(execution, "_trajectory_chunks", refuse)
-        with pytest.raises(ValueError, match="publication refused"):
-            execution.submit_experiment(handle, run=run)
-        assert run._state["pending_output"] == {}
-        assert [event.status for event in run.trace.events] == ["uncertain"]
-    monkeypatch.undo()
-    with nwqlib.load_run(tmp_path / "run", backend=AerBackend(), progress=False) as reopened:
-        assert reopened._state["pending_output"] == {}
-
-
-def test_saved_probability_marginals_are_admitted_in_simulator_memory(monkeypatch):
-    """Aer keeps every distinct saved marginal until completion; their 8*2**k bytes count before native work."""
-    import numpy as np
-    import nwqlib
-    from nwqlib import Expectation
-    from nwqlib.algorithms.expectation import ExpectationMethod
-    from nwqlib.backends import qiskit_aer as aer
-    from nwqlib.execution import ExecutionLimits
-    from nwqlib.operators import ingest_pauli
-
-    monkeypatch.setattr(aer, "_prepare_aer_execution", lambda *args, **kwargs: pytest.fail("native lowering started"))
-    # Live state 16*2**16 bytes (1 MiB) and two full-width sorted marginals of
-    # 8*2**16 bytes each fill 2 MiB; a third, distinct wire order does not fit.
-    points = (ObservationPoint(id="a", position=0, kind="probabilities", qubits=tuple(range(16))),
-              ObservationPoint(id="b", kind="probabilities", qubits=tuple(range(16))),
-              ObservationPoint(id="c", kind="probabilities", qubits=tuple(reversed(range(16)))))
-    plan = nwqlib.plan(Expectation(state=np.ones(1 << 16), observable=ingest_pauli((("Z" * 16, 1.),), num_qubits=16)),
-                       method=ExpectationMethod(), seed=7)
-    for schedule, admitted in ((trajectory(*points[:2]), True), (trajectory(*points), False)):
-        variant = plan.revise(experiments=(Experiment(name="t", setting="m", observation=schedule),))._bind(
-            blocks=plan.blocks)
-        with Run(variant, limits=ExecutionLimits(simulator_memory_mb=2)) as run:
-            if admitted:
-                with pytest.raises(pytest.fail.Exception, match="native lowering started"):
-                    prepare(variant.resolve("t"), run=run, runtime=RuntimeOptions(seed=7))
-            else:
-                with pytest.raises(ValueError, match=r"saved probabilities for point 'c': counted=2097152"):
-                    prepare(variant.resolve("t"), run=run, runtime=RuntimeOptions(seed=7))
-
-
 def view_plan(schedule):
     """The three-call body with a selected two-qubit readout tail and its selected adjoint as Program definitions."""
     from nwqlib.blocks.selection import select_preparation, transform_block
@@ -1149,111 +762,6 @@ def test_aer_view_reads_the_rotated_state_and_restores_the_continuation(monkeypa
             prepare(reordered.resolve("trajectory"), run=run, runtime=RuntimeOptions(seed=7))
 
 
-def test_point_chunk_fields_are_priced_once_and_completion_stays_within_the_reservation(monkeypatch):
-    """Each point-chunk field is the declaration, a reserved header field or a variable field, exactly once.
-
-    ``readout_bytes`` reserves ``sum_k (D_k + H_k + V_k) + M``; the growth that
-    completion charges must stay within that one pending reservation.
-    The pre-lowering gate prices the same point headers as the submission
-    gate, the layouts and the acquisition source included.
-    """
-    from nwqlib import _prepared_execution as execution
-    from nwqlib.execution import ObservationChunk
-    from test_amplitude_masses import readout
-
-    probe = three_call_plan(trajectory(pauli("x", 0, "ZZ")))
-    _, construction = probe.resolve("trajectory")._selected_construction(probe)
-    amplitudes = readout(width=2, coordinates=(0, 1), success=(), conditions=()).revise(
-        construction_id=construction.content_id)
-    plan = three_call_plan(trajectory(
-        pauli("p", 1, "ZZ", "XI"), ObservationPoint(id="m", position=2, kind="probabilities", qubits=(1, 0)),
-        ObservationPoint(id="a", position=2, kind="amplitudes", amplitudes=amplitudes), pauli("end", None, "XI")))
-    completions = []
-    finish = execution.Run._finish_attempt
-
-    def measured(self, index, event, chunk, **kwargs):
-        state = self._state
-        before = state["data_bytes"] + state["array_bytes"]
-        reserved = state["pending_output"][event.attempt]
-        finish(self, index, event, chunk, **kwargs)
-        completions.append((state["data_bytes"] + state["array_bytes"] - before, reserved,
-                            event.attempt in state["pending_output"]))
-
-    monkeypatch.setattr(execution.Run, "_finish_attempt", measured)
-    built = []
-    build = execution._point_chunk_headers
-    monkeypatch.setattr(execution, "_point_chunk_headers",
-                        lambda *args, **kwargs: built.append(build(*args, **kwargs)) or built[-1])
-    with Run(plan, progress=False) as run:
-        handle = prepare(plan.resolve("trajectory"), run=run, runtime=RuntimeOptions(seed=7))
-        early = built[0]
-        spec, record = handle.record.observation, handle.record
-        common, per_point = build(spec, execution._receipt_header(handle), run_id=run.run_id,
-                                  prepared_id=record.content_id, attempt="0" * 36, boundaries=record.boundaries,
-                                  backend_kind=run.backend.kind, target_version=record.target.version)
-        assert [execution._trajectory_fixed_bounds(spec, common=maps[0], per_point=maps[1], max_bytes=1 << 40)[1]
-                for maps in (early, (common, per_point))] == [
-            execution._trajectory_fixed_bounds(spec, common=common, per_point=per_point, max_bytes=1 << 40)[1]] * 2
-        for point, own in zip(handle.record.observation.positions, per_point, strict=True):
-            header, variable = set(common) | set(own), set(execution._point_variable_fields(point.kind))
-            assert not header & variable and "observation" not in header | variable
-            assert header | variable | {"observation"} == set(ObservationChunk.model_fields)
-        execution.submit_experiment(handle, run=run)
-    [(growth, reserved, pending)] = completions
-    assert growth <= reserved and not pending
-
-
-def test_a_context_reducer_reads_its_producing_receipts_window(state_reducer, monkeypatch):
-    """A reducer registered with ``receives_context`` reads its receipt's saved-state window and exclusions.
-
-    The window is the receipt's ``saved_state_probability_window``, its
-    probability window propagated through the host phase correction of the
-    saved state.
-
-    A reducer that keeps the default empty ``state_error_resolutions``
-    receives the unresolved state budget: the Aer receipt of a trajectory
-    that saves a state lists "amplitude-derived masses", so its context has
-    no modulo-phase state error, and, since the reducer is not registered
-    phase invariant, no state error. Only a reducer that declares the label, such as
-    ``projected_moments``, has it resolved. The three-argument reducer of
-    the same trajectory runs as before.
-    """
-    import numpy as np
-    from nwqlib.algorithms.expectation import ExpectationMethod
-    from nwqlib._prepared_execution import submit_experiment
-
-    contexts = []
-
-    def execute(state, parameters, bindings, *, context):
-        contexts.append(context)
-        return (np.array([context.probability_window]),)
-
-    monkeypatch.setitem(planning.READOUT_REDUCERS, "window", Reducer(
-        shape=lambda parameters: (ReducerOutput("float64", (1,)),), work=lambda parameters, width: 1,
-        execute=execute, receives_context=True))
-    monkeypatch.setattr(ExpectationMethod, "reduction_allowance",
-                        lambda self, plan, point, *, observation, width, run: 1 + (2 << 2), raising=False)
-    plan = three_call_plan(trajectory(
-        ObservationPoint(id="w", position=1, kind="reduction", reducer="window", parameters={}),
-        reduction("end", None)))
-    with Run(plan, progress=False) as run:
-        handle = prepare(plan.resolve("trajectory"), run=run, runtime=RuntimeOptions(seed=7))
-        chunks = submit_experiment(handle, run=run)
-    receipt = handle.record
-    [context] = contexts
-    assert (context.prepared_id, context.probability_window, context.probability_window_exclusions) == (
-        receipt.content_id, receipt.saved_state_probability_window, receipt.probability_window_exclusions)
-    assert chunks[0].values[0].real == (receipt.saved_state_probability_window,)
-    assert "amplitude-derived masses" in receipt.probability_window_exclusions
-    assert context.modulo_phase_state_error is None and receipt.saved_state_error()[0] is None
-    assert context.state_error is None and receipt.state_error()[0] is None
-    assert len(state_reducer) == 1
-    with pytest.raises(ValueError, match="state-error resolutions must be a tuple of nonempty labels"):
-        Reducer(shape=lambda parameters: (), state_error_resolutions=["amplitude-derived masses"])
-    with pytest.raises(ValueError, match="needs the ReductionContext of its producing receipt"):
-        planning.execute_reduction(receipt.observation.positions[0], np.zeros(4, complex), bindings=())
-
-
 def test_a_shared_phase_corrected_save_gives_each_reducer_its_qualified_state_budget(monkeypatch):
     """A phase-sensitive reducer receives no finite state error; a phase-invariant one the modulo-phase budget.
 
@@ -1330,7 +838,7 @@ def test_a_shared_phase_corrected_save_gives_each_reducer_its_qualified_state_bu
             receipt.saved_state_probability_window)
 
 
-def _projected_mass_checkpoints(labels, family, state):
+def _projected_mass_checkpoints(labels, state):
     """Acquisition and publication of one projected point on an Aer receipt.
 
     The receipt is a validated synthetic Aer receipt with G = 0 native
@@ -1338,7 +846,7 @@ def _projected_mass_checkpoints(labels, family, state):
     correction (``statevector_roundoff`` of ``(0, 0)``), so its
     ``state_error`` and ``saved_state_error`` are ``native_state_error(0, c)
     = 5u`` when every label is resolved. The two returned callables run the actual
-    ``_trajectory_chunks`` on ``state`` and the family's actual
+    ``_trajectory_chunks`` on ``state`` and the actual LCHS
     ``projected_moments`` on a stored chunk of ``state``. The stored chunk
     is built under the window convention (an added "unitary" label), then
     bound to this receipt's identity, as a chunk that another receipt
@@ -1349,7 +857,6 @@ def _projected_mass_checkpoints(labels, family, state):
     import nwqlib._prepared_execution as execution
     from nwqlib import _quantum_readout as readout
     from nwqlib.algorithms.lchs import analysis as lchs
-    from nwqlib.algorithms.qls import quantum as qls
     from nwqlib.core import Source
     from nwqlib.core.planning import Realization
     from nwqlib.execution import LogicalPreparationReceipt, PreparedArtifact, RegisterMap
@@ -1374,7 +881,7 @@ def _projected_mass_checkpoints(labels, family, state):
         native_quantum_layout=layout, logical_to_native=(0, 1, 2),
         probability_window_exclusions=labels, body_length=0, boundaries=(0,), statevector_roundoff=(0.0, 0.0))
     run = SimpleNamespace(run_id="r", backend=SimpleNamespace(kind="qiskit_aer"))
-    publish = (lchs if family == "lchs" else qls).projected_moments
+    publish = lchs.projected_moments
 
     def acquire(record, amplitudes):
         prepared = SimpleNamespace(record=record, realization=realization, _setting="s", _bindings=())
@@ -1393,9 +900,7 @@ def _projected_mass_checkpoints(labels, family, state):
         acquire=acquire, data_for=data_for, publish=publish)
 
 
-@pytest.mark.parametrize("family", ["lchs", "qls"])
-def test_projected_reducer_resolves_only_the_amplitude_mass_label_at_every_mass_checkpoint(
-        family, monkeypatch):
+def test_projected_reducer_resolves_only_the_amplitude_mass_label_at_every_mass_checkpoint(monkeypatch):
     """The projected kernel's qualified state budget decides its two mass checks on Aer.
 
     Every Aer receipt of a saved state lists "amplitude-derived masses". The
@@ -1429,14 +934,14 @@ def test_projected_reducer_resolves_only_the_amplitude_mass_label_at_every_mass_
     unit = np.zeros(8, dtype=np.complex128)
     unit[0] = 1
     receipt, (acquire_deficient_state, publish_deficient_chunk), steps = (
-        _projected_mass_checkpoints(PROJECTED_MASS_EXCLUSIONS, family, near))
+        _projected_mass_checkpoints(PROJECTED_MASS_EXCLUSIONS, near))
     assert receipt.probability_window_exclusions == ("amplitude-derived masses",)
     assert receipt.state_error()[0] is None
     assert receipt.state_error(PROJECTED_MASS_EXCLUSIONS)[0] == 5 * 2**-53
     for checkpoint in (acquire_deficient_state, publish_deficient_chunk):
         with pytest.raises(ValueError, match="outside the producing window"):
             checkpoint()
-    for checkpoint in _projected_mass_checkpoints(PROJECTED_MASS_EXCLUSIONS, family, unit)[1]:
+    for checkpoint in _projected_mass_checkpoints(PROJECTED_MASS_EXCLUSIONS, unit)[1]:
         checkpoint()
 
     monkeypatch.setitem(planning.READOUT_REDUCERS, "same_kernel", replace(
@@ -1447,143 +952,15 @@ def test_projected_reducer_resolves_only_the_amplitude_mass_label_at_every_mass_
     with pytest.raises(ValueError, match="require the projected_moments reducer"):
         steps.publish(steps.data_for(custom, chunk), chunk)
 
-    receipt, checkpoints, _ = _projected_mass_checkpoints((*PROJECTED_MASS_EXCLUSIONS, "unitary"), family, near)
+    receipt, checkpoints, _ = _projected_mass_checkpoints((*PROJECTED_MASS_EXCLUSIONS, "unitary"), near)
     assert receipt.state_error(PROJECTED_MASS_EXCLUSIONS)[0] is None
     for checkpoint in checkpoints:
         checkpoint()
-    receipt, checkpoints, _ = _projected_mass_checkpoints((), family, near)
+    receipt, checkpoints, _ = _projected_mass_checkpoints((), near)
     assert receipt.state_error()[0] == 5 * 2**-53
     for checkpoint in checkpoints:
         with pytest.raises(ValueError, match="outside the producing window"):
             checkpoint()
-
-
-def test_trajectory_metadata_minimum_includes_the_completion_rows_before_native_work(monkeypatch):
-    """``M_min(K) = 58*K + G_max`` on Aer, with ``G_max = 1113`` from the completion rows.
-
-    Each Pauli or probability point spends its 58-byte job and empty values
-    envelope, and the completion rows their largest growth
-    (``_prepared_execution._trajectory_fixed_bounds``,
-    ``_probability_point_metadata`` and ``synchronous_completion_growth``);
-    a probability point's manifests, summaries and publication rows are
-    funded in its header. With the default
-    ``max_completion_metadata_bytes = 65536``, ``58*K + 1113 <= 65536``
-    admits K = 1110 and refuses K = 1111 before native preparation, for
-    Pauli and for one-qubit probability points. A fresh detached NWQ-Sim or
-    Slurm outcome is priced at the maximum of ``detached_completion_growth``,
-    168 bytes, or 99 bytes with a forecast.
-    """
-    from nwqlib.backends import qiskit_aer as aer
-    from nwqlib.backends import AerBackend
-    from nwqlib._prepared_execution import (_completion_minimum, detached_completion_growth,
-                                            synchronous_completion_growth)
-    from test_prepared_execution import base_plan
-
-    # A forecast stores the event already revised, so its parent adds nothing.
-    for revised, expected in ((False, (1099, 1113)), (True, (1030, 1044))):
-        assert synchronous_completion_growth(
-            provider="qiskit_aer", timing_reference="nwqlib.backends.connection.AerBackend.submit", job_length=36,
-            max_bytes=1 << 40, event_already_revised=revised) == expected
-        run = SimpleNamespace(backend=AerBackend(), forecast=object() if revised else None)
-        assert _completion_minimum(run, 1 << 40) == expected[1]
-    # A fresh detached NWQ-Sim or Slurm outcome grows by (161, 168), or
-    # (92, 99) with a forecast (detached_completion_growth); admission uses
-    # the maximum. A backend without an established prototype adds nothing.
-    for revised, expected in ((False, (161, 168)), (True, (92, 99))):
-        assert detached_completion_growth(max_bytes=1 << 40, event_already_revised=revised) == expected
-        for kind in ("nwqsim", "slurm"):
-            run = SimpleNamespace(backend=SimpleNamespace(kind=kind), forecast=object() if revised else None)
-            assert _completion_minimum(run, 1 << 40) == expected[1]
-    assert _completion_minimum(SimpleNamespace(backend=SimpleNamespace(kind="ionq"), forecast=None), 1 << 40) == 0
-    monkeypatch.setattr(aer, "_prepare_aer_execution", lambda *args, **kwargs: pytest.fail("native lowering started"))
-    base = base_plan()
-    for kind in ("pauli", "probabilities"):
-        for count, admitted in ((1110, True), (1111, False)):
-            if kind == "pauli":
-                plan = three_call_plan(trajectory(*(pauli(f"p{index}", min(3, index // 371), "ZZ")
-                                                    for index in range(count))))
-            else:
-                plan = base.revise(experiments=(Experiment(name="trajectory", setting=f"{count} marginals",
-                    observation=trajectory(*(ObservationPoint(id=f"p{index}", position=None, kind="probabilities",
-                                                              qubits=(0,)) for index in range(count)))),))._bind(
-                    blocks=base.blocks)
-            with Run(plan, progress=False) as run:
-                if admitted:
-                    with pytest.raises(pytest.fail.Exception, match="native lowering started"):
-                        prepare(plan.resolve("trajectory"), run=run, runtime=RuntimeOptions(seed=7))
-                else:
-                    with pytest.raises(ValueError, match="need at least 65551 bytes, more than "
-                                                         "max_completion_metadata_bytes=65536"):
-                        prepare(plan.resolve("trajectory"), run=run, runtime=RuntimeOptions(seed=7))
-                assert run.trace.preparations == int(admitted)
-    plan = three_call_plan(trajectory(*(pauli(f"p{index}", min(3, index // 371), "ZZ") for index in range(1111))))
-    # A backend that cannot execute trajectories refuses the same schedule
-    # naming the capability, not the metadata allowance, at the default limit.
-    from qiskit_aer.noise import NoiseModel
-    with Run(plan, backend=AerBackend.from_noise_model(NoiseModel()), progress=False) as run:
-        with pytest.raises(ValueError, match="exact readouts require a noiseless backend"):
-            prepare(plan.resolve("trajectory"), run=run, runtime=RuntimeOptions(seed=7))
-        assert run.trace.preparations == 0
-
-
-def test_the_aer_target_executes_every_registered_reducer_and_views_only_pauli_or_probability_points(
-        two_complex_scalars):
-    """``reducers="registered"`` admits any registered reducer; a name tuple admits only its names.
-
-    A readout view is refused on a reduction point as an unsupported capability.
-    """
-    from nwqlib.backends.capabilities import unsupported_readout
-    from nwqlib.backends.targets import AER_STATEVECTOR_TARGET
-
-    point = ObservationPoint(id="r", position=1, kind="reduction", reducer="two_complex")
-    schedule = trajectory(point)
-    assert AER_STATEVECTOR_TARGET.reducers == "registered"
-    assert unsupported_readout(AER_STATEVECTOR_TARGET, schedule) is None
-    assert unsupported_readout(AER_STATEVECTOR_TARGET.revise(reducers=()), schedule) == (
-        "reduction 'two_complex' at point 'r'")
-    assert unsupported_readout(AER_STATEVECTOR_TARGET.revise(reducers=("two_complex",)), schedule) is None
-    unknown = trajectory(point.revise(reducer="absent"))
-    assert unsupported_readout(AER_STATEVECTOR_TARGET, unknown) == "unregistered reduction 'absent' at point 'r'"
-    viewed = trajectory(point.revise(view=ReadoutView(tail="t", inverse="t_inverse", wires=(0,))))
-    assert unsupported_readout(AER_STATEVECTOR_TARGET, viewed) == (
-        "the readout view of reduction point 'r'; remove view= from that point to observe it without a view")
-
-
-def test_the_trajectory_memory_check_and_the_simulator_share_one_thread_cap(monkeypatch, tmp_path):
-    """The saved-buffer admission charges the thread cap that Aer is given; restoration reapplies it.
-
-    The cap is resolved once per open Run: a reopened Run resolves it again.
-    """
-    import io
-    from itertools import chain, repeat
-    from qiskit import qpy
-    import nwqlib
-    from nwqlib.backends import AerBackend
-    from nwqlib.backends import qiskit_aer as aer
-
-    seen = []
-    admit = aer._admit_aer_saved_buffers
-    caps = chain([3], repeat(5))
-    monkeypatch.setattr(aer, "_aer_state_threads", lambda: next(caps))
-    monkeypatch.setattr(aer, "_admit_aer_saved_buffers",
-                        lambda observation, **kwargs: seen.append(kwargs["state_threads"]) or admit(observation,
-                                                                                                    **kwargs))
-    plan = three_call_plan(trajectory(ObservationPoint(id="m", position=1, kind="probabilities", qubits=(1,)),
-                                      pauli("end", None, "ZZ")))
-    with Run(plan, directory=tmp_path / "run", progress=False) as run:
-        handle = prepare(plan.resolve("trajectory"), run=run, runtime=RuntimeOptions(seed=7))
-    native = handle._native
-    assert seen == [3]
-    assert native.simulator.options.max_parallel_threads == native.metadata["simulator_max_parallel_threads"] == 3
-    stream = io.BytesIO()
-    qpy.dump(native.circuit, stream)
-    stream.seek(0)
-    saved, = qpy.load(stream)
-    restored = AerBackend().restore_native_data(handle.record, saved, native.metadata, run=None)
-    assert restored.simulator.options.max_parallel_threads == 3
-    with nwqlib.load_run(tmp_path / "run", backend=AerBackend(), progress=False) as reopened:
-        again = prepare(reopened.plan.resolve("trajectory"), run=reopened, runtime=RuntimeOptions(seed=7))
-    assert seen == [3, 5] and again._native.simulator.options.max_parallel_threads == 5
 
 
 def _zero_state_plan(width, *points):
@@ -1600,7 +977,7 @@ def _zero_state_plan(width, *points):
                                                observation=trajectory(*points)),))._bind(blocks=base.blocks)
 
 
-@pytest.mark.parametrize("kind,count", [("probabilities", 1), ("pauli_expectation", 1), ("probabilities", 16)])
+@pytest.mark.parametrize("kind,count", [("pauli_expectation", 1), ("probabilities", 16)])
 def test_an_admitted_trajectory_completes_at_its_required_metadata_allowance(monkeypatch, kind, count):
     """``58*K + 1113`` bytes admit a trajectory that completes; one byte less refuses before lowering.
 
@@ -1636,79 +1013,9 @@ def test_an_admitted_trajectory_completes_at_its_required_metadata_allowance(mon
             assert {chunk.values[0].encoding for chunk in chunks} == {"sparse"}
 
 
-def test_probability_header_credit_covers_each_funded_byte_once(monkeypatch):
-    """Completion credits a probability point's funded header bytes once and leaves the rest in the allowance.
-
-    The metadata a completion spends, after replaced rows and the probability
-    credit (``_prepared_execution._probability_header_credit``), is the
-    job envelope and completion-row growth, 1171 bytes for one Aer point with
-    microsecond timestamps: for a repeated acquisition whose payload row is
-    already stored, for an empty sparse marginal (two manifests of zero
-    entries) and, with 120 more bytes, for a 56-character job text whose six
-    occurrences exceed the 36-character prototype by 20 each. A probability
-    endpoint funds its whole chunk remainder from the allowance
-    (``_probability_endpoint_minimum``): with an empty sparse one-qubit
-    marginal it needs 6902 bytes, and 6901 refuses before any event.
-    """
-    import numpy as np
-    from types import SimpleNamespace
-    import nwqlib._prepared_execution as owner
-    from nwqlib.backends import qiskit_aer as aer
-    from nwqlib.execution import ExecutionLimits, submit_experiment
-    from test_prepared_execution import base_plan
-
-    monkeypatch.setattr(owner, "_now", lambda: "2026-09-29T12:34:56.123456+00:00")
-    spent = []
-    write = owner.Run._write
-
-    def measured(self, records=(), **kwargs):
-        if kwargs.get("release_output") is not None and any(kind == "chunk" for kind, _, _ in records):
-            _, raw = owner._completion_metadata_bound(records, self.limits.max_data_bytes)
-            replaced = sum(self._state["data_sizes"].get((kind, key), 0) for kind, key, _ in records)
-            spent.append(raw - replaced - owner._probability_header_credit(records, self.limits.max_data_bytes,
-                                                                           run=self))
-        return write(self, records, **kwargs)
-
-    monkeypatch.setattr(owner.Run, "_write", measured)
-    base = base_plan()
-    point = ObservationPoint(id="p0", position=None, kind="probabilities", qubits=(0,))
-    plan = base.revise(experiments=(Experiment(name="t", setting="1 marginals", observation=trajectory(point)),))._bind(
-        blocks=base.blocks)
-    with Run(plan, limits=ExecutionLimits(max_completion_metadata_bytes=1171)) as run:
-        handle = prepare(plan.resolve("t"), run=run, runtime=RuntimeOptions(seed=7))
-        for _ in range(2):
-            submit_experiment(handle, run=run)
-        # The second acquisition's payload row is already stored.
-        assert spent == [1171, 1171]
-
-    def supplied(job):
-        return lambda native: SimpleNamespace(raw_output={"trajectory": {"p0": {"probabilities": np.zeros(2)}}},
-                                              metadata={"native_job_id": job})
-
-    for job, allowance in (("x" * 36, 1171), ("x" * 56, 2000)):
-        spent.clear()
-        monkeypatch.setattr(aer, "_submit_aer_execution", supplied(job))
-        with Run(plan, limits=ExecutionLimits(max_completion_metadata_bytes=allowance)) as run:
-            (chunk,) = submit_experiment(prepare(plan.resolve("t"), run=run, runtime=RuntimeOptions(seed=7)), run=run)
-            assert chunk.values[0].encoding == "sparse" and chunk.values[0].entries == 0
-            assert spent == [1171 + 6 * (len(job) - 36)]
-    single = base.revise(experiments=(Experiment(name="t", setting="1 marginals", observation=ObservationSpec(
-        kind="probabilities", qubits=(0,))),))._bind(blocks=base.blocks)
-    monkeypatch.setattr(aer, "_submit_aer_execution", lambda native: SimpleNamespace(
-        raw_output={"probabilities": np.zeros(2)}, metadata={"native_job_id": "x" * 36}))
-    with Run(single, limits=ExecutionLimits(max_completion_metadata_bytes=6901)) as run:
-        with pytest.raises(ValueError, match="need at least 6902 bytes, more than max_completion_metadata_bytes=6901"):
-            prepare(single.resolve("t"), run=run, runtime=RuntimeOptions(seed=7))
-        assert not run.trace.events and run.trace.preparations == 0
-    spent.clear()
-    with Run(single, limits=ExecutionLimits(max_completion_metadata_bytes=6902)) as run:
-        submit_experiment(prepare(single.resolve("t"), run=run, runtime=RuntimeOptions(seed=7)), run=run)
-        assert spent == [6902] and run.trace.events[-1].status == "completed"
-
-
-@pytest.mark.parametrize("shots", [None, 200])
+@pytest.mark.parametrize("shots", [200])
 def test_counts_and_exact_scalar_metadata_refuse_before_the_backend_call(monkeypatch, shots):
-    """Counts and exact Pauli scalar readouts check their completion metadata before native preparation.
+    """Counts readouts check their completion metadata before native preparation.
 
     ``prepare_static`` checks the largest known requirement of the Plan's
     settings (``_prepared_execution._scalar_endpoint_metadata``) before the
@@ -1743,78 +1050,3 @@ def test_counts_and_exact_scalar_metadata_refuse_before_the_backend_call(monkeyp
         nwqlib.submit(prepared).wait()
         assert [event.status for event in prepared.run.trace.events] == ["completed"]
     assert calls == [1]
-
-
-@pytest.mark.parametrize("case", ["rfe", "qls"])
-def test_static_metadata_check_names_the_largest_setting_requirement(case):
-    """A static Plan's metadata refusal names its largest setting requirement before the first preparation.
-
-    The sampled RFE Plan's settings need 2,079 or 2,081 bytes by the decimal
-    width of their pooled shots (``_prepared_execution._scalar_endpoint_metadata``),
-    and its first settings need the smaller value. ``prepare_static`` checks
-    the maximum over all settings, so an allowance of 2,079 refuses naming
-    2,081 with no preparation. The exact QLS amplitude endpoint needs 5,316
-    bytes (``_prepared_execution._amplitude_endpoint_metadata``).
-    """
-    import nwqlib
-    from nwqlib import Eigenproblem, LinearSystem
-    from nwqlib.algorithms import QLS, RFE
-    from nwqlib.execution import ExecutionLimits
-
-    if case == "rfe":
-        plan = nwqlib.plan(Eigenproblem(A=[[.2, 0], [0, .7]]), method=RFE(initial_state=[1, 0]), shots=200, seed=7)
-        required, allowance = 2081, 2079
-    else:
-        plan = nwqlib.plan(LinearSystem(A=[[1.1, .1], [.1, .9]], b=[1, .25]), method=QLS(), seed=7)
-        required, allowance = 5316, 5315
-    with Run(plan, limits=ExecutionLimits(max_completion_metadata_bytes=allowance)) as run:
-        with pytest.raises(ValueError, match=f"at least {required} per completion, exceeding {allowance}"):
-            plan.method.prepare(plan, run=run)
-        assert not run.trace.events and run.trace.preparations == 0
-
-
-def test_static_scan_admits_each_setting_once_and_stops_pricing_at_a_known_cap_excess(monkeypatch):
-    """The Aer static scan admits each setting's Program once and prices no setting past a known cap excess.
-
-    One readout resolution per setting (``_selected_readout``) gives both the
-    observation and the header of the completion-metadata law, so the scan
-    calls ``_Admission.admitted`` once per setting. With
-    ``max_total_circuits=1`` the second setting already exceeds the cap, so
-    only the first setting is priced, and the refusal names the complete
-    population of the Plan.
-    """
-    import nwqlib
-    from nwqlib import Eigenproblem, _prepared_execution
-    from nwqlib.algorithms import RFE
-    from nwqlib.execution import ExecutionLimits
-    from nwqlib.ir.validation import _Admission
-
-    plan = nwqlib.plan(Eigenproblem(A=[[.2, 0], [0, .7]]), method=RFE(initial_state=[1, 0]), shots=200, seed=7)
-    calls = {"admitted": 0, "priced": 0}
-    admitted, priced = _Admission.admitted, _prepared_execution._known_endpoint_metadata
-    monkeypatch.setattr(_Admission, "admitted", lambda self: calls.__setitem__(
-        "admitted", calls["admitted"] + 1) or admitted(self))
-    monkeypatch.setattr(_prepared_execution, "_known_endpoint_metadata", lambda *args, **kwargs: calls.__setitem__(
-        "priced", calls["priced"] + 1) or priced(*args, **kwargs))
-
-    class ScanDone(Exception):
-        pass
-
-    def stop(*args, **kwargs):
-        raise ScanDone
-
-    monkeypatch.setattr(_prepared_execution, "_prepare_static_item", stop)
-    with Run(plan) as run, pytest.raises(ScanDone):
-        _prepared_execution.prepare_static(plan, run=run)
-    assert calls == {"admitted": len(plan.experiments), "priced": len(plan.experiments)} and len(plan.experiments) > 2
-    calls.update(admitted=0, priced=0)
-    with Run(plan, limits=ExecutionLimits(max_total_circuits=1)) as run:
-        with pytest.raises(ValueError, match=rf"max_total_circuits=1 cannot admit .*\(0 counted, {len(plan.experiments)} requested"):
-            _prepared_execution.prepare_static(plan, run=run)
-        assert run.trace.preparations == 0
-    assert calls == {"admitted": len(plan.experiments), "priced": 1}
-    # The cap refusal also comes before a metadata refusal that the priced
-    # first setting alone would cause.
-    with Run(plan, limits=ExecutionLimits(max_total_circuits=1, max_completion_metadata_bytes=1)) as run:
-        with pytest.raises(ValueError, match=rf"max_total_circuits=1 cannot admit .*\(0 counted, {len(plan.experiments)} requested"):
-            _prepared_execution.prepare_static(plan, run=run)

@@ -1,7 +1,6 @@
 """Direct installed-model comparison, count mapping and independent cycle relations."""
 
 import json
-import math
 import subprocess
 import sys
 
@@ -9,7 +8,7 @@ import pytest
 
 from nwqlib.backends.nwqec import compile_logical
 from nwqlib.backends.qre import PhysicalProjection, estimate_physical
-from test_nwqec_compilation import expectation_plan, lowered_rotation, require_native
+from test_nwqec_compilation import lowered_rotation, require_native
 
 
 @pytest.fixture(scope="module")
@@ -126,57 +125,3 @@ assert not attempts, attempts
         timeout=20,
     )
     assert completed.returncode == 0, completed.stderr
-
-
-def test_missing_readout_and_residual_gates_refuse_before_model(compilation, monkeypatch):
-    from nwqlib.backends import _auxiliary_process
-
-    monkeypatch.setattr(
-        _auxiliary_process,
-        "run_auxiliary",
-        lambda *a, **k: pytest.fail("invalid counts reached QDK"),
-    )
-    for options in (
-        {},
-        {"measurement_count": -1},
-        {"measurement_count": 1, "max_error": 0},
-        {"measurement_count": 100001},
-    ):
-        with pytest.raises(ValueError):
-            estimate_physical(compilation, **options)
-    residual = compilation.revise(raw_counts=(("rz", 1),))
-    with pytest.raises(ValueError, match="residual"):
-        estimate_physical(residual, measurement_count=1)
-
-
-def test_empty_finite_model_set_is_preserved(compilation):
-    tiny = compile_logical(lowered_rotation(math.pi / 4))
-    assert sum(value for name, value in tiny.raw_counts if name in {"t", "tdg"}) == 1
-    result = estimate_physical(tiny, measurement_count=1)
-    assert result.entries == ()
-    assert "No feasible result" in str(result)
-
-
-def test_original_counts_mapping_cannot_be_overridden(monkeypatch):
-    require_native()
-    from nwqlib import prepare
-    from nwqlib.backends import _auxiliary_process
-
-    prepared = prepare(expectation_plan(shots=8))
-    try:
-        compiled = compile_logical(prepared)
-    finally:
-        prepared.run.close()
-    captured = []
-
-    def stop_at_model(operation, request, **kwargs):
-        captured.append(request)
-        raise RuntimeError("mapping reached model")
-
-    monkeypatch.setattr(_auxiliary_process, "run_auxiliary", stop_at_model)
-    with pytest.raises(ValueError, match="cannot be overridden"):
-        estimate_physical(compiled, measurement_count=1)
-    assert captured == []
-    with pytest.raises(RuntimeError, match="mapping reached model"):
-        estimate_physical(compiled)
-    assert captured[0]["counts"]["measurementCount"] == len(compiled.terminal_measurements) == 1

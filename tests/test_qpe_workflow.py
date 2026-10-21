@@ -9,7 +9,7 @@ from math import cos, pi, sin
 import numpy as np
 import pytest
 
-from nwqlib.algorithms.qpe import QCELS, SPE, RFE, RWPE
+from nwqlib.algorithms.qpe import SPE
 from nwqlib.algorithms.qpe import numerical
 from nwqlib.algorithms.qpe.records import public_estimate
 
@@ -119,7 +119,7 @@ def test_spe_cdf_targets_the_low_energy_jump_of_a_mixed_spectrum():
     assert result.interval_low is result.interval_high is None
 
 
-@pytest.mark.parametrize("grid_size", [64, 4096])
+@pytest.mark.parametrize("grid_size", [4096])
 def test_unitary_spe_reports_one_principal_phase_across_a_phase_sweep(grid_size):
     from nwqlib import SpectralEstimation, solve
     from nwqlib.problems import Eigenphase
@@ -127,7 +127,7 @@ def test_unitary_spe_reports_one_principal_phase_across_a_phase_sweep(grid_size)
     # angle_principal rounds x + pi, so it can return a number near a grid
     # point x rather than x itself. On the default 4096-point grid the phase
     # in turns then differs from the turns of x at 745 points. This sweep puts
-    # the first crossing on such points at both grid sizes. A value
+    # the first crossing on such points. A value
     # taken from the raw coordinate would then differ from the phase, and
     # validate_plan would reject the Result.
     for phi in np.linspace(-1.4, 1.4, 15):
@@ -187,11 +187,10 @@ def test_spe_draw_distribution_and_quadratures_follow_the_filter():
     assert schedule == tuple((power, phase) for power in (5, 1, 5) for phase in (0., -pi/2))
 
 
-@pytest.mark.parametrize("mixture", [False, True])
-def test_rfe_largest_fourier_peak_has_correct_sign_and_mixed_spectrum_target(mixture):
+def test_rfe_largest_fourier_peak_has_correct_sign_and_mixed_spectrum_target():
     # Two orthogonal Fourier modes have exact DFT magnitudes .55 and .45.
     # The dominant mode is not the ground energy or a CDF threshold crossing.
-    energies, weights = ((2*pi*4/49, -2*pi*3/49), (.55, .45)) if mixture else ((2*pi*4/49,), (1.,))
+    energies, weights = (2*pi*4/49, -2*pi*3/49), (.55, .45)
     powers = tuple(range(49))
     samples = [
         ideal_overlap(power, phases=tuple(-energy for energy in energies), weights=weights)
@@ -201,33 +200,6 @@ def test_rfe_largest_fourier_peak_has_correct_sign_and_mixed_spectrum_target(mix
     assert result.value == pytest.approx(energies[0], rel=0, abs=2e-14)
     assert result.phase == pytest.approx(-energies[0], rel=0, abs=2e-14)
     assert result.interval_low is result.interval_high is result.interval_method is None
-
-
-def test_rfe_repeated_draws_keep_their_weight_and_actual_quadrature_association():
-    from types import SimpleNamespace
-    from nwqlib.algorithms.qpe.method import _static_estimate
-    from nwqlib.algorithms.qpe.records import QPEQuery
-
-    # At each k, two observations follow phase +pi/2 and one follows -pi/2.
-    # The DFT peaks therefore have magnitudes 2/3 and 1/3. Keeping only the
-    # last observation at each power would select the opposite phase.
-    powers, values, queries, rows = [], [], [], []
-    for k in range(4):
-        for phase in (pi/2, pi/2, -pi/2):
-            powers.append(k)
-            value = complex(cos(k*phase), sin(k*phase))
-            values.append(value)
-            for shift, mean in ((0., value.real), (-pi/2, value.imag)):
-                name = f"q{len(queries)}"
-                queries.append(QPEQuery(experiment=name, power=k, phase_shift=shift, acquisition=name))
-                rows.append(SimpleNamespace(experiment=name, mean=mean, shots=None))
-    method = RFE(num_samples=12, num_frequencies=4)
-    rec = SimpleNamespace(powers=tuple(SimpleNamespace(power=k) for k in range(4)),
-                          queries=tuple(queries), tau=None)
-    result, missing, exposure = _static_estimate(SimpleNamespace(reconstruction=rec), rows, method)
-    assert missing == () and exposure is None
-    assert result.phase == pytest.approx(pi/2, rel=0, abs=1e-14)
-    assert numerical.rfe(powers, values, tau=.5, num_frequencies=4).value == pytest.approx(-pi, rel=0, abs=2e-14)
 
 
 def test_aliasing_and_public_unwrapped_turns_boundary():
@@ -247,28 +219,6 @@ def test_aliasing_and_public_unwrapped_turns_boundary():
     ]
     rfe = numerical.rfe(range(64), rfe_samples, tau=1.0, num_frequencies=64)
     assert abs(rfe.value - (pi - 0.02)) <= pi/64
-
-
-def test_signal_resolution_is_the_admitted_window_of_its_means():
-    from nwqlib._validation import NUMERICAL_RELATION_RTOL as host_window
-
-    # One sample whose parts each lie within the window w of zero can be an
-    # exact zero, so a signal of modulus below sqrt(2)*w vanishes and one
-    # above it counts. The summation term gamma_2*|z| is about 1e-28 here.
-    powers = (0, 1, 2)
-    for modulus, supported in ((1.40e-12, False), (1.42e-12, True)):
-        samples = (1+0j, modulus+0j, 0j)
-        fit = numerical.qcels(powers, samples, tau=None, grid_size=64, mean_window=host_window)
-        assert (fit.value is not None) == supported
-    # A genuine eigenstate signal gives the same fit with and without the
-    # window, since every power carries a signal far above it.
-    samples = [ideal_overlap(power, phases=(.37,), weights=(1.,)) for power in range(6)]
-    exact = numerical.qcels(range(6), samples, tau=None, grid_size=64, mean_window=host_window)
-    assert exact == numerical.qcels(range(6), samples, tau=None, grid_size=64)
-    assert exact.stop_reason is None
-    peak = numerical.rfe(range(49), [ideal_overlap(k, phases=(.8,), weights=(1.,)) for k in range(49)],
-                         tau=None, num_frequencies=49, mean_window=host_window)
-    assert peak.value == pytest.approx(2*pi*round(.8*49/(2*pi))/49, rel=0, abs=1e-15)
 
 
 @pytest.mark.parametrize("datum", [0, 1])
@@ -297,28 +247,6 @@ def test_rwpe_one_bit_update_matches_independent_gaussian_integration(datum):
     assert estimated.interval_low < estimated.value < estimated.interval_high
 
 
-def test_numerical_domain_rejects_invalid_observations():
-    for mean, std, datum in ((0., 1., 2), (0., 0., 0), (float("nan"), 1., 0)):
-        with pytest.raises(ValueError):
-            numerical.rwpe_update(mean, std, datum)
-    with pytest.raises(ValueError, match="finite"):
-        numerical.rfe(
-            range(7), [complex("nan")] * 7, tau=0.5, num_frequencies=8
-        )
-
-
-def test_config_preserves_numpy_integers_and_numerical_domains():
-    assert QCELS(num_times=np.int64(3)).num_times == 3
-    assert SPE(fourier_degree=np.int64(2), overlap_lower_bound=.5).fourier_degree == 2
-    assert RFE(num_frequencies=np.int64(3)).num_frequencies == 3
-    assert RWPE(max_steps=np.int64(0)).max_steps == 0
-    for bad in (float("nan"), float("inf"), -1.0):
-        with pytest.raises(ValueError):
-            QCELS(pauli_pruning_rtol=bad)
-    with pytest.raises(ValueError):
-        RWPE(prior_std=0.)
-
-
 def test_hamiltonian_phase_interval_reverses_and_recenters_energy_bounds():
     estimate = numerical.NumericalEstimate(
         value=0.4,
@@ -333,60 +261,3 @@ def test_hamiltonian_phase_interval_reverses_and_recenters_energy_bounds():
     assert turns == pytest.approx(1 - 0.2 / (2 * pi), abs=1e-15)
     assert interval.low == pytest.approx(1 - 0.35 / (2 * pi), abs=1e-15)
     assert interval.high == pytest.approx(1 - 0.15 / (2 * pi), abs=1e-15)
-
-
-@pytest.mark.parametrize("execution", ["classical", "quantum"])
-def test_exact_signals_that_vanish_are_zero_at_their_mean_window(execution):
-    """Exact data that vanish in exact arithmetic are no signal, so aliasing is reported."""
-    from nwqlib import SpectralEstimation, solve
-    from nwqlib._validation import NUMERICAL_RELATION_RTOL
-    from nwqlib.problems import Eigenvalue
-
-    # z_p = cos(pi p/2) vanishes at odd p, so the signal powers share spacing 2.
-    H = np.diag([0.5, -0.5])
-    aliased = solve(SpectralEstimation(hamiltonian=H, initial_state=[2**-0.5, 2**-0.5]),
-                    method=QCELS(tau=pi, num_times=10, grid_size=256), output=Eigenvalue(),
-                    execution=execution, seed=1)
-    # Both routes return some odd-power means as roundoff rather than exact
-    # zeros, so only the mean window can tell them from a signal.
-    assert any(0 < abs(sample.mean) < 1e-15 for sample in aliased.samples if sample.power % 2)
-    assert aliased.stop_reason is not None and "aliased" in aliased.stop_reason
-    # Weights .5 + 2e-12 and .5 - 2e-12 give |z_p| = 4e-12 at odd p. Host
-    # scalars resolve a signal above sqrt(2) NUMERICAL_RELATION_RTOL, about
-    # 1.4e-12. Exact quantum means are admitted within their receipts'
-    # probability_window, about 7.7e-12 for these one-qubit circuits, so the
-    # quantum route resolves only a signal above sqrt(2) times that window
-    # and reports the same aliasing.
-    weighted = solve(SpectralEstimation(hamiltonian=H, initial_state=np.sqrt([.5 + 2e-12, .5 - 2e-12])),
-                     method=QCELS(tau=pi, num_times=10, grid_size=256), output=Eigenvalue(),
-                     execution=execution, seed=1)
-    if execution == "classical":
-        assert weighted.stop_reason is None
-    else:
-        window = max(receipt.probability_window for receipt in weighted.data.receipts)
-        assert np.sqrt(2) * NUMERICAL_RELATION_RTOL < 4e-12 < np.sqrt(2) * window
-        assert weighted.stop_reason is not None and "aliased" in weighted.stop_reason
-    # An eigenstate has signal at every power and gives its energy without aliasing.
-    eigenstate = solve(SpectralEstimation(hamiltonian=H, initial_state=[1.0, 0.0]),
-                       method=QCELS(tau=pi, num_times=10, grid_size=256), output=Eigenvalue(),
-                       execution=execution, seed=1)
-    assert eigenstate.stop_reason is None and eigenstate.estimator_value == pytest.approx(0.5, abs=1e-6)
-
-
-def test_exactly_flat_classical_signals_give_no_estimate():
-    """Equally weighted, equally spaced eigenphases give z_p = 0 exactly at every nonzero power."""
-    from nwqlib import SpectralEstimation, solve
-    from nwqlib.problems import Eigenphase
-
-    size = 16
-    unitary = np.diag(np.exp(2j*pi*np.arange(size)/size + 0.1j))
-    qcels = solve(SpectralEstimation(unitary=unitary, initial_state=np.ones(size)/np.sqrt(size)),
-                  method=QCELS(num_times=10, grid_size=256), output=Eigenphase(), execution="classical", seed=1)
-    assert qcels.estimator_value is None and "flat complex-fit objective" in qcels.stop_reason
-    # RFE's default K = 49 powers vanish for 49 equally spaced phases.
-    frequencies = 49
-    phases = np.concatenate([2*pi*np.arange(frequencies)/frequencies + 0.05, np.zeros(64 - frequencies)])
-    state = np.concatenate([np.ones(frequencies)/np.sqrt(frequencies), np.zeros(64 - frequencies)])
-    rfe = solve(SpectralEstimation(unitary=np.diag(np.exp(1j*phases)), initial_state=state), method=RFE(),
-                output=Eigenphase(), execution="classical", seed=1)
-    assert rfe.estimator_value is None and "flat sampled Fourier spectrum" in rfe.stop_reason

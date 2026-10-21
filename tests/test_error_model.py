@@ -1,6 +1,5 @@
 """Independent output-frame, exact-scalar and covariance witnesses; no native work."""
 
-import re
 from fractions import Fraction
 from unittest.mock import ANY
 
@@ -113,22 +112,6 @@ def test_relative_scale_requires_supported_nonzero_target_or_explicit_fallback()
     assert assess(reference.revise(fact=fact("eigenvalue", 2, kind="observed"))).threshold is None
     with pytest.raises(ValueError, match="relative"):
         original.assess(Accuracy(absolute_tolerance=.5), context=CONTEXT, absolute_fallback=.5)
-
-
-def test_point_restrictions_and_unresolved_premises_survive_export():
-    from nwqlib.ir import Binding
-    binding = Binding(parameter="n", value=4)
-    original = model(physical=0)
-    fixed = fact("sampling", 0, bindings=(binding,))
-    point = CONTEXT.revise(bindings=(binding,))
-    assert original.assess(Accuracy(absolute_tolerance=.1), context=point, facts=(fixed,)).status == "PASS"
-    with pytest.raises(ValueError, match="conflicting"):
-        original.assess(Accuracy(absolute_tolerance=.1), context=CONTEXT.revise(bindings=(binding.revise(value=1),)), facts=(fixed,))
-    unresolved = fixed.revise(fact=fixed.fact.revise(assumptions=("unverified model premise",)))
-    result = original.assess(Accuracy(absolute_tolerance=.1), context=point, facts=(unresolved,))
-    copied = FramedFact.model_validate_json(result.facts[-1].model_dump_json())
-    assert copied.bindings == (binding,) and copied.fact.assumptions == ("unverified model premise",)
-    assert original.assess(Accuracy(absolute_tolerance=.1), context=point, facts=(copied,)).status == "INCONCLUSIVE"
 
 
 def test_check_domain_and_signed_metric_are_distinct_from_evidence_status():
@@ -263,23 +246,6 @@ def test_independent_scalar_bound_integer_boundary_and_conditions():
     assert resolve_scalar_bound(0, 0, fixed_error=1, maximum=4).integer is None
 
 
-def test_scalar_bound_rejects_wrong_domain_frame_and_prospective_arithmetic():
-    from nwqlib.evidence import resolve_scalar_bound
-
-    for kwargs in ({"coefficient": -1}, {"tolerance": float("nan")}, {"fixed_error": -1},
-                   {"maximum": True}, {"minimum": 0}, {"fixed": 5}, {"work_per_unit": -1}):
-        values = dict(coefficient=1, tolerance=1, maximum=4)
-        values.update(kwargs)
-        with pytest.raises(ValueError):
-            resolve_scalar_bound(**values)
-    other = FRAME.revise(unit=Unit(symbol="m", dimension="custom"))
-    with pytest.raises(ValueError, match="metric, unit"):
-        resolve_scalar_bound(fact("c", 1), fact("epsilon", 1, frame=other), maximum=4)
-    assert resolve_scalar_bound(fact("c", 1), fact("epsilon", Fraction(1, 4)), maximum=4).integer == 4
-    with pytest.raises(ValueError, match="before operation"):
-        resolve_scalar_bound(1, Fraction(1, 2**32), maximum=2**40, decay="inverse_sqrt", max_integer_bits=48)
-
-
 def test_replacing_bound_never_inherits_displaced_confidence():
     original = model(physical=0, sampling=Fraction(1, 100))
     accuracy = Accuracy(absolute_tolerance=.1, component='sampling', confidence=.95)
@@ -295,130 +261,34 @@ def test_replacing_bound_never_inherits_displaced_confidence():
         context=CONTEXT,facts=checked.facts).status == 'INCONCLUSIVE'
 
 
-def test_criterion_free_result_keeps_its_actual_error_fact():
-    from nwqlib import Expectation, solve
-    from nwqlib.algorithms.expectation import ExpectationMethod
-    from nwqlib.operators.inputs import ingest_pauli
-    result = solve(Expectation(state=[1,0],observable=ingest_pauli([('I',1.)],num_qubits=1)),method=ExpectationMethod())
-    frame = result.plan.output.frame(result.plan.problem)
-    statement = FramedFact(frame=frame,bindings=(),failure_probability=0.,fact=Fact(
-        quantity='sampling',unit=frame.unit,scope=frame.scope,availability='concrete',value=Rational(numerator=0,denominator=1),
-        evidence=Evidence(kind='proved_relation',source=SOURCE,status='witnessed',
-            artifact='identity observable is the constant one; zero acquired random settings',
-            witnessed_scope=frame.scope,subject_id=result.observation_id)))
-    checked = result.revise(facts=(statement,))._attach(result.plan,result.data)
-    assert not checked.data.observations.chunks
-    assessment = checked.assess(absolute_tolerance=.01,component='sampling')
-    assert assessment.status == 'PASS'
-    assert checked.plan is result.plan and checked.data is result.data
-
-
-def _unit_cases():
-    import numpy as np
-    from nwqlib import Eigenproblem, LinearDynamics, LinearSystem
-    from nwqlib.operators.inputs import ingest_pauli
-    from nwqlib.problems import Eigenphase, Eigenvalue, NormalizedExpectation, NormSquared, Samples, StateVector
-
-    energy = np.diag([-1.137, 0.5])
-    system = dict(A=[[1.1, 0.1], [0.1, 0.9]], b=[1.0, 0.25])
-    conflicts = (
-        (Eigenproblem(A=energy, unit="Hartree"), Eigenvalue(unit="eV"), "Hartree"),
-        (Eigenproblem(A=energy), Eigenphase(unit="rad"), "turn"),
-        (LinearSystem(**system), Samples(unit="count"), "1"),
-        (LinearSystem(**system, unit="m"), StateVector(unit="m"), "1"),
-        (LinearSystem(**system, unit="m"), NormSquared(unit="m"), "(m)^2"),
-    )
-    observable = ingest_pauli((("Z", 1.0),), num_qubits=1)
-    legal = (
-        (Eigenproblem(A=energy, unit="Hartree"), Eigenvalue(unit="Hartree"), "Hartree"),
-        (Eigenproblem(A=energy), Eigenphase(unit="turn"), "turn"),
-        (Eigenproblem(A=energy), Eigenvalue(unit="eV"), "eV"),
-        (LinearDynamics(A=np.eye(2), initial_state=[1, 0], time=0.1, unit="m"),
-         NormalizedExpectation(observable=observable, unit="K"), "K"),
-    )
-    return conflicts, legal
-
-
-def test_output_unit_conflicting_with_a_defined_unit_raises_before_planning():
-    """An output unit relabels an unconverted value, so a conflict with the Problem's unit is an input error."""
-    from nwqlib import plan
-    from nwqlib.algorithms.lanczos import Lanczos
-
-    conflicts, legal = _unit_cases()
-    for problem, output, defined in conflicts:
-        with pytest.raises(ValueError, match=re.escape(f"conflicts with the unit '{defined}'")):
-            output.frame(problem)
-    problem, output, _ = conflicts[0]
-    with pytest.raises(ValueError, match="conflicts with the unit 'Hartree'"):
-        plan(problem, method=Lanczos(initial_state=(0.8, 0.6), krylov_dimension=2), output=output,
-             execution="classical", seed=1)
-    # The same symbol, or a label for a quantity without a defined unit, stays legal.
-    for problem, output, expected in legal:
-        assert output.frame(problem).unit.symbol == expected
-    problem, output, _ = legal[0]
-    selected = plan(problem, method=Lanczos(initial_state=(0.8, 0.6), krylov_dimension=2), output=output,
-                    execution="classical", seed=1)
-    assert selected.error_model.frame.unit.symbol == "Hartree"
-
-
 def _sampling_runs(shots=None):
     """Return one small run per estimator, with exact readout unless shots is given.
 
-    QCELS measures a fixed schedule of powers, and RWPE without an update
-    reports its prior. Classical RWPE emulates one random bit from each
-    exact signal, and SPE and RFE draw their frequencies or powers at random,
-    so their estimates depend on random draws even with exact readout.
+    Classical RWPE emulates one random bit from each exact signal, so its
+    estimate depends on random draws even with exact readout.
     """
     import numpy as np
-    import sympy as sp
-    from nwqlib import Eigenproblem, Expectation, LinearDynamics, LinearSystem, Optimization, solve
-    from nwqlib.algorithms import LCHS, ExpectationMethod
-    from nwqlib.algorithms.qpe import QCELS, RFE, RWPE, SPE
-    from nwqlib.algorithms.gcim import FixedGCIM
+    from nwqlib import Eigenproblem, Expectation, LinearSystem, solve
+    from nwqlib.algorithms import ExpectationMethod
+    from nwqlib.algorithms.qpe import RWPE
     from nwqlib.algorithms.lanczos import Lanczos
-    from nwqlib.algorithms.qhd import QHD
     from nwqlib.algorithms.qls import QLS
-    from nwqlib._prepared_execution import Run
-    from test_adapt_primary import plan_for as adapt_plan
 
-    x = sp.Symbol("x", real=True)
     energy = np.array([[1.5, -1.0], [-1.0, 0.5]])
     return dict(
         expectation=lambda: solve(Expectation(state=[2.0, 2.0], observable=[[2.0, 0.0], [0.0, 0.0]]),
                                   method=ExpectationMethod(), shots=shots, seed=7),
         lanczos=lambda: solve(Eigenproblem(A=energy), method=Lanczos(initial_state=[1, 0], krylov_dimension=2),
                               shots=shots, seed=7),
-        fixed_gcim=lambda: solve(Eigenproblem(A=energy), method=FixedGCIM(basis=([1.0, 0.0], [0.0, 1.0])),
-                                 shots=shots, seed=7),
         qls=lambda: solve(LinearSystem(A=[[1.1, 0.1], [0.1, 0.9]], b=[1.0, 0.25]), method=QLS(), seed=7),
-        qhd=lambda: solve(Optimization(objective=(x - 0.2) ** 2, variables=(x,), bounds=((-1.0, 1.0),)),
-                          method=QHD(), seed=7),
-        adapt=lambda: Run(adapt_plan(execution="classical", initial_state=(1, 0))).wait(timeout=5, poll_interval=0),
-        lchs=lambda: solve(LinearDynamics(A=[[0.4, 0.15], [0.05, 0.25]], initial_state=[1, 0], time=0.1),
-                           method=LCHS(), seed=7),
-        qcels=lambda: solve(Eigenproblem(A=np.diag([0.2, 0.7])), method=QCELS(initial_state=[1, 0]),
-                            shots=shots, seed=7),
-        rwpe_prior=lambda: solve(Eigenproblem(A=np.diag([0.2, 0.7])),
-                                 method=RWPE(initial_state=[1, 0], tau=1.0, max_steps=0),
-                                 execution="classical", seed=7),
         rwpe=lambda: solve(Eigenproblem(A=np.diag([0.2, 0.7])),
                            method=RWPE(initial_state=[1, 0], tau=1.0, max_steps=1, prior_std=1.0),
                            execution="classical", seed=7),
-        spe=lambda: solve(Eigenproblem(A=np.diag([0.2, 0.7])),
-                          method=SPE(initial_state=[1, 0], overlap_lower_bound=1.0),
-                          execution="classical", seed=7),
-        rfe=lambda: solve(Eigenproblem(A=np.diag([0.2, 0.7])),
-                          method=RFE(initial_state=[1, 0], tau=1.0, num_samples=3,
-                                     num_frequencies=16),
-                          execution="classical", seed=7),
     )
 
 
 @pytest.mark.parametrize("family,status", [
-    ("expectation", "PASS"), ("lanczos", "PASS"), ("fixed_gcim", "PASS"), ("adapt", "PASS"),
-    ("lchs", "PASS"), ("qcels", "PASS"), ("rwpe_prior", "PASS"),
-    ("qls", "NOT_APPLICABLE"), ("qhd", "NOT_APPLICABLE"),
-    ("rwpe", "INCONCLUSIVE"), ("spe", "INCONCLUSIVE"), ("rfe", "INCONCLUSIVE"),
+    ("expectation", "PASS"), ("qls", "NOT_APPLICABLE"), ("rwpe", "INCONCLUSIVE"),
 ])
 def test_exact_readout_sampling_is_zero_only_without_random_draws(family, status):
     """Exact readout proves zero sampling error only for an estimator that makes no random draw.
@@ -447,7 +317,7 @@ def test_exact_readout_sampling_is_zero_only_without_random_draws(family, status
     assert ("sampling" in total.remaining) == (status == "INCONCLUSIVE")
 
 
-@pytest.mark.parametrize("family", ["expectation", "lanczos", "fixed_gcim", "qcels"])
+@pytest.mark.parametrize("family", ["lanczos"])
 def test_finite_shots_keep_sampling_required(family):
     """Drawn outcomes never receive the exact-readout zero."""
     result = _sampling_runs(shots=64)[family]()

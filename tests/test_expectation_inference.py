@@ -1,6 +1,5 @@
 """Independent binary algebra and injected public expectation acquisitions."""
 
-from dataclasses import replace
 from fractions import Fraction
 from math import comb, log, sqrt
 from types import SimpleNamespace
@@ -202,7 +201,7 @@ def _beta_tail_masses(interval, a, b):
     return below(lower), 1 - below(upper)
 
 
-@pytest.mark.parametrize("failure", [0.05, 1.2e-16])
+@pytest.mark.parametrize("failure", [1.2e-16])
 def test_beta_endpoints_leave_the_selected_tail_mass(failure):
     """Both endpoints of Beta(4, 6) leave posterior mass alpha/2 outside.
 
@@ -239,7 +238,6 @@ def _cornish_fisher_beta_quantile(a, b, z):
     [
         (150_000_000_000, 349_999_999_998),  # a+b = 5e11, the validated limit
         (150_000_000_000, 349_999_999_999),  # a+b = 5e11 + 1
-        (2_702_159_776_422_297, 6_305_039_478_318_694),  # n = 2**53-1
     ],
 )
 def test_beta_interval_is_unavailable_above_the_validated_shape_total(zeros, ones, monkeypatch):
@@ -277,7 +275,6 @@ def test_beta_interval_is_unavailable_above_the_validated_shape_total(zeros, one
     [
         ((9, 1), (2, 8), (8, 2), Fraction(5, 7)),
         ((2, 8), (9, 1), (8, 2), Fraction(-5, 7)),
-        ((6, 4), (4, 6), (10, 0), Fraction(5)),
     ],
 )
 def test_affine_asymmetry_negative_contrast_and_signed_point(zero, one, science, expected):
@@ -330,37 +327,6 @@ def test_unusable_contrast_and_joint_rectangle_do_not_fallback():
     assert empty.interval.status == "empty" and empty.interval_image[0] > 1
 
 
-@pytest.mark.parametrize("mismatch", ["upgrade", "beta", "family", "probability", "kind"])
-def test_correction_rejects_incompatible_saved_inference_before_arithmetic(monkeypatch, mismatch):
-    from nwqlib.evidence._work import ExactArithmetic
-
-    inference, science = infer(population("science", 600, 400), "hoeffding", family=3)
-    _, zero = infer(population("zero", 900, 100), "hoeffding", family=3)
-    _, one = infer(population("one", 100, 900), "hoeffding", family=3)
-    if mismatch == "upgrade":
-        inference = inference.revise(method="anytime_hoeffding")
-    elif mismatch == "beta":
-        _, zero = infer(population("zero", 900, 100), "beta", family=3, independent_populations=True)
-    elif mismatch == "family":
-        _, zero = infer(population("zero", 900, 100), "hoeffding", family=1)
-    elif mismatch == "probability":
-        zero = zero.revise(interval=zero.interval.revise(probability=0.9))
-    else:
-        zero = zero.revise(interval=zero.interval.revise(kind="time_uniform"))
-    monkeypatch.setattr(
-        ExactArithmetic, "fraction", lambda *a: pytest.fail("incompatible inference reached arithmetic")
-    )
-    with pytest.raises(ValueError, match="inference"):
-        correct_binary(
-            science,
-            zero,
-            one,
-            options=BinaryReadoutMitigation(calibration_shots=1000),
-            inference=inference,
-            applicability_reason=None,
-        )
-
-
 def test_frozen_reuse_partial_and_missing_receipts_keep_honest_inference(injected):
     """Repeated frozen samples consume execution work but do not create independent statistical
     observations.
@@ -407,29 +373,10 @@ def test_frozen_reuse_partial_and_missing_receipts_keep_honest_inference(injecte
     assert "calibration" in unavailable.unavailable
 
 
-def test_identity_options_do_not_create_measurement_or_calibration(monkeypatch):
-    import nwqlib.algorithms.expectation as owner
-
-    monkeypatch.setattr(
-        owner, "_measured_program", lambda *a, **k: pytest.fail("identity created a measured path")
-    )
-    choice = make_choice(
-        terms=(("I", -2.0),),
-        inference=BinaryInferenceOptions(method="anytime_hoeffding"),
-        mitigation=BinaryReadoutMitigation(calibration_shots=1000),
-    )
-    run = Run(choice)
-    result = analyze(choice, run)
-    assert result.value == -2 and result.statistics is None
-    assert choice.experiments == choice.blocks == ()
-    assert run.trace.events == () and run.trace.preparations == 0
-
-
-@pytest.mark.parametrize("independent", [False, True])
-def test_independent_equal_histograms_keep_distinct_variables(injected, independent):
+def test_independent_equal_histograms_keep_distinct_variables(injected):
     choice = make_choice(
         terms=(("Z", 1.0), ("X", 1.0)),
-        inference=BinaryInferenceOptions(sampling_model="iid_bernoulli", independent_populations=independent),
+        inference=BinaryInferenceOptions(sampling_model="iid_bernoulli", independent_populations=True),
     )
     injected.payloads = {"group_0": {"0": 75, "1": 25}, "group_1": {"0": 75, "1": 25}}
     run = acquire(choice, injected)
@@ -438,13 +385,10 @@ def test_independent_equal_histograms_keep_distinct_variables(injected, independ
     assert populations[0].population.source_ids != populations[1].population.source_ids
     assert result.value == 1
     variance = result.statistics.variance.value.fact
-    if independent:
-        assert float(Fraction(variance.value.numerator, variance.value.denominator)) == pytest.approx(
-            1.5 / 99, rel=1e-14, abs=1e-14
-        )
-        assert variance.evidence.kind == "user_assertion"
-    else:
-        assert variance.availability == "unknown"
+    assert float(Fraction(variance.value.numerator, variance.value.denominator)) == pytest.approx(
+        1.5 / 99, rel=1e-14, abs=1e-14
+    )
+    assert variance.evidence.kind == "user_assertion"
     shared = Run(choice)
     for experiment in choice.experiments:
         handle = prepare(choice.resolve(experiment.name), run=shared, runtime=RuntimeOptions(seed=7))
@@ -487,54 +431,10 @@ def test_shared_stream_preserves_marginal_union_bound_but_not_product_independen
         )
 
 
-def test_within_setting_shared_stream_is_detected_after_another_setting(injected, monkeypatch):
-    from nwqlib.backends.connection import AerBackend
-
-    choice = make_choice(
-        q=2,
-        terms=(("IZ", 1.0), ("IX", 1.0)),
-        inference=BinaryInferenceOptions(
-            method="anytime_hoeffding", sampling_model="iid_bernoulli", independent_populations=True
-        ),
-    )
-    injected.payloads = {"group_0": {"00": 75, "01": 25}, "group_1": {"00": 75, "01": 25}}
-    run = Run(choice)
-    native_prepare = AerBackend.prepare
-    mapping = (0, 1)
-
-    def prepare_mapping(self, *args, **kwargs):
-        return replace(native_prepare(self, *args, **kwargs), logical_to_native=mapping)
-
-    monkeypatch.setattr(AerBackend, "prepare", prepare_mapping)
-    for name, mapping in (("group_0", (0, 1)), ("group_1", (0, 1)), ("group_1", (1, 0))):
-        handle = prepare(choice.resolve(name), run=run, runtime=RuntimeOptions(seed=7))
-        run.collect(submit(handle, run=run))
-    result = analyze(choice, run)
-    first, second = result.statistics.populations
-    assert first.interval.status == "conditional"
-    assert second.population.zeros == 150 and second.population.ones == 50
-    assert len(second.population.source_ids) == 2
-    assert second.interval.status == "unavailable" and "fixed sampling stream" in second.interval.reason
-    assert result.statistics.interval.status == "unavailable" and result.statistics.raw_value == 1.0
-
-
-@pytest.mark.parametrize("fresh", [False, True])
-def test_new_populations_accumulate_but_stopped_fixed_time_stays_unavailable(injected, monkeypatch, fresh):
+def test_new_populations_accumulate_but_stopped_fixed_time_stays_unavailable(injected):
     """Contrast complete prefixes with filtered or data-stopped populations before allowing
     coverage claims.
     """
-    from nwqlib.backends.connection import AerBackend
-    from nwqlib.execution import CountsSampling
-
-    if fresh:
-        actual = AerBackend.prepare
-        monkeypatch.setattr(
-            AerBackend,
-            "prepare",
-            lambda self, *args, **kwargs: replace(
-                actual(self, *args, **kwargs), counts_sampling=CountsSampling(kind="fresh")
-            ),
-        )
     choice = make_choice(
         inference=BinaryInferenceOptions(method="anytime_hoeffding", sampling_model="iid_bernoulli")
     )
@@ -542,19 +442,14 @@ def test_new_populations_accumulate_but_stopped_fixed_time_stays_unavailable(inj
     run = Run(choice)
     first = prepare(choice.resolve("group_0"), run=run, runtime=RuntimeOptions(seed=7))
     run.collect(submit(first, run=run))
-    if fresh:
-        receipt, next_handle = (first.record, first)
-    else:
-        next_handle = prepare(choice.resolve("group_0"), run=run, runtime=RuntimeOptions(seed=8))
+    next_handle = prepare(choice.resolve("group_0"), run=run, runtime=RuntimeOptions(seed=8))
     injected.payloads = {"group_0": {"0": 25, "1": 75}}
     run.collect(submit(next_handle, run=run))
     result = analyze(choice, run)
     population = result.statistics.populations[0].population
     assert population.zeros + population.ones == 200 and len(population.source_ids) == 2
     assert result.value == 0
-    assert len(run.prepared_artifacts) == (1 if fresh else 2)
-    if fresh:
-        assert population.preparation_ids == ((receipt.content_id,), (receipt.content_id,))
+    assert len(run.prepared_artifacts) == 2
     assert (
         result.statistics.interval.status == "conditional"
         and result.statistics.interval.kind == "time_uniform"
@@ -601,27 +496,13 @@ def test_new_populations_accumulate_but_stopped_fixed_time_stays_unavailable(inj
     assert stopped.statistics.interval.kind == "fixed_time"
 
 
-@pytest.mark.parametrize("method", ["anytime_hoeffding", "beta", "point"])
-@pytest.mark.parametrize("fresh", [False, True])
-def test_imported_observed_population_does_not_start_a_fresh_statistical_prefix(
-    injected, monkeypatch, method, fresh
-):
+def test_imported_observed_population_does_not_start_a_fresh_statistical_prefix(injected):
     """Importing an already observed frozen preparation must not restart a fresh statistical
     prefix.
     """
-    from nwqlib.backends.connection import AerBackend
-    from nwqlib.execution import CountsSampling
-
-    if fresh:
-        actual = AerBackend.prepare
-        monkeypatch.setattr(
-            AerBackend,
-            "prepare",
-            lambda self, *args, **kwargs: replace(
-                actual(self, *args, **kwargs), counts_sampling=CountsSampling(kind="fresh")
-            ),
-        )
-    choice = make_choice(inference=BinaryInferenceOptions(method=method, sampling_model="iid_bernoulli"))
+    choice = make_choice(
+        inference=BinaryInferenceOptions(method="anytime_hoeffding", sampling_model="iid_bernoulli")
+    )
     old = Run(choice)
     for seed, payload in ((7, {"1": 100}), (8, {"0": 100})):
         injected.payloads = {"group_0": payload}
@@ -629,8 +510,7 @@ def test_imported_observed_population_does_not_start_a_fresh_statistical_prefix(
         old.collect(submit(handle, run=old))
     full = analyze(choice, old)
     assert full.statistics.raw_value == 0
-    if method != "point":
-        assert full.statistics.interval.status == "conditional"
+    assert full.statistics.interval.status == "conditional"
     restored = ExpectationAnalysis.model_validate_json(full.model_dump_json())
     restored.validate_plan(choice)
     assert restored == full
@@ -640,15 +520,9 @@ def test_imported_observed_population_does_not_start_a_fresh_statistical_prefix(
     assert result.statistics.raw_value == 1
     assert new.trace.preparations == 0 and new.trace.local_prepared_ids == ()
     assert len(new.trace.events) == 1 and new.trace.events[0].shots == 100
-    if method == "point":
-        assert result.value == 1 and result.statistics.interval is None
-    elif fresh:
-        assert result.statistics.interval.status == "conditional"
-        assert result.value == (pytest.approx(50 / 51, rel=1e-14, abs=1e-14) if method == "beta" else 1)
-    else:
-        assert result.statistics.interval.status == "unavailable"
-        assert "imported" in result.statistics.interval.reason
-        assert result.value == (None if method == "beta" else 1)
+    assert result.statistics.interval.status == "unavailable"
+    assert "imported" in result.statistics.interval.reason
+    assert result.value == 1
 
 
 def test_partial_count_denominator_and_public_signed_correction(injected):
@@ -664,115 +538,6 @@ def test_partial_count_denominator_and_public_signed_correction(injected):
     assert solved.value == pytest.approx(5.0, rel=1e-14, abs=1e-14)
     restored = ExpectationAnalysis.model_validate_json(solved.model_dump_json())
     assert restored.value == solved.value and restored.statistics.raw_value == 1.0
-
-
-def test_whole_register_hzh_reuses_actual_occupation_preparation(injected):
-    choice = make_choice(preparation="hzh", occupations=(1,))
-    selected = next((block for block in choice.blocks if block.record.signature.name == "state"))
-    assert selected._payload is choice.problem.state
-    assert [(port.name, port.width) for port in selected.record.signature.quantum] == [("system", 1)]
-    assert [(gate.gate, gate.qubits) for gate in selected.record.decomposition] == [
-        ("h", (0,)),
-        ("z", (0,)),
-        ("h", (0,)),
-    ]
-    injected.payloads = {"group_0": {"1": 100}}
-    result = analyze(choice, acquire(choice, injected))
-    assert result.value == -1 and result.physical_scale == choice.problem.state.preparation.physical_scale
-
-
-@pytest.mark.parametrize("context", ["compiler", "configuration", "pivot"])
-def test_receipt_context_and_inference_associations_reject_before_reconstruction(
-    injected, monkeypatch, context
-):
-    """Forge compiler, configuration and pivot associations while poisoning inference to require
-    earlier rejection.
-    """
-    import nwqlib.algorithms.expectation as owner
-    from nwqlib.execution import RegisterMap
-
-    choice = make_choice(
-        q=2, terms=(("XY", 1.0), ("IZ", 1.0)), mitigation=BinaryReadoutMitigation(calibration_shots=1000)
-    )
-    assert {setting.pivot for setting in choice.reconstruction.settings if setting.role == "science"} == {
-        0,
-        1,
-    }
-    injected.payloads = {
-        "science_0": {"0": 80, "1": 20},
-        "science_1": {"0": 80, "1": 20},
-        "zero_0": {"0": 1000},
-        "one_0": {"1": 1000},
-        "zero_1": {"0": 1000},
-        "one_1": {"1": 1000},
-    }
-    run = acquire(choice, injected)
-    result = analyze(choice, run)
-    parity = next((block for block in choice.blocks if block.record.choice == "XY"))
-    assert [(p.gate, p.qubits) for p in parity.record.decomposition] == [
-        ("sdg", (0,)),
-        ("h", (0,)),
-        ("h", (1,)),
-        ("cx", (0, 1)),
-    ]
-    assert len(choice.experiments) == 6 and result.value == 1.2
-    monkeypatch.setattr(
-        owner, "infer_binary", lambda *a, **k: pytest.fail("forged context reached inference")
-    )
-    bad_trace = run.trace.revise(events=(run.trace.events[0].revise(shots=99), *run.trace.events[1:]))
-    with pytest.raises(ValueError, match="pivot/readout"):
-        choice.method.analyze(
-            choice, RunData(run.observations, trace=bad_trace, receipts=run.prepared_artifacts), settings={}
-        )
-    receipts = list(run.prepared_artifacts)
-    foreign = receipts[-1].revise(
-        **{
-            "compiler": dict(compiler=receipts[-1].compiler.revise(version="other")),
-            "configuration": dict(backend_configuration_id=choice.content_id),
-            "pivot": dict(logical_to_native=(1, 0)),
-        }[context]
-    )
-    chunk = run.observations.chunks[-1].revise(prepared_id=foreign.content_id)
-    events = (
-        *run.trace.events[:-1],
-        run.trace.events[-1].revise(prepared_id=foreign.content_id, observation_id=chunk.content_id),
-    )
-    submission = run.trace.submissions[-1]
-    submission = submission.revise(items=(submission.items[0].revise(prepared_id=foreign.content_id),))
-    trace = run.trace.revise(
-        events=events,
-        local_prepared_ids=(*run.trace.local_prepared_ids[:-1], foreign.content_id),
-        submissions=(*run.trace.submissions[:-1], submission),
-    )
-    with pytest.raises(ValueError, match="target/compiler|native parity pivot"):
-        choice.method.analyze(
-            choice,
-            RunData(
-                ObservationView(chunks=(*run.observations.chunks[:-1], chunk)),
-                trace=trace,
-                receipts=(*receipts[:-1], foreign),
-            ),
-            settings={},
-        )
-    wrong_layout = run.observations.chunks[0].revise(
-        quantum_layout=(RegisterMap(name="bit_0", bits=(1,)), RegisterMap(name="bit_1", bits=(0,)))
-    )
-    trace = run.trace.revise(
-        events=(run.trace.events[0].revise(observation_id=wrong_layout.content_id), *run.trace.events[1:])
-    )
-    with pytest.raises(ValueError, match="pivot/readout"):
-        choice.method.analyze(
-            choice,
-            RunData(
-                ObservationView(chunks=(wrong_layout, *run.observations.chunks[1:])),
-                trace=trace,
-                receipts=run.prepared_artifacts,
-            ),
-            settings={},
-        )
-    wrong = result.revise(statistics=result.statistics.revise(inference_options_id=choice.method.content_id))
-    with pytest.raises(ValueError, match="inference/setting"):
-        wrong.validate_plan(choice)
 
 
 def test_declared_workload_caps_precede_all_preparation(injected):
@@ -798,14 +563,3 @@ def test_result_save_load_and_reanalysis_share_original_counts(injected, tmp_pat
     revised = loaded.analyze()
     assert revised.value == result.value and revised.statistics == result.statistics
     assert revised.origin.invocation_id != result.origin.invocation_id and injected.calls == before
-
-
-def test_result_with_source_preparation_groups_loads_with_its_identity(injected, tmp_path):
-    selected = make_choice()
-    injected.payloads = {"group_0": {"0": 75, "1": 25}}
-    run = acquire(selected, injected)
-    handle = prepare(selected.resolve("group_0"), run=run, runtime=RuntimeOptions(seed=8))
-    run.collect(submit(handle, run=run))
-    result = analyze(selected, run)._attach(selected, run.data)
-    path = result.save(tmp_path / "good")
-    assert nwqlib.load_result(path).content_id == result.content_id

@@ -75,7 +75,7 @@ Work units count planned classical operations and do not predict runtime. These 
 
 | `LinearDynamics` field | Meaning |
 | --- | --- |
-| `A` | Finite square matrix, or a supported structured generator such as a [periodic stencil](#periodic-stencils) |
+| `A` | Finite square dense matrix, or a [periodic stencil](#periodic-stencils). LCHS has no sparse or Pauli route. A SciPy sparse $A$ can be passed as `A.toarray()` and a Qiskit `SparsePauliOp` as `A.to_matrix()`, and the [dense limits](#what-fits-the-default-limits) then apply |
 | `initial_state` | Physical $u$ at `initial_time`, including magnitude and phase |
 | `time` | Final time, at least `initial_time` |
 | `source` | Optional constant physical source $b$. `None` means zero |

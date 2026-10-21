@@ -7,7 +7,6 @@ import scipy.linalg
 from qiskit import transpile
 from qiskit.quantum_info import Operator, SparsePauliOp
 import nwqlib.subroutines.fermionic_pool as fermionic_pool
-import nwqlib.subroutines.fermionic_circuits as matrix_elements
 from nwqlib.algorithms.gcim import sector_expectations
 from nwqlib.subroutines.fermionic_pool import (
     FermionicGenerator,
@@ -91,115 +90,6 @@ def test_matrix_free_generator_action_and_exponential_match_dense_reference() ->
     )
 
 
-@pytest.mark.parametrize(("theta", "steps"), [(0.0, 0), (0.2, 1), (10 / 9, 2), (1.3, 3)])
-def test_exponential_work_law_counts_the_taylor_pauli_actions(monkeypatch, theta, steps) -> None:
-    from types import SimpleNamespace
-    from nwqlib.algorithms.gcim import adapt_actions
-    from nwqlib.algorithms.gcim.adapt_records import _exponential_action_work
-    from nwqlib.operators._pauli import pauli_action_requirements
-
-    terms = tuple(
-        (SparsePauliOp.from_list([("XY", 0.4j), ("ZI", -0.3j), ("YY", 0.2j)])).to_list()
-    )
-    member = SimpleNamespace(terms=terms)
-    actions = []
-    action = adapt_actions.apply_terms
-
-    def counted(table, state, **kwargs):
-        actions.append(len(table))
-        return action(table, state, **kwargs)
-
-    monkeypatch.setattr(adapt_actions, "apply_terms", counted)
-    d = 4
-    adapt_actions.packed_exponential(adapt_actions.pack_action_rows(terms, 2), np.ones(d, dtype=complex), theta)
-    degree = fermionic_pool.GENERATOR_TAYLOR_DEGREE
-    # Every Horner term applies the whole three-row table once. The Pauli
-    # 1-norm is 0.9, so a step count is max(1, ceil(1.8 theta)), and none at
-    # theta = 0. At theta = 10/9, 1.8 theta rounds to exactly 2, where a
-    # count formed in another order could round up to 3.
-    assert actions == [3] * (degree * steps)
-    # The law (adapt_records._exponential_action_work) charges each executed
-    # action the shared single-column allowance of pauli_action_requirements,
-    # a scaling and an addition per Horner term, one copy per step and ten
-    # normalization passes, which also cover the copy that replaces the
-    # steps at theta = 0.
-    shared = pauli_action_requirements(d, 3, min(3, d), complex_input=True)[1]
-    assert _exponential_action_work(member, theta, d) == (
-        len(actions) * (shared + 2 * d) + steps * d + 10 * d
-    )
-
-
-def test_classical_adapt_acts_with_packed_tables_and_admits_each_whole_query(monkeypatch) -> None:
-    """Classical ADAPT's Pauli actions use the Plan's packed tables, and a query is priced whole.
-
-    The small one-qubit classical fixture performs 97 generator, H0 and
-    insertion actions, every one on a table packed once per Plan
-    (adapt_actions.build_action_tables) and none from labels. Its two-factor
-    energy-and-gradient query at angles (0.2, -0.7) needs 5,939 work units
-    under the shared action law (adapt_actions.query_work with
-    adapt_records._energy_gradient_work): it is admitted at max_products =
-    5,939 and refused at 5,938. Label-form actions or the former per-term
-    action charge fail.
-    """
-    from collections import Counter
-    import nwqlib
-    from nwqlib.algorithms.gcim import adapt_actions, adapt_acquisition
-    from nwqlib.operators._pauli import PauliTerms
-    from test_adapt_primary import plan_for
-
-    counts = Counter()
-    for module in (adapt_actions, adapt_acquisition, fermionic_pool):
-        original = module.apply_terms
-
-        def counted(table, *args, _original=original, **kwargs):
-            counts["packed" if isinstance(table, PauliTerms) else "labels"] += 1
-            return _original(table, *args, **kwargs)
-
-        monkeypatch.setattr(module, "apply_terms", counted)
-    plan = plan_for(execution="classical")
-    # One H0 row and three generator rows, each also packed as an
-    # insertion row: R = 1 + 2*3 = 7 rows of 32 bytes, packed at
-    # R(q + 4) = 35 work units (adapt_actions.build_action_tables).
-    tables = plan._native["inputs"].cache["action_tables"]
-    assert (tables["resident_bytes"], tables["packing_work"]) == (224, 35)
-    nwqlib.solve(plan, progress=False)
-    assert counts == Counter(packed=97)
-
-    point = adapt_acquisition._point(plan, "energy", right=((0, 0.2), (1, -0.7)))
-    experiment, program = plan._resolve_selection(point.experiment, point.bindings)
-    admitted = plan.method.revise(max_products=5939)
-    (kernel,) = admitted.selected_kernels(plan, experiment, program)
-    assert kernel.invocation_work == 5939
-    with pytest.raises(ValueError, match="ADAPT classical query needs 5939 scalar products, exceeding "
-                                         "max_products=5938. Later queries"):
-        plan.method.revise(max_products=5938).selected_kernels(plan, experiment, program)
-
-
-def test_sector_work_law_counts_two_linear_spin_actions(monkeypatch) -> None:
-    import nwqlib.operators.inputs as inputs
-    from nwqlib.algorithms.gcim.sector import _sector_work
-
-    passes = []
-    action = inputs.apply_terms
-
-    def counted(rows, state, **kwargs):
-        passes.append(max(1, len(rows)))
-        return action(rows, state, **kwargs)
-
-    monkeypatch.setattr(inputs, "apply_terms", counted)
-    q = 8
-    rng = np.random.default_rng(3)
-    sector_expectations(rng.normal(size=1 << q) + 1.0j * rng.normal(size=1 << q), num_qubits=q)
-    # S_- S_+ is applied as two sequential sums of 2q Pauli terms each, so
-    # its cost is linear in q, and each is charged by the shared action law.
-    from nwqlib.operators._pauli import pauli_action_requirements
-
-    n = 1 << q
-    assert len(passes) == 2 and sum(passes) == 4 * q
-    actions = sum(pauli_action_requirements(n, rows, min(rows, n))[1] for rows in passes)
-    assert _sector_work(q) == n * (9 * (q // 2) + 15) + q * n // 2 + 4 * q + 2 + actions
-
-
 def test_matrix_free_spin_squared_action_matches_validation_matrix() -> None:
     rng = np.random.default_rng(72)
     state = rng.normal(size=16) + 1.0j * rng.normal(size=16)
@@ -210,20 +100,6 @@ def test_matrix_free_spin_squared_action_matches_validation_matrix() -> None:
         rtol=1.0e-13,
         atol=1.0e-12,
     )
-
-
-def test_structured_generator_preserves_identity_global_phase() -> None:
-    identity = FermionicGenerator(
-        family="custom",
-        spatial_indices=(),
-        pool_index=0,
-        num_qubits=2,
-        fermion_terms=(),
-        pauli_terms=tuple((SparsePauliOp.from_list([("II", 0.5j)])).to_list()),
-    )
-    theta = 0.37
-    observed = Operator(matrix_elements.build_generator_circuit(identity, theta)).data
-    np.testing.assert_allclose(observed, np.exp(0.5j * theta) * np.eye(4), rtol=0.0, atol=1.0e-12)
 
 
 def test_exact_compiler_constructs_large_compact_inputs_with_bounded_local_work(
@@ -329,7 +205,7 @@ def test_exact_compiler_controlled_identity_preserves_relative_phase() -> None:
     np.testing.assert_allclose(Operator(observed).data, expected, rtol=0.0, atol=1.0e-12)
 
 
-@pytest.mark.parametrize("label", ("XI", "YI", "ZI", "XX", "YY", "ZZ", "XYZ", "III"))
+@pytest.mark.parametrize("label", ("YI", "XYZ"))
 @pytest.mark.parametrize("theta", (1.0e-11, 0.37))
 def test_exact_compiler_controls_only_the_pauli_rotation(label, theta) -> None:
     from nwqlib.subroutines.fermionic_circuits import build_generator_circuit

@@ -430,9 +430,7 @@ def _prepare_plan(
     )
     try:
         run.progress("input", 1, 1)
-        # Only an explicit "all" reaches the hook, so a Method that overrides
-        # prepare without the settings keyword keeps its default behavior.
-        plan.method.prepare(plan, run=run, **({"settings": "all"} if settings == "all" else {}))
+        plan.method.prepare(plan, run=run, settings=settings)
     except BaseException as error:
         if run.directory is not None:
             error.add_note(f"Original preparation data is saved at {run.directory}")

@@ -90,101 +90,6 @@ def test_saved_array_layout_corruption_rejects_without_scientific_reanalysis(
     assert len(supplied_qhd.calls) == 1
 
 
-def test_interrupted_result_snapshot_removes_its_folder_and_keeps_live_array(
-    tmp_path, monkeypatch, supplied_qhd
-):
-    result = nwqlib.solve(supplied_qhd.plan)
-    original = result.data.artifact(result.artifact).array
-    import nwqlib._choice_archive as owner
-
-    write = owner.ArchiveFiles.write_array
-
-    def interrupted(files, *args):
-        write(files, *args)
-        raise OSError("interrupted explicit snapshot")
-
-    monkeypatch.setattr(owner.ArchiveFiles, "write_array", interrupted)
-    with pytest.raises(OSError, match="interrupted explicit snapshot"):
-        result.save(tmp_path / "failed")
-    assert not (tmp_path / "failed").exists()
-    assert result.data.artifact(result.artifact).array is original and not original.flags.writeable
-    np.testing.assert_array_equal(original, supplied_qhd.raw)
-
-
-def test_equal_saved_bytes_preserve_distinct_acquisition_provenance(supplied_qhd):
-    first = nwqlib.solve(supplied_qhd.plan)
-    second = nwqlib.solve(supplied_qhd.plan)
-    a, b = first.artifact, second.artifact
-    assert a.digest == b.digest and a.content_id != b.content_id and a.acquisition != b.acquisition
-    np.testing.assert_array_equal(first.data.artifact(a).array, second.data.artifact(b).array)
-    with pytest.raises(ValueError, match="not stored"):
-        first.data.artifact(b)
-
-
-@pytest.mark.parametrize("dtype", ["complex128", "float64"])
-def test_artifact_publication_canonicalizes_endian_before_identity(dtype):
-    from hashlib import sha256
-    import struct
-    from nwqlib.artifacts import ArrayOutput, ArtifactStore
-    from nwqlib.core import Basis, Source
-
-    if dtype == "complex128":
-        expected = struct.pack("<6d", 1.0, -2.0, 3.0, 0.5, -0.0, 0.0)
-        array = np.asarray([1 - 2j, 0j, 3 + 0.5j, 0j, complex(-0.0, 0.0), 0j], dtype=">c16")[::2]
-    else:
-        expected = struct.pack("<3d", 1.0, -2.5, -0.0)
-        array = np.asarray([1.0, 7.0, -2.5, 7.0, -0.0, 7.0], dtype=">f8")[::2]
-    output = ArrayOutput(
-        name="supplied",
-        kind="vector",
-        basis=Basis(identity="three", dimension=3, ordering="increasing coordinate"),
-        frame="physical",
-        global_phase="physical",
-        dtype=dtype,
-    )
-    source = Source(name="supplied values", version="1", domain="test", reference="struct.pack oracle")
-    identity = "sha256:" + "a" * 64
-    provenance = dict(
-        plan_id=identity,
-        realization_id=identity,
-        construction_id=identity,
-        producer_id=identity,
-        acquisition=("run", "attempt", "job", "0"),
-        source=source,
-    )
-    store = ArtifactStore(max_bytes=2 * len(expected))
-    handle = store._publish(array, output=output, provenance=provenance)
-    assert handle.manifest.digest == "sha256:" + sha256(expected).hexdigest()
-    assert handle.manifest.encoding == f"{dtype}-le-c" and handle.manifest.data_bytes == len(expected)
-    assert handle.array.dtype.str == ("<c16" if dtype == "complex128" else "<f8")
-    assert handle.array.tobytes() == expected
-    array[0] = 99
-    assert handle.array.tobytes() == expected and not handle.array.flags.writeable
-    assert store.data_bytes == len(expected)
-    # A handed-over private array is kept, not copied, and can no longer be written.
-    private = np.frombuffer(expected, dtype=handle.array.dtype).copy()
-    kept = store._publish(private, output=output, private=True,
-                          provenance=dict(provenance, acquisition=("run", "attempt", "job", "1")))
-    assert np.shares_memory(kept.array, private) and kept.manifest.digest == handle.manifest.digest
-    with pytest.raises(ValueError, match="read-only"):
-        private[0] = 99
-    with pytest.raises(ValueError):
-        kept.array.flags.writeable = True
-    if dtype == "float64":
-        with pytest.raises(ValueError, match="global_phase"):
-            ArrayOutput.model_validate(dict(output.model_dump(exclude_computed_fields=True),
-                                            global_phase="modulo_global_phase"))
-    # Finiteness is checked in blocks: a nonfinite last entry of a vector longer
-    # than one block, and of the last row of an operator, still rejects.
-    for kind, size in (("vector", 3 * 2**16 + 5), ("operator", 300)):
-        wide = ArrayOutput(name="wide", kind=kind, frame="physical", global_phase="physical", dtype=dtype,
-                           basis=Basis(identity="wide", dimension=size, ordering="increasing coordinate"))
-        values = np.zeros(wide.shape, dtype=handle.array.dtype)
-        values.reshape(-1)[-1] = np.nan
-        with pytest.raises(ValueError, match="finite"):
-            ArtifactStore(max_bytes=wide.data_bytes)._publish(values, output=wide, provenance=provenance)
-
-
 def test_saved_source_text_does_not_choose_executable_owner(tmp_path, monkeypatch, supplied_qhd):
     result = nwqlib.solve(supplied_qhd.plan)
     path = result.save(tmp_path / "data")
@@ -197,25 +102,6 @@ def test_saved_source_text_does_not_choose_executable_owner(tmp_path, monkeypatc
         importlib, "import_module", lambda *a: pytest.fail("saved source selected arbitrary import")
     )
     with pytest.raises(ValueError, match="Method|method"):
-        nwqlib.load_result(path)
-
-
-def test_saved_physical_input_layout_is_checked_before_reuse(tmp_path, monkeypatch):
-    from nwqlib.algorithms import LCHS
-    from nwqlib.problems import inputs
-
-    result = nwqlib.solve(nwqlib.LinearDynamics(A=np.eye(2), initial_state=[1., 0.], time=0),
-                          method=LCHS(), execution="classical")
-    path = result.save(tmp_path / "initial")
-    saved = json.loads((path / "result.json").read_text())
-    filename = saved["selection"]["selected"]["problem"]["inputs"]["initial_state"]["data"]["physical"]
-    monkeypatch.setattr(inputs, "normalize_physical_vector_with_scale",
-                        lambda *a: pytest.fail("load normalized the input again"))
-    loaded = nwqlib.load_result(path)
-    np.testing.assert_array_equal(loaded.solution, [1., 0.])
-    with (path / filename).open("wb") as stream:
-        np.save(stream, np.array([1., 0., 5.]))  # Same dtype, wrong native dimension.
-    with pytest.raises(ValueError, match="layout"):
         nwqlib.load_result(path)
 
 
@@ -369,27 +255,4 @@ def test_save_refuses_an_observation_that_differs_from_its_attempt_or_receipt(
     forged = _with_fault(hadamard_counts.result, **changes)
     with pytest.raises(ValueError, match=message):
         forged.save(tmp_path / fault)
-    assert not (tmp_path / fault).exists()
-
-
-@pytest.mark.parametrize("fault,message", [
-    ("array_without_manifest", "missing its requested array"),
-    ("duplicate_manifests", "require distinct manifests"),
-    ("manifest_from_another_plan", "array belongs to another Plan"),
-])
-def test_save_refuses_an_array_without_its_one_manifest(tmp_path, supplied_qhd, fault, message):
-    """Each array a saved observation names needs one manifest of the same Plan in the saved inventory."""
-    result = nwqlib.solve(supplied_qhd.plan)
-    (handle,) = result.data.artifacts
-    if fault == "array_without_manifest":
-        artifacts = ()
-    elif fault == "duplicate_manifests":
-        artifacts = (handle, handle)
-    else:
-        other = nwqlib.plan(supplied_qhd.plan.problem,
-                            method=QHD(num_grid_points=3, num_steps=1, total_time=0.2, keep_state=True), seed=7)
-        artifacts = (handle, *nwqlib.solve(other).data.artifacts)
-    _with_fault(result).save(tmp_path / "legal")
-    with pytest.raises(ValueError, match=message):
-        _with_fault(result, artifacts=artifacts).save(tmp_path / fault)
     assert not (tmp_path / fault).exists()

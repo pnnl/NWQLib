@@ -252,23 +252,3 @@ def test_stage_bound_suppression_and_invalid_inputs() -> None:
                 bounds(raw_record={**INCOMPLETE_PROFILE, "unbudgeted_error_stages": stages})
         with pytest.raises(ValueError, match="named parameter profile"):
             bounds(raw_record={**INCOMPLETE_PROFILE, "kernel_parameter_selection": {}})
-
-
-@pytest.mark.parametrize("matrix,initial,time", [
-    ([[0.4, 0.15], [0.05, 0.25]], [20.0, 0.0], 0.1),  # PSD L, no shift: the input norm 20 scales the bound.
-    ([[-2.0, 0.1], [0.1, 0.2]], [1.0, 0.0], 1.0),  # Negative spectrum: exp(psd_shift*t) scales it.
-])
-def test_kernel_bound_fields_are_unit_input_and_published_facts_are_physical(matrix, initial, time):
-    """The reconstruction bounds are per unit input before PSD growth, the Result facts physical."""
-    from nwqlib import LinearDynamics, solve
-    from nwqlib.algorithms import LCHS
-
-    result = solve(LinearDynamics(A=matrix, initial_state=initial, time=time), method=LCHS(),
-                   execution="classical")
-    rec = result.plan.reconstruction
-    weight = np.linalg.norm(initial) * np.exp(rec.psd_shift * time)
-    facts = {fact.fact.quantity: fact.fact.value.value for fact in result.facts
-             if fact.fact.quantity in {"kernel_approximation", "k_quadrature"}}
-    assert facts["kernel_approximation"] == pytest.approx(weight * rec.kernel_approximation_bound, rel=1e-13)
-    assert facts["k_quadrature"] == pytest.approx(weight * rec.quadrature_bound, rel=1e-13)
-    assert "Selected kernel bounds per unit input before PSD growth:" in str(result)

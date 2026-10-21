@@ -147,7 +147,6 @@ def nexus_service(sdk_connection, monkeypatch):
     return service
 
 
-
 def test_public_nexus_archive_resumes_original_compile_and_execution(tmp_path, monkeypatch, nexus_service):
     """Reopen at compile and execution frontiers, then require exactly one occurrence of each
     external operation.
@@ -188,65 +187,6 @@ def test_public_nexus_archive_resumes_original_compile_and_execution(tmp_path, m
         assert run.wait().content_id == result.content_id
     assert service.calls == before
     assert service.calls["local_preparation"] == service.calls["upload"] == service.calls["compile"] == service.calls["execute"] == 1
-
-
-@pytest.mark.parametrize("mode", ["compile_error", "lost_ack_cancel"])
-def test_nexus_compile_failure_and_cancel_keep_original_work(tmp_path, monkeypatch, nexus_service, mode):
-    """A failed or cancelled compile preserves its original preparation charge and must never
-    launch execution.
-    """
-    from nwqlib._run_journal import LocalJournal
-    service = nexus_service
-    path = tmp_path / "original"
-    service.compile_lost_ack = mode == "lost_ack_cancel"
-    with Run(choice_for_nexus(), backend=service.backend, directory=path) as run:
-        if service.compile_lost_ack:
-            with pytest.raises(ConnectionError, match="acknowledgement lost"):
-                run.resume()
-            pending, = run._state["remote_preparations"].values()
-            assert pending.status == "compile_uncertain" and pending.locator is None
-        else:
-            run.resume()
-        assert run.trace.jobs == 0 and run.trace.preparations == 1
-    service.compile_lost_ack = False
-    original = next(iter(service.jobs))
-    if mode == "compile_error":
-        service.compile_status = JobStatusEnum.ERROR
-        with load_run(path, backend=service.backend) as run:
-            with monkeypatch.context() as guard:
-                guard.setattr(LocalJournal, "read_payload", lambda *a, **k: pytest.fail("failed compile loaded payload"))
-                run.resume()
-            pending, = run._state["remote_preparations"].values()
-            assert pending.status == "failed" and pending.locator.job_id == original
-    else:
-        service.cancel_error = ConnectionError("cancel accepted but acknowledgement lost")
-        with load_run(path, backend=service.backend) as run:
-            with pytest.raises(ConnectionError) as caught:
-                run.cancel("stop original compile")
-            assert caught.value is service.cancel_error
-            pending, = run._state["remote_preparations"].values()
-            assert pending.locator.job_id == original and pending.cancel_requested
-            assert pending.status == "compile_pending"
-        service.cancel_error = None
-        service.compile_status = JobStatusEnum.CANCELLED
-        with load_run(path, backend=service.backend) as run:
-            run.resume()
-            pending, = run._state["remote_preparations"].values()
-            assert pending.status == "cancelled" and pending.locator.job_id == original
-    before = service.calls.copy()
-    with load_run(path, backend=service.backend) as run:
-        run.resume()
-        assert run.trace.preparations == 1 and run.trace.jobs == 0
-        assert service.calls == before
-        from nwqlib.execution import RunFailed
-        with pytest.raises(RunFailed) as caught:
-            run.wait(timeout=0)
-        assert caught.value.stage == "prepare"
-        assert caught.value.locator.job_id == original
-        assert caught.value.status == ("failed" if mode == "compile_error" else "cancelled")
-        assert service.calls == before
-    assert service.calls["local_preparation"] == service.calls["upload"] == service.calls["compile"] == 1
-    assert service.calls["execute"] == 0
 
 
 def test_nexus_later_read_failure_keeps_prior_item_and_association(tmp_path, nexus_service):

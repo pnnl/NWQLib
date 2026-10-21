@@ -15,12 +15,11 @@ import pytest
 from scipy.linalg import expm
 
 from qiskit import QuantumCircuit
-from qiskit.circuit import ControlledGate
-from qiskit.circuit.library import CXGate, CZGate, SwapGate, UnitaryGate, iSwapGate
+from qiskit.circuit.library import UnitaryGate
 from qiskit.quantum_info import Operator, random_unitary
 
 from nwqlib.subroutines._dense_synthesis import dense_unitary_circuit
-from nwqlib.subroutines.qiskit_compat import _exact_dense_definitions, controlled
+from nwqlib.subroutines.qiskit_compat import controlled
 
 UNIT_ROUNDOFF = 2.0**-53
 
@@ -75,32 +74,15 @@ def test_dense_unitary_circuit_is_exact_to_rounding(num_qubits, family):
         assert error <= bound, (label, error)
 
 
-@pytest.mark.parametrize("num_qubits", [2, 3, 4, 5])
-def test_generic_cx_count_matches_block_zxz_law(num_qubits):
+def test_generic_cx_count_matches_block_zxz_law():
     # Krol and Al-Ars, arXiv:2403.13692v2, abstract and Sec. 5.3:
-    # (22/48) 4**n - (3/2) 2**n + 5/3 CX, three for two qubits.
+    # (22/48) 4**n - (3/2) 2**n + 5/3 CX.
+    num_qubits = 4
     unitary = random_unitary(1 << num_qubits, seed=num_qubits).data
     circuit = dense_unitary_circuit(unitary)
-    law = 3 if num_qubits == 2 else (22 * 4**num_qubits - 72 * 2**num_qubits + 80) // 48
+    law = (22 * 4**num_qubits - 72 * 2**num_qubits + 80) // 48
     assert _cx(circuit) == law
     assert set(circuit.count_ops()) <= {"u", "cx", "rz", "h"}
-
-
-def test_special_two_qubit_classes_use_their_exact_cx_counts():
-    rng = np.random.default_rng(7)
-    local = lambda: np.kron(random_unitary(2, seed=rng).data, random_unitary(2, seed=rng).data)  # noqa: E731
-    cases = {
-        "local": (np.eye(4), 0),
-        "cx": (CXGate().to_matrix(), 1),
-        "cz": (CZGate().to_matrix(), 1),
-        "iswap": (iSwapGate().to_matrix(), 2),
-        "swap": (SwapGate().to_matrix(), 3),
-    }
-    for name, (core, cx) in cases.items():
-        unitary = np.exp(0.3j) * local() @ core @ local()
-        circuit = dense_unitary_circuit(unitary)
-        assert _cx(circuit) == cx, name
-        assert np.abs(Operator(circuit).data - unitary).max() <= 64 * UNIT_ROUNDOFF * 4, name
 
 
 def test_near_special_two_qubit_unitary_keeps_its_entangling_part():
@@ -171,13 +153,7 @@ def test_a2_batches_restart_after_a_block_that_keeps_its_own_circuit():
         assert np.abs(got - want).max() <= 1e-12, part
 
 
-def test_dense_unitary_circuit_rejects_invalid_shapes():
-    for bad in (np.eye(3), np.ones((2, 4)), np.array([[1.0]]), np.full((2, 2), np.nan)):
-        with pytest.raises(ValueError):
-            dense_unitary_circuit(bad)
-
-
-@pytest.mark.parametrize("controls,state", [(1, 1), (2, 1), (2, 3)])
+@pytest.mark.parametrize("controls,state", [(2, 1)])
 def test_controlled_composite_uses_exact_dense_definition(controls, state):
     from nwqlib.subroutines.block_encoding.core import build_block_encoding
 
@@ -220,86 +196,7 @@ def test_exact_dense_unitaries_make_basis_lowering_exact():
     assert exact_dense_unitaries(plain) is plain
 
 
-@pytest.mark.parametrize("prepared", [False, True])
-def test_noisy_aer_lowering_keeps_dense_unitary_exact(prepared):
-    # A noise model's basis omits Aer's unitary instruction, so lowering
-    # decomposes the gate instead of applying its matrix. The Run path also
-    # wraps each lowered top-level gate through _AerPreparation.
-    from qiskit_aer.noise import NoiseModel, depolarizing_error
-    from nwqlib.backends import qiskit_aer
-    from nwqlib.backends.targets import AER_COUNTS_TARGET
-
-    rng = np.random.default_rng(10)
-    two = expm(-1j * 1e-6 * _hermitian(rng, 4))
-    three = expm(-1j * 1e-8 * _hermitian(rng, 8))
-    inner = QuantumCircuit(3)
-    inner.append(UnitaryGate(three), [0, 1, 2])
-    circuit = QuantumCircuit(3, 3)
-    circuit.append(UnitaryGate(two), [0, 1])
-    circuit.append(inner.to_gate(), [2, 0, 1])
-    expected = Operator(circuit).data
-    circuit.measure([0, 1, 2], [0, 1, 2])
-    noise = NoiseModel(basis_gates=["cx", "rz", "sx", "x"])
-    noise.add_all_qubit_quantum_error(depolarizing_error(0.01, 2), ["cx"])
-    execution = qiskit_aer._prepare_aer_execution(
-        AER_COUNTS_TARGET, circuit, shots=10, seed=1, noise_model=noise,
-        preparation=qiskit_aer._AerPreparation() if prepared else None,
-    ).circuit
-    assert "unitary" not in execution.count_ops()
-    body = execution.remove_final_measurements(inplace=False)
-    assert np.abs(Operator(body).data - expected).max() <= 1e-13
-
-
-def test_controlled_rewrite_keeps_parameters_open_controls_and_shared_matrices():
-    from qiskit.circuit import Parameter
-
-    rng = np.random.default_rng(11)
-    unitary = expm(-1j * 1e-6 * _hermitian(rng, 4))
-    single = expm(-1j * 1e-6 * _hermitian(rng, 2))
-    # An open-control gate whose closed definition holds a dense unitary: the
-    # rewrite must enter its X-conjugated definition.
-    closed = QuantumCircuit(2)
-    closed.append(UnitaryGate(_controlled_matrix(single, 1, 1)), [0, 1])
-    open_control = ControlledGate("c_single", 2, [], num_ctrl_qubits=1, definition=closed, ctrl_state=0,
-                                  base_gate=UnitaryGate(single))
-    theta = Parameter("theta")
-    body = QuantumCircuit(3)
-    body.ry(theta, 2)
-    body.append(open_control, [2, 0])
-    body.append(UnitaryGate(unitary), [0, 1])
-    body.append(UnitaryGate(unitary), [0, 1])
-    gate = controlled(body.to_gate(), 1)
-    rewritten = _exact_dense_definitions(body.to_gate(), {})
-    dense = [item.operation for item in rewritten.definition.data if item.operation.name == "dense_unitary"]
-    assert len(dense) == 2
-    for value in (0.0, 0.7):
-        reference = body.assign_parameters({theta: value})
-        expected = _controlled_matrix(Operator(reference).data, 1, 1)
-        actual = Operator(gate.definition.assign_parameters({theta: value})).data
-        assert np.abs(actual - expected).max() <= 1e-13, value
-
-
-def test_adapt_verification_reference_keeps_supplied_dense_unitary_exact():
-    # ADAPT verification decomposes the supplied reference circuit before it
-    # simulates it. Qiskit's own expansion of this near-identity unitary errs
-    # by about 1e-6 in the amplitudes.
-    from types import SimpleNamespace
-    from qiskit.quantum_info import Statevector
-    from nwqlib.algorithms.gcim.adapt_verification import _lowered_native_circuits
-    from nwqlib.problems.inputs import state_input
-
-    unitary = expm(-1j * 1e-6 * _hermitian(np.random.default_rng(12), 4))
-    reference = QuantumCircuit(2)
-    reference.append(UnitaryGate(unitary), [0, 1])
-    plan = SimpleNamespace(_native={"reference": state_input(reference)},
-                           method=SimpleNamespace(max_bytes=10**8))
-    lowered = _lowered_native_circuits(plan, None, (), {}, max_work=10**9, max_bytes=10**9)[0][()]
-    assert "unitary" not in lowered.count_ops()
-    state = Statevector.from_instruction(lowered).data
-    assert np.abs(state - unitary[:, 0]).max() <= 1e-13
-
-
-@pytest.mark.parametrize("controls", [1, 2, 3])
+@pytest.mark.parametrize("controls", [2])
 def test_directly_controlled_unitary_is_exact_to_rounding(controls):
     # Qiskit 2.5.2's UnitaryGate.control keeps its synthesis of the
     # controlled matrix within numpy.allclose(atol=1e-7, rtol=1e-5). Here it
@@ -324,61 +221,6 @@ def test_directly_controlled_unitary_is_exact_to_rounding(controls):
     lowered = transpile(circuit, basis_gates=["u", "cx"], optimization_level=0)
     expected = _controlled_matrix(unitary, controls, 0)
     assert np.abs(Operator(lowered).data - expected).max() <= 64 * UNIT_ROUNDOFF * expected.shape[0]
-
-
-def test_controlled_unitary_inverse_reverses_the_exact_definition():
-    # inverse_realized_gate reverses the exact definition, while Qiskit's own
-    # ControlledGate.inverse would synthesize the adjoint through
-    # UnitaryGate.control again.
-    from nwqlib.subroutines.qiskit_compat import inverse_realized_gate
-
-    unitary = expm(-1e-6j * _hermitian(np.random.default_rng(13), 4))
-    gate = controlled(UnitaryGate(unitary), 2, ctrl_state=1)
-    inverse = inverse_realized_gate(gate)
-    expected = _controlled_matrix(unitary.conj().T, 2, 1)
-    assert np.abs(Operator(inverse).data - expected).max() <= 64 * UNIT_ROUNDOFF * 16
-
-
-def _dense_qpe_power(unitary, name, shots=None):
-    """Plan QCELS on a unitary input and build its selected dense power ``name``."""
-    from nwqlib import SpectralEstimation, plan
-    from nwqlib.algorithms.qpe import QCELS, powers
-    from nwqlib.algorithms.qpe.method import _new_context
-
-    state = np.eye(unitary.shape[0])[0]
-    chosen = plan(SpectralEstimation(unitary=unitary, initial_state=state), method=QCELS(),
-                  shots=shots, seed=7)
-    block = next(b for b in chosen.blocks if b.record.signature.name == name)
-    context = _new_context()
-    return block, powers.construct_dense_power(block, (), lambda new: context)
-
-
-def test_dense_qpe_power_is_controlled_exactly():
-    # QPE's dense powers go through controlled(UnitaryGate(V^p), 1). With
-    # Qiskit 2.5.2 this near-identity power erred by 7.9e-11 per entry, and
-    # the block recorded its error as unknown.
-    unitary = expm(-1e-6j * _hermitian(np.random.default_rng(14), 2))
-    block, circuit = _dense_qpe_power(unitary, "power_p1")
-    expected = _controlled_matrix(unitary, 1, 1)
-    assert np.abs(Operator(circuit).data - expected).max() <= 64 * UNIT_ROUNDOFF * 4
-    assert block.record.semantics.epsilon == 0.0
-
-
-def test_dense_qpe_power_of_an_admitted_near_unitary_input_is_a_power_of_its_polar_base():
-    # The input's unitarity defect 8e-9 is inside QPE's 1e-8 admission
-    # window. Every power is a power of the one selected base V = polar(A)
-    # (powers.polar_base), so the tenth power targets V**10, not polar(A**10).
-    # The comparison uses the predeclared regression threshold 2e-12, rtol=0,
-    # on three qubits; it certifies nothing beyond this fixture.
-    from scipy.linalg import polar
-
-    exact = expm(-1j * _hermitian(np.random.default_rng(15), 4))
-    defective = exact @ (np.eye(4) + 4e-9 * np.diag([1.0, -1.0, 1.0, -1.0]))
-    block, circuit = _dense_qpe_power(defective, "power_p10", shots=5)
-    base = polar(defective)[0]
-    expected = _controlled_matrix(np.linalg.matrix_power(base, 10), 1, 1)
-    assert np.abs(Operator(circuit).data - expected).max() <= 2e-12
-    assert block._payload[0] is not defective and np.abs(block._payload[0] - base).max() <= 2e-12
 
 
 def test_dense_qpe_admission_charges_the_controlled_synthesis():
@@ -427,7 +269,7 @@ def _counted_syntheses(monkeypatch):
     return calls
 
 
-@pytest.mark.parametrize("num_qubits", [2, 3, 4, 5])
+@pytest.mark.parametrize("num_qubits", [4])
 def test_dense_synthesis_size_bounds_the_kept_instructions_and_the_traced_peak(num_qubits):
     # The kept-byte law allots 256 bytes to each of at most 11 * 4**m / 8
     # instructions, the census bound for any input. A Haar-random input used

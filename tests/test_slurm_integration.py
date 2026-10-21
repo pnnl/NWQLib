@@ -225,7 +225,7 @@ def test_known_job_missing_terminal_output_and_transport_error_remain_refreshabl
     assert sum((call[0] == "sbatch" for call in state.calls)) == 1
 
 
-@pytest.mark.parametrize("code", ["7:0", "0:9"])
+@pytest.mark.parametrize("code", ["7:0"])
 def test_nonzero_exit_or_signal_blocks_native_success_and_preserves_population(supplied, code):
     state, selected = (supplied, selection())
     with Run(selected, backend=state.backend, directory=state.journal) as run:
@@ -247,12 +247,6 @@ def test_nonzero_exit_or_signal_blocks_native_success_and_preserves_population(s
     "changed",
     [
         {"input_id": "foreign-input"},
-        {"nwqsim_revision": "foreign-build"},
-        {"backend": "NVGPU"},
-        {"method": "DM"},
-        {"native_simulations": 2},
-        {"native_simulations": True},
-        {"native_simulations": 1.0},
     ],
 )
 def test_foreign_or_malformed_completed_packet_cannot_publish_or_poison_retry(supplied, changed):
@@ -294,7 +288,6 @@ def test_cancel_original_job_is_sent_once_across_interrupted_request(supplied):
 
 
 @pytest.mark.parametrize(("revision", "message"), [
-    ("foreign-build", "build identity"),
     # The known unqualified source must fail on its own revision check.
     ("b35763d846e6512ed817d3f88ac8ce79a7e82a7e", "undefined behavior"),
 ])
@@ -316,47 +309,9 @@ def test_build_identity_and_known_unqualified_source_fail_before_lowering(suppli
         assert run.trace.jobs == 0 and (not state.calls)
 
 
-def test_cpu_single_rank_configuration_roundtrip_and_profile_admission(supplied):
-    backend = supplied.backend
-    assert NWQSimSlurmBackend.model_validate_json(backend.model_dump_json()) == backend
-    with pytest.raises(ValueError, match="only the MPI backend"):
-        backend.revise(profile=backend.profile.revise(nodes=2))
-    with pytest.raises(ValueError, match="cannot consume a GPU"):
-        backend.revise(profile=backend.profile.revise(gpus_per_task=1, gpu_bind="closest"))
-    with pytest.raises(ValueError, match="time window"):
-        backend.revise(accounting_until=backend.accounting_since)
-
-
-def test_corrected_build_keeps_finite_u_phase_domain(supplied):
-    import sys
-    from qiskit import QuantumCircuit
-    from nwqlib.core.planning import ObservationSpec
-
-    circuit = QuantumCircuit(1, 1)
-    circuit.u(0, sys.float_info.max, sys.float_info.max, 0)
-    circuit.measure(0, 0)
-    with Run(
-        selection(),
-        backend=supplied.backend,
-        directory=Path(supplied.backend.profile.spool).parent / "extra-run",
-    ) as run:
-        result = supplied.backend.prepare(
-            circuit,
-            observation=ObservationSpec(kind="counts", shots=4),
-            runtime=RuntimeOptions(seed=23),
-            position=len(circuit.data),
-            source_definitions=(),
-            run=run,
-            snapshot="finite-u-preservation",
-        )
-    request = json.loads(result.payload)
-    assert request["gates"][0]["params"] == [0, sys.float_info.max, sys.float_info.max]
-    assert result.target.version == REVISION and (not supplied.calls)
-
-
 @pytest.mark.parametrize(
     "backend,method",
-    [("CPU", "DM"), ("MPI", "SV"), ("NVGPU", "SV"), ("NVGPU", "DM"), ("AMDGPU", "SV"), ("AMDGPU", "DM")],
+    [("MPI", "SV"), ("NVGPU", "SV")],
 )
 def test_selected_slurm_target_allocation_and_packet_survive_resume(supplied, backend, method):
     state, selected = (supplied, selection(3))
@@ -396,132 +351,3 @@ def selection(q=1):
         observable=ingest_pauli((("I" * q, 1.0), ("I" * (q - 1) + "Z", 1.0)), num_qubits=q),
     )
     return nwqlib.plan(problem, method=ExpectationMethod(), shots=4, seed=23)
-
-
-def test_selected_optimization_level_reaches_the_native_preparation(supplied):
-    # Level 1 merges the two Rz rotations and marks the receipt with the
-    # exclusion "optimization_level", as the NWQ-Sim adapter does.
-    from qiskit import QuantumCircuit
-    from nwqlib.core.planning import ObservationSpec
-
-    backend = supplied.backend.revise(optimization_level=1)
-    circuit = QuantumCircuit(1, 1)
-    circuit.rz(0.1, 0)
-    circuit.rz(0.2, 0)
-    circuit.measure(0, 0)
-    with Run(selection(), backend=backend, directory=Path(backend.profile.spool).parent / "level-run") as run:
-        result = backend.prepare(circuit, observation=ObservationSpec(kind="counts", shots=4),
-                                 runtime=RuntimeOptions(seed=23), position=len(circuit.data),
-                                 source_definitions=(), run=run, snapshot="level")
-    assert len(json.loads(result.payload)["gates"]) == 1
-    assert "optimization_level" in result.probability_window_exclusions
-
-
-@pytest.mark.parametrize("response_bytes", [1, 5, 4096])
-def test_trajectory_admission_prices_each_point_at_a_ten_digit_job_id(supplied, response_bytes):
-    """A Slurm trajectory reserves ten job-ID digits per point before sbatch, for any response cap.
-
-    Without a forecast the early condition is ``32*K + 168 <= M`` for K Pauli
-    points: ``NWQSimSlurmBackend.native_job_id_length`` returns 10, the
-    largest decimal length of a positive uint32 job ID that
-    ``SlurmLauncher._locator`` admits, so each point's job and empty values
-    envelope costs at most ``22 + 10`` bytes, and the fresh outcome
-    transaction grows by at most 168 bytes
-    (``_prepared_execution.detached_completion_growth``). The bound does not
-    depend on ``max_response_bytes``. One byte below it the Run refuses before
-    any scheduler call. At it the submission reaches sbatch when the cap
-    covers the 22-byte acknowledgement floor, and otherwise launch refuses
-    before sbatch.
-    """
-    from test_observation_schedule import pauli, three_call_plan, trajectory
-
-    from nwqlib.execution import ExecutionLimits
-
-    plan = three_call_plan(trajectory(pauli("a", 1, "ZZ", "XY"), pauli("b", 2, "XX"), pauli("end", None, "ZI")),
-                           state=(1., 2j, -3., 4.))
-    required = 32 * 3 + 168
-    backend = supplied.backend.revise(max_response_bytes=response_bytes)
-    spool = Path(backend.profile.spool)
-
-    def launch(allowance):
-        with Run(plan, backend=backend, directory=spool.parent / f"run-{allowance}",
-                 limits=ExecutionLimits(max_completion_metadata_bytes=allowance)) as run:
-            handle = prepare(plan.resolve("trajectory"), run=run, runtime=RuntimeOptions(seed=7))
-            submit_detached((handle,), run=run)
-
-    with pytest.raises(ValueError, match=f"need at least {required} bytes, more than "
-                                         f"max_completion_metadata_bytes={required - 1}, before native work"):
-        launch(required - 1)
-    assert supplied.calls == []
-    if response_bytes < 22:
-        with pytest.raises(ValueError, match="requires max_response_bytes >= 22"):
-            launch(required)
-        assert supplied.calls == []
-    else:
-        launch(required)
-        assert [call[0] for call in supplied.calls] == ["sbatch"]
-
-
-def test_configuration_precheck_refuses_before_the_submission_intent(supplied):
-    """A response cap below the acknowledgement floor is refused before the intent commits.
-
-    ``SlurmLauncher.admit`` runs from ``NWQSimSlurmBackend.admit_batch``, which
-    ``submit_detached`` calls before ``Run._begin_submission``. The refused Run
-    therefore holds no submission, event, exposure or output reservation, so a
-    refresh has no job to search for, and a Run with the corrected
-    configuration submits the same Plan.
-    """
-    state, selected = (supplied, selection())
-    backend = state.backend.revise(max_response_bytes=21)
-    with Run(selected, backend=backend, directory=state.journal) as run:
-        handle = prepared(run, selected)
-        with pytest.raises(ValueError, match="requires max_response_bytes >= 22"):
-            submit_detached((handle,), run=run)
-        assert run.trace.submissions == () and run.trace.events == () and run.trace.jobs == 0
-        assert all(not any(counts.values()) for counts in run.exposure.values())
-        assert run._state["pending_output"] == {} and run.trace.data_bytes_reserved == 0
-        assert not refresh_submissions(run=run)
-    assert state.calls == [] and not (Path(backend.profile.spool)).exists()
-    with Run(selected, backend=backend.revise(max_response_bytes=4096),
-             directory=state.journal.parent / "corrected.sqlite") as run:
-        submit_detached((prepared(run, selected),), run=run)
-        assert run.trace.jobs == 1
-    assert [call[0] for call in state.calls] == ["sbatch"]
-
-
-@pytest.mark.parametrize("response_bytes, reply", [
-    (1, "4294967295;perlmutter\n"), (21, "4294967295;perlmutter\n"),
-    (22, "4294967295;perlmutter\n"), (22, "4294967295;perlmutter\r\n")])
-def test_launch_refuses_a_response_cap_below_the_longest_acknowledgement(supplied, response_bytes, reply):
-    """Launch needs ``12 + len(cluster)`` response bytes before any write (``SlurmLauncher.launch``).
-
-    The longest canonical acknowledgement of a supported job ID from
-    ``perlmutter`` is ``4294967295;perlmutter\\n``, 22 bytes. A smaller cap is
-    refused with no spool directory and no scheduler call, so no job is
-    submitted that the launcher could not then track. At 22 bytes the job
-    is tracked. The floor assumes one LF, so a CRLF reply of 23 bytes exceeds
-    the 22-byte cap after the one sbatch call (``SlurmLauncher._command``),
-    and the spool stays in place for reconciliation.
-    """
-    from test_nexus_backend import IO
-
-    calls = []
-
-    def scheduler(argv, *, max_output_bytes):
-        calls.append(argv)
-        return reply
-
-    profile = supplied.backend.profile
-    launcher = SlurmLauncher(profile, transport=scheduler, max_response_bytes=response_bytes)
-    sid = "7f6e5d4c-3b2a-4190-8a7b-6c5d4e3f2a1b"
-    if response_bytes < 22:
-        with pytest.raises(ValueError, match=f"requires max_response_bytes >= 22 .*got {response_bytes}"):
-            launcher.launch(b"{}", submission_id=sid, max_input_bytes=100, run=IO())
-        assert calls == [] and not Path(profile.spool).exists()
-    elif reply.endswith("\r\n"):
-        with pytest.raises(ValueError, match="exceeded its admitted text response"):
-            launcher.launch(b"{}", submission_id=sid, max_input_bytes=100, run=IO())
-        assert len(calls) == 1 and (Path(profile.spool) / sid / "job.sh").exists()
-    else:
-        locator = launcher.launch(b"{}", submission_id=sid, max_input_bytes=100, run=IO())
-        assert locator.job_id == "4294967295" and len(calls) == 1

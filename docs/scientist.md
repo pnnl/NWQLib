@@ -38,7 +38,7 @@ logical_width at logical_device: 3 count [exact]
 
 `logical_width` is the peak number of logical qubits in use at once. The indented line gives the gate basis of the count, the workflow stage and what exactly is counted, as [Read the labels](resources.md#meaning-of-each-quantity) explains. `row.estimate.quantities` lists every count of the row. An unavailable count carries its reason and is distinct from zero ([Estimate resources](resources.md)).
 
-A Method that does not support the problem gives a row with a `reason` and no `Plan`. An invalid input raises an error. `compare` keeps every row, in the order given, and ranks none of them. [Rank candidate plans](search.md) ranks rows by shots, width or predicted time.
+A Method that does not support the problem gives a row with a `reason` and no `Plan`. An invalid input raises an error. `compare` keeps every row, in the order given, and ranks none of them. [Rank candidate plans](search.md) ranks rows by shots, width or predicted time. For a sampled Plan, the width usually holds only when its measurement runs execute one after another. Ranking sampled Plans by width therefore needs `context=ResourceContext(batch_schedule="serial")`, where `ResourceContext` comes from `nwqlib.resources` ([Objectives](search.md#objectives)).
 
 A Method you write goes into `methods` beside the built-in ones and is compared in the same way ([Run your own circuit](own_circuit.md), [Add a method](algorithm_protocol.md)).
 

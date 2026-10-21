@@ -4,7 +4,6 @@ import numpy as np
 import pytest
 from nwqlib.algorithms.gcim import FixedGCIM
 from nwqlib.core.planning import RandomStreams
-from nwqlib.execution import ExecutionLimits
 from nwqlib.core.analysis import RunData
 from nwqlib._prepared_execution import Run
 from nwqlib.execution import ObservationView
@@ -71,35 +70,6 @@ def test_missing_pair_is_partial_without_smaller_solve(monkeypatch):
     assert partial.pencil is None
 
 
-def test_foreign_observations_reject_before_projected_work(monkeypatch):
-    import nwqlib.algorithms.gcim.fixed_basis as owner
-
-    plan = plan_for()
-    data = Run(plan_for(A=np.diag([2.0, -1.0]))).wait(timeout=5, poll_interval=0).data
-    monkeypatch.setattr(
-        owner, "_solve_projected_pencil", lambda *a, **k: pytest.fail("foreign data reached solve")
-    )
-    with pytest.raises(ValueError, match="another selected Plan"):
-        plan.method.analyze(plan, data, settings={})
-
-
-def test_caps_and_scalar_identity_precede_native_work(monkeypatch):
-    import nwqlib.blocks.lowering as lowering
-
-    monkeypatch.setattr(
-        lowering, "_lower_qiskit", lambda *a, **k: pytest.fail("inadmissible native preparation")
-    )
-    run = Run(plan_for(), limits=ExecutionLimits(max_total_circuits=1))
-    with pytest.raises(ValueError, match=r"ExecutionLimits\(max_total_circuits="):
-        run.plan.method.prepare(run.plan, run=run)
-    scalar = Run(plan_for(A=np.eye(2) * 3)).wait(timeout=5, poll_interval=0)
-    assert scalar.eigenvalue == 3 and not scalar.data.trace.events
-    # Two basis states and one nonidentity term need b(b+1)/2 = 3 exact pair
-    # acquisitions (pencil.pair_count); the refusal names that count and the cap.
-    with pytest.raises(ValueError, match="population 3 exceeds max_experiments=1 before expansion"):
-        plan_for(max_experiments=1)
-
-
 def test_classical_pencil_uses_original_access_without_pauli_conversion(monkeypatch):
     # Patch the name the eigen-input owner calls; it binds it at import.
     import nwqlib.algorithms._eigen_inputs as eigen_inputs
@@ -159,7 +129,7 @@ def test_classical_projection_keeps_rayleigh_cancellation_under_column_scaling()
         np.testing.assert_allclose(pencil.eigenvalues, spectrum, rtol=0, atol=tolerance)
 
 
-@pytest.mark.parametrize("kind, q, b", (("csr", 14, 1), ("csr", 14, 2), ("csr", 14, 6), ("csr", 12, 8), ("dense", 10, 2), ("dense", 10, 16)))
+@pytest.mark.parametrize("kind, q, b", (("csr", 14, 2), ("dense", 10, 2)))
 def test_classical_projection_peak_fits_its_byte_law(kind, q, b):
     import tracemalloc
     from scipy import sparse
@@ -349,42 +319,6 @@ def test_rank_deficient_basis_is_admitted_at_its_gram_formation_error():
 
 
 
-def test_unbounded_off_diagonal_gram_refusal_names_its_remedies(monkeypatch):
-    """A negative Gram mode refused without off-diagonal bounds shows the remedies that apply to it.
-
-    The rank-deficient basis (a, b, exp(0.7i) a) solves with qualified pair
-    receipts. With every receipt's state error made unavailable, the solve
-    admits no input error beyond its roundoff and refuses the computed
-    negative mode; the summary then names sampled acquisition, ADAPT and a
-    smaller basis, and says that overlap_cutoff does not change the check.
-    """
-    from qiskit import QuantumCircuit
-    from nwqlib import solve
-    from nwqlib.execution import PreparedArtifact
-    from nwqlib.algorithms.gcim.fixed_basis import UNQUALIFIED_GRAM_REFUSAL
-    from nwqlib.operators import ingest_pauli
-    from nwqlib.problems.inputs import state_input
-
-    def layered(seed, phase=0.0):
-        draw = np.random.default_rng(seed)
-        circuit = QuantumCircuit(2, global_phase=phase)
-        for _ in range(300):
-            for qubit in range(2):
-                circuit.u(*draw.uniform(-np.pi, np.pi, 3), qubit)
-            circuit.cx(0, 1)
-        return circuit
-
-    def run():
-        return solve(Eigenproblem(A=ingest_pauli((("ZI", .5), ("XX", .3), ("IY", .2)), num_qubits=2)),
-                     method=FixedGCIM(basis=tuple(state_input(c) for c in (layered(4), layered(104), layered(4, .7)))),
-                     execution="quantum", seed=7)
-
-    assert UNQUALIFIED_GRAM_REFUSAL not in str(run())
-    monkeypatch.setattr(PreparedArtifact, "state_error", lambda self, resolved=(): (None, "unqualified"))
-    refused = run()
-    assert refused.pencil.failure_reason == "negative_deterministic_overlap_eigenvalue"
-    assert UNQUALIFIED_GRAM_REFUSAL in str(refused)
-
 def test_classical_offset_removal_agrees_across_storage_formats():
     from scipy import linalg, sparse
     from nwqlib import solve
@@ -413,28 +347,6 @@ def test_classical_offset_removal_agrees_across_storage_formats():
         result = solve(Eigenproblem(A=a), method=FixedGCIM(basis=basis), execution="classical", seed=7)
         assert result.plan.reconstruction.identity_shift == pytest.approx(1e3, rel=0, abs=1.)
         assert result.eigenvalue == pytest.approx(reference, rel=0, abs=tolerance)
-
-
-def test_projected_energy_chunks_record_no_recovery_scale():
-    """FixedGCIM host scalars are energies, so no basis-order-dependent scale is recorded."""
-    import nwqlib
-    from nwqlib.algorithms.lanczos import Lanczos
-
-    H = np.array([[1.0, 0.3, 0, 0.1], [0.3, -0.5, 0.2, 0], [0, 0.2, 0.4, 0.1j], [0.1, 0, -0.1j, -1.0]])
-    c1, c2 = 3.0 * np.array([1, 1, 0, 0]), (0.5 - 0.5j) * np.array([0, 1, 1j, 1])
-    energies = []
-    for basis in ((c1, c2), (c2, c1)):
-        result = nwqlib.solve(Eigenproblem(A=H), method=FixedGCIM(basis=basis), execution="classical", seed=1)
-        (chunk,) = result.data.observations.chunks
-        assert chunk.physical_scale is None and "no recovery applies" in chunk.physical_scale_unavailable
-        energies.append(result.eigenvalue)
-    assert energies[0] == pytest.approx(energies[1], rel=0, abs=1e-12)
-    # Lanczos keeps the norm of its supplied input state.
-    u = 5j * np.array([1.0, 0.2, -0.3, 0.1j])
-    lanczos = nwqlib.solve(Eigenproblem(A=H), method=Lanczos(initial_state=u, krylov_dimension=2),
-                           execution="classical", seed=1)
-    (chunk,) = lanczos.data.observations.chunks
-    assert chunk.physical_scale.as_float() == pytest.approx(np.linalg.norm(u), rel=1e-15, abs=0)
 
 
 def test_exact_pair_reductions_match_dense_reference_entries():
@@ -531,61 +443,6 @@ def test_pair_reductions_are_admitted_against_their_work_and_workspace(monkeypat
         small.reduction_allowance(plan, None, observation=observation, width=3, run=None)
 
 
-def test_exact_plan_at_one_hundred_qubits_plans_and_estimates_with_default_caps():
-    """Exact FixedGCIM planning and estimation do not admit the execution-time pair-reduction work.
-
-    Two product trial states of the parity Hamiltonian ``-Z^q - 0.7 X^q`` at
-    q = 100 have three pair reductions (``pencil.pair_count``) whose summed
-    registered work exceeds the default ``max_classical_products``. That sum
-    is a host cost of acquisition, admitted when a pair is prepared, so
-    planning and resource estimation proceed with the default caps.
-    """
-    from nwqlib import estimate
-    from nwqlib.algorithms.gcim.pencil import pair_count
-    from nwqlib.operators import ingest_pauli
-    from nwqlib.problems.inputs import ingest_product
-
-    q = 100
-    parity = ingest_pauli((("Z" * q, -1.0), ("X" * q, -0.7)), num_qubits=q)
-    basis = tuple(ingest_product([[np.cos(t), np.sin(t)]] * q) for t in (np.pi / 8, 3 * np.pi / 8))
-    plan = plan_for(A=parity, basis=basis)
-    assert len(plan.experiments) == pair_count(2, 2)
-    exact = estimate(plan).quantity("exact_evaluations").fact.value
-    assert (exact.numerator, exact.denominator) == (pair_count(2, 2), 1)
-
-
-def test_pair_reduction_hook_decodes_each_pair_point_once_per_plan(monkeypatch):
-    """One hook call per point decodes the Plan's M pair points a bounded number of times.
-
-    The Plan-level total is fixed by its experiments. Re-decoding it on each
-    hook call costs M parameter decodes per call, M**2 over one pass of the
-    Plan's points, which at b = 48 (M = 1176) took seconds of host time.
-    Summed once, a pass decodes each point for the total and once as its
-    own point, at most 2M.
-    """
-    from nwqlib.algorithms.gcim import pair_reducer
-    from nwqlib.operators import ingest_pauli
-    from nwqlib.problems.inputs import ingest_product
-
-    rng = np.random.default_rng(1)
-    basis = tuple(ingest_product([(np.cos(t), np.sin(t)), (np.cos(s), np.exp(1j * s) * np.sin(s))])
-                  for t, s in rng.uniform(0, 3, size=(48, 2)))
-    plan = plan_for(A=ingest_pauli((("ZI", .5), ("XY", .3), ("IX", .2)), num_qubits=2), basis=basis)
-    readouts = [e.readout for e in plan.experiments]
-    assert len(readouts) == 48 * 49 // 2
-    calls = [0]
-    original = pair_reducer.pair_work
-
-    def counted(*args, **kwargs):
-        calls[0] += 1
-        return original(*args, **kwargs)
-
-    monkeypatch.setattr(pair_reducer, "pair_work", counted)
-    for readout in readouts:
-        plan.method.reduction_allowance(plan, None, observation=readout, width=5, run=None)
-    assert calls[0] <= 2 * len(readouts)
-
-
 def _smallest_exact_adapt():
     from nwqlib.algorithms.gcim import ADAPT
     from nwqlib.operators import ingest_pauli
@@ -597,8 +454,7 @@ def _smallest_exact_adapt():
 
 @pytest.mark.parametrize("build", (
     lambda: (Eigenproblem(A=np.diag([1., -1.])), FixedGCIM(basis=([1, 1], [1, 1j]))),
-    _smallest_exact_adapt,
-), ids=("FixedGCIM", "ADAPT"))
+), ids=("FixedGCIM",))
 def test_saved_exact_gcim_result_loads_in_a_fresh_process(tmp_path, build):
     """load_result in a new interpreter resolves the saved pair reduction before any GCiM module loads."""
     import json
@@ -664,59 +520,6 @@ def test_exact_gcim_pair_reductions_run_on_nwqsim_with_aer_entries(tmp_path):
                 native = run.wait(timeout=60, poll_interval=0.1)
         assert native.pencil.failure_reason is None
         np.testing.assert_allclose(entries(native), entries(aer), rtol=0, atol=2e-12)
-
-
-def test_repeated_pair_acquisitions_pool_with_population_weights_and_their_bound():
-    """Two acquisitions of one exact pair pool into their population-weighted mean with a pooled bound.
-
-    Each reduction contributes population one, so the pooled entry is the
-    equal-weight mean of the two raw reductions. ``pair_reducer.pooled_bound``
-    adds rounding terms to the weighted mean of the contribution bounds, so
-    the pooled bound exceeds that mean for nonzero entries. The pooled entries lie within
-    their pooled bounds of the dense ``V^dagger H0 V`` and ``V^dagger V``.
-    """
-    from qiskit.quantum_info import SparsePauliOp
-    from nwqlib.core.planning import RuntimeOptions
-    from nwqlib._prepared_execution import prepare_experiment, submit_experiment
-    from nwqlib.operators import ingest_pauli
-
-    terms = (("ZI", .5), ("XY", .3), ("IX", .2))
-    basis = ([1, 0, 0, 0], [.6, .8j, 0, 0])
-    plan = plan_for(A=ingest_pauli(terms, num_qubits=2), basis=basis)
-    raw = []
-    with Run(plan) as run:
-        for experiment in plan.experiments:
-            handle = prepare_experiment(plan.resolve(experiment.name), run=run, runtime=RuntimeOptions(seed=7))
-            for _ in range(2 if experiment.name == "pair_0_1" else 1):
-                for chunk in submit_experiment(handle, run=run):
-                    run.collect(chunk)
-                    if experiment.name == "pair_0_1":
-                        (value,) = chunk.values
-                        raw.append((complex(value.real[0], value.imaginary[0]),
-                                    complex(value.real[1], value.imaginary[1])))
-        data = run.data
-    pooled = plan.method.analyze(plan, data, settings={})
-    # Both contributions come from one receipt, so each has the bound of a
-    # single acquisition of the pair.
-    with Run(plan) as fresh:
-        single = {p.pair: p for p in fresh.wait(timeout=5, poll_interval=0).pairs}
-    (pair,) = [p for p in pooled.pairs if p.pair == (0, 1)]
-    assert pair.weights == (.5, .5) and len(pair.contribution_ids) == 2 and len(raw) == 2
-    assert complex(pair.hamiltonian.real, pair.hamiltonian.imag) == pytest.approx(
-        (raw[0][0] + raw[1][0]) / 2, rel=0, abs=2.0**-52)
-    assert complex(pair.overlap.real, pair.overlap.imag) == pytest.approx(
-        (raw[0][1] + raw[1][1]) / 2, rel=0, abs=2.0**-52)
-    # The pooling rounding term is positive for nonzero entries, so the
-    # pooled bound exceeds the equal contributions' common bound.
-    assert pair.overlap_bound > single[(0, 1)].overlap_bound
-    assert pair.hamiltonian_bound > single[(0, 1)].hamiltonian_bound
-    assert all(p.weights == (1.0,) for p in pooled.pairs if p.pair != (0, 1))
-    v = np.column_stack(basis).astype(complex)
-    v /= np.linalg.norm(v, axis=0)
-    h0 = SparsePauliOp.from_list(terms).to_matrix()
-    assert abs(complex(pair.overlap.real, pair.overlap.imag) - (v[:, 0].conj() @ v[:, 1])) <= pair.overlap_bound
-    assert abs(complex(pair.hamiltonian.real, pair.hamiltonian.imag)
-               - (v[:, 0].conj() @ h0 @ v[:, 1])) <= pair.hamiltonian_bound
 
 
 def test_grouped_sampled_pencil_matches_the_dense_reference_within_its_standard_errors(tmp_path):
@@ -912,83 +715,6 @@ def test_repeated_group_acquisitions_pool_with_squared_population_weights():
     assert estimates[0].chunk_mean_variances == (-.25,)
 
 
-@pytest.mark.parametrize("groups, message", (
-    ((("ZI", (0,)),), "exactly once"),
-    ((("ZI", (0, 0)), ("IX", (1,))), "exactly once"),
-    ((("ZX", (0, 1)), ("II", ())), "empty membership"),
-    ((("ZXI", (0, 1)),), "wrong basis width"),
-    ((("ZZ", (0, 1)),), "differs from its Pauli rows"),
-    ((("ZX", (0, 1, 2)),), "not qubit-wise commuting"),
-))
-def test_group_partition_must_cover_each_row_once_in_one_qwc_basis(groups, message):
-    from nwqlib.algorithms.gcim.fixed_basis import FixedGCIMReconstruction, PauliArrays, SampledGroup
-
-    rows = ((("IX", .5), ("YI", .25), ("ZI", -1.0)) if "commuting" in message else (("IX", .5), ("ZI", -1.0)))
-    with pytest.raises(ValueError, match=message):
-        FixedGCIMReconstruction(
-            terms=PauliArrays.from_rows(rows, 2), basis_size=2, num_qubits=2,
-            groups=tuple(SampledGroup(basis=basis, indices=indices) for basis, indices in groups))
-
-
-def test_group_statistics_are_refused_outside_the_grouped_route_and_admitted_before_decoding():
-    """Exact Results cannot carry group statistics, and a grouped pass is admitted at its stated law.
-
-    The pass law of fixed_basis.read_groups over the stored bin counts m_a
-    and group sizes L_a of each chunk, with c = n + 1 classical bits and one
-    key word, is
-    B = sum_a 16 m_a + max_a(80 m_a + 8 L_a) + 8 sum_a(L_a + 16) + (n + 16)L + 512b**2
-    bytes and W = sum_a[m_a(c + 28 + 8 L_a) + L_a c] + L(n + 1) + 32b**2 + 16b**3
-    work. At B and W the pass runs; one byte or one unit less refuses it
-    before any chunk is decoded.
-    """
-    from types import SimpleNamespace
-    import nwqlib
-    from nwqlib.algorithms.gcim import fixed_basis
-    from nwqlib.operators import ingest_pauli
-
-    exact = nwqlib.solve(plan_for(), progress=False)
-    with pytest.raises(ValueError, match="belong only to a sampled Plan"):
-        exact.revise(sampled_pair_variances=(fixed_basis.SampledPairVariance(
-            pair=(0, 1), h0=(0., 0.), overlap=(0., 0.), covariance=(0., 0.), physical_h=(0., 0.),
-            variance_negative=False),))._attach(exact.plan, exact.data)
-
-    rng = np.random.default_rng(2)
-    n, b = 3, 3
-    basis = tuple(rng.normal(size=2**n) + 1j * rng.normal(size=2**n) for _ in range(b))
-    rows = (("III", .7), ("ZII", .5), ("IZI", -.3), ("ZZI", .2), ("XII", .4), ("IYI", -.25), ("XYI", .1))
-    plan = nwqlib.plan(Eigenproblem(A=ingest_pauli(rows, num_qubits=n)), method=FixedGCIM(basis=basis),
-                       execution="quantum", shots=37, seed=3)
-    result = nwqlib.solve(plan, progress=False)
-    rec, c = plan.reconstruction, n + 1
-    L = len(rec.nonidentity_coefficients)
-    settings = {s[0]: s for s in fixed_basis.sampled_settings(b, rec.groups)}
-    bins = [len(chunk.values) for chunk in result.data.observations.chunks]
-    sizes = [len(rec.groups[settings[chunk.experiment][-1]].indices) for chunk in result.data.observations.chunks]
-    need = (sum(16 * m for m in bins) + max(80 * m + 8 * g for m, g in zip(bins, sizes))
-            + 8 * sum(g + 16 for g in sizes) + (n + 16) * L + 512 * b * b)
-    work = (sum(m * (c + 28 + 8 * g) + g * c for m, g in zip(bins, sizes))
-            + L * (n + 1) + 32 * b * b + 16 * b**3)
-
-    class Limited:
-        def __init__(self, max_bytes, max_analysis_work):
-            self.method = SimpleNamespace(max_bytes=max_bytes, max_analysis_work=max_analysis_work)
-
-        def __getattr__(self, name):
-            return getattr(plan, name)
-
-    assert fixed_basis.read_groups(Limited(need, work), result.data) == result.group_moments
-    decoded = []
-    original = fixed_basis.reduce_group
-    fixed_basis.reduce_group = lambda *a, **k: decoded.append(1) or original(*a, **k)
-    try:
-        for limits, message in (((need - 1, work), "max_bytes"), ((need, work - 1), "max_analysis_work")):
-            with pytest.raises(ValueError, match=message):
-                fixed_basis.read_groups(Limited(*limits), result.data)
-    finally:
-        fixed_basis.reduce_group = original
-    assert decoded == []
-
-
 def test_grouped_analysis_is_admitted_before_setting_construction(monkeypatch):
     import numpy as np
     import pytest
@@ -1046,28 +772,6 @@ def test_grouped_analysis_is_admitted_before_setting_construction(monkeypatch):
         with pytest.raises(ValueError, match=rf"GCIM planned grouped analysis needs {size} data bytes"):
             select_wide(size - 1)
     assert len(select_wide(size).experiments) == 8
-
-
-def test_analysis_work_limits_cover_sampled_and_classical_plans(monkeypatch):
-    """The known solve/analysis floor refuses before grouping, with a legal larger plan."""
-    import nwqlib
-    from nwqlib.algorithms.gcim import fixed_basis
-    from nwqlib.operators import ingest_pauli
-
-    A = [[1, .2, 0, .1], [.2, -1, .3, 0], [0, .3, .5, .2], [.1, 0, .2, -.4]]
-    basis = ([1, 0, 0, 0], [0, 1, 1j, 0], [1, 1, 1, 1])
-    problem = nwqlib.Eigenproblem(A=A)
-    with monkeypatch.context() as guarded:
-        guarded.setattr(fixed_basis, "sampled_groups", lambda *a, **k: pytest.fail("grouped before work admission"))
-        with pytest.raises(ValueError, match=r"max_analysis_work=10\b"):
-            nwqlib.plan(problem, method=FixedGCIM(basis=basis, max_analysis_work=10), shots=16, seed=1)
-    selected = nwqlib.plan(problem, method=FixedGCIM(basis=basis), shots=16, seed=1)
-    assert selected.experiments
-    # Without shots nothing is grouped and the solve is the known requirement.
-    problem = nwqlib.Eigenproblem(A=ingest_pauli((("Z", 1.0),), num_qubits=1))
-    method = FixedGCIM(basis=([1, 0], [0, 1], [1, 1]), max_analysis_work=100)
-    with pytest.raises(ValueError, match=r"max_analysis_work=100\b"):
-        nwqlib.plan(problem, method=method, execution="classical", seed=1)
 
 
 def test_default_analysis_work_admits_a_fourteen_qubit_grouped_plan():

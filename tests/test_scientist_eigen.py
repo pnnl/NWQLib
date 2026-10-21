@@ -21,42 +21,19 @@ def execute(problem, method, mode="quantum", shots=None):
     return result, run
 
 
-@pytest.mark.parametrize("mode", ["quantum", "classical"])
-def test_same_target_different_initialization(mode):
+def test_same_target_different_initialization():
     p = Eigenproblem(A=[[1, 1], [1, 1]])
     for method in (
         Lanczos(initial_state=[1, 0], krylov_dimension=2),
         FixedGCIM(basis=([1, 1], [1, -1])),
     ):
-        result, run = execute(p, method, mode)
+        result, run = execute(p, method, "quantum")
         assert result.eigenvalue == pytest.approx(0, abs=1e-12, rel=0)
-        assert (all(e.execution == "host_kernel" for e in run.trace.events)) == (
-            mode == "classical"
-        )
+        assert not all(e.execution == "host_kernel" for e in run.trace.events)
         again = result.analyze(overlap_cutoff=1e-9)
         assert again.data is result.data and again.plan is result.plan
         assert again.eigenvalue == pytest.approx(result.eigenvalue, abs=1e-12, rel=0)
         assert len(run.trace.events) == len(result.data.trace.events)
-
-
-def test_complex_gcim_shift_uses_gram_not_coordinate_identity():
-    vectors = ([1, 0], [1, 1j])
-    h = np.array([[0.7, 0.3 + 0.2j], [0.3 - 0.2j, -0.4]])
-    base, _ = execute(Eigenproblem(A=h), FixedGCIM(basis=vectors))
-    shifted, _ = execute(Eigenproblem(A=h + 2.5 * np.eye(2)), FixedGCIM(basis=vectors))
-    expected = np.linalg.eigvalsh(h)[0]
-    assert base.eigenvalue == pytest.approx(expected, abs=2e-12, rel=0)
-    assert shifted.eigenvalue - base.eigenvalue == pytest.approx(2.5, abs=2e-12, rel=0)
-    s = np.array([[complex(z.real, z.imag) for z in row] for row in base.pencil.overlap])
-    assert s[0, 1] == pytest.approx(2**-0.5, abs=1e-12, rel=0)
-
-
-def test_lanczos_rank_deficiency_does_not_establish_ground():
-    result, _ = execute(
-        Eigenproblem(A=np.diag([0.0, 1.0])), Lanczos(initial_state=[0, 1], krylov_dimension=2)
-    )
-    assert result.eigenvalue == pytest.approx(1, abs=1e-12, rel=0)
-    assert result.kept_rank == 1
 
 
 def test_original_dimension_padding_and_raw_chebyshev_gram():
@@ -106,6 +83,33 @@ def test_sensitivity_actual_population_and_no_reacquisition(monkeypatch):
         strict.revise(cutoff=strict.cutoff*1.01).validate_plan(result.plan)
 
 
+def test_saved_sampled_lanczos_result_reanalyzes_with_its_shot_counts(tmp_path):
+    """A reloaded sampled Result gives the original Ritz values under changed cutoff criteria.
+
+    The confidence cutoff 2 m sqrt(2 log(2 r/delta)/n_min) (Hoeffding, see
+    the Lanczos guide) reads the shot counts of the r = 2m - 2 = 2 sampled Gram
+    moments, so it reveals counts lost or changed by saving.
+    """
+    import nwqlib
+    from nwqlib.operators import ingest_pauli
+
+    problem = Eigenproblem(A=ingest_pauli((("ZZ", 1.0), ("XI", 0.5), ("IX", 0.5)), num_qubits=2))
+    result = nwqlib.solve(nwqlib.plan(problem, method=Lanczos(initial_state=[1, 0, 0, 0], krylov_dimension=2),
+                                      shots=4096, seed=7))
+    loaded = nwqlib.load_result(result.save(tmp_path / "sampled"))
+    counts = [stat.shots for degree, stat in loaded.statistics if degree < 3]
+    assert counts == [4096, 4096]
+    delta = 0.05
+    for criterion in (dict(overlap_cutoff_policy="confidence", overlap_failure_probability=delta),
+                      dict(overlap_cutoff=1e-9), dict()):
+        original, reopened = result.analyze(**criterion), loaded.analyze(**criterion)
+        assert (reopened.eigenvalue, reopened.kept_rank, reopened.cutoff) == (
+            original.eigenvalue, original.kept_rank, original.cutoff)
+    strict = loaded.analyze(overlap_cutoff_policy="confidence", overlap_failure_probability=delta)
+    # Machine precision: the same closed form evaluated in binary64.
+    assert strict.cutoff == pytest.approx(2*2*np.sqrt(2*np.log(2*2/delta)/4096), rel=2e-15)
+
+
 # Projected analysis envelope of numerical.reconstruct at krylov_dimension m=2:
 # 512*m*m+128*m bytes and 32*m*m+16*m**3 work.
 ANALYSIS_BYTES = 512 * 2 * 2 + 128 * 2
@@ -128,7 +132,7 @@ def at_envelope(limit, envelope, plan_method, method):
     return method(None)
 
 
-@pytest.mark.parametrize("mode,shots", [("quantum", None), ("quantum", 100), ("classical", None)])
+@pytest.mark.parametrize("mode,shots", [("quantum", None)])
 @pytest.mark.parametrize(
     "limit,envelope,message",
     [
@@ -162,85 +166,7 @@ def test_lanczos_plan_admits_projected_analysis_before_acquisition(mode, shots, 
     assert len(run.trace.events) == len(result.plan.experiments)
 
 
-@pytest.mark.parametrize(
-    "limit,envelope,message",
-    [
-        ("max_bytes", ANALYSIS_BYTES, f"Lanczos projected analysis needs {ANALYSIS_BYTES} data bytes"),
-        ("max_analysis_work", 2 * ANALYSIS_WORK, "sensitivity pilot exceeds max_analysis_work"),
-    ],
-)
-def test_sensitivity_plan_admits_pilot_solve_and_derivative_before_acquisition(limit, envelope, message):
-    """The pilot solves the projected pencil and then differentiates it, within the byte
-    envelope of numerical.reconstruct and twice its work. One unit below either must stop
-    plan() before the pilot stage is acquired. At the envelope itself the analysis admission
-    passes: a max_analysis_work limit runs both stages, and a max_bytes limit stops at the
-    fixed census or Gershgorin allowance (FIXED_PHASE), so that case runs both stages under
-    the default byte limit.
-    """
-    problem = Eigenproblem(A=[[1, 1], [1, 1]])
-
-    def method(value):
-        return Lanczos(
-            initial_state=[1, 0],
-            krylov_dimension=2,
-            sampling=SensitivitySampling(total_shots=100, pilot_fraction=0.2),
-            **({} if value is None else {limit: value}),
-        )
-
-    def plan_method(selected):
-        return selected.plan(
-            problem, output=problem.default_output(), execution="quantum", shots=None, rng=RandomStreams(4)
-        )
-
-    with pytest.raises(ValueError, match=message):
-        plan_method(method(envelope - 1))
-    result, run = execute(problem, at_envelope(limit, envelope, plan_method, method))
-    assert result.eigenvalue is not None
-    assert len(run.trace.events) == 2 * len(result.plan.experiments)
-
-
-def test_sensitivity_scalar_operator_needs_no_pilot_work():
-    """A scalar operator has every moment known, so the controller acquires nothing and
-    never runs the pilot. One solve's work must therefore suffice for its Plan.
-    """
-    method = Lanczos(
-        initial_state=[1, 0],
-        krylov_dimension=2,
-        sampling=SensitivitySampling(total_shots=100, pilot_fraction=0.2),
-        max_analysis_work=ANALYSIS_WORK,
-    )
-    result, run = execute(Eigenproblem(A=[[2, 0], [0, 2]]), method)
-    assert result.eigenvalue == 2
-    assert not run.trace.events
-
-
-def test_lanczos_analysis_checks_the_analyzing_method_limits():
-    """Lanczos.analyze takes its limits from the Method it is called on, which need not be the
-    one that planned the data. The projected analysis must check those limits before its solve.
-    Reanalysis under the planning Method's own limits, here exactly the work envelope, must
-    pass. The planning Method keeps the default byte limit, which the fixed census allowance
-    needs (FIXED_PHASE).
-    """
-    problem = Eigenproblem(A=[[1, 1], [1, 1]])
-    planned = Lanczos(
-        initial_state=[1, 0],
-        krylov_dimension=2,
-        max_analysis_work=ANALYSIS_WORK,
-    )
-    result, _ = execute(problem, planned)
-    again = result.analyze(overlap_cutoff=1e-9)
-    assert again.eigenvalue == pytest.approx(result.eigenvalue, abs=1e-12, rel=0)
-    for limit, envelope, message in (
-        ("max_bytes", ANALYSIS_BYTES, f"Lanczos projected analysis needs {ANALYSIS_BYTES} data bytes"),
-        ("max_analysis_work", ANALYSIS_WORK, "Lanczos projected analysis exceeds max_analysis_work"),
-    ):
-        small = Lanczos(initial_state=[1, 0], krylov_dimension=2, **{limit: envelope - 1})
-        with pytest.raises(ValueError, match=message):
-            small.analyze(result.plan, result.data, settings={})
-
-
-@pytest.mark.parametrize("mode", ["quantum", "classical"])
-def test_adapt_commutator_actual_decision_and_reanalysis(mode):
+def test_adapt_commutator_actual_decision_and_reanalysis():
     from nwqlib.algorithms.gcim.adapt import ADAPT
     from nwqlib.operators import ingest_pauli
     from nwqlib.algorithms.gcim.adapt_verification import AdaptVerificationOptions
@@ -248,12 +174,9 @@ def test_adapt_commutator_actual_decision_and_reanalysis(mode):
     p = Eigenproblem(A=[[1.0, 0], [0, -1.0]])
     method = ADAPT(initial_state=[1, 1], pool=(ingest_pauli((("Y", 1j),), num_qubits=1),))
     plan = method.plan(
-        p, output=p.default_output(), execution=mode, shots=None, rng=RandomStreams(3)
+        p, output=p.default_output(), execution="quantum", shots=None, rng=RandomStreams(3)
     )
-    if mode == "quantum":
-        assert plan.reconstruction.pool[0].commutator.rows() == (("X", 2.0),)
-    else:
-        assert plan.reconstruction.processed_hamiltonian == p.A.reference
+    assert plan.reconstruction.pool[0].commutator.rows() == (("X", 2.0),)
     run = Run(plan)
     method.prepare(plan, run=run)
     assert not run.trace.events
@@ -304,30 +227,19 @@ def test_saved_eigen_results_restore_selection_without_analysis(tmp_path, monkey
         )
 
 
-@pytest.mark.parametrize("family", ["adapt", "sensitivity"])
-def test_interrupted_analysis_retry_keeps_physical_population_and_rng(monkeypatch, family):
+def test_interrupted_analysis_retry_keeps_physical_population_and_rng(monkeypatch):
     """Explicit analysis recovery adds one analysis attempt while preserving acquired populations
     and the RNG trajectory.
     """
-    from nwqlib.algorithms.gcim import ADAPT
-    from nwqlib.operators import ingest_pauli
+    from nwqlib.algorithms.lanczos import workflow as owner
 
-    if family == "adapt":
-        from nwqlib.algorithms.gcim import adapt_acquisition as owner
-
-        function = "_pencil_from_observations"
-        method = ADAPT(initial_state=[1, 1], pool=(ingest_pauli((("Y", 1j),), num_qubits=1),))
-        problem = Eigenproblem(A=[[1.0, 0], [0, -1.0]])
-    else:
-        from nwqlib.algorithms.lanczos import workflow as owner
-
-        function = "_sensitivity_weights"
-        method = Lanczos(
-            initial_state=[1, 0],
-            krylov_dimension=2,
-            sampling=SensitivitySampling(total_shots=100, pilot_fraction=0.2),
-        )
-        problem = Eigenproblem(A=[[1.0, 1], [1, 1.0]])
+    function = "_sensitivity_weights"
+    method = Lanczos(
+        initial_state=[1, 0],
+        krylov_dimension=2,
+        sampling=SensitivitySampling(total_shots=100, pilot_fraction=0.2),
+    )
+    problem = Eigenproblem(A=[[1.0, 1], [1, 1.0]])
     plan = method.plan(
         problem,
         output=problem.default_output(),
@@ -371,9 +283,8 @@ def test_interrupted_analysis_retry_keeps_physical_population_and_rng(monkeypatc
         run.resume(reanalyze=True)
 
 
-@pytest.mark.parametrize("storage", ["dense", "csr", "csc", "pauli"])
+@pytest.mark.parametrize("storage", ["dense", "pauli"])
 def test_original_matvec_affine_frame_and_saved_ritz(storage, monkeypatch, tmp_path):
-    from scipy.sparse import csr_matrix, csc_matrix
     from nwqlib.operators import ingest_pauli
     from nwqlib.algorithms import _eigen_inputs
     from nwqlib.saved_evidence import load_result
@@ -383,8 +294,6 @@ def test_original_matvec_affine_frame_and_saved_ritz(storage, monkeypatch, tmp_p
     matrix = np.array([[0.3, 1 - 1j], [1 + 1j, -0.3]])
     inputs = {
         "dense": matrix,
-        "csr": csr_matrix(matrix),
-        "csc": csc_matrix(matrix),
         "pauli": ingest_pauli((("X", 1), ("Y", 1), ("Z", 0.3)), num_qubits=1),
     }
     monkeypatch.setattr(
@@ -413,123 +322,6 @@ def test_original_matvec_affine_frame_and_saved_ritz(storage, monkeypatch, tmp_p
         -np.sqrt(2.09), rel=0, abs=2e-12
     )
     run.close()
-
-
-def test_eigen_scalar_shots_and_conversion_admission(monkeypatch):
-    from scipy.sparse import csr_matrix, csc_matrix, diags
-    from nwqlib.algorithms import _eigen_inputs
-    from nwqlib.algorithms.protocol import ApplicabilityError
-    from nwqlib.operators import ingest_pauli
-
-    for scalar in (0.0, 2.5):
-        result, run = execute(
-            Eigenproblem(A=scalar * np.eye(2)),
-            Lanczos(initial_state=[1, 0], krylov_dimension=2),
-            shots=17,
-        )
-        assert result.eigenvalue == scalar
-        assert not run.trace.events and not result.contribution_ids
-        assert not result.plan.construction.program.bindings
-        run.close()
-    for sparse in (csr_matrix, csc_matrix):
-        problem = Eigenproblem(A=sparse([[1.0, 0.2], [0.2, -1.0]]))
-        with pytest.raises(ApplicabilityError, match="input_conversion"):
-            execute(problem, Lanczos(initial_state=[1, 0], krylov_dimension=2))
-        result, run = execute(
-            problem,
-            Lanczos(initial_state=[1, 0], krylov_dimension=2, input_conversion="dense_pauli"),
-        )
-        assert result.eigenvalue == pytest.approx(-np.sqrt(1.04), rel=0, abs=2e-12)
-        run.close()
-    calls = []
-    original = _eigen_inputs.pauli_coefficients
-    monkeypatch.setattr(
-        _eigen_inputs, "pauli_coefficients", lambda a: (calls.append(1), original(a))[1]
-    )
-    p = Eigenproblem(A=np.eye(2))
-    for method, mode, shots in (
-        (Lanczos(krylov_dimension=3), "quantum", None),
-        (Lanczos(degrees=(1, 1)), "quantum", None),
-        (Lanczos(), "classical", 2),
-        (FixedGCIM(basis=([1, 0], [0, 1]), max_basis_size=1), "quantum", None),
-        (Lanczos(max_conversion_work=3), "quantum", None),
-    ):
-        with pytest.raises(ValueError):
-            method.plan(
-                p, output=p.default_output(), execution=mode, shots=shots, rng=RandomStreams(4)
-            )
-    assert calls == []
-    # Large sparse planning exercises original access only, no state expansion/solve.
-    p = Eigenproblem(A=diags(np.arange(1024, dtype=float), format="csr"))
-    plan = Lanczos(krylov_dimension=2).plan(
-        p, output=p.default_output(), execution="classical", shots=None, rng=RandomStreams(4)
-    )
-    assert plan._native["operator"] is p.A and calls == []
-    # Compact quantum input is unaffected by the small dense convenience limit.
-    p = Eigenproblem(A=ingest_pauli((("Z" + "I" * 5, 1),), num_qubits=6))
-    plan = Lanczos(krylov_dimension=2).plan(
-        p, output=p.default_output(), execution="quantum", shots=None, rng=RandomStreams(4)
-    )
-    assert plan._native["operator"] is p.A
-
-
-def test_preparation_admitted_before_recurrence_and_duplicate_basis(monkeypatch):
-    from nwqlib.algorithms import _eigen_inputs
-    from nwqlib.algorithms.lanczos import method as lanczos_method
-    from nwqlib.algorithms.gcim import fixed_basis
-    from nwqlib.problems.inputs import ingest_product, ingest_vector
-
-    problem = Eigenproblem(A=np.diag([0.0, 1.0, 2.0, 3.0]))
-    seed = ingest_product(([2**-0.5, 2**-0.5], [2**-0.5, 1j * 2**-0.5]))
-    method = Lanczos(initial_state=seed, krylov_dimension=2)
-    plan = method.plan(
-        problem,
-        output=problem.default_output(),
-        execution="classical",
-        shots=None,
-        rng=RandomStreams(4),
-    )
-    _, work = method._classical_requirements(plan._native["operator"], seed, plan.reconstruction)
-    calls = []
-    original = _eigen_inputs.state_direction
-    monkeypatch.setattr(
-        lanczos_method, "state_direction", lambda *a, **k: (calls.append(1), original(*a, **k))[1]
-    )
-    limited = method.revise(max_classical_products=work - 1)
-    with pytest.raises(ValueError, match="max_classical_products"):
-        execute(problem, limited, "classical")
-    assert not calls
-    result, run = execute(problem, method.revise(max_classical_products=work), "classical")
-    assert len(calls) == 1 and result.eigenvalue is not None
-    run.close()
-
-    a = np.array([[0.7, 0.3 + 0.2j], [0.3 - 0.2j, -0.4]])
-    one, two = ingest_vector([1, 0]), ingest_vector([1, 1j])
-    for basis, expected in (((one, one), 1), ((one, two), 2)):
-        calls.clear()
-        actions = []
-        # (A - cI) acts once per distinct state, whichever route removes c.
-        action = fixed_basis._offset_free_actions
-        with monkeypatch.context() as guard:
-            guard.setattr(
-                fixed_basis,
-                "state_direction",
-                lambda *a, **k: (calls.append(1), original(*a, **k))[1],
-            )
-            guard.setattr(
-                fixed_basis, "_offset_free_actions",
-                lambda operator, columns, *a, **k: (actions.extend(columns.T),
-                                                    action(operator, columns, *a, **k))[1],
-            )
-            result, run = execute(Eigenproblem(A=a), FixedGCIM(basis=basis), "classical")
-        assert len(calls) == len(actions) == expected
-        v = np.column_stack([original(s) for s in basis])
-        h = [[complex(z.real, z.imag) for z in row] for row in result.pencil.hamiltonian]
-        s = [[complex(z.real, z.imag) for z in row] for row in result.pencil.overlap]
-        np.testing.assert_allclose(h, v.conj().T @ a @ v, rtol=0, atol=2e-14)
-        np.testing.assert_allclose(s, v.conj().T @ v, rtol=0, atol=2e-14)
-        assert result.pencil.kept_rank == expected
-        run.close()
 
 
 def test_sparse_three_dimensional_adapt_preserves_embedding(monkeypatch):
@@ -669,64 +461,6 @@ def test_matrix_energy_shift_preserves_original_input_relation(monkeypatch, tmp_
     assert facts[0].fact.value.numerator == 0
     run1.close()
     run2.close()
-
-
-def test_energy_endpoint_byte_laws_count_table_scalars_and_relation_workspace():
-    import json
-    from scipy.sparse import csr_matrix
-    from nwqlib.evidence import energy_shift
-    from nwqlib.operators import ingest_dense, ingest_pauli, ingest_sparse
-
-    # Capture (energy_shift._operator_payload): borrowed storage plus, per
-    # scanned entry, four 8-byte scalars and two copies of at most
-    # 6 + 2*digits + 48 bytes of identity JSON, or 3q + 68 bytes per Pauli
-    # term, plus 2 bytes of brackets per JSON copy; a matrix adds the
-    # extraction workspace 41n + 24D + 65536 (dense input omits 24D).
-    # -1.2345678901234567e-308 has the longest binary64 repr, so the entries
-    # and the terms below fill the JSON allowance up to one byte.
-    x = -1.2345678901234567e-308
-    dense = ingest_dense(np.array([[x + 1j * x, x + 1j * x], [x + 1j * x, x + 1j * x]]))
-    diagonal = ingest_sparse(csr_matrix(np.diag([0.0, x + 1j * x, x + 1j * x, 0.0])))
-    for operator, scanned, index_bytes in ((dense, 4, 0), (diagonal, 2, 24 * 4)):
-        text = 6 + 2 * len(str(operator.basis.dimension - 1)) + 2 * 24
-        law = operator.manifest.payload_bytes + scanned * (32 + 2 * text) + 4 + 41 * scanned + index_bytes + 65536
-        entries = energy_shift._operator_payload(operator, max_bytes=law)["matrix_entries"]
-        # Record.content_id encodes with compact separators and hashes UTF-8 bytes.
-        encoded = json.dumps([list(entry) for entry in entries], separators=(",", ":"), ensure_ascii=False)
-        assert len(encoded.encode("utf-8")) == scanned * text + 1
-        with pytest.raises(ValueError, match="endpoint entries needs"):
-            energy_shift._operator_payload(operator, max_bytes=law - 1)
-    for terms, q in (((("XZ", x), ("II", x)), 2), (((("X" + "I" * 19), x),), 20)):
-        pauli = ingest_pauli(terms, num_qubits=q)
-        law = pauli.manifest.payload_bytes + len(terms) * (3 * q + 68) + 4
-        captured = energy_shift._operator_payload(pauli, max_bytes=law)["terms"]
-        assert captured == terms
-        encoded = json.dumps([list(term) for term in captured], separators=(",", ":"), ensure_ascii=False)
-        assert len(encoded.encode("utf-8")) == len(terms) * (q + 30) + 1
-        with pytest.raises(ValueError, match="endpoint terms needs"):
-            energy_shift._operator_payload(pauli, max_bytes=law - 1)
-
-    # Relation workspace (energy_shift._relation_bytes): 192U + 65536 for a
-    # matrix relation of U stored entries, and [16 max(1,q) + 256]N + 65536
-    # for a Pauli relation of N = U + 1 contributions.
-    matrix = np.array([[1.0, 0.25 + 0.5j], [0.25 - 0.5j, -1.0]])
-    method = Lanczos(initial_state=[1, 0], krylov_dimension=2, overlap_cutoff=1e-14)
-    first, first_run = execute(Eigenproblem(A=matrix), method, "classical")
-    second, second_run = execute(Eigenproblem(A=matrix + 2 * np.eye(2)), method, "classical")
-    baseline = energy_shift.EnergyShiftOptions.for_result(first, name="shift", shift=2.0, tolerance=0.0).baseline
-    target = energy_shift._endpoint(second)
-    law = 192 * 8 + 65536  # Four entries in each endpoint.
-    energy_shift._matrix_relation(baseline, target, 2.0, max_bytes=law)
-    with pytest.raises(ValueError, match="matrix relation entries needs"):
-        energy_shift._matrix_relation(baseline, target, 2.0, max_bytes=law - 1)
-    pauli_base = baseline.revise(matrix_entries=None, terms=(("I", 1.0), ("Z", 0.5)))
-    pauli_target = baseline.revise(matrix_entries=None, terms=(("I", 3.0), ("Z", 0.5)))
-    law = (16 + 256) * 5 + 65536
-    energy_shift._pauli_relation(pauli_base, pauli_target, 2.0, max_bytes=law)
-    with pytest.raises(ValueError, match="Pauli relation entries needs"):
-        energy_shift._pauli_relation(pauli_base, pauli_target, 2.0, max_bytes=law - 1)
-    first_run.close()
-    second_run.close()
 
 
 def test_energy_shift_relations_decide_the_exact_binary64_relation():

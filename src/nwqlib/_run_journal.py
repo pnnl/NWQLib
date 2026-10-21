@@ -38,7 +38,7 @@ from nwqlib.operators.access import Count
 # A Method-owned Result field change may instead bump that Method's archive
 # format when load_run checks it before restoring the journal and validating
 # the concrete Result.
-RUN_FORMAT = "nwqlib.run/20"
+RUN_FORMAT = "nwqlib.run/21"
 
 
 def unsupported_run_format(found, where="saved run"):

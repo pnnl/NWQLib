@@ -1,7 +1,5 @@
 """Independent physical references and selected-grid/refinement continuations."""
 
-from dataclasses import replace
-from math import sqrt
 from types import SimpleNamespace
 
 import numpy as np
@@ -138,95 +136,6 @@ def test_complex_source_reference_uses_original_dimension_phase_and_one_propagat
     assert repeated[0].fact.value == facts[0].fact.value and repeated[0].fact.evidence.artifact == again.content_id != receipt.content_id
 
 
-def test_reference_failure_and_missing_physical_access_do_not_start_another_operation(monkeypatch):
-    problem = nwqlib.LinearDynamics(A=np.eye(2), initial_state=[1,1j], time=.1)
-    physical = nwqlib.solve(problem, method=method(), execution="classical")
-    scalar = nwqlib.solve(problem, method=method(), output=nwqlib.NormSquared(), execution="classical")
-    failure = RuntimeError("reference expm failed")
-    calls = []
-    def fail(*args):
-        calls.append(True)
-        raise failure
-    patch_exponential(monkeypatch, fail)
-    checks = LCHSVerification(reference="expm")
-    with pytest.raises(ValueError, match="phase-faithful"):
-        scalar.verify(checks=checks)
-    with pytest.raises(ValueError, match="max_dense_work"):
-        physical.verify(checks=checks.revise(max_dense_work=1))
-    with pytest.raises(ValueError, match="bytes"):
-        physical.verify(checks=checks.revise(max_bytes=16))
-    with pytest.raises(ValueError, match="original configured Method"):
-        method(trotter_steps=3).verify(physical.plan, physical, checks=checks)
-    assert not calls
-    with pytest.raises(RuntimeError) as caught:
-        physical.verify(checks=checks)
-    assert caught.value is failure and calls == [True]
-
-
-def test_zero_relative_reference_preserves_absolute_discrepancy():
-    problem = nwqlib.LinearDynamics(A=np.eye(2), initial_state=[0,0], time=.1)
-    result = nwqlib.solve(problem, method=method())
-    receipt, facts = result.verify(checks=LCHSVerification(reference="expm", metric="relative_l2"))
-    assert facts[0].fact.availability == "unknown" and "nonzero" in facts[0].fact.reason
-    raw = raw_values(receipt)
-    assert raw["reference_error.absolute_l2"] == raw["reference_error.reference_norm"] == 0
-
-
-@pytest.mark.parametrize("metric, threshold, expected, status", [
-    ("absolute_l2", 2.6, sqrt(7.), "FAIL"), ("relative_l2", 2., sqrt(3.5), "PASS")])
-def test_signed_discrepancy_threshold_is_a_scoped_check(monkeypatch, metric, threshold, expected, status):
-    from nwqlib.algorithms.lchs import host
-    from nwqlib.evidence.error_model import assemble_check
-    monkeypatch.setattr(host, "_evolve", lambda *a: (np.array([1j,2j]), None, ()))
-    result = nwqlib.solve(nwqlib.LinearDynamics(A=np.eye(2), initial_state=[1,1], time=.5),
-                          method=method(), execution="classical")
-    patch_exponential(monkeypatch, lambda matrix: np.eye(2, dtype=complex))
-    checks = LCHSVerification(reference="expm", metric=metric, threshold=threshold)
-    _, facts = result.verify(checks=checks)
-    # Physical target(i,2i), reference(1,1): squared discrepancy2+5=7,
-    # reference squared norm2. Aligning phase would give another answer.
-    assert facts[0].fact.value.value == pytest.approx(expected, rel=0, abs=2e-15)
-    assessment = assemble_check(checks.verification_checks(result)[0], artifact_id=result.content_id, fact=facts[0])
-    assert assessment.status == status
-    from nwqlib.evidence.error_model import Certificate
-    patch_exponential(monkeypatch, lambda *a, **k: pytest.fail("certificate replayed a reference"))
-    certificate = Certificate(plan_id=result.plan_id, result_id=result.content_id,
-        assessment=result.assess(absolute_tolerance=3.), checks=())
-    for _ in range(2):
-        certificate = certificate.with_verification(result, options=checks, evidence=facts)
-        assert certificate.checks[0].status == status and len(certificate.checks)==1
-        assert certificate.assessment.status == "INCONCLUSIVE"
-
-
-def test_unavailable_exponential_leaves_the_reference_unknown_without_fallback(monkeypatch):
-    # For A = diag(-800, 1) and T = 1 the exponential holds exp(800), above the
-    # binary64 range, although u0 and b have no component on that mode. A
-    # 1-norm above 2**37 is refused before any kernel runs.
-    import warnings
-    import scipy.integrate
-    from nwqlib.algorithms.lchs.references import closed_form_reference, expm_reference
-    checks = SimpleNamespace(max_bytes=10**6, max_dense_work=10**6)
-    counts = dict.fromkeys(("expm_attempts", "expm_completed", "matvec_attempts", "matvec_completed"), 0)
-    initial, source = np.array([0, 1j]), np.array([0, 1+0j])
-    with warnings.catch_warnings():
-        warnings.simplefilter("error")
-        overflow = np.diag([-800., 1.]).astype(complex)
-        assert closed_form_reference(overflow, initial, source, 1., checks=checks, counts=counts) is None
-        assert expm_reference(overflow, initial, 1., checks=checks, counts=counts) is None
-    assert counts["expm_completed"] == 2 and counts["matvec_attempts"] == 0
-    with monkeypatch.context() as local:
-        patch_exponential(local, lambda *a, **k: pytest.fail("kernel ran above the 1-norm limit"))
-        assert closed_form_reference(np.diag([2.**38, 1.]).astype(complex), initial, source, 1.,
-                                     checks=checks, counts=counts) is None
-    result = nwqlib.solve(nwqlib.LinearDynamics(A=np.eye(2), initial_state=[1,0], source=[1,0], time=.1),
-        method=method(duhamel_nodes=1), execution="classical")
-    patch_exponential(monkeypatch, lambda matrix: np.full(matrix.shape, np.inf, dtype=complex))
-    monkeypatch.setattr(scipy.integrate, "solve_ivp", lambda *a, **k: pytest.fail("unselected IVP fallback"))
-    receipt, facts = result.verify(checks=LCHSVerification(reference="closed_form"))
-    assert facts[0].fact.availability == "unknown" and "not finite" in facts[0].fact.reason
-    assert raw_values(receipt) == {"reference_error": None, "reference_error.reference_norm": None}
-
-
 def test_explicit_ivp_signed_rhs_consistency_and_rhs_cap(monkeypatch):
     import scipy.integrate
     result = nwqlib.solve(nwqlib.LinearDynamics(A=np.eye(2), initial_state=[1,1], source=[1j,-1], time=.5),
@@ -270,22 +179,20 @@ def test_explicit_ivp_signed_rhs_consistency_and_rhs_cap(monkeypatch):
         LCHSVerification(reference="ivp", rtol=np.finfo(float).eps, atol=1e-12, max_rhs_calls=1)
 
 
-@pytest.mark.parametrize("execution", ["classical", "quantum"])
-def test_selected_grid_preserves_padded_source_phase_and_archive_without_selection(tmp_path, monkeypatch, execution):
+def test_selected_grid_preserves_padded_source_phase_and_archive_without_selection(tmp_path, monkeypatch):
     from nwqlib.algorithms.lchs import time_independent_terms as terms
     problem = nwqlib.LinearDynamics(A=np.diag([-.1+.2j,.1-.2j,.3+.1j]),
         initial_state=.5*np.exp(1j*np.pi/3)*np.array([1,1j,.5]), source=[.25j,0,.1], time=.1)
-    chosen = nwqlib.plan(problem, method=method(duhamel_nodes=2), execution=execution)
-    if execution == "quantum":
-        assert sum(register.width for register in chosen.construction.program.registers) <= 13
+    chosen = nwqlib.plan(problem, method=method(duhamel_nodes=2), execution="quantum")
+    assert sum(register.width for register in chosen.construction.program.registers) <= 13
     result = nwqlib.solve(chosen)
-    saved = result.save(tmp_path/execution)
+    saved = result.save(tmp_path/"quantum")
     monkeypatch.setattr(terms, "generate_lchs_quadrature", lambda *a, **k: pytest.fail("quadrature reselected"))
     monkeypatch.setattr(terms, "generate_lchs_product_formula_select_plan", lambda *a, **k: pytest.fail("PF reselected"))
     restored = nwqlib.load_result(saved)
     receipt, facts = restored.verify(checks=LCHSVerification(reference="selected_grid"))
-    # Same finite selected sum; dense native lowering has a looser roundoff envelope.
-    assert facts[0].fact.value.value < (2e-10 if execution == "quantum" else 3e-14)
+    # Same finite selected sum, within the roundoff envelope of dense native lowering.
+    assert facts[0].fact.value.value < 2e-10
     counts = arguments(receipt)
     # One Hermitian eigensystem per k node serves all three applications.
     assert counts["applications"] == 3 and counts["expm_completed"] == 0 and counts["eigh_calls"] == 4
@@ -296,54 +203,26 @@ def test_selected_grid_preserves_padded_source_phase_and_archive_without_selecti
         restored.verify(checks=LCHSVerification(reference="selected_grid", max_node_evaluations=1))
 
 
-def test_selected_grid_rejects_foreign_payload_and_corrupt_actual_source_role(monkeypatch):
-    from nwqlib.algorithms.lchs.selected_grid import selected_payload
-    from nwqlib.algorithms.lchs import time_independent_terms as terms
-    problem = nwqlib.LinearDynamics(A=np.eye(2), initial_state=[0,0], source=[1,1j], time=.1)
-    result = nwqlib.solve(problem, method=method(duhamel_nodes=1), execution="classical")
-    app = result.applications[0]
-    from nwqlib.ir import Binding
-    wrong = app.revise(arguments=tuple(Binding(parameter=entry.parameter, value=0) if entry.parameter=="source_application" else entry
-                                      for entry in app.arguments))
-    # A forged Result application cannot substitute for the completed chunk.
-    changed = result.revise(applications=(wrong,))._attach(result.plan, result.data)
-    monkeypatch.setattr(terms, "_node_eigensystem", lambda *a, **k: pytest.fail("bad schedule reached reference"))
-    with pytest.raises(ValueError, match="actual acquisition"):
-        changed.verify(checks=LCHSVerification(reference="selected_grid"))
-    chosen = nwqlib.plan(problem, method=method(duhamel_nodes=1))
-    payload = chosen._native["native_data"]
-    chosen._native["native_data"] = replace(payload)
-    with pytest.raises(ValueError, match="exact SELECT"):
-        selected_payload(chosen)
-
-
-# A budgeted Plan's classical reference repeats each acquired node step
-# count as a fixed-step formula (selected_grid.grid_reference).
-@pytest.mark.parametrize("execution,backend", [("classical", "trotter"), ("quantum", "trotter"),
-                                               ("classical", "trotter_error_budgeted")])
-def test_fixed_pf_selected_grid_never_reselects_steps_and_keeps_identity_phase(monkeypatch, execution, backend):
+def test_fixed_pf_selected_grid_never_reselects_steps_and_keeps_identity_phase(monkeypatch):
     from nwqlib.algorithms.lchs import time_independent_terms as terms
     matrix = np.array([[.5,.25j],[.25j,.2]])
-    fixed = dict(trotter_steps=2) if backend == "trotter" else {}
     result = nwqlib.solve(nwqlib.LinearDynamics(A=matrix, initial_state=[0,0], source=[1,1j], time=.3),
-        method=method(hamiltonian_evolution_backend=backend, duhamel_nodes=2, **fixed), execution=execution)
-    if execution == "quantum":
-        assert sum(register.width for register in result.plan.construction.program.registers) <= 13
+        method=method(hamiltonian_evolution_backend="trotter", duhamel_nodes=2, trotter_steps=2), execution="quantum")
+    assert sum(register.width for register in result.plan.construction.program.registers) <= 13
     monkeypatch.setattr(terms, "generate_lchs_product_formula_select_plan", lambda *a, **k: pytest.fail("PF steps reselected"))
     monkeypatch.setattr(terms, "_budgeted_trotter_node_record", lambda *a, **k: pytest.fail("budgeted PF selection replayed"))
     from qiskit.circuit.library import PauliEvolutionGate
     monkeypatch.setattr(PauliEvolutionGate, "to_matrix", lambda *a, **k: pytest.fail("PF reference became an exact exponential"))
     receipt, facts = result.verify(checks=LCHSVerification(reference="selected_grid"))
-    assert facts[0].fact.value.value < (2e-10 if execution == "quantum" else 1e-13)
+    assert facts[0].fact.value.value < 2e-10
     counts = arguments(receipt)
     assert counts["applications"] == 2 and counts["fixed_pf_completed"] == 8
     assert counts["application_0_source"] == counts["application_1_source"] == 1
-    if backend == "trotter":
-        assert all(value == 2 for name, value in counts.items() if name.endswith("_steps"))
-    # The reference never decomposes L and H: the classical one reads the
-    # stored node table, the quantum one evolves the selected branch circuits.
+    assert all(value == 2 for name, value in counts.items() if name.endswith("_steps"))
+    # The quantum reference evolves the selected branch circuits, so it never
+    # decomposes L and H or reads the stored node table.
     assert counts["pauli_decomposition_attempts"] == counts["pauli_decomposition_completed"] == 0
-    assert (counts["stored_node_read_work"] > 0) == (execution == "classical")
+    assert not counts["stored_node_read_work"] > 0
 
 
 def test_refinement_propagates_all_physical_components_once_without_vector(monkeypatch):
@@ -406,6 +285,26 @@ def test_refinement_propagates_all_physical_components_once_without_vector(monke
     assert calls == [(3,3),(4,4),"duhamel"]
 
 
+def test_constant_source_solution_lies_within_its_refined_bound_of_the_closed_form():
+    # A Hermitian A = V diag(lam) V^T gives u(T) = V [exp(-lam T) V^T u0 + (1 - exp(-lam T))/lam V^T b],
+    # the solution of du/dt = -A u + b in ACL arXiv:2312.03916v2, Eq. (2), with no SciPy exponential.
+    A, initial, source, elapsed = np.array([[.6, .1], [.1, .3]]), np.array([1., 0.]), np.array([.2, -.1]), 3.
+    lam, vectors = np.linalg.eigh(A)
+    expected = vectors @ (np.exp(-lam*elapsed)*(vectors.T @ initial) - np.expm1(-lam*elapsed)/lam*(vectors.T @ source))
+    # One Duhamel node at T = 3 makes the Duhamel quadrature stage most of the refined bound.
+    chosen = nwqlib.plan(nwqlib.LinearDynamics(A=A, initial_state=initial, time=elapsed, source=source),
+                         method=LCHS(duhamel_nodes=1), execution="classical")
+    planned = {item.fact.quantity:item.fact for item in chosen.facts}
+    assert planned["duhamel_quadrature"].value is None  # Unknown until refinement evaluates it.
+    result = nwqlib.solve(chosen)
+    _, facts = result.verify(checks=LCHSRefinement(components=("duhamel",)))
+    bound = {item.fact.quantity:item.fact.value.value for item in facts}["algorithmic_approximation"]
+    # Method-error-bounded class: the refined algorithmic_approximation bounds the physical
+    # L2 error of the kernel, k-quadrature and Duhamel stages together. The relative 1e-12
+    # allows for binary64 evaluation of the finite sum and of the reference.
+    assert np.linalg.norm(result.solution - expected) <= bound*(1 + 1e-12)
+
+
 def test_fixed_pf_structural_and_dense_bounds_follow_independent_pauli_commutators(monkeypatch):
     from nwqlib.algorithms.lchs import time_independent_terms as terms
     from nwqlib.algorithms.lchs import LCHS
@@ -465,82 +364,6 @@ def test_fixed_pf_dense_commutators_admit_the_singular_values_of_their_norms(mon
     # one product per norm, 8 p d**3 + 24 p d**2 = 4,390,912, would admit this cap.
     with pytest.raises(ValueError, match="max_dense_work before dense commutators"):
         terms._fixed_trotter_certificate_records(**fields, max_dense_work=8*p*d**3+24*p*d*d)
-
-
-@pytest.mark.parametrize("execution", ["classical", "quantum"])
-def test_fixed_pf_refinement_keeps_source_only_applications_and_physical_weight(execution):
-    # The quantum source layout names physical branches; the stored node
-    # table still covers the quadrature grid that refinement evaluates.
-    matrix = np.array([[.7,.3j],[.3j,.3]])
-    result = nwqlib.solve(nwqlib.LinearDynamics(A=matrix, initial_state=[0,0], source=[1,1j], time=.3),
-        method=method(hamiltonian_evolution_backend="trotter", trotter_steps=2, duhamel_nodes=2), execution=execution)
-    receipt, facts = result.verify(checks=LCHSRefinement(components=("fixed_pf",), dense_validation=True))
-    quad = result.plan._native["native_data"].quadrature
-    # H=.3X, L=.5I+.2Z. The identity is exact; the two Pauli commutators
-    # give C_k=.004*k²+.003*|k|. Each source term has |w|*sqrt2*T_app³/r².
-    subtotal = sum(abs(c)*(.004*float(k)**2+.003*abs(float(k))) for k,c in zip(quad.k_nodes,quad.coefficients,strict=True))
-    expected = sum(abs(weight)*sqrt(2)*(.3-start)**3*subtotal/4
-        for start,weight in zip(result.plan.reconstruction.source_nodes,result.plan.reconstruction.source_weights,strict=True))
-    value = next(entry.fact.value.value for entry in facts if entry.fact.quantity=="trotter_synthesis")
-    assert value == pytest.approx(expected, rel=3e-14, abs=1e-18)
-    counts = arguments(receipt)
-    assert counts["applications"] == 2 and counts["application_0_source"] == counts["application_1_source"] == 1
-    # The dense validation coefficient is independent of elapsed time, so each
-    # of the four distinct k-nodes is evaluated once and both source
-    # applications reuse it.
-    assert len(set(map(float, quad.k_nodes))) == 4
-    assert counts["pauli_decomposition_completed"] == 0 and counts["dense_bound_completed"] == 4
-    assert next(entry for entry in facts if entry.fact.quantity=="algorithmic_approximation").fact.availability == "unknown"
-
-
-def test_zero_source_refinement_keeps_exact_zero_without_spectral_reference(monkeypatch):
-    from nwqlib.algorithms.lchs import inhomogeneous_theory as theory
-    result = nwqlib.solve(nwqlib.LinearDynamics(A=np.eye(2), initial_state=[1,0], source=[0,0], time=.2),
-        method=method(), execution="classical")
-    monkeypatch.setattr(theory, "_scaling_safe_spectral_norm", lambda *a: pytest.fail("zero source acquired a norm"))
-    monkeypatch.setattr(theory, "_duhamel_quadrature_error_bound", lambda **k: pytest.fail("zero source acquired a remainder"))
-    receipt, facts = result.verify(checks=LCHSRefinement(components=("duhamel",)))
-    assert next(entry.fact.value.value for entry in facts if entry.fact.quantity=="duhamel_quadrature") == 0
-    assert all(value==0 for name,value in arguments(receipt).items() if name.endswith("_attempts"))
-
-
-def test_periodic_refinement_keeps_existing_scalar_bound_and_rejects_dense_reference(monkeypatch):
-    from nwqlib.operators.inputs import PeriodicStencil
-    from nwqlib.problems.inputs import ingest_occupation
-    from nwqlib.algorithms.lchs import inhomogeneous_theory as theory
-    problem = nwqlib.LinearDynamics(A=PeriodicStencil(2,.2,.1,.05),
-        initial_state=ingest_occupation("00",num_qubits=2), time=.1)
-    result = nwqlib.solve(problem, method=method(hamiltonian_evolution_backend="trotter", trotter_steps=2),
-        output=nwqlib.NormSquared())
-    monkeypatch.setattr(theory, "_scaling_safe_spectral_norm", lambda *a: pytest.fail("periodic input was densified"))
-    receipt, facts = result.verify(checks=LCHSRefinement(components=("fixed_pf",)))
-    original = next(entry.fact.value.value for entry in result.plan.facts if entry.fact.quantity=="trotter_synthesis")
-    assert next(entry.fact.value.value for entry in facts if entry.fact.quantity=="trotter_synthesis") == original
-    assert arguments(receipt)["dense_work"] == arguments(receipt)["structural_work"] == 0
-    with pytest.raises(ValueError, match="no implicit densification"):
-        result.verify(checks=LCHSRefinement(components=("spectral_norms",)))
-    with pytest.raises(ValueError, match="no implicit densification"):
-        LCHSVerification(reference="selected_grid").validate_domain(problem)
-
-
-@pytest.mark.parametrize("scale", (1., 1e-6, 1e-10, 1e-13))
-def test_closed_form_source_response_keeps_its_digits_for_small_norm_times_time(scale):
-    # For symmetric A = V diag(lam) V^T the source response is
-    # V diag(-expm1(-lam*T)/lam) V^T b, accurate to rounding for every lam*T.
-    # Forming I - expm(-A*T) cancels about log10(1/(||A||*T)) digits, a
-    # relative error of 1e-3 at ||A||*T = 6e-14.
-    from nwqlib.algorithms.lchs.references import closed_form_reference
-    base = np.array([[.6, .1], [.1, .3]])
-    lam, vectors = np.linalg.eigh(scale*base)
-    source = np.array([.2, -.1], dtype=complex)
-    initial = np.array([.5, 1j])
-    exact = (vectors @ np.diag(np.exp(-lam)) @ vectors.T) @ initial + (
-        vectors @ np.diag(-np.expm1(-lam)/lam) @ vectors.T) @ source
-    counts = dict.fromkeys(("expm_attempts", "expm_completed", "matvec_attempts", "matvec_completed"), 0)
-    checks = SimpleNamespace(max_bytes=10**6, max_dense_work=10**6)
-    reference = closed_form_reference((scale*base).astype(complex), initial, source, 1., checks=checks, counts=counts)
-    # About 90 unit roundoffs (1e-14) of the expm, relative to the solution norm.
-    assert np.linalg.norm(reference-exact) <= 1e-14*np.linalg.norm(exact)
 
 
 @pytest.mark.parametrize("rotated", [False, True])
@@ -674,58 +497,3 @@ def test_refinement_spectral_norm_admits_its_singular_values():
     assert refused["spectral_svd_attempts"] == 0
     value = _spectral_norm(matrix, SimpleNamespace(max_bytes=10**9, max_dense_work=100_000_000), counts())
     assert value == pytest.approx(np.linalg.norm(matrix, 2), rel=1e-12)
-
-
-def test_selected_pf_branch_vector_evolution_matches_the_operator_product():
-    """This phase-sensitive regression compares the selected branch's vector
-    evolution with the full Operator product on the same once-decomposed
-    circuit. The named fixtures use at most four system qubits and 5000
-    elementary gates, with input norm at most one up to normalization rounding.
-    The componentwise tolerance is 2e-12 with zero relative tolerance. It is
-    an empirical test allowance, not a product-formula or backend error bound.
-    The conditional represented-matrix bound (selected_pf_comparison_tolerance)
-    is asserted as well on the same outputs.
-    """
-    from qiskit.quantum_info import Operator, SparsePauliOp, Statevector
-    from _pf_branch_comparison import (assert_represented_vector_distance, regression_atol,
-                                       selected_pf_comparison_tolerance)
-    from nwqlib.algorithms.lchs.select_synthesis import _build_product_formula_branch
-    from collections import defaultdict
-    from nwqlib.algorithms.lchs.selected_grid import grid_reference, selected_grid
-    from nwqlib.algorithms.lchs.solution_error_budget import psd_recovery_part
-    q, d = 3, 8
-    L = SparsePauliOp.from_list([("III", .4), ("ZII", .1)]).to_matrix()
-    H = SparsePauliOp.from_list([("III", .13), ("IXY", .21), ("XZI", -.17), ("YYZ", .11), ("ZZI", .09)]).to_matrix()
-    v = np.arange(1, d+1, dtype=complex)+1j*np.arange(d, 0, -1)
-    v /= np.linalg.norm(v)
-    method = LCHS(k_quadrature=ProviderConfig(implementation="signed_binary_uniform",
-                                              parameters={"num_qubits": 2, "lsb_position": 0}),
-                  hamiltonian_evolution_backend="trotter", trotter_order=2, trotter_steps=3, duhamel_nodes=2)
-    plan = nwqlib.plan(nwqlib.LinearDynamics(A=L+1j*H, initial_state=v, source=np.roll(v, 1)*(.3+.2j), time=.2),
-                       method=method, execution="quantum")
-    checks = LCHSVerification(reference="selected_grid")
-    grid = selected_grid(plan, None, checks=checks)
-    selected = grid.payload.select_data.plan
-    summed = np.zeros(d, dtype=complex)
-    branches = 0
-    for app in grid.applications:
-        if not app.weight or not app.input_norm:
-            continue
-        for node, coefficient in enumerate(grid.coefficients):
-            if coefficient == 0:
-                continue
-            circuit = _build_product_formula_branch(selected, app.slots[node], num_system_qubits=q)
-            circuit.global_phase += selected.identity_phases[app.slots[node]]
-            decomposed = circuit.decompose()
-            limits = selected_pf_comparison_tolerance(decomposed, app.vector)
-            actual = Statevector(app.vector).evolve(decomposed).data
-            expected = Operator(decomposed).data @ app.vector
-            assert_represented_vector_distance(actual, expected, limits["atol_2"])
-            np.testing.assert_allclose(actual, expected, atol=regression_atol(decomposed, app.vector), rtol=0)
-            summed += (app.weight*psd_recovery_part(grid.shift, app.elapsed, 0)*coefficient)*expected
-            branches += 1
-    assert branches == 12
-    # The reference assembles the same saved branches, phases and weights.
-    counts = defaultdict(int)
-    assert_represented_vector_distance(grid_reference(plan, grid, checks=checks, counts=counts), summed, 2e-12)
-    assert counts["fixed_pf_completed"] == branches

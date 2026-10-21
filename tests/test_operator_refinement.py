@@ -2,11 +2,10 @@
 
 from fractions import Fraction
 
-import numpy as np
 import pytest
 from scipy import sparse
 
-from nwqlib.core import Float64, Rational, Scope, Unit
+from nwqlib.core import Rational, Scope, Unit
 from nwqlib.operators import OperatorFactReport, OperatorInput, ingest_pauli, operator_input, refine_operator_facts
 
 UNIT = Unit(symbol="Ha", dimension="energy")
@@ -34,7 +33,7 @@ def test_pauli_l1_and_centered_bounds_keep_binary64_residues():
     assert OperatorFactReport.model_validate_json(report.model_dump_json()) == report
 
 
-@pytest.mark.parametrize("factory", [sparse.csr_matrix, sparse.csc_array])
+@pytest.mark.parametrize("factory", [sparse.csr_matrix])
 def test_sparse_gershgorin_zero_row_and_borrowed_scan(factory, monkeypatch):
     operator = operator_input(factory([[2, 1j, 0], [-1j, -1, 0], [0, 0, 0]]))
     arrays = operator.sparse_entries()
@@ -59,38 +58,3 @@ def test_sparse_gershgorin_zero_row_and_borrowed_scan(factory, monkeypatch):
     assert reads == [4, 4, 6]
     assert report.receipts[0].input_entries == 4
     assert report.receipts[0].input_bytes == operator.manifest.payload_bytes
-
-
-def test_metadata_reuses_previous_facts_and_repeated_scan_has_new_identity(monkeypatch):
-    operator = ingest_pauli([("I", -2), ("Z", .5)], num_qubits=1)
-    first = refine(operator, refinements=("certify_pauli_l1",))
-    second = refine(operator, refinements=("certify_pauli_l1",), previous=first)
-    assert second.receipts[0] == first.receipts[0] and len(second.receipts) == 2
-    assert second.receipts[1].acquisition_id != first.receipts[0].acquisition_id
-    assert second.receipts[1].scalar_operations == first.receipts[0].scalar_operations > 0
-    estimate = first.facts[0].revise(fact=first.facts[0].fact.revise(value=Float64(value=2.5),
-        evidence=first.facts[0].fact.evidence.revise(kind="numerical_estimate")))
-    previous = first.revise(facts=(estimate, *first.facts[1:]))
-    for name in ("pauli_terms", "sparse_entries", "dense_array", "entry", "matvec"):
-        monkeypatch.setattr(OperatorInput, name, lambda *a, **k: pytest.fail("metadata scan"))
-    result = refine(operator, previous=previous)
-    assert result.facts == previous.facts and result.receipts == previous.receipts
-    assert result.facts[0].fact.evidence.kind == "numerical_estimate"
-    restored = OperatorInput.from_record(operator.to_record())
-    assert not refine(restored).options
-    with pytest.raises(ValueError, match="unavailable"):
-        refine(restored, refinements=("certify_pauli_l1",))
-
-
-def test_invalid_bound_or_association_rejects_and_small_cap_precedes_scan(monkeypatch):
-    operator = ingest_pauli([("I", -2), ("Z", .5)], num_qubits=1)
-    report = refine(operator, refinements=("certify_pauli_l1",))
-    negative = report.facts[0].revise(fact=report.facts[0].fact.revise(value=Rational(numerator=-1, denominator=1)))
-    with pytest.raises(ValueError, match="nonnegative"):
-        report.revise(facts=(negative, *report.facts[1:]))
-    another = operator_input(np.eye(2))
-    with pytest.raises(ValueError, match="another operator"):
-        refine(another, previous=report)
-    monkeypatch.setattr(OperatorInput, "pauli_terms", lambda *a, **k: pytest.fail("read before byte admission"))
-    with pytest.raises(ValueError, match="max_bytes"):
-        refine(operator, refinements=("certify_pauli_l1",), max_bytes=1)

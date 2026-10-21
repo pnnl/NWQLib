@@ -28,7 +28,7 @@ Without a device profile, `scan` uses the logical resource formulas of each Plan
 Each objective is minimized:
 
 - `requested_shots`: the shots of the Plan's measurement batches plus the separately declared direct readouts of its experiments. This is the planned number of shots. Retries and later adaptive measurements that the Plan does not specify are outside this count, which does not treat them as zero.
-- `logical_width`: the largest exact peak of logical qubits at one location, for one measurement run. A peak that holds only when the measurement runs execute one after another requires `ResourceContext(batch_schedule="serial")`, and the value keeps that condition.
+- `logical_width`: the largest exact peak of logical qubits at one location, for one measurement run. A peak that holds only when the measurement runs execute one after another requires `ResourceContext(batch_schedule="serial")`, and the value keeps that condition. A sampled Plan usually has such a peak, so without that context its width is unavailable.
 - `predicted_seconds`: the predicted times of one timing model and scope, given as `Objective(kind="predicted_seconds", model_id=time_model.content_id, scope=...)`, summed only under a serial schedule declared with `context=ResourceContext(batch_schedule="serial")`. Every measurement run of the Plan needs a matching prediction. Overlapping scopes are not added together. The sum is conditional on its model and carries no confidence guarantee.
 
 ## Read the ranking

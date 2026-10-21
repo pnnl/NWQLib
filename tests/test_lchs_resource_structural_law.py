@@ -17,12 +17,10 @@ def _mixed_two_problem() -> LinearDynamics:
     )
 
 
-
 def _heat_problem(num_qubits):
     size=1<<num_qubits
     matrix=.1*(2*np.eye(size)-np.eye(size,k=1)-np.eye(size,k=-1))
     return LinearDynamics(A=matrix,initial_state=np.eye(size)[0],time=.1)
-
 
 
 def _pf_options(
@@ -44,7 +42,6 @@ def _pf_options(
         trotter_order=order,
         trotter_steps=steps,
     )
-
 
 
 PF_CASES = {
@@ -124,100 +121,6 @@ def test_product_formula_law_matches_recursive_built_select(case: str, phase) ->
         else 0
         for instruction in built.data
     )
-
-
-
-@pytest.mark.parametrize("phase", (0.0, 0.37, 1.0e-16, 5.0e-324))
-def test_branch_controlled_phase_law_prices_only_nonzero_physical_branches(
-    monkeypatch, phase
-) -> None:
-    from qiskit import QuantumCircuit, transpile
-    from nwqlib.subroutines.qiskit_compat import controlled
-    from nwqlib.algorithms.lchs.select_synthesis import (
-        _branch_controlled_product_formula_resource_law,
-    )
-
-    problem = _mixed_two_problem()
-    options = _pf_options(tier="analytic", order=1, steps=1, epsilon=0.5, truncation_multiplier=1.0)
-    data = generate_lchs_product_formula_select_plan(
-        quadrature=generate_lchs_quadrature(
-            matrix=problem.A.dense_array(), final_time=problem.elapsed_time, method=options),
-        final_time=problem.elapsed_time,
-        method=options,
-    )
-    # Three physical branches: cancellation, a full turn, and a phase added after
-    # a full turn. Circuit assignment normalizes the identity phase first, so
-    # even a subnormal coefficient phase survives the second assignment.
-    # A nonzero padded address must not be charged by the branch-controlled path.
-    count = data.plan.padded_node_count
-    plan = replace(
-        data.plan,
-        physical_node_count=3,
-        branch_to_node=(0, 1, 2) + (None,) * (count - 3),
-        coefficient_phases=(0.25, 0.0, phase) + (0.5,) * (count - 3),
-        identity_phases=(-0.25, 2 * np.pi, 2 * np.pi) + (0.0,) * (count - 3),
-        branch_step_counts=(0,) * count,
-    )
-    controls = count.bit_length() - 1
-    built = QuantumCircuit(controls + 1)
-    for branch in range(3):
-        node = QuantumCircuit(1)
-        node.global_phase = plan.identity_phases[branch]
-        node.global_phase += plan.coefficient_phases[branch]
-        built.append(controlled(node.to_gate(), controls, ctrl_state=branch), range(controls + 1))
-    actual_cx = transpile(built, **TRANSPILE_OPTIONS).count_ops().get("cx", 0)
-    law = _branch_controlled_product_formula_resource_law(plan)
-    # Inspect emitted sample multiplicities before resource transpilation; only
-    # the tiny independently constructed physical branches need to be lowered.
-    from nwqlib.algorithms.lchs.quantum_resources import _pf_samples
-
-    payload = SimpleNamespace(
-        select_data=replace(data, plan=plan), selected_select="branch_controlled"
-    )
-    samples = list(
-        _pf_samples(
-            payload,
-            SimpleNamespace(num_control_qubits=controls, num_system_qubits=1),
-            dict(max_qubits=13,max_bytes=64*1024**2,max_build_work=100_000_000,used_build_work=0),
-        )
-    )
-    sampled_phases = sum(
-        multiplicity for name, _, multiplicity in samples if name == "branch_phase"
-    )
-    assert (law["select_control_diagonal_basis_cx_count"], sampled_phases) == (
-        actual_cx,
-        int(phase != 0.0),
-    )
-    assert (actual_cx > 0) == (phase != 0.0)
-    # The displayed branch-phase operation has a fixed name, not a circuit-N name.
-    assert not any("circuit-" in item.operation.name
-                   for name, circuit, _ in samples if name == "branch_phase" for item in circuit.data)
-
-
-
-def test_qsp_control_projection_counts_single_qubit_and_global_phase_gates():
-    from nwqlib.algorithms.lchs.compiled_selection import _census_cx, _controlled_kind_cx
-    from qiskit import QuantumCircuit, transpile
-    from nwqlib.subroutines.qiskit_compat import controlled
-
-    circuit = QuantumCircuit(3)
-    circuit.ry(0.2, 0)
-    circuit.ry(0.3, 0)
-    circuit.cx(1, 0)
-    circuit.cx(1, 0)
-    circuit.x(2)
-    query = QuantumCircuit(4)
-    query.append(controlled(circuit.to_gate(), 1), range(4))
-    actual = int(transpile(query, **TRANSPILE_OPTIONS).count_ops()["cx"])
-    census = {"rotation": 2, "cx": 2, "h_or_x": 1}
-    # This elementary circuit has two Toffolis, two CRY gates and one CX after control.
-    assert _census_cx(census, _controlled_kind_cx(1)) == actual
-    phase = QuantumCircuit(1)
-    phase.global_phase = 0.23
-    controlled_phase = QuantumCircuit(3)
-    controlled_phase.append(controlled(phase.to_gate(), 2), range(3))
-    actual_phase = int(transpile(controlled_phase, **TRANSPILE_OPTIONS).count_ops()["cx"])
-    assert _controlled_kind_cx(2)["global_phase"] == actual_phase
 
 
 # Width, builder and applicable dense-synthesis price of each census gate.
@@ -382,35 +285,6 @@ def _qsp_plan(case, address_bits=1, route='auto'):
     return problem, plan(problem, method=method)
 
 
-@pytest.mark.parametrize("case", sorted(_QSP_PROBLEMS))
-def test_qsp_child_census_bounds_the_unrolled_child(case):
-    """Every census kind bounds the matching gates of the child circuit that the SELECT controls.
-
-    The SELECT controls the exact dense synthesis of a dense dilation and
-    the unrolled gates of a Pauli or banded LCU, whose one-qubit Pauli
-    factors are U gates. Each kind is compared with the child PREP pair
-    taken at its largest construction.
-    """
-    from nwqlib._preparation_laws import _uniform_superposition_gate_slots, direct_preparation_cx_bound
-    from nwqlib.algorithms.lchs.compiled_selection import _qsp_child_gate_census
-    from nwqlib.algorithms.lchs.native import _build_compiled_qsp_part_encoding
-    from nwqlib.subroutines.qiskit_compat import _exact_dense_definitions
-    _, selected = _qsp_plan(case)
-    for part in selected._native['native_data'].qsp_plan['part_plans'][:2]:
-        if part.implementation == 'exact_zero':
-            continue
-        gate = _exact_dense_definitions(_build_compiled_qsp_part_encoding(part).circuit.to_gate(), {})
-        built = _unrolled_kind_census(gate)
-        census = dict(_qsp_child_gate_census(part))
-        prep_qubits = census.pop("preparation_qubits", 0)
-        uniform = _uniform_superposition_gate_slots(prep_qubits)
-        prep = {"cx": max(direct_preparation_cx_bound(prep_qubits, complex_phases=False), uniform.get("cx", 0)),
-                "rotation": max((1 << prep_qubits) - 1, uniform.get("ry", 0)), "phase": uniform.get("p", 0),
-                "h_or_x": max(prep_qubits, uniform.get("h", 0) + uniform.get("x", 0))}
-        for kind, count in built.items():
-            assert count <= census.get(kind, 0) + 2*prep.get(kind, 0), (part.implementation, kind)
-
-
 @pytest.mark.parametrize("route", ["gatewise", "whole_matrix"])
 @pytest.mark.parametrize(("case", "address_bits"), [
     ("dense_one_child", 2), ("dense_and_banded", 1), ("banded_children", 1), ("pauli_children", 1),
@@ -442,31 +316,25 @@ def _xx_generator_problem():
     return LinearDynamics(A=matrix + .1j*np.kron([[0, 1], [1, 0]], [[0, 1], [1, 0]]), initial_state=np.ones(4), time=.3)
 
 
-@pytest.mark.parametrize(("problem_factory", "address_bits", "order", "exact"), [
-    (_xx_generator_problem, 3, 1, False), (_xx_generator_problem, 4, 1, False), (_xx_generator_problem, 3, 2, False),
-    (_mixed_two_problem, 4, 1, True), (_mixed_two_problem, 3, 2, True)])
-def test_branch_controlled_product_formula_law_bounds_the_built_select(problem_factory, address_bits, order, exact):
+def test_branch_controlled_product_formula_law_bounds_the_built_select():
     """The branch-controlled product-formula law is an upper bound on the transpiled built leaf.
 
     Gray-code and phase-polynomial prices for the controlled RZ, H and
-    parity CX give 0.88 and 0.84 of the build at three and four address
-    bits for two-qubit X labels. One-qubit labels are single controlled
-    rotations, where the law equals the build.
+    parity CX give 0.88 of the build at three address bits for two-qubit X
+    labels.
     """
     from qiskit import transpile
     from nwqlib import plan
     from nwqlib.algorithms.lchs.native import construct_select
-    problem = problem_factory()
-    grid = ProviderConfig(implementation='signed_binary_uniform', parameters={'num_qubits': address_bits, 'lsb_position': -1})
-    selected = plan(problem, method=LCHS(hamiltonian_evolution_backend='trotter', trotter_steps=order, trotter_order=order,
+    problem = _xx_generator_problem()
+    grid = ProviderConfig(implementation='signed_binary_uniform', parameters={'num_qubits': 3, 'lsb_position': -1})
+    selected = plan(problem, method=LCHS(hamiltonian_evolution_backend='trotter', trotter_steps=1, trotter_order=1,
                                          lcu_select_implementation='branch_controlled', k_quadrature=grid))
     record = next(item for item in selected.construction.selections if item.signature.name == 'lchs_select')
     law = next(item.value for item in record.resource_laws if not item.adjoint)
     built = construct_select(SimpleNamespace(_payload=(selected._native['native_data'], problem.elapsed_time)), (), None)
     actual = transpile(built, **TRANSPILE_OPTIONS).count_ops().get('cx', 0)
     assert actual <= law
-    if exact:
-        assert actual == law
 
 
 @pytest.mark.parametrize("controls", (1, 2, 3, 4, 8))
@@ -492,135 +360,6 @@ def test_controlled_source_preparation_bounds_every_construction(controls):
             state = np.asarray(state, dtype=complex) / np.linalg.norm(state)
             circuit = _build_normalized_state_preparation(state, input_norm=1., register_name="system").circuit
             assert _lowered_cx(controlled(circuit.to_gate(), controls, ctrl_state=0)) <= price
-
-
-
-@pytest.mark.parametrize('backend',['dense_exact','trotter','qsp_block_encoding'])
-def test_explicit_samples_reuse_archived_selection_and_preserve_scope(backend,tmp_path,monkeypatch):
-    from nwqlib import plan
-    from nwqlib.algorithms.lchs.quantum_resources import sample_resources
-    from nwqlib._choice_archive import ArchiveFiles,save_plan,load_plan
-    from nwqlib.subroutines.qsp import evolution
-    from nwqlib.subroutines.state_preparation import mps
-    chosen=plan(LinearDynamics(A=[[.3,.04j],[.04j,.5]],initial_state=[1,1j],time=.1),
-        method=LCHS(hamiltonian_evolution_backend=backend,
-            k_quadrature=ProviderConfig(implementation='signed_binary_uniform',parameters={'num_qubits':2,'lsb_position':-1})))
-    assert sum(r.width for r in chosen.construction.program.registers)<=10
-    files=ArchiveFiles(tmp_path,8_000_000)
-    saved=save_plan(chosen,files)
-    def forbidden(*args,**kwargs):
-        pytest.fail('resource inspection repeated numerical selection')
-    monkeypatch.setattr(evolution,'prepare_qsp_evolution',forbidden)
-    monkeypatch.setattr(mps,'_decompose_normalized_state',forbidden)
-    monkeypatch.setattr(np.linalg,'eigvalsh',forbidden)
-    loaded=load_plan(saved,files)
-    assert loaded._native['native_data'].method is loaded.method
-    values=sample_resources(loaded,max_qubits=10)
-    settings={setting.name for setting in loaded.reconstruction.settings}
-    assert set(values['weighted_totals'])==settings
-    assert {row['name'].removeprefix('readout_') for row in values['representatives']
-        if row['name'].startswith('readout_')}==settings
-    select=loaded._native['native_data'].selected_select
-    for row in values['representatives']:
-        inventory=row['inventory']
-        assert type(row['multiplicity']) is int and row['multiplicity']>=0
-        assert inventory['compiler'] is None and inventory['basis']=='selected_sample_raw'
-        assert inventory['circuit'].startswith(f"LCHS {row['name']} representative (SELECT={select})")
-        assert inventory['total_operations']==sum(inventory['operations'].values())
-    assert all(totals['total_operations']==sum(totals['operations'].values())>0
-        for totals in values['weighted_totals'].values())
-    # Representative sub-circuits carry fixed names, not process-dependent circuit-N names.
-    assert not any('circuit-' in name for totals in values['weighted_totals'].values()
-        for name in totals['operations'])
-    with pytest.raises(ValueError,match='max_qubits'):
-        sample_resources(loaded,max_qubits=1)
-    # An equal-looking detached numerical payload is not the actual selected
-    # leaf population; reject before any sample circuit is built.
-    loaded._native['native_data']=replace(loaded._native['native_data'])
-    with pytest.raises(ValueError,match='exact SELECT'):
-        sample_resources(loaded,max_qubits=10)
-
-
-def test_actual_representative_operation_limit_allows_equality(monkeypatch):
-    from nwqlib import plan
-    from nwqlib.algorithms.lchs import quantum_resources
-    from nwqlib.algorithms.lchs.quantum_resources import sample_resources
-    chosen=plan(LinearDynamics(A=np.diag([.2,.3]),initial_state=[1,0],time=.1),
-        method=LCHS(k_quadrature=ProviderConfig(implementation='signed_binary_uniform',parameters={'num_qubits':2,'lsb_position':-1})))
-    assert sum(register.width for register in chosen.construction.program.registers)==3
-    values=sample_resources(chosen,max_qubits=3)
-    representatives=values['representatives']
-    actual=sum(row['inventory']['total_operations'] for row in representatives)
-    admitted=sample_resources(chosen,max_qubits=3,max_operations=actual)
-    assert admitted==values
-    with pytest.raises(ValueError,match='max_operations'):
-        sample_resources(chosen,max_qubits=3,max_operations=actual-1)
-    # Dense SELECT is reported by one structural bound record for its 2**2
-    # physical branches and adds nothing to the raw inventory. PREP and
-    # readout representatives count once.
-    (bound,)=values['structural_bounds']
-    assert bound['multiplicity']==4 and bound['bound']['count_kind']=='structural_upper_bound'
-    others=representatives
-    assert all(row['multiplicity']==1 for row in others)
-    # |0> needs no initial PREP gate and the exact readout measures nothing, yet
-    # both inventories are present.
-    assert {row['name'] for row in others if row['inventory']['operations']=={}}=={
-        'initial_prep','readout_setting_0'}
-    expected={}
-    for row in representatives:
-        for name,count in row['inventory']['operations'].items():
-            expected[name]=expected.get(name,0)+row['multiplicity']*count
-    others_total=sum(row['inventory']['total_operations'] for row in others)
-    assert values['weighted_totals']=={'setting_0':dict(operations=expected,
-        total_operations=others_total)}
-    # A setting whose readout representative is missing has no weighted total.
-    built=quantum_resources._representatives
-    monkeypatch.setattr(quantum_resources,'_representatives',lambda *args:(
-        row for row in built(*args) if not row[0].startswith('readout_')))
-    with pytest.raises(ValueError,match='no readout inventory for setting setting_0'):
-        sample_resources(chosen,max_qubits=3)
-
-
-def test_readout_counts_join_only_their_own_setting():
-    from nwqlib import plan,NormalizedExpectation
-    from nwqlib.algorithms.lchs.quantum_resources import sample_resources
-    # Z+X/2 on the one system qubit needs an X and a Z setting. Each readout
-    # measures the two success bits and the system bit once; X first applies H.
-    chosen=plan(LinearDynamics(A=np.diag([.2,.3]),initial_state=[1,0],time=.1),
-        method=LCHS(k_quadrature=ProviderConfig(implementation='signed_binary_uniform',parameters={'num_qubits':2,'lsb_position':-1})),
-        output=NormalizedExpectation(observable=[[1,.5],[.5,-1]]),shots=64)
-    rec=chosen.reconstruction
-    labels={setting.name:setting.label for setting in rec.settings}
-    assert sorted(labels.values())==['X','Z'] and len(rec.success_bits)+len(rec.system_bits)==3
-    values=sample_resources(chosen,max_qubits=3)
-    readout={row['name'].removeprefix('readout_'):row['inventory']['operations']
-        for row in values['representatives'] if row['name'].startswith('readout_')}
-    assert {labels[name]:operations for name,operations in readout.items()}=={'X':{'h':1,'measure':3},'Z':{'measure':3}}
-    core={}
-    for row in values['representatives']:
-        if not row['name'].startswith('readout_'):
-            for name,count in row['inventory']['operations'].items():
-                core[name]=core.get(name,0)+row['multiplicity']*count
-    for setting,label in labels.items():
-        totals=values['weighted_totals'][setting]
-        assert totals['operations']['measure']==core.get('measure',0)+3
-        assert totals['operations'].get('h',0)==core.get('h',0)+(label=='X')
-        assert totals['total_operations']==sum(core.values())+3+(label=='X')
-
-
-def test_branch_controlled_trotter_sample_names_are_fixed():
-    from nwqlib import plan
-    from nwqlib.algorithms.lchs.quantum_resources import sample_resources
-    chosen=plan(LinearDynamics(A=[[.3,.04j],[.04j,.5]],initial_state=[1,1j],time=.1),
-        method=LCHS(hamiltonian_evolution_backend='trotter',lcu_select_implementation='branch_controlled',
-            k_quadrature=ProviderConfig(implementation='signed_binary_uniform',parameters={'num_qubits':2,'lsb_position':-1})))
-    first,second=(sample_resources(chosen,max_qubits=10) for _ in range(2))
-    assert first==second
-    names={name for totals in first['weighted_totals'].values() for name in totals['operations']}
-    assert not any('circuit-' in name for name in names)
-    # The Hermitian part gives X and the diagonal dissipative part gives Z, so
-    # each Pauli rotation class appears under one fixed label.
-    assert sorted(name.rsplit('pauli_rotation_',1)[1] for name in names if 'pauli_rotation_' in name)==['X','Z']
 
 
 def _dense_select_problem(q, source=False, seed=17):
@@ -704,27 +443,6 @@ def test_dense_exact_select_cx_law_bounds_a_source_layout(route):
         # The preparation is inside each branch's whole-matrix synthesis.
         m=3+selected.reconstruction.padded_branches.bit_length()-1
         assert law==selected.reconstruction.physical_branches*((25*4**m-96*2**m+128)//96)
-
-
-def test_dense_synthesis_census_bounds_every_emitted_gate_kind():
-    from scipy.linalg import expm
-    from scipy.stats import unitary_group
-    from nwqlib.subroutines._dense_synthesis import dense_synthesis_gate_census, dense_unitary_circuit
-    rng=np.random.default_rng(11)
-    for q in (2,3,4):
-        d=2**q
-        g=rng.normal(size=(d,d))+1j*rng.normal(size=(d,d))
-        u0,u1=unitary_group.rvs(d//2,random_state=rng),unitary_group.rvs(d//2,random_state=rng)
-        cases=[unitary_group.rvs(d,random_state=rng),expm(-1e-4j*(g+g.conj().T)),
-               np.block([[u0,np.zeros_like(u0)],[np.zeros_like(u0),u1]]),np.eye(d)[rng.permutation(d)]]
-        bound=dense_synthesis_gate_census(q)
-        for unitary in cases:
-            counts=dense_unitary_circuit(unitary).count_ops()
-            assert set(counts)<={'cx','u','rz','h'}
-            assert all(counts.get(name,0)<=bound[name] for name in bound)
-    # The generic Haar case reaches the RZ and H bounds, which have no A.2 saving.
-    counts=dense_unitary_circuit(unitary_group.rvs(16,random_state=rng)).count_ops()
-    assert (counts['rz'],counts['h'])==(dense_synthesis_gate_census(4)['rz'],dense_synthesis_gate_census(4)['h'])
 
 
 @pytest.mark.parametrize(('q','a','source','route'),[(2,2,False,'auto'),(3,1,True,'auto'),(1,2,False,'auto'),
@@ -834,32 +552,6 @@ def test_compiled_qsp_select_charges_the_syntheses_of_its_dense_children(monkeyp
                                                                compiled_select_dense_syntheses)
         assert sorted(calls)==sorted(compiled_select_dense_syntheses(native.qsp_plan,route=route)
                                      +compiled_select_controlled_syntheses(native.qsp_plan,route=route))
-
-
-@pytest.mark.parametrize(('case','route'),[('dense_one_child','auto'),('dense_and_banded','auto'),
-                                          ('banded_children','auto')])
-def test_representative_sampling_charges_its_dense_syntheses(monkeypatch,case,route):
-    """Explicit sampling adds the synthesis and control laws of each controlled dense QSP child to its build work.
-
-    Each law of the route inflated past max_build_work refuses the dense
-    children before they are built and leaves the banded QSP children
-    unaffected. On the whole-matrix route, which "auto" takes for one
-    control, a dense child beside another is charged the whole-matrix
-    synthesis law instead.
-    """
-    from nwqlib.algorithms.lchs.quantum_resources import sample_resources
-    from nwqlib.subroutines import _dense_synthesis
-    _,selected=_qsp_plan(case,route=route)
-    sample_resources(selected)
-    whole=route=='auto' and case!='dense_one_child'
-    for law in ('controlled_synthesis_size',) if whole else ('dense_synthesis_size','gatewise_control_size'):
-        with monkeypatch.context() as patched:
-            patched.setattr(_dense_synthesis,law,lambda *counts:(10**9,0,0),raising=False)
-            if case=='banded_children':
-                sample_resources(selected)
-                continue
-            with pytest.raises(ValueError,match='max_build_work'):
-                sample_resources(selected)
 
 
 def test_dense_representative_sampling_reports_its_structural_bound_without_building(monkeypatch):

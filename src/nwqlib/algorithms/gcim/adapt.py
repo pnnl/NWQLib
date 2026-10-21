@@ -1053,8 +1053,13 @@ class ADAPT(Method):
             "estimate(plan) folds the Plan's resource laws without building circuits"
         )
 
-    def prepare(self, plan, *, run):
-        """Prepare the controller's first new query (adapt_acquisition.prepare_adapt)."""
+    def prepare(self, plan, *, run, settings="first"):
+        """Prepare the controller's first new query (adapt_acquisition.prepare_adapt).
+
+        ``settings`` is always ``"first"``, because ``prepare_all_refusal``
+        refuses ``"all"`` before a Run exists, so ``prepare_adapt`` does not
+        take it.
+        """
         from .adapt_acquisition import prepare_adapt
 
         return prepare_adapt(plan, run=run)

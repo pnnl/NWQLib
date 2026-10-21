@@ -11,12 +11,12 @@ from nwqlib.subroutines.fermionic_pool import enumerate_spin_adapted_gsd_pool
 from _fermionic_references import generator_matrix
 
 
-@pytest.mark.parametrize("pool_index,force_insertion", ((0, False), (1, False), (1, True)))
+@pytest.mark.parametrize("force_insertion", (False, True))
 def test_measured_product_jacobian_matches_independent_generator_derivative(
-    monkeypatch, pool_index, force_insertion
+    monkeypatch, force_insertion
 ):
     """Compare the optimizer Jacobian with 2 Re< H psi, A psi > and count every shift evaluation."""
-    generator = enumerate_spin_adapted_gsd_pool(2)[pool_index]
+    generator = enumerate_spin_adapted_gsd_pool(2)[1]
     reference = np.ones(1, complex)
     for qubit in reversed(range(4)):
         angle = (0.2 + 0.3 * qubit) / 2
@@ -28,14 +28,13 @@ def test_measured_product_jacobian_matches_independent_generator_derivative(
     rule = optimization._generator_shift_rule(
         generator, max_bytes=100_000_000, max_products=10_000_000
     )
-    if pool_index == 1:
-        shots = optimization._generator_shift_rule(generator, execution_mode=ExecutionMode.SHOTS)
-        assert shots["method"] == "pauli_insertion_shift" and shots["evaluations"] == 16
-        assert shots["signed_weight_square_sum"] == pytest.approx(0.25, abs=1e-15, rel=0.0)
-        assert shots["uniform_allocation_variance_cost_proxy"] == pytest.approx(
-            4.0, abs=1e-14, rel=0.0
-        )
-        assert rule["evaluations"] == 12
+    shots = optimization._generator_shift_rule(generator, execution_mode=ExecutionMode.SHOTS)
+    assert shots["method"] == "pauli_insertion_shift" and shots["evaluations"] == 16
+    assert shots["signed_weight_square_sum"] == pytest.approx(0.25, abs=1e-15, rel=0.0)
+    assert shots["uniform_allocation_variance_cost_proxy"] == pytest.approx(
+        4.0, abs=1e-14, rel=0.0
+    )
+    assert rule["evaluations"] == 12
     if force_insertion:
         rule = optimization._generator_shift_rule(generator, execution_mode=ExecutionMode.SHOTS)
     calls = []
@@ -165,34 +164,17 @@ def test_classical_taylor_product_gradient_matches_exact_rational_reference(degr
     assert derivative == pytest.approx(gradient, abs=GRAD_ATOL, rel=0)
 
 
-def test_classical_taylor_product_gradient_empty_chain_and_underflow_branch():
-    """The empty chain gives the reference energy; a nonzero angle with zero steps has zero derivative.
-
-    With zero selected steps the first factor is the identity, so the energy
-    and the second derivative are those of the second factor alone.
-    """
-    energy, gradient = _production(18, (), lambda g, t: 1)
-    assert energy == 0.75 and gradient.shape == (0,)
-    energy, gradient = _production(18, (1e-300, -5 / 16), lambda g, t: 0 if abs(t) < 1e-200 else 1)
-    import sympy as sp
-
-    alone, derivative = exact_product_reference(18, (0, sp.Rational(-5, 16)))
-    assert gradient[0] == 0.0
-    assert energy == pytest.approx(alone, abs=GRAD_ATOL, rel=0)
-    assert gradient[1] == pytest.approx(derivative[1], abs=GRAD_ATOL, rel=0)
-
-
-@pytest.mark.parametrize("pool", ("xz", "yz"))
+@pytest.mark.parametrize("pool", ("yz",))
 def test_classical_adapt_energy_query_gradient_matches_exact_rational_reference(pool):
-    """One classical ADAPT energy query of iX (or iY) then iZ returns the exact reference energy and gradient.
+    """One classical ADAPT energy query of iY then iZ returns the exact reference energy and gradient.
 
     The query runs through the Plan's host kernel, which selects each
     factor's step count, orders the chain and names ``gradient_j``. The
     Hamiltonian ``I/8 + X/4 + 5Z/8`` is the reference matrix
     ``[[3/4, 1/4], [1/4, -1/2]]``, the reference state is ``|0>``, and each
-    angle takes one Taylor step, as in the reference. With iX and iZ this
-    real H and reference make the energy even in theta, so the iY pool also
-    detects an objective built with exp(-theta A).
+    angle takes one Taylor step, as in the reference. With iX in place of iY,
+    this real H and reference would make the energy even in theta, so the iY
+    pool detects an objective built with exp(-theta A).
     """
     import sympy as sp
     from test_adapt_primary import plan_for

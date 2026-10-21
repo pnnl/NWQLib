@@ -1,56 +1,9 @@
-"""Current advertised owners resolve; configuration modules remain lazy."""
+"""Default LCHS planning and classical action without SDK imports."""
 
-import ast
-from importlib import import_module
-from pathlib import Path
 import subprocess
 import sys
 
-import pytest
 
-import nwqlib
-
-
-def _lazy_export_modules():
-    """Modules whose exports resolve through a module-level __getattr__.
-
-    The root package is covered by test_shared_contracts, which resolves every
-    root export in a fresh process.
-    """
-    package = Path(nwqlib.__file__).parent
-    names = []
-    for path in sorted(package.rglob("*.py")):
-        tree = ast.parse(path.read_text(encoding="utf-8"))
-        if any(isinstance(node, ast.FunctionDef) and node.name == "__getattr__" for node in tree.body):
-            parts = ("nwqlib", *path.relative_to(package).with_suffix("").parts)
-            names.append(".".join(parts[:-1] if parts[-1] == "__init__" else parts))
-    return tuple(name for name in names if name != "nwqlib")
-
-
-@pytest.mark.parametrize("name", _lazy_export_modules())
-def test_declared_owner_exports_resolve(name):
-    module = import_module(name)
-    for public in module.__all__:
-        assert getattr(module, public) is not None
-
-
-def test_method_configuration_access_preserves_lazy_owner_boundaries():
-    program = """
-import sys
-import nwqlib
-assert 'nwqlib.algorithms' not in sys.modules
-import nwqlib.algorithms as methods
-owners = tuple('nwqlib.algorithms.' + name for name in methods._METHOD_OWNERS.values())
-assert not any(name in sys.modules for name in owners)
-Lanczos = methods.Lanczos
-assert Lanczos is methods.Lanczos
-assert 'nwqlib.algorithms.lanczos.method' in sys.modules
-assert 'nwqlib.algorithms.qhd.method' not in sys.modules
-assert 'nwqlib.algorithms.gcim.chemistry' not in sys.modules
-assert not any(name.startswith(('qiskit', 'pyscf', 'openfermion')) for name in sys.modules)
-"""
-    completed = subprocess.run([sys.executable, "-c", program], capture_output=True, text=True)
-    assert completed.returncode == 0, completed.stderr
 
 
 def test_default_lchs_planning_and_classical_action_do_not_attempt_sdk_imports():

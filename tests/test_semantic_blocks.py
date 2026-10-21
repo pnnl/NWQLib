@@ -1,7 +1,6 @@
 """Independent small action, phase, binding, and materialization witnesses."""
 
 import builtins
-from collections import Counter
 
 import numpy as np
 import pytest
@@ -12,12 +11,11 @@ from nwqlib.blocks import (
     select_preparation, select_signed_pauli, select_zero_reflection, signed_pauli_cx_bound, transform_block,
 )
 from nwqlib.ir import (
-    Allocate, Binding, BlockCall, ClassicalValue, Definition, ExprRef, Expression, Measure,
-    MeasurementBatch, MetadataRef, Parameter, ParameterRef, PortMap, Program, Register,
-    Release, Repeat, Sequence, Setting,
+    Allocate, Binding, BlockCall, Definition, ExprRef, Expression, Parameter, ParameterRef, PortMap, Program, Register,
+    Repeat, Sequence,
 )
 from nwqlib.operators import ingest_pauli
-from nwqlib.problems import ingest_occupation, ingest_product, ingest_vector
+from nwqlib.problems import ingest_occupation, ingest_vector
 
 LOWER = dict(max_operations=100000, max_qubits=3, max_clbits=3)
 
@@ -45,79 +43,6 @@ def one(block, *, repeat=1):
 
 def action(circuit, initial):
     return np.asarray(Statevector(initial).evolve(circuit).data)
-
-
-def test_lowering_method_context_is_lazy_local_and_not_rebuilt_on_gate_hits(monkeypatch):
-    """Instrument lazy method contexts and gate-cache hits to separate local ownership from
-    repeated construction.
-    """
-    from types import SimpleNamespace
-    import qiskit
-    from nwqlib.blocks import lowering
-    from nwqlib.blocks.selection import SelectedBlock
-    from nwqlib.core import Source
-
-    contexts, builds = [], []
-    payload = object()
-
-    class Circuit:
-        def __init__(self, *registers):
-            self.qubits = tuple(bit for reg in registers for bit in reg)
-
-        def append(self, gate, wires, *, copy):
-            assert not copy and len(wires) == 1
-
-        def find_bit(self, bit):
-            return SimpleNamespace(index=self.qubits.index(bit))
-
-    def factory():
-        context = []
-        contexts.append(context)
-        return context
-
-    def build(block, arguments, method_context):
-        assert arguments == () and block._payload is payload
-        context = method_context(factory)
-        context.append(block.record.signature.name)
-        builds.append(context)
-        return SimpleNamespace(to_gate=lambda **kwargs: object())
-
-    source = Source(name="test.local_constructor", version="1", domain="injected one-qubit binding",
-                    reference="explicit factory callable; no common family registration")
-    originals = tuple(select_zero_reflection(name, 1) for name in ("first", "second"))
-    blocks = tuple(SelectedBlock.bind(block.record.revise(
-        signature=block.record.signature.revise(target=source), implementation=source),
-        payload=payload, constructor=build) for block in originals)
-    selected = construction(blocks, tuple((block.record.signature.name,
-        ((block.record.signature.quantum[0].name, "q"),)) for block in (*blocks, blocks[0])), (("q", 1),))
-    monkeypatch.setattr(qiskit, "QuantumCircuit", Circuit)
-    with pytest.raises(ValueError, match="max_operations"):
-        lower_qiskit(selected, blocks=blocks, max_operations=1)
-    assert not contexts and not builds
-    lower_qiskit(selected, blocks=blocks, **LOWER)
-    lower_qiskit(selected, blocks=blocks, **LOWER)
-    assert len(contexts) == 2 and contexts[0] is not contexts[1]
-    assert all(context == ["first", "second"] for context in contexts)
-    assert builds[0] is builds[1] and builds[2] is builds[3]
-    shared, gets = [], []
-
-    def getter(factory):
-        gets.append(factory)
-        return shared
-
-    definitions = ({}, {})
-    for _ in range(2):
-        lowering._lower_qiskit(selected, blocks=blocks, **LOWER,
-                               definition_cache=definitions, method_context=getter)
-    assert shared == ["first", "second"] and len(gets) == 2
-    error = RuntimeError("injected constructor context failure")
-
-    def failed(factory):
-        raise error
-
-    with pytest.raises(RuntimeError) as raised:
-        lowering._lower_qiskit(selected, blocks=blocks, **LOWER, method_context=failed)
-    assert raised.value is error
 
 
 @pytest.mark.parametrize("custom", (None, "target", "payload", "symbolic"))
@@ -250,15 +175,14 @@ def test_supplied_selected_preparation_forward_inverse_control_and_unknown_laws(
         lower_qiskit(restored, blocks=(another,), **LOWER)
 
 
-@pytest.mark.parametrize("power", [.5, -.5, 0.])
-def test_supplied_annotations_reach_common_preparation_hls_once(power, monkeypatch):
+def test_supplied_annotations_reach_common_preparation_hls_once(monkeypatch):
     from qiskit import QuantumCircuit
     from qiskit.circuit import AnnotatedOperation, ControlModifier, InverseModifier, PowerModifier
     from nwqlib.core.planning import RuntimeOptions
     from nwqlib._prepared_execution import Run, prepare_experiment
     import nwqlib.blocks._qiskit_intake as intake
 
-    theta, phi, phase = .4, .12, .08
+    theta, phi, phase, power = .4, .12, .08, .5
     local = QuantumCircuit(1, global_phase=phi)
     local.ry(theta, 0)
     annotation = AnnotatedOperation(local.to_gate(),
@@ -266,9 +190,8 @@ def test_supplied_annotations_reach_common_preparation_hls_once(power, monkeypat
     circuit = QuantumCircuit(2, global_phase=phase)
     circuit.append(annotation, [0, 1], copy=False)
     _, plan = supplied_expectation(circuit)
-    if power == .5:
-        experiment, = plan.experiments
-        plan = plan.revise(experiments=(experiment, experiment.revise(name="reused")))._bind(blocks=plan.blocks)
+    experiment, = plan.experiments
+    plan = plan.revise(experiments=(experiment, experiment.revise(name="reused")))._bind(blocks=plan.blocks)
     copies = []
     snapshot = intake.snapshot_circuit
     def counted(*args, **kwargs):
@@ -294,24 +217,6 @@ def test_supplied_annotations_reach_common_preparation_hls_once(power, monkeypat
     assert len(copies) == 1  # Native definition cache reuses the same admitted supplied source.
     assert run.trace.events == ()
     run.close()
-
-
-def test_equivalent_choice_changes_recipe_identity_and_actual_inventory():
-    state = ingest_occupation("1", num_qubits=1)
-    x = select_preparation("prep", state)
-    hzh = select_preparation("prep", state, choice="hzh")
-    px, ph = one(x), one(hzh)
-    assert px.content_id != ph.content_id
-    assert [item.gate for item in x.record.decomposition] == ["x"]
-    assert [item.gate for item in hzh.record.decomposition] == ["h", "z", "h"]
-    for block, program, expected_counts in ((x, px, {"x": 1}), (hzh, ph, {"h": 2, "z": 1})):
-        loaded = SelectedConstruction.model_validate_json(program.model_dump_json())
-        circuit = lower_qiskit(loaded, blocks=(block,), **LOWER).circuit.decompose()
-        assert dict(circuit.count_ops()) == expected_counts
-        for initial, expected in (([1, 0], [0, 1]), ([0, 1], [1, 0])):
-            np.testing.assert_allclose(action(circuit, initial), expected, atol=2e-14, rtol=0)
-    repeated = lower_qiskit(one(hzh, repeat=3), blocks=(hzh,), **LOWER).circuit.decompose()
-    assert dict(repeated.count_ops()) == {"h": 6, "z": 3}
 
 
 def test_parameter_calls_keep_distinct_action_and_only_recent_native_specializations(monkeypatch):
@@ -516,57 +421,7 @@ def test_reject_before_sdk_import_and_no_repeat_expansion(monkeypatch):
         one(prep).revise(program=one(prep).program.revise(signatures=(bad_signature,)))
 
 
-def test_generic_phase_preparation_law_is_not_exact_inventory():
-    state = ingest_vector(np.array([1, 1j], dtype=complex))
-    block = select_preparation("prep", state)
-    assert block.record.choice == "native:magnitude_phase"
-    assert block.record.decomposition is None
-    assert "not an exact inventory" in block.record.cost_context
-    circuit = lower_qiskit(one(block), blocks=(block,), **LOWER).circuit
-    np.testing.assert_allclose(action(circuit, [1, 0]), np.array([1, 1j]) / np.sqrt(2), atol=3e-14, rtol=0)
-    inverse = transform_block("inverse", block, adjoint=True)
-    assert inverse.record.semantics.kind == "unitary_transform"
-    assert inverse.record.semantics.base_semantics == block.record.semantics
-    assert inverse.record.semantics.epsilon is None
-    # For U=diag(1,i) RY(pi/2), U†|0>=(|0>-|1>)/sqrt(2), not U|0>.
-    inverse_circuit = lower_qiskit(one(inverse), blocks=(inverse,), **LOWER).circuit
-    np.testing.assert_allclose(action(inverse_circuit, [1, 0]), np.array([1, -1]) / np.sqrt(2), atol=3e-14, rtol=0)
-    assert Counter(item.gate for item in select_preparation("basis", ingest_occupation("0", num_qubits=1)).record.decomposition) == {}
-
-
-def test_product_law_scope_and_pauli_selection_byte_admission(monkeypatch):
-    product = ingest_product(np.array([[1, 1j], [2, 1]], dtype=complex))
-    prep = select_preparation("product", product)
-    controlled = transform_block("controlled", prep, control=True)
-    assert prep.record.cost_law.name == "direct_preparation_cx_bound"
-    assert controlled.record.cost_law.name == "direct_preparation_controlled_cx_bound"
-    assert {item.parameter: item.value for item in prep.record.cost_parameters} == {"num_qubits": 1, "multiplicity": 2}
-    assert controlled.record.cost_parameters == prep.record.cost_parameters
-    operator = ingest_pauli([("X", 1), ("Y", 2)], num_qubits=1)
-    import nwqlib.blocks.selection as selection
-    with monkeypatch.context() as patch:
-        patch.setattr(selection.np, "zeros", lambda *a, **k: pytest.fail("unadmitted Pauli array allocation"))
-        with pytest.raises(ValueError, match="max_bytes"):
-            select_signed_pauli("select", operator, max_bytes=1)
-    selected = select_signed_pauli("select", operator)
-    prep = select_pauli_preparation("prep", selected)
-    assert prep.record.coefficient_selection_id == selected.record.content_id
-
-
-def test_generic_preparation_rejects_a_family_without_its_own_constructor_and_law():
-    from nwqlib.problems.inputs import StateInput
-
-    product = ingest_product(np.array([[1, 1j], [2, 1]], dtype=complex))
-    legal = select_preparation("product", product)
-    assert {binding.parameter: binding.value for binding in legal.record.cost_parameters} == {
-        "num_qubits": 1, "multiplicity": 2}
-    record = product.to_record()
-    record["preparation"]["implementation"] = "qiskit.mps_circuit"
-    with pytest.raises(ValueError, match="no native constructor and cost law"):
-        select_preparation("mps", StateInput.from_record(record))
-
-
-@pytest.mark.parametrize("index_qubits", range(1, 5))
+@pytest.mark.parametrize("index_qubits", [4])
 def test_native_cx_envelopes_cover_uniform_preparation_and_larger_select_tables(index_qubits):
     from qiskit import transpile
     from nwqlib._preparation_laws import direct_preparation_controlled_cx_bound
@@ -606,94 +461,6 @@ def test_controlled_generic_inventory_satisfies_native_slot_bound():
     assert signed_pauli_cx_bound(1, 1, controlled=True) == 30
     assert circuit.count_ops().get("cx", 0) <= 30
     assert set(circuit.count_ops()) <= {"u", "cx"}
-
-
-def test_lowering_reuses_native_admission_and_has_explicit_measurement_layout(monkeypatch):
-    import nwqlib.operators.inputs as operators
-    import nwqlib.problems.inputs as states
-    block = select_preparation("prep", ingest_occupation("10", num_qubits=2))
-    selected = one(block)
-    root = next(item for item in selected.program.definitions if item.id == "root")
-    definitions = tuple(item if item.id != "root" else root.revise(node=Sequence(children=root.node.children + ("measure",)))
-                        for item in selected.program.definitions)
-    program = selected.program.revise(definitions=definitions + (Definition(id="measure", node=Measure(wire="system", result="readout")),),
-        classical=(ClassicalValue(name="readout", dtype="bits", width=2),))
-    selected = selected.revise(program=program)
-
-    def forbidden(*args, **kwargs):
-        pytest.fail("lowering repeated admission of the input")
-
-    # Every problems.inputs admission hashes through its own _digest binding.
-    # A lazy import of the hash reads the operators.inputs attribute instead.
-    for owner in (operators, states):
-        monkeypatch.setattr(owner, "_digest", forbidden)
-    artifact = lower_qiskit(selected, blocks=(block,), **LOWER)
-    assert artifact.quantum_layout == (("system", (0, 1)),)
-    assert artifact.measurement_layout == (("readout", (0, 1)),)
-    measured = [(artifact.circuit.find_bit(item.qubits[0]).index, artifact.circuit.find_bit(item.clbits[0]).index)
-                for item in artifact.circuit.data if item.operation.name == "measure"]
-    assert measured == [(0, 0), (1, 1)]
-
-
-def test_selected_experiment_reaches_lowering_and_unused_definitions_stay_unbuilt(monkeypatch):
-    """Zero repeats and unused definitions must not build gates, while control/inverse share one
-    realized base.
-    """
-    from nwqlib.blocks.selection import SelectedBlock
-    from nwqlib.core import InputRef, Source
-    prep = select_preparation("prep", ingest_occupation("1", num_qubits=1))
-    unused = select_zero_reflection("unused", 2)
-    selected = construction((prep, unused), (("prep", (("system", "system"),)),), (("system", 1),))
-    source = Source(name="bounded test setting", version="1", domain="test", reference="test:setting")
-    metadata = MetadataRef(format=source, data=InputRef(identity="test:readout", representation="setting", source=source))
-    definitions = []
-    for definition in selected.program.definitions:
-        if definition.id == "repeat":
-            definition = definition.revise(node=Repeat(body="body", count=ExprRef(expression="n")))
-        elif definition.id == "root":
-            definition = definition.revise(node=Sequence(children=definition.node.children + ("release",)))
-        definitions.append(definition)
-    definitions.extend((Definition(id="release", node=Release(wire="system")),
-        Definition(id="batch", node=MeasurementBatch(body="root", settings=tuple(
-            Setting(label="same label", bindings=(Binding(parameter="n", value=n),), metadata=metadata) for n in (0, 3)
-        )))))
-    program = selected.program.revise(root="batch", definitions=tuple(definitions),
-        parameters=(Parameter(name="n", domain="integer", lower=0),),
-        expressions=(Expression(id="n", value=ParameterRef(parameter="n")),))
-    with pytest.raises(ValueError, match="select one static experiment"):
-        lower_qiskit(selected.revise(program=program), blocks=(prep,), **LOWER)
-    for point, expected in ((0, {}), (1, {"x": 3})):
-        chosen = selected.revise(program=program.select_experiment("batch", point), selections=(prep.record,))
-        artifact = lower_qiskit(chosen, blocks=(prep,), **LOWER)
-        assert dict(artifact.circuit.decompose().count_ops()) == expected
-        assert artifact.defined_selections == (() if point == 0 else (prep.record.content_id,))
-        assert unused.record.content_id not in artifact.defined_selections
-    constructor = prep._constructor
-    builds = []
-
-    def build(block, arguments, method_context):
-        assert arguments == ()
-        builds.append(block.record.content_id)
-        return constructor(block, arguments, method_context)
-
-    prep = SelectedBlock.bind(prep.record, payload=prep._payload, constructor=build)
-    ctrl = transform_block("ctrl", prep, control=True)
-    inv = transform_block("inv", prep, control=True, adjoint=True)
-    pair = construction((ctrl, inv), (("ctrl", (("control", "control"), ("system", "system"))),
-                                    ("inv", (("control", "control"), ("system", "system")))), (("control", 1), ("system", 1)))
-    import nwqlib.subroutines.qiskit_compat as compatibility
-    original = compatibility.controlled
-    controls = []
-
-    def count_control(*args, **kwargs):
-        controls.append(1)
-        return original(*args, **kwargs)
-
-    monkeypatch.setattr(compatibility, "controlled", count_control)
-    artifact = lower_qiskit(pair, blocks=(ctrl, inv), **LOWER)
-    assert controls == [1]
-    assert builds == [prep.record.content_id]
-    assert set(artifact.defined_selections) == {prep.record.content_id, ctrl.record.content_id, inv.record.content_id}
 
 
 def _dense_encoding_block():

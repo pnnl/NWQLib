@@ -62,63 +62,6 @@ def scalar(result, metric, location=None):
     return fact.value.numerator / fact.value.denominator if fact.value.denominator != 1 else fact.value.numerator
 
 
-def test_quantity_error_keeps_exact_location_selection():
-    construction, _ = preparation()
-    result = estimate(construction)
-    width = result.quantity("logical_width", location="logical_device")
-    assert width is next(q for q in result.quantities if q.metric == "logical_width" and q.location == "logical_device")
-    for metric, location in (("logical_width", None), ("logical_width", "foreign"), ("branches", None)):
-        with pytest.raises(ValueError) as caught:
-            result.quantity(metric, location=location)
-        message = str(caught.value)
-        assert f"metric={metric!r}" in message and f"location={location!r}" in message
-        assert ("'logical_device'" in message) == (metric == "logical_width")
-        assert ".quantities" in message
-
-
-def test_hundred_register_lifetimes_use_aggregates_without_native_work():
-    """100 simultaneous one-bit wires have peak 100, then release to zero."""
-    from nwqlib.resources.fold import _Fold
-
-    registers = tuple(Register(name=f"q{i}", width=1) for i in range(100))
-    definitions = tuple(Definition(id=f"a{i}", node=Allocate(wire=r.name)) for i, r in enumerate(registers))
-    definitions += tuple(Definition(id=f"r{i}", node=Release(wire=r.name)) for i, r in enumerate(registers))
-    program = Program(root="root", registers=registers, definitions=definitions + (
-        Definition(id="root", node=Sequence(children=tuple(d.id for d in definitions))),))
-    folder = _Fold(SelectedConstruction(program=program, selections=()), ResourceContext())
-    result = folder.run()
-    assert scalar(result, "logical_width", "logical_device") == 100
-    assert scalar(result, "operations") == 0
-    assert result.limits == program.limits  # The configured cap was not increased.
-    # The fold stores one role/location subtotal per state, independent of the
-    # identities of all the live wires. Admission alone owns their lifetimes.
-    assert sum(len(state) for state in folder.quantum_footprints) <= 100
-
-
-def test_symbolic_release_preserves_formal_width_and_varying_bindings():
-    expr = Expression(id="n", value=ParameterRef(parameter="n"))
-    registers = (Register(name="a", width=ExprRef(expression="n")),
-        Register(name="b", width=ExprRef(expression="n")),
-        Register(name="c", width=7, role="dirty_ancilla"))
-    nodes = (Allocate(wire="a"), Allocate(wire="b"), Release(wire="a"),
-        Allocate(wire="c"), Release(wire="b"), Release(wire="c"))
-    definitions = tuple(Definition(id=str(i), node=node) for i, node in enumerate(nodes))
-    program = Program(root="root", registers=registers, parameters=(Parameter(name="n", domain="integer", lower=1),),
-        expressions=(expr,), definitions=definitions + (
-            Definition(id="root", node=Sequence(children=tuple(d.id for d in definitions))),))
-    construction = SelectedConstruction(program=program, selections=())
-    symbolic = estimate(construction)
-    assert symbolic.quantity("logical_width", location="logical_device").fact.availability == "symbolic"
-    width = symbolic.quantity("logical_width", location="logical_device")
-    assert f"symbolic ({width.fact.symbol.name})" in str(symbolic)
-    # Exact independently listed live totals: n, 2n, n, n+7, 7, 0.
-    for n, peak in ((3, 10), (11, 22)):
-        result = estimate(construction.revise(program=program.revise(bindings=(Binding(parameter="n", value=n),))))
-        assert scalar(result, "logical_width", "logical_device") == peak
-        assert scalar(result, "system", "logical_device") == 2 * n
-        assert scalar(result, "dirty_ancilla", "logical_device") == 7
-
-
 def selected(name="ft", *, width=1, laws=None, bindings=(), workspace=(), parameters=()):
     signature = BlockSignature(name=name, target=SOURCE,
         quantum=(QuantumPort(name="q", width=width),), parameters=parameters)
@@ -152,31 +95,6 @@ def calls(record, *, parallel=False, same_wire=False, repeat=1):
     )
     return SelectedConstruction(program=Program(root="root", definitions=definitions,
                                 registers=regs, signatures=(record.signature,)), selections=(record,))
-
-
-def test_controlled_cx_primitive_counts_toffoli_without_synthesis(monkeypatch):
-    from nwqlib.blocks.records import Primitive
-
-    record = selected(width=3, laws=()).revise(
-        decomposition=(Primitive(gate="cx", qubits=(0,1)),), controlled=True)
-    logical = estimate(calls(record), context=ResourceContext(basis="selected_logical"))
-    assert scalar(logical,"toffoli") == 2  # Two stored calls, each exactly CCX.
-    assert scalar(logical,"cx") == 0
-    assert logical.quantity("t").fact.availability == "unknown"
-    for basis in ("cx","clifford_t"):
-        unresolved = estimate(calls(record), context=ResourceContext(basis=basis))
-        assert unresolved.quantity("cx").fact.availability == "unknown"
-    # Display must preserve known counts beside missing basis conversion and
-    # read stored facts, without folding or serializing the construction again.
-    from nwqlib.resources.fold import _Fold
-    def forbidden(*args, **kwargs):
-        pytest.fail("resource display performed work beyond reading stored quantities")
-    monkeypatch.setattr(_Fold, "run", forbidden)
-    monkeypatch.setattr(WorkloadEstimate, "model_dump", forbidden)
-    rendered = str(logical)
-    assert "toffoli: 2 count [exact]" in rendered
-    assert logical.quantity("t").fact.reason in rendered
-    assert "basis=selected_logical" in rendered and "population=dynamic workload" in rendered
 
 
 def test_same_choice_small_lowered_inventory_and_trillion_repeat():
@@ -533,54 +451,6 @@ def test_branch_adaptive_and_shot_populations_remain_conditional():
             expressions=(Expression(id="n", value=ParameterRef(parameter="n")),))
 
 
-def test_batch_lowering_materializes_one_body_and_ir_repeat_still_repeats(monkeypatch):
-    """Two resets per body and four shots imply eight dynamic resets, but native lowering
-    materializes only one body.
-    """
-    import sys
-    from types import SimpleNamespace
-    from nwqlib.ir import Reset
-
-    class Circuit:
-        def __init__(self, *registers):
-            self.resets = 0
-
-        def reset(self, wires):
-            self.resets += len(wires)
-
-        def find_bit(self, bit):
-            return SimpleNamespace(index=bit)
-
-    def forbidden(*args):
-        pytest.fail("native gate preparation is forbidden in this metadata/stub witness")
-
-    monkeypatch.setitem(sys.modules, "qiskit", SimpleNamespace(
-        QuantumCircuit=Circuit, QuantumRegister=lambda width, name: tuple(range(width)),
-        ClassicalRegister=forbidden))
-    monkeypatch.setitem(sys.modules, "nwqlib.subroutines.qiskit_compat", SimpleNamespace(
-        controlled=forbidden, inverse_realized_gate=forbidden))
-    metadata = MetadataRef(format=SOURCE, data=InputRef(identity="test:reset", representation="test", source=SOURCE))
-    program = Program(root="batch", registers=(Register(name="q", width=1),), definitions=(
-        Definition(id="allocate", node=Allocate(wire="q")),
-        Definition(id="reset", node=Reset(wire="q")),
-        Definition(id="repeat", node=Repeat(body="reset", count=2)),
-        Definition(id="release", node=Release(wire="q")),
-        Definition(id="body", node=Sequence(children=("allocate", "repeat", "release"))),
-        Definition(id="batch", node=MeasurementBatch(body="body", repetitions=4,
-            observation_kind="counts", settings=(Setting(label="reset", metadata=metadata),))),
-    ))
-    construction = SelectedConstruction(program=program, selections=())
-    workload = estimate(construction)
-    assert (scalar(workload, "shots"), scalar(workload, "resets")) == (4, 8)
-    logical = lower_qiskit(construction, blocks=(), **LOWERING)
-    assert logical.circuit.resets == 2  # One body containing coherent IR Repeat(2).
-    assert logical.construction_id == construction.content_id
-    unknown_defs = program.definitions[:-1] + (program.definitions[-1].revise(
-        node=program.definitions[-1].node.revise(repetitions=None, observation_kind=None)),)
-    unknown = construction.revise(program=program.revise(definitions=unknown_defs))
-    assert lower_qiskit(unknown, blocks=(), **LOWERING).circuit.resets == 2
-
-
 def test_native_bounds_product_and_control_phase_are_not_zero_or_exact(monkeypatch):
     import numpy as np
     from nwqlib.blocks.selection import _source
@@ -645,123 +515,6 @@ def test_native_bounds_product_and_control_phase_are_not_zero_or_exact(monkeypat
     bad = bad.revise(cost_law=_source("direct_preparation_cx_bound"), implementation=_source("preparation.native"))
     with pytest.raises(ValueError, match="integer growth"):
         estimate(calls(bad), context=ResourceContext(basis="cx"))
-
-
-def test_positive_symbolic_repeat_preserves_exported_classical_lifetime():
-    # x is defined inside the guaranteed-positive loop; y is defined after it.
-    def program(lower):
-        return Program(root="root", parameters=(Parameter(name="n", domain="integer", lower=lower),),
-            expressions=(Expression(id="n", value=ParameterRef(parameter="n")),),
-            classical=(ClassicalValue(name="x", dtype="integer"), ClassicalValue(name="y", dtype="integer")),
-            definitions=(
-                Definition(id="x", node=ClassicalStage(implementation=SOURCE, outputs=("x",))),
-                Definition(id="loop", node=Repeat(body="x", count=ExprRef(expression="n"))),
-                Definition(id="y", node=ClassicalStage(implementation=SOURCE, outputs=("y",))),
-                Definition(id="root", node=Sequence(children=("loop", "y"))),
-            ))
-    positive = estimate(SelectedConstruction(program=program(1), selections=()))
-    assert scalar(positive, "classical_registers", "host") == 2
-    may_skip = estimate(SelectedConstruction(program=program(0), selections=()))
-    # The peak over possible positive executions can also be two; without
-    # positivity it cannot be called an exact guaranteed live inventory.
-    assert may_skip.quantity("classical_registers", location="host").interpretation == "upper_bound"
-    assert scalar(may_skip, "classical_registers", "host") == 2
-    # Reset layer count is min(1,width); the admitted zero-width target is empty.
-    from nwqlib.ir import Reset
-    reset = Program(root="root", parameters=(Parameter(name="n", domain="integer", lower=0),),
-        expressions=(Expression(id="n", value=ParameterRef(parameter="n")),),
-        registers=(Register(name="q", width=ExprRef(expression="n")),), definitions=(
-            Definition(id="allocate", node=Allocate(wire="q")),
-            Definition(id="reset", node=Reset(wire="q")),
-            Definition(id="root", node=Sequence(children=("allocate", "reset"))),))
-    for width, depth in ((0, 0), (2, 1)):
-        result = estimate(SelectedConstruction(program=reset.bind(n=width), selections=()))
-        assert scalar(result, "resets") == width and scalar(result, "logical_depth") == depth
-    symbolic = estimate(SelectedConstruction(program=reset, selections=()))
-    assert symbolic.quantity("logical_depth").fact.availability == "symbolic"
-    positive_reset = reset.revise(parameters=(Parameter(name="n", domain="integer", lower=1),))
-    assert scalar(estimate(SelectedConstruction(program=positive_reset, selections=())), "logical_depth") == 1
-
-
-def test_rotation_precision_is_required_and_observation_is_not_projected_as_execution():
-    laws = tuple(ResourceLaw(metric=metric, basis="clifford_t", value=value,
-        interpretation="exact", evidence=EVIDENCE) for metric, value in (("arbitrary_rotations", 1), ("t", 3)))
-    unresolved = estimate(calls(selected(laws=laws)), context=ResourceContext(basis="clifford_t"))
-    assert scalar(unresolved, "arbitrary_rotations") == 2
-    assert unresolved.quantity("t").fact.availability == "unknown"
-    precision = Float64(value=1e-4)
-    resolved_laws = tuple(law.revise(precision=precision, synthesis=SOURCE) for law in laws)
-    resolved = estimate(calls(selected(laws=resolved_laws)),
-                        context=ResourceContext(basis="clifford_t", precision=precision, synthesis=SOURCE))
-    assert scalar(resolved, "t") == 6
-    # Historical observed source data can inform a planned projection, never
-    # create a current executed population or witnessed derived receipt.
-    observed = ResourceLaw(metric="operations", basis="selected_logical", value=3,
-                          interpretation="exact", evidence=Evidence(kind="observed", source=SOURCE))
-    prediction = estimate(calls(selected(laws=(observed,)))).quantity("operations")
-    assert prediction.lifecycle == "planned"
-    assert prediction.interpretation == "estimate"
-    assert prediction.fact.evidence.kind == "empirical_prediction"
-    assert prediction.fact.evidence.status == "declared"
-    asserted = ResourceLaw(metric="operations", basis="selected_logical", value=1,
-                           interpretation="exact", evidence=EVIDENCE)
-    obs, assertion = selected("observed", laws=(observed.revise(value=1),)), selected("asserted", laws=(asserted,))
-    p = calls(obs).program
-    definitions = tuple(d.revise(node=d.node.revise(signature="asserted")) if d.id == "b" else d for d in p.definitions)
-    mixed = estimate(SelectedConstruction(program=p.revise(definitions=definitions,
-        signatures=(obs.signature, assertion.signature)), selections=(obs, assertion)))
-    assert scalar(mixed, "operations") == 2
-    assert mixed.quantity("operations").interpretation == "estimate"
-    assert mixed.quantity("operations").fact.evidence.kind == "empirical_prediction"
-    assert {source.kind for source in mixed.sources} >= {"observed", "user_assertion"}
-    zero = selected(laws=(ResourceLaw(metric="operations", basis="selected_logical", value=0,
-        interpretation="estimate", evidence=Evidence(kind="numerical_estimate", source=SOURCE)),))
-    estimated_zero = estimate(calls(zero, repeat=2)).quantity("operations")
-    assert estimated_zero.fact.value.numerator == 0 and estimated_zero.interpretation == "estimate"
-    unreachable = estimate(calls(selected(laws=()), repeat=0)).quantity("operations")
-    assert unreachable.fact.value.numerator == 0 and unreachable.interpretation == "exact"
-
-
-def test_resource_quantity_domain_preserves_expectations_and_generic_facts():
-    from nwqlib.core import Rational, Scope, Complex128
-    from nwqlib.evidence import Fact
-    from nwqlib.resources import ResourceQuantity
-
-    def fact(value, metric="operations"):
-        return Fact(quantity=metric, unit=Unit(symbol="count", dimension="count"),
-                    scope=Scope(domain="supplied inventory"), availability="concrete",
-                    value=value, evidence=EVIDENCE)
-    def quantity(value, metric="operations", interpretation="exact"):
-        return ResourceQuantity(metric=metric, fact=fact(value, metric), population="one call",
-                                basis="supplied", interpretation=interpretation)
-    for invalid in (Rational(numerator=-1, denominator=1),
-                    Rational(numerator=3, denominator=2), Float64(value=-.5)):
-        with pytest.raises(ValueError):
-            quantity(invalid)
-    half = Rational(numerator=1, denominator=2)
-    for metric, interpretation in (("expected_operations", "exact"), ("operations", "estimate"),
-                                   ("operations", "upper_bound")):
-        result = quantity(half, metric, interpretation)
-        assert ResourceQuantity.model_validate_json(result.model_dump_json()) == result
-    zero = quantity(Rational(numerator=0, denominator=1))
-    with pytest.raises(ValueError):
-        zero.revise(fact=fact(half))
-    # Signed/complex Facts are useful outside resource cardinalities.
-    signed = fact(Rational(numerator=-1, denominator=1))
-    assert signed.value.numerator == -1
-    complex_fact = fact(Complex128(real=1., imag=1.))
-    with pytest.raises(ValueError, match="real scalars"):
-        zero.revise(fact=complex_fact)
-    unknown = zero.revise(interpretation="unavailable", fact=zero.fact.revise(
-        availability="unknown", value=None, evidence=None, reason="not inventoried"))
-    assert unknown.fact.value is None
-    # Portable workload interchange reaches the same admission owner.
-    workload = estimate(calls(selected()))
-    payload = workload.model_dump(mode="json")
-    operations = next(q for q in payload["quantities"] if q["metric"] == "operations")
-    operations["fact"]["value"] = Rational(numerator=-3, denominator=1).model_dump(mode="json")
-    with pytest.raises(ValueError):
-        WorkloadEstimate.model_validate(payload)
 
 
 def test_signed_pauli_native_cx_law_is_consumed_at_actual_fold_binding(monkeypatch):

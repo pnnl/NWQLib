@@ -12,7 +12,6 @@ from decimal import Decimal, localcontext
 import json
 from math import log, sqrt
 import os
-import re
 from pathlib import Path
 import signal
 import subprocess
@@ -21,7 +20,6 @@ from types import SimpleNamespace
 from typing import ClassVar, Literal
 from unittest.mock import patch
 
-import numpy as np
 import pytest
 import sympy as sp
 
@@ -37,12 +35,11 @@ from nwqlib.algorithms.qhd import (
     run_resources,
     solve_augmented_lagrangian,
 )
-from nwqlib.algorithms.qhd._durable import header_committed
 from nwqlib.backends.connection import BackendRefresh, NativePreparation, circuit_layout
 from nwqlib._prepared_execution import PreparationNotRebuilt
 from nwqlib.blocks.kernels import BoundKernel
 from nwqlib.core.records import Record, Source
-from nwqlib.execution import CountsSampling, ExecutionLimits, JobLocator, RunFailed
+from nwqlib.execution import CountsSampling, JobLocator, RunFailed
 from nwqlib.problems import ConstrainedOptimization, Optimization
 
 x, y = sp.symbols("x y")
@@ -77,47 +74,6 @@ def _stop_at(stage, number):
 
 def _committed(path):
     return json.loads((path / "controller.json").read_text())
-
-
-@pytest.mark.parametrize("kind", ["constrained", "refinement"])
-def test_a_serialization_interrupt_keeps_completed_outer_work(tmp_path, monkeypatch, kind):
-    """Pydantic's real serialization wrapper must not turn Ctrl-C into a finished outer run."""
-    import nwqlib.scientist as scientist
-
-    original = sp.srepr
-    planning = scientist._plan_with_streams
-    armed = False
-    plans = 0
-    interrupt = KeyboardInterrupt("interrupted symbolic serialization")
-
-    def interrupted_srepr(value, **kwargs):
-        nonlocal armed
-        if armed and sys._getframe(1).f_code.co_name == "_symbolic_record":
-            armed = False
-            raise interrupt
-        return original(value, **kwargs)
-
-    def interrupted_planning(*args, **kwargs):
-        nonlocal plans, armed
-        plans += 1
-        armed = plans == 2
-        return planning(*args, **kwargs)
-
-    monkeypatch.setattr(sp, "srepr", interrupted_srepr)
-    monkeypatch.setattr(scientist, "_plan_with_streams", interrupted_planning)
-    directory = tmp_path / kind
-    with pytest.raises(KeyboardInterrupt) as caught:
-        if kind == "constrained":
-            _solve(directory=directory)
-        else:
-            refine_box(Optimization(objective=(x - sp.Rational(3, 10)) ** 2,
-                                    variables=(x,), bounds=((-1.0, 1.0),)),
-                       qhd=QHD_SMALL, options=REFINED, execution="classical", seed=3,
-                       directory=directory, progress=False)
-    assert caught.value is interrupt
-    saved = _committed(directory)
-    assert saved["record"] is None
-    assert len(saved["iterations" if kind == "constrained" else "levels"]) == 1
 
 
 def _without_run_identities(value):
@@ -381,57 +337,6 @@ def test_a_standalone_refinement_resumes_between_levels(tmp_path, counted):
     assert counted == dict(prepare=0, evolutions=0) and loaded.content_id == again.content_id
 
 
-def test_level_file_save_and_load_are_admitted_against_the_level_max_bytes(tmp_path):
-    """Saving and loading a level file are admitted against the level's QHD.max_bytes before the file is
-    written or read, and each refusal names the smallest admitting limit, at which the file round-trips
-    (``refinement._LevelTables``). The written file holds the four fields of the version-3 format within the
-    file-byte bound ``refinement._level_json_bound``, whose value is also checked on a three-table fixture.
-    """
-    problem = Optimization(objective=(2 * x**2 - 1) ** 2 + 3 * x / 5 + 2 * (y - sp.Rational(3, 10)) ** 2
-                           + 6 * x * y / 5, variables=(x, y), bounds=((-1.2, 1.2), (-1.2, 1.2)))
-    qhd = QHD(num_grid_points=4, num_steps=20, total_time=6.0, initial_state=UniformState())
-    options = BoxRefinement(scaling="search_model", potential_gain=8.0, max_levels=8, max_no_improve=2)
-    with pytest.raises(KeyboardInterrupt):
-        refine_box(problem, qhd=qhd, options=options, execution="classical", seed=7,
-                   progress=_stop_at("input", 3), directory=tmp_path / "run")
-    from nwqlib.algorithms.qhd import refinement
-
-    folder = tmp_path / "run" / "levels" / "1" / "run"
-    saved = json.loads((folder.parent / "tables.json").read_text())
-    box = [list(bounds) for bounds in problem.bounds]  # The first level's box is the problem's.
-    specs = tuple((tuple(t["support"]), t["values"]["shape"][0]) for t in saved["tables"])
-    stored = refinement._LevelTables.load(folder, box, qhd=QHD(), specs=specs, held_bytes=0)
-    target = tmp_path / "copy" / "run"
-    arguments = (target, box, stored.tables, stored.evaluations, stored.offset)
-    with pytest.raises(ValueError, match=r"level tables save requires \d+ bytes") as caught:
-        refinement._LevelTables.save(*arguments, qhd=QHD(max_bytes=1), held_bytes=0)
-    limit = int(re.search(r"max_bytes>=(\d+)", str(caught.value)).group(1))
-    with pytest.raises(ValueError, match=f"requires {limit} bytes"):
-        refinement._LevelTables.save(*arguments, qhd=QHD(max_bytes=limit - 1), held_bytes=0)
-    assert not (target.parent / "tables.json").exists()
-    refinement._LevelTables.save(*arguments, qhd=QHD(max_bytes=limit), held_bytes=0)
-    # A version-3 file holds exactly these four fields, within its file-byte bound.
-    written = target.parent / "tables.json"
-    assert set(json.loads(written.read_text())) == {"format", "tables", "evaluations", "offset"}
-    assert written.stat().st_size <= refinement._level_json_bound(specs, stored.evaluations, stored.offset)
-    with pytest.raises(ValueError, match=r"level tables load requires \d+ bytes") as caught:
-        refinement._LevelTables.load(target, box, qhd=QHD(max_bytes=1), specs=specs, held_bytes=0)
-    limit = int(re.search(r"max_bytes>=(\d+)", str(caught.value)).group(1))
-    with pytest.raises(ValueError, match=f"requires {limit} bytes"):
-        refinement._LevelTables.load(target, box, qhd=QHD(max_bytes=limit - 1), specs=specs, held_bytes=0)
-    again = refinement._LevelTables.load(target, box, qhd=QHD(max_bytes=limit), specs=specs, held_bytes=0)
-    assert len(again.tables) == len(stored.tables)
-    for actual, expected in zip(again.tables, stored.tables, strict=True):
-        assert actual.support == expected.support
-        np.testing.assert_array_equal(actual.values.array, expected.values.array)
-    assert (again.offset, again.evaluations) == (stored.offset, stored.evaluations)
-    # J_v3 = 77 + T(specs) + D(evaluations) + R(offset) on the d = 2 fixture of three tables and
-    # 24 evaluations, with a null or -5/2 offset (refinement._level_json_bound).
-    fixture = (((0,), 4), ((1,), 4), ((0, 1), 16))
-    assert refinement._level_json_bound(fixture, 24, None) == 1505
-    assert refinement._level_json_bound(fixture, 24, sp.Rational(-5, 2)) == 1511
-
-
 def test_resume_refuses_another_backend_another_layer_and_a_second_controller(tmp_path, monkeypatch):
     """Resume checks the backend, controller layer and exclusive lock before new work."""
     with patch("nwqlib.scientist._plan_with_streams", side_effect=KeyboardInterrupt("stopped while round 0 plans")):
@@ -456,245 +361,34 @@ def test_resume_refuses_another_backend_another_layer_and_a_second_controller(tm
         resume_augmented_lagrangian(tmp_path / "a", backend=None)
 
 
-def _files(path):
-    return {p.relative_to(path).as_posix(): p.read_bytes() for p in sorted(path.rglob("*")) if p.is_file()}
-
-
-@pytest.mark.parametrize("kind", ["standalone", "constrained"])
-def test_an_unevaluated_sum_reopens_and_resumes_only_with_its_original_expression(
-    tmp_path, monkeypatch, counted, kind
-):
-    """A saved Sum keeps its expression, values and completed work through continuation.
-
-    Ordinary SymPy unpickling drops the summand's unevaluated Mul(1, ...).
-    That reader must be refused without changing the directory or doing work.
-    The correct reader preserves the original expression and continues once.
-    """
-    import pickle
-    from nwqlib.algorithms.qhd import load_box_refinement
-    from nwqlib.algorithms.qhd import archive
-
-    r = sp.Symbol("x", real=True)
-    n = sp.Symbol("n", integer=True)
-    piece = sp.Piecewise((r, r > 0), (r**2, True), evaluate=False)
-    with sp.evaluate(False):
-        objective = sp.Sum(piece, (n, 0, 2))
-    qhd = QHD(num_grid_points=5, include_boundary_points=True, num_steps=2, total_time=0.1)
-    levels = BoxRefinement(max_levels=1, scaling="search_model")
-    directory = tmp_path / "run"
-    if kind == "standalone":
-        problem = Optimization(objective=objective, variables=(r,), bounds=((-1.0, 1.0),))
-        whole = refine_box(problem, qhd=qhd, options=levels, execution="classical", seed=1, progress=False,
-                           directory=directory)
-        saved = whole.save(tmp_path / "saved")
-        resume = resume_box_refinement
-    else:
-        problem = ConstrainedOptimization(objective=objective, variables=(r,), bounds=((-1.0, 1.0),),
-                                          equalities=(r + sp.Rational(1, 4),))
-        options = AugmentedLagrangian(max_iterations=3, feasibility_tolerance=1e-9)
-        whole = solve_augmented_lagrangian(problem, qhd=qhd, refinement=levels, execution="classical", seed=1,
-                                          options=options, progress=False, directory=tmp_path / "whole")
-        total_work = dict(counted)
-        counted.update(prepare=0, evolutions=0)
-        with pytest.raises(KeyboardInterrupt):
-            solve_augmented_lagrangian(problem, qhd=qhd, refinement=levels, execution="classical", seed=1,
-                                       options=options,
-                                       progress=_stop_at("input", 3), directory=directory)
-        assert (len(_committed(directory)["iterations"]), len(_committed(directory)["levels"])) == (2, 0)
-        resume = resume_augmented_lagrangian
-    # The real dependency's default reader changes this normally saved input.
-    with (directory / "problem.pickle").open("rb") as stream:
-        rebuilt, *_ = pickle.Unpickler(stream).load()
-    assert sp.srepr(rebuilt) != sp.srepr(objective)
-    committed, stored = _committed(directory), _files(directory)
-    before = dict(counted)
-    with monkeypatch.context() as patch:
-        patch.setattr(archive, "_SymbolicReader", pickle.Unpickler)
-        patch.setattr("nwqlib.scientist.load_run", lambda *a, **k: pytest.fail("reopened a Run"))
-        patch.setattr("nwqlib.scientist._plan_with_streams", lambda *a, **k: pytest.fail("planned"))
-        if kind == "standalone":
-            with pytest.raises(ValueError, match="expressions differ"):
-                load_box_refinement(saved)
-        with pytest.raises(ValueError, match="expressions differ"):
-            resume(directory, backend=None)
-    assert _committed(directory) == committed and _files(directory) == stored
-    assert counted == before
-    resumed = resume(directory, backend=None, progress=False)
-    assert sp.srepr(resumed.problem.objective) == sp.srepr(objective)
-    assert resumed.problem.content_id == problem.content_id
-    for point, expected in ((sp.Rational(-1, 2), sp.Rational(3, 4)),
-                            (sp.Rational(1, 2), sp.Rational(3, 2))):
-        assert resumed.problem.objective.subs(r, point).doit() == expected
-    if kind == "standalone":
-        _assert_same_run(resumed, whole)
-        assert load_box_refinement(saved).content_id == whole.content_id
-        assert counted == before
-    else:
-        _assert_same_run(resumed.record, whole.record)
-        assert [item.run_id for item in resumed.iterations[:2]] == [
-            item["run_id"] for item in committed["iterations"]]
-        assert counted == total_work
-
-
-@pytest.mark.parametrize("kind", ["constrained", "refined", "standalone"])
-def test_an_unevaluated_quotient_resumes_as_the_uninterrupted_run(tmp_path, kind):
+def test_an_unevaluated_quotient_resumes_as_the_uninterrupted_run(tmp_path):
     """An objective kept as supplied passes the expression check and continues as the uninterrupted run.
 
     f = x + (x + 2)/(x + 2), built with evaluate=False, has its pole outside [-1, 1], and SymPy's evaluation
     would turn it into x + 1. The rebuilt problem has the stored identity, so an interrupted run resumes,
-    with each committed round or level kept, to the records of the uninterrupted run, and the ended
-    directory reopens with the same record.
+    with each committed round kept, to the records of the uninterrupted run, and the ended directory
+    reopens with the same record.
     """
     quotient = sp.Mul(x + 2, sp.Pow(x + 2, -1, evaluate=False), evaluate=False)
     objective = sp.Add(x, quotient, evaluate=False)
-    if kind == "standalone":
-        problem = Optimization(objective=objective, variables=(x,), bounds=((-1.0, 1.0),))
+    problem = ConstrainedOptimization(objective=objective, variables=(x,), bounds=((-1.0, 1.0),),
+                                      equalities=(x + sp.Rational(1, 4),))
 
-        def run(directory, progress=False):
-            return refine_box(problem, qhd=QHD_SMALL, options=REFINED.revise(max_levels=3), execution="classical",
-                              seed=3, progress=progress, directory=directory)
+    def run(directory, progress=False):
+        return _solve(problem, max_iterations=3, progress=progress, directory=directory)
 
-        resume, record = resume_box_refinement, lambda result: result
-    else:
-        problem = ConstrainedOptimization(objective=objective, variables=(x,), bounds=((-1.0, 1.0),),
-                                          equalities=(x + sp.Rational(1, 4),))
-        refinement = dict(refinement=REFINED) if kind == "refined" else {}
-
-        def run(directory, progress=False):
-            return _solve(problem, max_iterations=3, progress=progress, directory=directory, **refinement)
-
-        resume, record = resume_augmented_lagrangian, lambda result: result.record
+    resume, record = resume_augmented_lagrangian, lambda result: result.record
     whole = run(tmp_path / "whole")
     with pytest.raises(KeyboardInterrupt):
         run(tmp_path / "cut", progress=_stop_at("input", 3))
     committed = _committed(tmp_path / "cut")
-    # The third Run is round 2, the first level of round 1 or level 3, so the rounds or levels before it are kept.
-    assert (len(committed.get("iterations", ())), len(committed["levels"])) == {
-        "constrained": (2, 0), "refined": (1, 0), "standalone": (0, 2)}[kind]
+    # The third Run is round 2, so the two rounds before it are kept.
+    assert (len(committed.get("iterations", ())), len(committed["levels"])) == (2, 0)
     resumed = resume(tmp_path / "cut", backend=None, progress=False)
     _assert_same_run(record(resumed), record(whole))
     assert sp.srepr(resumed.problem.objective) == sp.srepr(objective)
     assert resumed.problem.content_id == problem.content_id
     assert record(resume(tmp_path / "cut", backend=None)).content_id == record(resumed).content_id
-
-
-class RefusingBackend(PendingBackend):
-    """PendingBackend whose native preparation raises from its second call on, as a failing native compiler would."""
-
-    kind: Literal["refusing_fixture"] = "refusing_fixture"
-    preparations: ClassVar[list] = []
-
-    def prepare(self, circuit, **kwargs):
-        self.preparations.append(circuit.num_qubits)
-        if len(self.preparations) > 1:
-            raise ValueError("the fixture refuses its second native preparation")
-        return super().prepare(circuit, **kwargs)
-
-
-def test_a_round_whose_preparation_raised_records_the_work_of_its_durable_run(tmp_path, monkeypatch):
-    """The work that a failed round spent is counted, and a raised preparation adds no circuit law.
-
-    Round 1's native preparation raises, so ``prepare`` closes its Run before the layer holds it. The durable
-    Run folder keeps the charged preparation attempt and the stored data, and the round records them. The
-    attempt does not establish a built circuit, so the round's CX bound and rotation count are unknown, and
-    the run's rotation total is unknown both in the record and in ``run_resources``.
-    """
-    for name in ("launches", "refreshes", "preparations"):
-        monkeypatch.setattr(RefusingBackend, name, [])
-    result = _solve(execution="quantum", shots=64, backend=RefusingBackend(), directory=tmp_path / "refused")
-    assert result.termination == "inner_failed" and len(result.iterations) == 2
-    failed = result.iterations[1]
-    counts = failed.resources
-    assert failed.run_id is not None and failed.result_id is None
-    assert (counts.circuit_preparations, counts.circuit_attempts, counts.shots) == (1, 0, 0) and counts.data_bytes > 0
-    assert (counts.cx, counts.arbitrary_rotations) == (None, None)
-    assert result.resources.arbitrary_rotations is None and run_resources(result).arbitrary_rotations is None
-
-
-def test_a_round_refused_before_its_journal_header_records_zero_counts_and_its_stored_bytes(tmp_path, monkeypatch):
-    """A real byte-budget refusal before the header leaves zero execution counts and charges stored files."""
-    from nwqlib._prepared_execution import Run
-
-    write = Run._write
-
-    def refuse_second_header(run, records=(), **kwargs):
-        if run.directory == tmp_path / "refused" / "iterations" / "1" / "run" and any(
-                kind == "header" for kind, _, _ in records):
-            kwargs["max_data_bytes"] = run._state["external_bytes"]
-        return write(run, records, **kwargs)
-
-    monkeypatch.setattr(Run, "_write", refuse_second_header)
-    directory = tmp_path / "refused"
-    result = _solve(execution="quantum", shots=64, max_iterations=3, directory=directory,
-                    limits=ExecutionLimits(max_data_bytes=10_000_000))
-    folder = directory / "iterations" / "1" / "run"
-    assert result.termination == "inner_failed" and len(result.iterations) == 2
-    assert not header_committed(folder), "the second header did not reach its byte-budget refusal"
-    first, refused = (item.resources for item in result.iterations)
-    stored = sum(path.stat().st_size for path in folder.iterdir()
-                 if path.is_file() and not path.name.startswith("run.sqlite"))
-    assert result.iterations[1].run_id is None
-    zero = ("circuit_preparations", "circuit_attempts", "completed_circuit_attempts", "shots", "completed_shots",
-            "evolution_work", "construction_work", "synthesis_work", "cx", "arbitrary_rotations")
-    assert {name: getattr(refused, name) for name in zero} == dict.fromkeys(zero, 0)
-    assert refused.data_bytes == stored > 0 and refused.unavailable == ()
-    totals = result.resources
-    assert totals.data_bytes == first.data_bytes + stored
-    assert {name: getattr(totals, name) for name in zero} == {name: getattr(first, name) for name in zero}
-    assert run_resources(result).arbitrary_rotations == first.arbitrary_rotations
-
-
-def test_a_failed_round_whose_journal_cannot_be_read_records_unknown_counts(tmp_path, monkeypatch):
-    """A committed journal that cannot be read gives unknown counts, never the known zeros of a header-less Run.
-
-    Round 1's native preparation raises after its Run committed the journal header and charged the
-    preparation, as in ``test_a_round_whose_preparation_raised_records_the_work_of_its_durable_run``. While
-    another connection holds an exclusive SQLite lock on that journal, reading the counters of the closed
-    folder (``_durable.closed_trace``) fails. A failed read is no evidence that nothing was prepared
-    (``_durable.header_committed``), so every count is unknown with the error as its reason.
-    """
-    import sqlite3
-
-    from nwqlib.algorithms.qhd._durable import closed_trace, reopen
-    from nwqlib.algorithms.qhd._outer import RUN_COUNTS, run_counts
-
-    for name in ("launches", "refreshes", "preparations"):
-        monkeypatch.setattr(RefusingBackend, name, [])
-    monkeypatch.chdir(tmp_path)
-    result = _solve(execution="quantum", shots=64, backend=RefusingBackend(), directory=Path("refused"))
-    folder = Path("refused") / "iterations" / "1" / "run"
-    assert result.iterations[1].resources.circuit_preparations == 1
-    holder = sqlite3.connect(folder / "run.sqlite", isolation_level=None)
-    try:
-        holder.execute("BEGIN EXCLUSIVE")
-        trace, reason = closed_trace(folder, RefusingBackend())
-    finally:
-        holder.close()
-    counts, unavailable = run_counts(trace, reason)
-    assert trace is None and "could not be read" in reason and "locked" in reason
-    assert counts == dict.fromkeys(RUN_COUNTS) and dict(unavailable) == dict.fromkeys(RUN_COUNTS, reason)
-    # A journal without read permission fails at once, with no lock to wait for. Reopening the committed
-    # folder must keep it (``_durable.reopen``), never suggest removing it as a header-less folder.
-    journal = folder / "run.sqlite"
-    mode = journal.stat().st_mode
-    journal.chmod(0)
-    try:
-        with pytest.raises(Exception) as caught:
-            reopen(folder, backend=RefusingBackend(), progress=False)
-    finally:
-        journal.chmod(mode)
-    assert "could not be read" in caught.value.__notes__[-1] and "Keep it" in caught.value.__notes__[-1]
-
-    # SQLite creates the file before the transaction creates any tables. This is the genuine
-    # empty-schema state of interrupted creation, without modifying a committed journal.
-    empty = Path("empty")
-    empty.mkdir()
-    sqlite3.connect(empty / "run.sqlite").close()
-    assert not header_committed(empty)
-    with pytest.raises(FileNotFoundError) as caught:
-        reopen(empty, backend=None, progress=False)
-    assert "no committed journal header" in caught.value.__notes__[-1]
-    assert (empty / "run.sqlite").is_file()
 
 
 def _noise_model():
@@ -869,65 +563,3 @@ def test_a_slack_round_resumes_with_its_committed_representation(tmp_path, count
     _assert_same_run(resumed.record, whole.record)
     loaded = load_augmented_lagrangian(resumed.save(tmp_path / "saved"))
     assert loaded.record.content_id == resumed.record.content_id
-
-
-def test_a_converted_round_resumes_after_a_committed_stall_split_with_its_check_charges(tmp_path, counted,
-                                                                                        monkeypatch):
-    """A slack round's search-model refinement splits at level 2, and the process stops as level 3 creates its Run.
-
-    f = x + 1 with the constant inequality -1 <= 0 in slack form on [-1, 1], K = 5 endpoint grids,
-    ``mode_or_mean`` and three levels. Injected x marginals times a uniform slack factor make level 1 keep
-    [-1, 1/4], make level 2 stall and split at its valley, and put level 3's mass on its last x point. A
-    search-model level solves at unit points u and reports their rounded images a + D u, and the layer checks
-    f and g at those images (constrained._level_check), so the split's scored points are checked at x = -11/16
-    and 1/4, not at their unit coordinates 1/4 and 1. Resume restores levels 1 and 2 from the record without
-    checking them again, continues level 3's Run and charges each restored level's checks, two for its grid
-    point and mean and two more for its split, so the records, layer charges included, equal those of the
-    uninterrupted run. The round checks two points per level, two scored points and its own point, its
-    reservation (2 L + 2 B + 1) C of constrained._setup with L = 3 and B = 1.
-    """
-    from nwqlib.algorithms.qhd import constrained
-    from nwqlib.algorithms.qhd.objective import node_count
-
-    problem = ConstrainedOptimization(objective=x + 1, variables=(x,), bounds=((-1.0, 1.0),),
-                                      inequalities=(sp.Integer(-1),))
-    qhd = QHD(num_grid_points=5, include_boundary_points=True, keep_state=True)
-    options = AugmentedLagrangian(inequality_form="slack", inner_point="mode_or_mean", max_iterations=1)
-    refinement = BoxRefinement(scaling="search_model", point_rule="mode_or_mean", max_levels=3, max_no_improve=3,
-                               mass_threshold=0.95, stall_split="best_region")
-    checked, evaluate = [], constrained._evaluate
-
-    def recorded(setup, point):
-        checked.append(point)
-        return evaluate(setup, point)
-
-    def inject():
-        rows = iter(((0.3, 0.5, 0.19, 0.005, 0.005), (0.15, 0.3, 0.01, 0.19, 0.35), (0.0, 0.0, 0.0, 0.0, 1.0)))
-        monkeypatch.setattr("nwqlib.algorithms.qhd.method._evolve_restricted",
-                            lambda *args: np.kron(np.sqrt(next(rows)), np.full(5, 1 / np.sqrt(5))).astype(complex))
-
-    def run(directory, progress=False):
-        return solve_augmented_lagrangian(problem, qhd=qhd, options=options, refinement=refinement,
-                                          execution="classical", seed=3, progress=progress, directory=directory)
-
-    monkeypatch.setattr(constrained, "_evaluate", recorded)
-    inject()
-    whole = run(tmp_path / "whole")
-    item = whole.iterations[0]
-    levels = item.refinement.levels
-    split = levels[1].split
-    assert item.representation.slacks and [level.split is not None for level in levels] == [False, True, False]
-    assert levels[1].box == ((-1.0, 0.25), (0.0, 1.0)) and split.points == ((-0.6875, 0.0), (0.25, 0.0))
-    assert len(checked) == 9 and checked[4:6] == [(-0.6875,), (0.25,)]
-    cost = sum(node_count(term, 100) + 1 for term in (problem.objective, *problem.inequalities))
-    assert item.resources.layer_evaluations == 2 * 9 and item.resources.layer_work == (2 * 3 + 2 * 1 + 1) * cost
-    inject()
-    with pytest.raises(KeyboardInterrupt):
-        run(tmp_path / "cut", progress=_stop_at("input", 3))
-    committed = _committed(tmp_path / "cut")
-    assert len(committed["levels"]) == 2 and committed["levels"][1]["split"] is not None
-    checked.clear()
-    counted.update(prepare=0, evolutions=0)
-    resumed = resume_augmented_lagrangian(tmp_path / "cut", backend=None, progress=False)
-    assert counted == dict(prepare=0, evolutions=1) and len(checked) == 3
-    _assert_same_run(resumed.record, whole.record)

@@ -2371,24 +2371,6 @@ def _check_scope(run, point):
         raise ValueError("run cancellation prevents new work")
 
 
-def _template_seed(randomness, construction_id):
-    """Seed of a backend's native template for one construction, in the uint32 runtime-seed domain.
-
-    It is the first uint32 word that NumPy's ``SeedSequence`` generates for
-    the Plan's recorded root entropy with the child path
-    ``(*randomness.spawn_key, 2, c)``, where ``c`` is the construction
-    identity's SHA-256 digest read as an integer. ``RandomStreams`` spawns the
-    method and backend streams as the children 0 and 1 of the same root, so
-    this path draws nothing from them: row seeds and the method's draws stay
-    as they were. The same Plan and construction give the same seed in every
-    Run, before or after reopening.
-    """
-    import numpy as np
-    digest = int(construction_id.removeprefix("sha256:"), 16)
-    sequence = np.random.SeedSequence(randomness.entropy, spawn_key=(*randomness.spawn_key, 2, digest))
-    return int(sequence.generate_state(1, dtype=np.uint32)[0])
-
-
 def _refuse_unsupported_target(run, observation):
     """Refuse a readout the backend's target cannot execute, naming the capability."""
     run._backend_notice()
@@ -2647,17 +2629,10 @@ def prepare_experiment(point, *, run, runtime=None, held=None):
                 raise ValueError("observation position exceeds the selected circuit")
         snapshot = str(uuid4())
         callback = getattr(run.backend, "prepare_local", None) or run.backend.prepare
-        # The template hook (backends/connection.py module docstring) reaches
-        # only an adapter that declares ``prepares_from_templates``, so other
-        # adapters receive no template arguments.
-        hook = {}
-        if getattr(run.backend, "prepares_from_templates", False):
-            hook = dict(construction_id=construction.content_id, backend_context=state["backend_context"],
-                        template_seed=_template_seed(plan.randomness, construction.content_id))
         native = callback(owned, observation=observation, runtime=runtime, position=position,
             source_definitions=tuple(state["definitions"][0].values()) + tuple(state["definitions"][1].values())
                 + tuple(state["specializations"].values()) + tuple(specializations.values()), run=run, snapshot=snapshot,
-            **hook, **({"views": views} if views else {}))
+            **({"views": views} if views else {}))
     except AdmissionStepsExceeded as error:
         raise _named_admission_refusal(plan, error) from error
     finally:
@@ -2693,14 +2668,9 @@ def _finish_native_preparation(preparation, *, run, reservation, fields, items, 
     identity in the same transaction, so a reopened Run can tell a finished
     preparation from an interrupted one (a charge without ``prepared_id``). For a
     remote compilation, the pending record becomes ``completed`` in the same
-    transaction. A preparation can record only the template seed that the
-    preparation hook supplied to its adapter.
+    transaction.
     """
     observation = fields["observation"]
-    template_seed = getattr(preparation, "template_seed", None)
-    if template_seed is not None and (not getattr(run.backend, "prepares_from_templates", False)
-                                      or template_seed != _template_seed(run.plan.randomness, fields["construction_id"])):
-        raise ValueError("a preparation records only the template seed that the preparation hook supplied")
     if observation.kind != "counts" and observation.population == "unconditional" and preparation.population != "unconditional":
         raise ValueError("selected unconditional readout has a conditioned or unknown population")
     payload = None if preparation.payload is None else PayloadRef(format=preparation.payload_format,
@@ -2713,7 +2683,7 @@ def _finish_native_preparation(preparation, *, run, reservation, fields, items, 
         native_operations=preparation.operations, population=preparation.population, transformation=preparation.transformation,
         counts_sampling=preparation.counts_sampling, provider_options_json=preparation.provider_options_json,
         probability_window_exclusions=preparation.probability_window_exclusions,
-        template_seed=template_seed, statevector_roundoff=preparation.statevector_roundoff)
+        statevector_roundoff=preparation.statevector_roundoff)
     handle = PreparedHandle._make(record, fields["realization"], preparation.native, items, setting, bindings)
     records = [("preparation", reservation.preparation_id, reservation.revise(prepared_id=record.content_id)),
                ("prepared", record.content_id, record)]

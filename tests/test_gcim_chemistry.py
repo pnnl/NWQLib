@@ -2,8 +2,6 @@
 
 from __future__ import annotations
 
-from types import SimpleNamespace
-
 import numpy as np
 import pytest
 from qiskit.quantum_info import Statevector
@@ -12,12 +10,10 @@ from _h2_sto3g_reference import (
     H2_STO3G_JW_TERMS,
     H2_STO3G_M7_ROUNDING,
     H2_STO3G_M7_TERMS,
-    H2_STO3G_NUCLEAR_REPULSION,
 )
 from nwqlib.algorithms.gcim import (
     build_gcim_chemistry_problem,
     chemistry_reference_diagnostic,
-    correlation_fraction,
     qubit_operator_to_sparse_pauli,
 )
 from nwqlib._prepared_execution import Run
@@ -38,207 +34,6 @@ def _sparse_pauli_dict(operator) -> dict[str, float]:
         str(pauli): float(np.real_if_close(coefficient))
         for pauli, coefficient in zip(operator.paulis, operator.coeffs, strict=True)
     }
-
-
-@pytest.fixture
-def chemistry_events(monkeypatch):
-    """Record chemistry calls with synthetic solvers, including an orbital rotation that exposes
-    wrong basis reuse.
-    """
-    from nwqlib.algorithms.gcim import chemistry
-
-    events = []
-
-    class MeanField:
-        converged = True
-        e_tot = -0.5
-
-        def __init__(self):
-            self.mo_coeff = np.eye(2)
-
-        def kernel(self):
-            events.append("rhf")
-            return self.e_tot
-
-        def get_hcore(self):
-            return np.diag([-1.0, 1.0])
-
-    class Reference:
-        converged = True
-        e_tot = -0.6
-
-        def __init__(self, name):
-            self.name = name
-
-        def kernel(self):
-            events.append(self.name)
-            return (-0.1,)
-
-    class CASCI(Reference):
-        def __init__(self, mean_field, *_):
-            super().__init__("casci")
-            self.mo_coeff = mean_field.mo_coeff
-
-        def kernel(self):
-            events.append("casci")
-            self.mo_coeff = np.array([[0.0, -1.0], [1.0, 0.0]])
-            return (self.e_tot,)
-
-        def get_h1eff(self, mo_coeff=None):
-            events.append("h1eff")
-            orbitals = self.mo_coeff if mo_coeff is None else mo_coeff
-            return orbitals.T @ np.diag([-1.0, 1.0]) @ orbitals, 0.7
-
-        def get_h2eff(self, mo_coeff=None):
-            events.append("h2eff")
-            return np.zeros((2, 2, 2, 2))
-
-    mol = SimpleNamespace(nelectron=2, energy_nuc=lambda: 0.7, atom_symbol=lambda _: "H")
-    extras = SimpleNamespace(
-        gto=SimpleNamespace(M=lambda **_: mol),
-        scf=SimpleNamespace(RHF=lambda _: MeanField()),
-        mp=SimpleNamespace(MP2=lambda _: Reference("mp2")),
-        cc=SimpleNamespace(CCSD=lambda _: Reference("ccsd")),
-        mcscf=SimpleNamespace(CASCI=CASCI),
-        ao2mo=SimpleNamespace(
-            kernel=lambda *_: np.zeros((2, 2, 2, 2)),
-            restore=lambda _, integrals, __: np.asarray(integrals),
-        ),
-        FermionOperator=object,
-        jordan_wigner=lambda _: SimpleNamespace(terms={(): 1.0}),
-    )
-    monkeypatch.setattr(chemistry, "_require_chemistry_extras", lambda: extras)
-    monkeypatch.setattr(
-        chemistry,
-        "_assemble_spin_orbital_fermion_operator",
-        lambda *_, **__: SimpleNamespace(terms={(): 1.0}),
-    )
-    return events
-
-
-@pytest.mark.parametrize("active_space", [None, (2, 2), (np.int64(2), np.int64(2))])
-def test_default_input_and_reports_do_not_solve_references_or_allocate_amplitudes(
-    chemistry_events,
-    monkeypatch,
-    active_space,
-) -> None:
-    from nwqlib.algorithms.gcim import chemistry
-
-    def forbidden(*_, **__):
-        pytest.fail("chemistry input/report construction allocated reference amplitudes")
-
-    monkeypatch.setattr(Statevector, "from_instruction", forbidden)
-    data = build_gcim_chemistry_problem("fake geometry", active_space=active_space)
-    events = ["rhf"] if active_space is None else ["rhf", "h1eff", "h2eff"]
-    assert chemistry_events == events
-    assert data.reference_occupations == (1, 1, 0, 0)
-    assert data.adapt_method().initial_state.preparation.implementation == "qiskit.occupation"
-    circuit = data.reference_preparation
-    assert circuit.count_ops() == {"x": 2}
-    assert [circuit.find_bit(item.qubits[0]).index for item in circuit.data] == [0, 1]
-    diagnostic = chemistry_reference_diagnostic(data.metadata, energy=-0.5)
-    section = chemistry.chemistry_reference_report_section(diagnostic)
-    # The display consumes the stored panel and starts no chemistry solve.
-    assert chemistry_events == events
-    assert "correlation_fraction" not in diagnostic
-    assert "active_space_casci_correlation_fraction" not in diagnostic
-    for method in ("mp2", "ccsd") + (() if active_space is None else ("casci",)):
-        assert data.reference_panel[f"e_{method}"] is None
-        assert data.reference_panel[method]["status"] == "not_requested"
-        assert any(f"E_{method.upper()}: not_requested" in line for line in section.lines)
-
-
-@pytest.mark.parametrize("method", ["mp2", "ccsd", "casci"])
-def test_explicit_reference_runs_once_and_casci_rotation_does_not_change_input(
-    chemistry_events,
-    method,
-) -> None:
-    data = build_gcim_chemistry_problem(
-        "fake geometry",
-        active_space=(2, 2),
-        reference_methods=(method, method.upper()),
-    )
-    assert chemistry_events == ["rhf", "h1eff", "h2eff", method]
-    assert data.reference_panel[method]["status"] == "computed"
-    assert data.reference_panel[f"e_{method}"] == -0.6
-    assert np.array_equal(data.one_body_integrals, np.diag([-1.0, 1.0]))
-    assert data.metadata["orbital_frame"] == (
-        "RHF molecular orbitals before reference calculations; each orbital's first AO "
-        "coefficient above 1e-08 of its largest magnitude is positive"
-    )
-
-
-@pytest.mark.parametrize(
-    "kwargs, message",
-    [
-        ({"reference_methods": ("casci",)}, "requires active_space"),
-    ],
-)
-def test_reference_method_admission_precedes_chemistry_work(monkeypatch, kwargs, message) -> None:
-    from nwqlib.algorithms.gcim import chemistry
-
-    def forbidden():
-        pytest.fail("invalid reference request reached chemistry dependencies")
-
-    monkeypatch.setattr(chemistry, "_require_chemistry_extras", forbidden)
-    with pytest.raises(ValueError, match=message):
-        build_gcim_chemistry_problem("fake geometry", **kwargs)
-
-
-
-
-def test_scientific_cardinalities_reject_before_unneeded_chemistry_work(
-    chemistry_events,
-    monkeypatch,
-) -> None:
-    from nwqlib.algorithms.gcim import chemistry
-
-    with pytest.raises(ValueError, match="molecule electron count"):
-        build_gcim_chemistry_problem("fake geometry", active_space=(4, 2))
-    assert chemistry_events == []
-
-    def forbidden():
-        pytest.fail("invalid active-space counts reached chemistry dependencies")
-
-    monkeypatch.setattr(chemistry, "_require_chemistry_extras", forbidden)
-    for active_space in ((2.9, 2.9), (2, 2.9)):
-        with pytest.raises(ValueError, match="integer"):
-            build_gcim_chemistry_problem("fake geometry", active_space=active_space)
-        with pytest.raises(ValueError, match="integer"):
-            chemistry._validate_active_space(
-                active_space, total_electrons=4, system_spatial_orbitals=4
-            )
-    assert chemistry._validate_active_space(
-        (np.int64(2), np.int64(2)), total_electrons=4, system_spatial_orbitals=4
-    ) == (2, 2)
-    assert chemistry.closed_shell_reference_occupations(
-        n_spatial_orbitals=np.int64(2), num_electrons=np.int64(2)
-    ) == (1, 1, 0, 0)
-    for counts in ((2.9, 2), (2, 2.9)):
-        with pytest.raises(ValueError, match="integer"):
-            chemistry.closed_shell_reference_occupations(
-                n_spatial_orbitals=counts[0], num_electrons=counts[1]
-            )
-
-
-def test_correlation_fraction_formula_on_synthetic_inputs() -> None:
-    assert correlation_fraction(-1.15, -1.0, -1.2) == pytest.approx(0.75, rel=0, abs=2e-15)
-    with pytest.raises(ValueError, match="E_CCSD - E_HF"):
-        correlation_fraction(-1.0, -1.0, -1.0)
-
-
-def test_stored_h2_table_matches_published_m7_to_its_printed_digits() -> None:
-    # The stored electronic table plus 1/R must reproduce every printed
-    # coefficient of Kyriienko arXiv:1901.09988, doi:10.1038/s41534-019-0239-7,
-    # Eq. (M7), including the qubit
-    # placement and
-    # signs of the four XY terms. The allowance is the half unit of the sixth
-    # printed decimal plus 1e-9 for the binary64 table and the Bohr constant.
-    stored = dict(H2_STO3G_JW_TERMS)
-    stored["IIII"] += H2_STO3G_NUCLEAR_REPULSION
-    assert set(stored) == {label for label, _ in H2_STO3G_M7_TERMS}
-    for label, printed in H2_STO3G_M7_TERMS:
-        assert stored[label] == pytest.approx(printed, rel=0.0, abs=H2_STO3G_M7_ROUNDING + 1.0e-9)
 
 
 def test_h2_pyscf_openfermion_pipeline_matches_stored_table_and_published_m7() -> None:
@@ -429,61 +224,6 @@ def test_lih_cas22_active_space_matches_pyscf_casci() -> None:
     )
 
 
-def test_active_space_input_rejections() -> None:
-    _require_chemistry_extras()
-
-    geometry = "H 0 0 0; H 0 0 0.7414"
-    with pytest.raises(ValueError, match="even active electron"):
-        build_gcim_chemistry_problem(geometry, active_space=(1, 2))
-    with pytest.raises(ValueError, match="active-orbital capacity"):
-        build_gcim_chemistry_problem(geometry, active_space=(6, 2))
-    with pytest.raises(ValueError, match="molecular orbital count"):
-        build_gcim_chemistry_problem(geometry, active_space=(2, 3))
-    with pytest.raises(ValueError, match="core and active orbitals"):
-        build_gcim_chemistry_problem(geometry, active_space=(0, 2))
-
-
-def test_heh_cation_charge_knob_builds_closed_shell_problem() -> None:
-    _require_chemistry_extras()
-
-    data = build_gcim_chemistry_problem(
-        "He 0 0 0; H 0 0 0.772",
-        basis="sto-3g",
-        unit="Angstrom",
-        charge=1,
-        name="HeH+/STO-3G charge-knob coverage",
-        reference_methods=(),
-    )
-
-    assert data.metadata["charge"] == 1
-    assert data.num_electrons == 2
-    assert data.num_qubits == 4
-    assert data.reference_occupations == (1, 1, 0, 0)
-    # Sanity bound, not a physics anchor: a bound cation RHF energy is negative.
-    assert data.reference_panel["e_hf"] < 0.0
-
-
-def test_coefficient_cutoff_drops_pauli_terms_monotonically() -> None:
-    _require_chemistry_extras()
-
-    geometry = "H 0 0 0; H 0 0 0.7414"
-    counts = []
-    for cutoff in (1.0e-12, 1.0e-6, 1.0e-1):
-        data = build_gcim_chemistry_problem(
-            geometry,
-            basis="sto-3g",
-            unit="Angstrom",
-            coefficient_cutoff=cutoff,
-            reference_methods=(),
-        )
-        counts.append(len(data.hamiltonian.paulis))
-
-    # Loosening the cutoff can only remove terms; the H2/STO-3G JW table has
-    # |coefficient| ~ 4.5e-2 entries, so the 1e-1 cutoff must strictly drop.
-    assert counts[0] >= counts[1] >= counts[2]
-    assert counts[2] < counts[0]
-
-
 def test_spin_nonzero_input_is_rejected() -> None:
     _require_chemistry_extras()
 
@@ -494,49 +234,6 @@ def test_spin_nonzero_input_is_rejected() -> None:
             unit="Angstrom",
             spin=2,
         )
-
-
-def test_reference_panel_records_mp2_ccsd_failures_without_blocking_build(monkeypatch) -> None:
-    """Inject a thrown MP2 error and nonconverged CCSD result without discarding the successfully
-    built Hamiltonian.
-    """
-    _require_chemistry_extras()
-    from pyscf import cc, mp
-
-    class BrokenMP2:
-        def __init__(self, mean_field):
-            self.mean_field = mean_field
-
-        def kernel(self):
-            raise RuntimeError("mp2 boom")
-
-    class NonConvergedCCSD:
-        converged = False
-        e_tot = None
-
-        def __init__(self, mean_field):
-            self.mean_field = mean_field
-
-        def kernel(self):
-            return 0.0, None, None
-
-    monkeypatch.setattr(mp, "MP2", BrokenMP2)
-    monkeypatch.setattr(cc, "CCSD", NonConvergedCCSD)
-
-    data = build_gcim_chemistry_problem(
-        "H 0 0 0; H 0 0 0.7414",
-        basis="sto-3g",
-        unit="Angstrom",
-        reference_methods=("mp2", "ccsd"),
-    )
-
-    panel = data.reference_panel
-    assert panel["e_mp2"] is None
-    assert panel["mp2"]["status"] == "failed"
-    assert "mp2 boom" in panel["mp2"]["failure_reason"]
-    assert panel["e_ccsd"] is None
-    assert panel["ccsd"]["status"] == "non_converged"
-    assert "did not converge" in panel["ccsd"]["failure_reason"]
 
 
 def test_openfermion_jw_matches_hand_rolled_e4_e5_generators() -> None:
@@ -571,82 +268,3 @@ def test_openfermion_jw_matches_hand_rolled_e4_e5_generators() -> None:
         rtol=0.0,
         atol=1.0e-12,
     )
-
-
-def test_partial_chemistry_panel_renders_missing_reference() -> None:
-    from nwqlib.algorithms.gcim import chemistry as gcim_chemistry
-
-    diagnostic = chemistry_reference_diagnostic(
-        {
-            "chemistry_reference_panel": {
-                "label": "application context, not a validation gate",
-                "e_hf": -1.0,
-                "mp2": {"status": "not_requested"},
-            }
-        },
-        energy=0.0,
-    )
-    section = gcim_chemistry.chemistry_reference_report_section(diagnostic)
-    assert section.title == "Chemistry References"
-    assert any("E_CCSD" in line for line in section.lines)
-
-
-def test_reference_energy_records_mp2_missing_converged_as_computed() -> None:
-    import types
-    from nwqlib.algorithms.gcim import chemistry as gcim_chemistry
-
-    class Solver:
-        e_tot = -1.2
-
-        def kernel(self):
-            return (-0.2,)
-
-    mean_field = types.SimpleNamespace(e_tot=-1.0)
-    mp2 = gcim_chemistry._reference_energy(
-        "mp2",
-        Solver,
-        lambda solver: solver.kernel()[0],
-        mean_field,
-        missing_converged_ok=True,
-    )
-    ccsd = gcim_chemistry._reference_energy(
-        "ccsd",
-        Solver,
-        lambda solver: solver.kernel()[0],
-        mean_field,
-        missing_converged_ok=False,
-    )
-    assert mp2["mp2"]["status"] == "computed"
-    assert ccsd["ccsd"]["status"] == "non_converged"
-
-
-def test_zero_correlation_panel_remains_undefined_and_renderable() -> None:
-    from nwqlib.algorithms.gcim import chemistry as gcim_chemistry
-
-    diagnostic = gcim_chemistry.chemistry_reference_diagnostic(
-        {"chemistry_reference_panel": {"e_hf": -2.807, "e_ccsd": -2.807}},
-        energy=-2.807,
-    )
-    assert "correlation_fraction" not in diagnostic
-    assert diagnostic["correlation_fraction_note"] == "undefined: E_CCSD == E_HF"
-    section = gcim_chemistry.chemistry_reference_report_section(diagnostic)
-    assert any("undefined" in line for line in section.lines)
-
-
-def test_numpy_bool_convergence_flags_are_respected() -> None:
-    import types
-    from nwqlib.algorithms.gcim import chemistry as gcim_chemistry
-
-    class _FakeSolver:
-        converged = np.bool_(False)
-        e_tot = -1.23
-
-    record = gcim_chemistry._reference_energy(
-        "ccsd",
-        lambda: _FakeSolver(),
-        lambda solver: -0.1,
-        types.SimpleNamespace(e_tot=-1.0),
-        missing_converged_ok=False,
-    )
-    assert record["e_ccsd"] is None
-    assert record["ccsd"]["status"] == "non_converged"

@@ -1,5 +1,30 @@
 # Release notes
 
+## v1.0.3.post1 (2026-10-21)
+
+Relative to v1.0.3, this maintenance release changes the test suite, the documentation, two extension interfaces and the shared Run and Result archive formats. It cannot load Run or Result archives written by v1.0.3. Defaults are unchanged.
+
+The test suite holds 1,501 tests, against 3,259 in v1.0.3. It keeps the checks of computed quantities against independent references, the resource limits that refuse work before it starts, the normal save, load and resume paths, the checks against installed SDKs, the example notebooks and every test that the mutation probes or the documentation name. Tests were removed when they were judged to check only message wording, printed text, internal records and helper calls, the rejection of misuse such as unknown options or edited saved files, or a case that another current test covers.
+
+New tests follow a user's workflow through the public API:
+
+- The Python examples on the README and documentation pages run as written. On 20 of these pages, the values the examples compute are compared with independent computations.
+- The `nwqlib` command lists the registered Methods, reports the options each Method requires as its constructor does, and lists installed third-party Methods without importing them.
+- LCHS and QLS solutions for a periodic stencil agree with the dense matrix exponential and linear solve within their stated error bounds. On Aer, a QLS solution scales with the magnitude, sign and phase of the right-hand side, and its physical scalars lie within their error bounds. A two-qubit Pauli operator `A` with a supplied `kappa` gives the same solution as its dense matrix, sampled indices follow the solution's distribution, and each accuracy setting in a comparison meets its own tolerance.
+- A classical LCHS solution with a constant source lies within its refined error bound of the closed-form solution, and a sampled expectation value lies within its reported sampling radius.
+- The `Solution` of a LinearSystem or LinearDynamics carries the Problem's unit, and its `NormSquared` carries the square of that unit. An Expectation's unit labels its normalized expectation, so a `QuadraticForm` output has an unspecified unit unless it declares one.
+- QCELS estimates the H2 ground energy from a Pauli Hamiltonian with and without a constant offset. Lanczos keeps only the reachable directions when the requested Krylov dimension exceeds the subspace that the initial state generates. A saved sampled Lanczos result reanalyzes with its shot counts, and `scan` by requested shots and `logical_width` keeps both Plans of a shots-width trade-off in its nondominated set.
+
+The LCHS guide states that `A` must be a dense matrix or a periodic stencil, and how to pass a SciPy sparse matrix or a Qiskit `SparsePauliOp` in dense form. The pages on comparing and ranking Plans state that ranking sampled Plans by width needs `ResourceContext(batch_schedule="serial")`. The Units section states that a unit-normalized StateVector is dimensionless for every Problem. The maintenance guide describes the documentation example check.
+
+Two extension interfaces and the shared archive formats change:
+
+- NWQLib passes `settings` to the Method's `prepare(plan, *, run, settings)` hook on every call, so an override of that hook must accept the keyword. In v1.0.3, NWQLib passed `settings` only for `"all"`, and the inherited `Method.prepare_all_refusal` refused `"all"` for an override without the keyword. The inherited `Method.prepare_all_refusal` now returns `None`, so a Method that cannot prepare every setting in advance overrides it, as [Adaptive Methods](algorithm_protocol.md#adaptive-methods) describes.
+- The `prepares_from_templates` attribute of backend adapters and the `template_seed` fields of `NativePreparation` and `PreparedArtifact` are removed. No backend included with NWQLib set that attribute. An adapter that set it no longer receives the `construction_id`, `backend_context` and `template_seed` keyword arguments at `prepare` or `prepare_local`. These arguments have no replacement.
+- Because preparation records change, the shared archive formats are `nwqlib.run/21` and `nwqlib.result/14`. This release cannot load earlier shared formats, including those written by v1.0.3. Keep the writer's NWQLib version available to read old results or finish pending runs, or replan and rerun with this release to create new archives. This also applies to Result and Run subfolders of QHD refinement and augmented-Lagrangian archives.
+
+Package and citation source versions are `1.0.3.post1`, with the project concept DOI.
+
 ## v1.0.3 (2026-10-19)
 
 Relative to v1.0.2, this release includes the mathematical and planning updates first published in `1.0.2.post1` and the complete BSD-2-Clause license with the PNNL/DOE disclaimer.

@@ -55,6 +55,3 @@ H2_STO3G_M7_TERMS: tuple[tuple[str, float], ...] = (
 # Printed to six decimals, so each value is within half a unit of the sixth
 # decimal of the Hamiltonian the paper computed.
 H2_STO3G_M7_ROUNDING = 5.0e-7
-# Nuclear repulsion 1/R in Hartree, with R converted using the Bohr radius
-# 0.529177210903 Angstrom (CODATA 2018).
-H2_STO3G_NUCLEAR_REPULSION = 0.529177210903 / 0.7414

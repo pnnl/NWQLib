@@ -28,7 +28,7 @@ from nwqlib.execution import ExecutionTrace, ObservationView, PreparedArtifact
 # field change may instead bump that Method's archive format when load_result
 # checks it before validating the concrete Result. read_report checks shared
 # metadata, leaving Method-owned fields and archive formats uninterpreted.
-RESULT_FORMAT = "nwqlib.result/13"
+RESULT_FORMAT = "nwqlib.result/14"
 
 
 def _validate_recorded_data(plan_id, observations, trace, receipts, manifests):

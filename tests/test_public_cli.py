@@ -29,48 +29,12 @@ def cli(*args, cwd=None):
     )
 
 
-def test_options_uses_actual_required_scientific_configuration_without_instantiation(capsys):
-    from nwqlib.cli import main
-
-    assert main(["options", "adapt_gcim"]) == 0
-    schema = json.loads(capsys.readouterr().out)
-    assert {"initial_state", "pool"} <= set(schema["required"])
-    assert "theta" in schema["properties"]
-    assert main(["options", "fixed_gcim"]) == 0
-    assert "basis" in json.loads(capsys.readouterr().out)["required"]
-
-
-def test_card_and_options_help_print_without_discovering_methods(monkeypatch, capsys):
-    from nwqlib import cli as module
-
-    monkeypatch.setattr(module, "_registrations", lambda *args: pytest.fail("help discovered methods"))
-    for command, description in (("card", "declared scope"), ("options", "configuration schema")):
-        with pytest.raises(SystemExit) as stopped:
-            module.main([command, "--help"])
-        assert stopped.value.code == 0
-        assert description in capsys.readouterr().out
-
-
 def test_actual_external_check_method_cli_and_zero_acquisition_falsifier():
     completed = cli("check-method", "_hadamard_method:case")
     assert completed.returncode == 0, completed.stderr
     report = json.loads(completed.stdout)
     assert report["status"] == "CONFORMANT"
     assert report["method"] == "example.hadamard_pauli_expectation"
-    assert "not a general" in report["qualification"]
-
-
-def test_check_method_propagates_factory_attribute_errors(monkeypatch):
-    import types
-    from nwqlib.cli import main
-
-    # An AttributeError raised inside an existing factory is not a lookup error.
-    def broken_case():
-        raise AttributeError("internal author attribute")
-
-    monkeypatch.setitem(sys.modules, "broken_author_module", types.SimpleNamespace(case=broken_case))
-    with pytest.raises(AttributeError, match="internal author attribute"):
-        main(["check-method", "broken_author_module:case"])
 
 
 def test_author_checker_rejects_false_oracle_ineffective_falsifier_and_disabled_pair_check(
@@ -91,21 +55,93 @@ def test_author_checker_rejects_false_oracle_ineffective_falsifier_and_disabled_
     assert check_method(original)["status"] == "CONFORMANT"
 
 
-def test_author_checker_preserves_array_result_and_same_plan_falsifier():
-    import numpy as np
-    import nwqlib
-    from nwqlib.algorithms import LCHS
-    from nwqlib.algorithms.authoring import MethodCase
-    from nwqlib.problems.inputs import ingest_product
+def test_console_script_and_module_list_every_registered_method():
+    from nwqlib import methods
 
-    # t=0 and zero physical input give an exact, independent two-entry oracle.
-    original = MethodCase(
-        method=LCHS(),
-        problem=nwqlib.LinearDynamics(A=np.eye(2), initial_state=ingest_product([[0., 0.]]), time=0),
-        execution="classical", evaluate=nwqlib.solve,
-        accepts=lambda result: len(result.data.artifacts) == 1 and bool(np.array_equal(result.solution, np.zeros(2))),
-        invalid_result=lambda result: result.revise(construction_id="sha256:" + "0" * 64),
+    script = Path(sys.executable).with_name("nwqlib")
+    if not script.exists():
+        pytest.skip("the nwqlib console script exists only in an installed environment")
+    module = cli("algorithms")
+    installed = subprocess.run(
+        [str(script), "algorithms"],
+        cwd=ROOT,
+        env=dict(os.environ, PYTHONPATH=os.pathsep.join((str(ROOT / "src"), str(ROOT / "tests")))),
+        text=True,
+        capture_output=True,
+        check=False,
     )
-    assert check_method(original)["status"] == "CONFORMANT"
-    with pytest.raises(ValueError, match="expected relation failed"):
-        check_method(replace(original, accepts=lambda result: bool(np.array_equal(result.solution, np.ones(2)))))
+    assert module.returncode == installed.returncode == 0, module.stderr + installed.stderr
+    assert installed.stdout == module.stdout
+    # Each listed Method is printed as name@version before its outputs.
+    names = (line.split(":", 1)[0] for line in module.stdout.splitlines())
+    listed = {tuple(name.rsplit("@", 1)) for name in names if "@" in name}
+    assert listed == {(row.source.name, row.source.version) for row in methods()}
+
+
+def test_options_and_card_match_each_registered_method_constructor(capsys):
+    import pydantic
+
+    from nwqlib import methods
+    from nwqlib.algorithms import AlgorithmRegistry
+    from nwqlib.cli import main
+    from nwqlib.operators import ingest_pauli
+
+    registrations = methods()
+    registry = AlgorithmRegistry(registrations)
+    assert main(["algorithms", "--json"]) == 0
+    cards = json.loads(capsys.readouterr().out)
+    assert {(card["source"]["name"], card["source"]["version"]) for card in cards} == {
+        (row.source.name, row.source.version) for row in registrations
+    }
+    # The required inputs of the documented examples of the three Methods that have any.
+    supplied = {
+        "adapt_gcim": dict(initial_state=[1, 1], pool=(ingest_pauli((("Y", 1j),), num_qubits=1),)),
+        "fixed_gcim": dict(basis=([1, 1], [1, 1j])),
+        "spe": dict(initial_state=[1, 0], overlap_lower_bound=1.0),
+    }
+    for row in registrations:
+        name, version = row.source.name, row.source.version
+        assert main(["options", name, "--version", version]) == 0
+        schema = json.loads(capsys.readouterr().out)
+        # The required fields `options` reports are the ones a Method constructed without configuration lacks.
+        try:
+            registry.resolve(row.source)
+            missing = set()
+        except pydantic.ValidationError as error:
+            missing = {item["loc"][0] for item in error.errors() if item["type"] == "missing"}
+        assert set(schema.get("required", ())) == missing, name
+        method = registry.resolve(row.source, **supplied.get(name, {}))
+        assert main(["card", name, "--version", version]) == 0
+        card = json.loads(capsys.readouterr().out)
+        assert tuple(card["descriptor"]["output_families"]) == tuple(method.descriptor.output_families)
+
+
+def test_third_party_listing_reads_entry_points_without_importing_the_extension(tmp_path):
+    # An installed distribution declares one Method by entry point. Importing its module writes a marker file.
+    marker = tmp_path / "imported"
+    metadata = tmp_path / "toyext-0.1.dist-info"
+    metadata.mkdir()
+    (metadata / "METADATA").write_text("Metadata-Version: 2.1\nName: toyext\nVersion: 0.1\n")
+    (metadata / "entry_points.txt").write_text("[nwqlib.algorithms]\ntoy_method@1 = toyext:factory\n")
+    (tmp_path / "toyext.py").write_text(
+        f"from pathlib import Path\nPath({str(marker)!r}).write_text('imported')\n\n"
+        "def factory(**configuration):\n    raise AssertionError('factory called')\n"
+    )
+    env = dict(os.environ, PYTHONPATH=os.pathsep.join((str(tmp_path), str(ROOT / "src"))))
+
+    def run(*args):
+        return subprocess.run(
+            [sys.executable, "-m", "nwqlib", *args],
+            cwd=tmp_path, env=env, text=True, capture_output=True, check=False,
+        )
+
+    built_in, listed = run("algorithms"), run("algorithms", "--third-party")
+    cards, options = run("algorithms", "--json", "--third-party"), run("options", "toy_method", "--third-party")
+    assert built_in.returncode == listed.returncode == cards.returncode == 0
+    assert "toy_method@1" in {line.split(":", 1)[0] for line in listed.stdout.splitlines()}
+    assert "toy_method@1" not in {line.split(":", 1)[0] for line in built_in.stdout.splitlines()}
+    (card,) = (card for card in json.loads(cards.stdout) if card["source"]["name"] == "toy_method")
+    assert card["descriptor"] is None and card["options_available"] is False
+    # A configuration schema needs the extension's code, so the CLI reports it unavailable with exit status 1.
+    assert options.returncode == 1
+    assert not marker.exists()

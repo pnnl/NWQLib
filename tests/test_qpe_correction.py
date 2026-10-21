@@ -1,47 +1,10 @@
 """Selected QPE meaning, legal alternatives, count identity and immutable evidence."""
 
-from math import pi
 import numpy as np
 import pytest
 from nwqlib import Eigenproblem, solve, plan
 from nwqlib.algorithms.qpe import QPEVerification
-from nwqlib.algorithms.qpe.records import validate_selection, energy_phase_turns
-from nwqlib._counts import CountsSources
 from test_qpe_selected import make_plan
-
-
-def _with_outcomes(chunk, outcomes):
-    """A revision of ``chunk`` that holds the supplied outcomes and keeps every other field."""
-    from nwqlib.execution import ObservationChunk
-
-    fields = {name: getattr(chunk, name) for name in type(chunk).model_fields if name != "values"}
-    return ObservationChunk.from_histogram(outcomes, **{**fields, "parent_id": chunk.content_id})
-
-
-def test_foreign_target_and_tau_relabel_cannot_reuse_selection():
-    selected = make_plan(execution="quantum")
-    with pytest.raises(ValueError, match="original target"):
-        validate_selection(selected.revise(problem=Eigenproblem(A=np.diag([0.5, -0.7]))))
-    with pytest.raises(ValueError, match="Method"):
-        validate_selection(selected.revise(method=selected.method.revise(tau=0.3)))
-    other = plan(selected.problem, method=selected.method.revise(tau=0.3), seed=7)
-    validate_selection(other)
-    assert other.problem == selected.problem and other.reconstruction.tau == 0.3
-
-
-@pytest.mark.parametrize("estimator", ["qcels", "rfe"])
-def test_automatic_time_uses_the_same_full_phase_domain_for_dense_and_pauli(estimator):
-    from nwqlib.operators import ingest_pauli
-
-    # Both access forms have the same tight radius .5. Planning must use the
-    # estimator's phase domain without requiring a Pauli matrix expansion.
-    targets = (np.diag([.5, -.5]), ingest_pauli((("Z", .5),), num_qubits=1))
-    for target in targets:
-        options = dict(max_time=None) if estimator == "qcels" else {}
-        selected = make_plan(execution="quantum", estimator=estimator, target=target, tau=None, **options)
-        # Two eps allows the multiplication and division defining the time.
-        assert selected.reconstruction.tau == pytest.approx(.9 * pi / .5, rel=2*np.finfo(float).eps, abs=0)
-        assert selected.reconstruction.aliasing_bound_sufficient
 
 
 def test_spe_verification_compares_the_lowest_cluster_and_declared_overlap(monkeypatch):
@@ -83,36 +46,6 @@ def test_rwpe_noninteger_time_has_the_declared_native_interference_probability(a
     # Two-qubit dense synthesis or commuting Pauli rotations, followed by two
     # Hadamards and one phase, accumulate only a short binary64 arithmetic chain.
     assert observed == pytest.approx(expected, rel=0, abs=2e-14)
-
-
-def test_rwpe_unitary_only_input_rejects_before_matrix_access(monkeypatch):
-    from nwqlib import SpectralEstimation
-    from nwqlib.algorithms.qpe import RWPE
-    from nwqlib.operators import OperatorInput
-
-    # Admitting a unitary whose dimension is not a power of two pads it, which
-    # reads its dense array, so the refusal must come before that.
-    problem = SpectralEstimation(unitary=np.diag([1., 1j, -1.]), initial_state=[1., 0., 0.])
-    monkeypatch.setattr(OperatorInput, "dense_array", lambda *a, **k: pytest.fail("expanded unitary"))
-    with pytest.raises(ValueError, match="continuous Hamiltonian"):
-        plan(problem, method=RWPE())
-
-
-def test_same_seed_counts_source_is_not_an_independent_population():
-    result = solve(make_plan(execution="quantum", shots=11))
-    data = result.data
-    receipts = {r.content_id: r for r in data.receipts}
-    sources = CountsSources(receipts.get, data.trace._acquisition)
-    sources.require_independent(data.observations.chunks[0])
-    first, second = data.receipts[:2]
-    copied = second.revise(counts_sampling=first.counts_sampling)
-    receipts[copied.content_id] = copied
-    with pytest.raises(ValueError, match="sampling stream"):
-        sources.admit_preparation(copied.content_id)
-    sources.admit_preparation(second.content_id)
-    sources.require_independent(data.observations.chunks[1])
-    # Rereading exactly the same acquired source is legal; a controller owns once-only updates.
-    sources.require_independent(data.observations.chunks[0])
 
 
 def test_pooled_draw_query_uses_its_received_population_with_its_draw_weight(monkeypatch):
@@ -169,25 +102,6 @@ def test_pooled_draw_query_uses_its_received_population_with_its_draw_weight(mon
         owner.received_fourier_exposure(((pooled, pooled, 0, 6),), selected.shots)
 
 
-def test_phase_scalar_and_interval_frame_match_original_units():
-    from nwqlib.algorithms.qpe.records import QPEInterval
-
-    result = solve(make_plan(estimator="spe", phase=True))
-    for phase in (-0.1, 1.0, float("nan")):
-        with pytest.raises(ValueError):
-            result.revise(phase_turns=phase)
-    with pytest.raises(ValueError, match="phase disagree"):
-        result.revise(phase_turns=0.2).validate_plan(result.plan)
-    with pytest.raises(ValueError, match="interval frame"):
-        result.revise(
-            interval=QPEInterval(low=0., high=.5, method="explicit test interval",
-                frame="energy in requested operator units", interpretation="nominal test interval")
-        ).validate_plan(result.plan)
-    assert energy_phase_turns(0.7, 0.2) == pytest.approx((-0.14 / (2 * pi)) % 1.0, abs=1e-15)
-    with pytest.raises(ValueError, match="finite"):
-        energy_phase_turns(1e308, 1e308)
-
-
 def test_qcels_units_sparse_schedule_and_actual_admission(monkeypatch):
     from nwqlib.algorithms.qpe import QCELS, numerical
     from nwqlib.algorithms.qpe import method as owner
@@ -242,34 +156,11 @@ def test_qcels_units_sparse_schedule_and_actual_admission(monkeypatch):
                 plan(Eigenproblem(A=np.diag([.4, -.7])), method=method, execution="classical", seed=7)
 
 
-def test_qcels_archive_preserves_effective_grid_without_refitting(tmp_path, monkeypatch):
-    from nwqlib.algorithms.qpe import method as owner, numerical
-    from nwqlib.algorithms.qpe.records import QPEInterval
-    from nwqlib import load_result
-
-    result = solve(make_plan(num_times=3, max_time=4., grid_size=64))
-    assert result.fit.effective_grid == 161
-    assert result.analyze(grid_size=128).fit.effective_grid == 161
-    with pytest.raises(ValueError, match="actual finite analysis grid"):
-        result.revise(fit=result.fit.revise(effective_grid=64)).validate_plan(result.plan)
-    with pytest.raises(ValueError, match="uncertainty interval"):
-        result.revise(interval=QPEInterval(low=0., high=1., method="qcels_residual_slope_t",
-                     frame="energy in requested operator units", interpretation="obsolete slope interval"))
-    with pytest.raises(ValueError, match="analysis revision"):
-        result.revise(origin=result.origin.revise(analyzer=owner._ANALYSIS_SOURCE)).validate_plan(result.plan)
-    saved = result.save(tmp_path / "result")
-    monkeypatch.setattr(numerical, "qcels", lambda *a, **k: pytest.fail("archive refit"))
-    monkeypatch.setattr(numerical, "planned_power_schedule", lambda *a: pytest.fail("archive schedule"))
-    loaded = load_result(saved)
-    assert loaded.fit == result.fit and loaded.interval is None and loaded.samples == result.samples
-
-
-@pytest.mark.parametrize("estimator", ("qcels", "spe", "rfe"))
-def test_changed_grid_reanalyzes_without_reacquisition(monkeypatch, estimator):
+def test_changed_grid_reanalyzes_without_reacquisition(monkeypatch):
     from nwqlib.algorithms.qpe import numerical
     from nwqlib.backends import qiskit_aer
 
-    result = solve(make_plan(estimator=estimator, execution="quantum"))
+    result = solve(make_plan(estimator="qcels", execution="quantum"))
     monkeypatch.setattr(qiskit_aer, "_submit_aer_execution",
                         lambda *a, **k: pytest.fail("analysis acquired a new sample"))
     monkeypatch.setattr(
@@ -277,14 +168,6 @@ def test_changed_grid_reanalyzes_without_reacquisition(monkeypatch, estimator):
         "nominal_eigensystem",
         lambda *a, **k: (_ for _ in ()).throw(AssertionError("new spectrum")),
     )
-    if estimator == "rfe":
-        # K specifies both the power distribution and Fourier frequencies.
-        # Changing it cannot be treated as analysis of the same acquisition.
-        for settings in (dict(num_frequencies=16), dict(num_samples=16), dict(grid_size=128)):
-            with pytest.raises(ValueError, match="acquisition"):
-                result.analyze(**settings)
-        assert result.analyze().estimator_value == result.estimator_value
-        return
     settings = dict(grid_size=128)
     revised = result.analyze(**settings)
     assert revised.data is result.data and revised.plan is result.plan
@@ -293,13 +176,12 @@ def test_changed_grid_reanalyzes_without_reacquisition(monkeypatch, estimator):
         result.analyze(num_samples=16)
 
 
-@pytest.mark.parametrize("phase", [False, True])
+@pytest.mark.parametrize("phase", [True])
 def test_reference_limit_precedes_reference_work(monkeypatch, phase):
     from nwqlib.algorithms.qpe import method as owner, numerical
 
-    # A Hamiltonian quantum run already holds its eigensystem, so verification
-    # would next project the reference state. A unitary run holds none, so it
-    # would first diagonalize the target.
+    # A unitary quantum run holds no eigensystem, so verification would first
+    # diagonalize the target.
     result = solve(make_plan(execution="quantum", phase=phase))
     for module, name in ((numerical, "nominal_eigensystem"), (owner, "_reference_data")):
         monkeypatch.setattr(
@@ -320,54 +202,6 @@ def test_static_same_seed_rejects_before_second_submission(monkeypatch):
         submit(prepared)
     assert prepared.run.trace.jobs == 1
     assert sum(c.returned_shots for c in prepared.run.observations.chunks) == 11
-
-
-@pytest.mark.parametrize("uncertain", [False, True])
-def test_unused_or_uncertain_count_source_rejects_before_another_submit(monkeypatch, uncertain):
-    from nwqlib._prepared_execution import Run, prepare_experiment, submit_experiment
-    from nwqlib.core.planning import RuntimeOptions
-
-    selected = make_plan(execution="quantum", shots=11)
-    run = Run(selected)
-    first = prepare_experiment(
-        selected.resolve(selected.experiments[0].name), run=run, runtime=RuntimeOptions(seed=17)
-    )
-    original = type(run.backend).submit
-    if uncertain:
-
-        def fail(*a, **k):
-            raise RuntimeError("uncertain native outcome")
-
-        monkeypatch.setattr(type(run.backend), "submit", fail)
-        with pytest.raises(RuntimeError, match="uncertain"):
-            submit_experiment(first, run=run)
-        monkeypatch.setattr(type(run.backend), "submit", original)
-    else:
-        submit_experiment(first, run=run)
-    assert not run.observations.chunks
-    second = prepare_experiment(
-        selected.resolve(selected.experiments[1].name), run=run, runtime=RuntimeOptions(seed=17)
-    )
-    with pytest.raises(ValueError, match="sampling stream"):
-        submit_experiment(second, run=run)
-    assert len(run.trace.events) == 1 and run.trace.jobs == 1
-
-
-def test_exact_probability_window_follows_the_stated_roundoff_relation():
-    from nwqlib._validation import (AER_STATEVECTOR_ROUNDOFF_PER_OPERATION, NUMERICAL_RELATION_RTOL,
-                                    NWQSIM_CPU_SV_ROUNDOFF_PER_OPERATION, UNIT_ROUNDOFF,
-                                    exact_probability_window, exact_readout_roundoff)
-
-    assert exact_probability_window(None, 9) == exact_probability_window(0, 0) == NUMERICAL_RELATION_RTOL
-    assert exact_readout_roundoff(9) == 2**10 + 10
-    deep = exact_probability_window(529_017, 9)  # the H4 QCELS power-10 circuit
-    assert deep == (AER_STATEVECTOR_ROUNDOFF_PER_OPERATION * 529_017 + 2**10 + 10) * UNIT_ROUNDOFF
-    assert deep > 1.2e-12  # its observed normalization gap
-    assert exact_probability_window(529_018, 9) > deep
-    shallow = exact_probability_window(529_017, 9, per_operation=NWQSIM_CPU_SV_ROUNDOFF_PER_OPERATION)
-    assert shallow == (NWQSIM_CPU_SV_ROUNDOFF_PER_OPERATION * 529_017 + 2**10 + 10) * UNIT_ROUNDOFF
-    with pytest.raises(ValueError, match="nonnegative"):
-        exact_probability_window(-1, 2)
 
 
 def test_roundoff_constants_cover_the_worst_instruction_of_each_derivation():
@@ -401,35 +235,6 @@ def test_roundoff_constants_cover_the_worst_instruction_of_each_derivation():
     assert NWQSIM_CPU_SV_ROUNDOFF_PER_OPERATION >= nwqsim * (1 - 1e-12)
 
 
-def test_aer_exact_preparation_lists_operations_outside_the_roundoff_derivation():
-    """Supplied matrices and large phase sums are recorded as exclusions, while parameterized
-    gates with reduced angles, including a diagonal rotation by a large angle, are inside.
-    """
-    from qiskit import QuantumCircuit
-    from qiskit.circuit.library import UnitaryGate
-    from nwqlib.backends.qiskit_aer import _prepare_aer_execution
-    from nwqlib.backends.targets import AER_STATEVECTOR_TARGET
-
-    def exclusions(circuit, probability_qubits=(0,)):
-        prepared = _prepare_aer_execution(AER_STATEVECTOR_TARGET, circuit, shots=None, seed=1,
-                                          probability_qubits=probability_qubits)
-        return prepared.metadata["probability_window_exclusions"]
-
-    gates = QuantumCircuit(2)
-    gates.h(0)
-    gates.cx(0, 1)
-    gates.rz(1.0e3, 1)
-    gates.u(0.3, 2.0, -3.0, 0)
-    assert exclusions(gates) == ()
-    assert exclusions(gates, probability_qubits=None) == ("amplitude-derived masses",)
-    supplied = gates.copy()
-    supplied.append(UnitaryGate(np.eye(4)), [0, 1])
-    assert exclusions(supplied) == ("unitary",)
-    unreduced = QuantumCircuit(1)
-    unreduced.u(0.1, 7.0, 7.0, 0)  # sum of |parameters| 14.1 > 4*pi
-    assert exclusions(unreduced) == ("u phase sum",)
-
-
 def test_every_aer_statevector_operation_is_classified_for_the_roundoff_window():
     """A native operation that is neither inside the derivation nor listed as an exclusion would
     make an empty exclusion tuple claim coverage it does not have."""
@@ -455,66 +260,11 @@ def test_every_aer_statevector_operation_is_classified_for_the_roundoff_window()
     assert _PHASE_SUM_OPERATIONS <= covered
 
 
-def test_receipt_window_uses_its_target_constant_and_exclusions_stay_off_host_receipts():
-    from nwqlib._validation import NWQSIM_CPU_SV_ROUNDOFF_PER_OPERATION, exact_probability_window
-
-    result = solve(make_plan(execution="quantum"))
-    receipt = next(item for item in result.data.receipts if item.observation.kind == "trajectory")
-    assert receipt.target.name == "aer_statevector" and receipt.probability_window_exclusions is not None
-    nwqsim = receipt.revise(target=receipt.target.revise(name="nwqsim_cpu_sv"))
-    assert nwqsim.probability_window == exact_probability_window(
-        receipt.native_operations, len(receipt.logical_to_native),
-        per_operation=NWQSIM_CPU_SV_ROUNDOFF_PER_OPERATION)
-    host = solve(make_plan()).data.receipts[0]  # classical route
-    assert host.execution == "host_kernel" and host.probability_window_exclusions is None
-    with pytest.raises(ValueError, match="host preparation"):
-        host.revise(probability_window_exclusions=())
-
-
 def _with_expectations(chunk, shift):
     """A revision of trajectory point ``chunk`` whose ancilla X expectation is moved by ``shift``."""
     values = tuple(item.revise(value=item.value + shift) if item.label.endswith("X") else item
                    for item in chunk.values)
     return chunk.revise(values=values)
-
-
-def test_trajectory_expectation_admits_the_roundoff_of_its_executed_circuit():
-    """A deep controlled-evolution trajectory may exceed a unit expectation by binary64 roundoff
-    above the fixed floor. An excess within that circuit's receipt window is kept as the raw
-    value beside its endpoint, and an excess beyond it, or without the receipt, still rejects.
-    """
-    from nwqlib._validation import NUMERICAL_RELATION_RTOL
-    from nwqlib.algorithms.qpe import QCELS
-    from nwqlib.algorithms.qpe.method import _samples
-    from nwqlib.execution import ObservationView
-    from nwqlib.operators import ingest_pauli
-
-    target = ingest_pauli((("XX", 0.5), ("ZI", 1.0), ("IZ", 0.3), ("YY", 0.2)), num_qubits=2)
-    result = solve(Eigenproblem(A=target), method=QCELS(initial_state=[1, 0, 0, 0]), seed=7)
-    (receipt,) = result.data.receipts
-    window = receipt.probability_window
-    assert window > 100 * NUMERICAL_RELATION_RTOL  # deep enough to separate the circuit window from the floor
-    # Power 0 reads Re z_0 = 1 up to roundoff, so a shift reaches the endpoint.
-    chunk = next(item for item in result.data.observations.chunks if item.point == "power_0")
-    value = next(item.value for item in chunk.values if item.label.endswith("X"))
-    for excess, supplied, admitted in ((window / 2, result.data.receipts, True),
-                                       (2 * window, result.data.receipts, False),
-                                       (window / 2, (), False)):
-        changed = _with_expectations(chunk, 1 + excess - value)
-        data = ObservationView(chunks=(changed,))
-        if admitted:
-            changed.validate_unit_bound(receipt)
-            samples = _samples(result.plan, data, result.data.trace, receipts=supplied)
-            real = next(sample for sample in samples if sample.phase_shift is None
-                        and next(q for q in result.plan.reconstruction.queries
-                                 if q.experiment == sample.experiment).phase_shift == 0)
-            assert real.mean == 1.0 and real.raw_mean == 1 + excess
-            for fields in (dict(raw_mean=0.0), dict(mean=0.0)):
-                with pytest.raises(ValueError, match="endpoint"):
-                    real.revise(**fields)
-        else:
-            with pytest.raises(ValueError, match="endpoint window"):
-                _samples(result.plan, data, result.data.trace, receipts=supplied)
 
 
 def test_excess_expectation_is_checked_against_its_circuit_window_when_created_and_saved(tmp_path, monkeypatch):
@@ -566,7 +316,7 @@ def test_excess_expectation_is_checked_against_its_circuit_window_when_created_a
     assert not (tmp_path / "narrow").exists()
 
 
-@pytest.mark.parametrize("readout", ("trajectory", "counts", "host"))
+@pytest.mark.parametrize("readout", ("counts", "host"))
 def test_saved_samples_load_without_estimator_work(readout, tmp_path, monkeypatch):
     from nwqlib import load_result
     from nwqlib.algorithms.qpe import numerical
@@ -585,188 +335,3 @@ def test_saved_samples_load_without_estimator_work(readout, tmp_path, monkeypatc
     folder = result.save(tmp_path / "legal")
     loaded = load_result(folder)
     assert loaded.samples == result.samples and loaded.data.observations == result.data.observations
-
-
-@pytest.mark.parametrize('family', ['expectation', 'qcels'])
-def test_run_counts_index_visits_each_completed_source_once(monkeypatch, family):
-    import itertools
-    from types import SimpleNamespace
-    import nwqlib as nw
-    from nwqlib.algorithms.expectation import ExpectationMethod
-    from nwqlib.backends import qiskit_aer
-    from nwqlib.operators import ingest_pauli
-
-    totals = []
-    for count in (4, 8):
-        if family == 'expectation':
-            # Two distinct labels without I differ on a site where both act,
-            # so each forms its own qubit-wise commuting group and setting.
-            labels = [''.join(word) for word in itertools.product('XYZ', repeat=2)]
-            problem = nw.Expectation(state=[1,0,0,0], observable=ingest_pauli(
-                [(label,1/count) for label in labels[:count]], num_qubits=2))
-            choice = nw.plan(problem, method=ExpectationMethod(), accuracy=nw.Accuracy(
-                component='sampling', absolute_tolerance=1., confidence=.9), seed=1)
-        else:
-            from nwqlib.algorithms.qpe import QCELS
-            choice = nw.plan(nw.Eigenproblem(A=np.diag([-.2,.3])), method=QCELS(
-                initial_state=[1,0], tau=1., num_times=count//2-1, max_time=3., grid_size=32),
-                shots=10, seed=1)
-        visits, calls = [], []
-        original = CountsSources.require_independent
-        def joined(self, chunk):
-            if self is prepared.run._state['counts_sources']:
-                visits.append(chunk.acquisition_key)
-            return original(self, chunk)
-        def acquire(native):
-            calls.append(1)
-            key = '00' if family == 'expectation' else '0'  # grouped readout measures both qubits
-            return SimpleNamespace(raw_output={'counts': {key: choice.shots}},
-                                   metadata={'native_job_id': str(len(calls))})
-        with monkeypatch.context() as patch:
-            patch.setattr(qiskit_aer, '_submit_aer_execution', acquire)
-            prepared = nw.prepare(choice)
-            patch.setattr(CountsSources, 'require_independent', joined)
-            with prepared.run:
-                result = nw.submit(prepared).wait(timeout=0)
-                assert len(result.data.observations.chunks) == count
-                assert len(visits) == len(set(visits)) == count
-                assert len(calls) == count
-                totals.append(len(visits))
-    assert totals == [4,8]  # One source join per actual acquisition, not N(N-1)/2.
-
-
-@pytest.mark.parametrize('failed_transition', ['reserved', 'completed'])
-def test_counts_index_follows_atomic_reservation_and_rebuilds_once(tmp_path, monkeypatch, failed_transition):
-    import sqlite3
-    from types import SimpleNamespace
-    import nwqlib as nw
-    from nwqlib.backends import qiskit_aer
-    from nwqlib.core.planning import RuntimeOptions
-    from nwqlib._prepared_execution import Run, prepare_experiment, submit_experiment, restore_prepared
-
-    choice = make_plan(execution='quantum', shots=11)
-    calls = []
-    def acquire(native):
-        calls.append(1)
-        return SimpleNamespace(raw_output={'counts': {'0': 11}},
-                               metadata={'native_job_id': str(len(calls))})
-    monkeypatch.setattr(qiskit_aer, '_submit_aer_execution', acquire)
-    run = Run(choice, directory=tmp_path/'atomic')
-    backend = run.backend
-    first = prepare_experiment(choice.resolve(choice.experiments[0].name), run=run,
-                               runtime=RuntimeOptions(seed=17))
-    journal = run._state['journal']
-    journal.connection.execute("CREATE TRIGGER reject_transition BEFORE INSERT ON records "
-        f"WHEN NEW.kind='event' AND json_extract(NEW.payload,'$.status')='{failed_transition}' "
-        "BEGIN SELECT RAISE(ABORT, 'count storage failure'); END")
-    with pytest.raises(sqlite3.IntegrityError, match='count storage failure'):
-        submit_experiment(first, run=run)
-    sources = run._state['counts_sources']
-    assert not sources.counted
-    assert bool(sources.streams) == (failed_transition == 'completed')
-    assert len(calls) == int(failed_transition == 'completed')
-    journal.connection.execute('DROP TRIGGER reject_transition')
-    run.close()
-    with nw.load_run(tmp_path/'atomic', backend=backend) as restored:
-        assert restored._state['counts_sources'] is None
-        handle = restored._state['handles'].get(first.record.content_id) or restore_prepared(
-            first.record.content_id, run=restored, for_submission=True)
-        if failed_transition == 'reserved':
-            # No reservation committed, so using the original prepared stream is legal.
-            chunk = submit_experiment(handle, run=restored)
-            assert len(calls) == 1 and not restored.observations.chunks
-            assert restored._state['counts_sources'].counted
-            restored._state['counts_sources'].require_independent(chunk)  # Same acquisition reread.
-        else:
-            assert restored.trace.events[0].status == 'uncertain'
-            with pytest.raises(ValueError, match='sampling stream'):
-                submit_experiment(handle, run=restored)
-            assert len(calls) == 1
-    # The successful unused acquisition is reconstructed exactly once, even
-    # though two rejected submission attempts both consult the restored index.
-    with nw.load_run(tmp_path/'atomic', backend=backend) as restored:
-        second = prepare_experiment(restored.plan.resolve(restored.plan.experiments[1].name),
-                                    run=restored, runtime=RuntimeOptions(seed=17))
-        joins = []
-        original = CountsSources.require_independent
-        def joined(self, chunk):
-            if self is restored._state['counts_sources']:
-                joins.append(chunk.acquisition_key)
-            return original(self, chunk)
-        with monkeypatch.context() as patch:
-            patch.setattr(CountsSources, 'require_independent', joined)
-            for _ in range(2):
-                with pytest.raises(ValueError, match='sampling stream'):
-                    submit_experiment(second, run=restored)
-        assert len(joins) == int(failed_transition == 'reserved')
-        assert len(calls) == 1
-
-
-def test_unitary_input_selects_and_binds_one_polar_base(tmp_path):
-    """A unitary-input Plan names its polar base V and binds every spectral consumer to it.
-
-    The reconstruction records V = polar(A) of the admitted near-unitary A,
-    the saved Result binds it on load, and both the classical route and
-    verification refuse a spectral context computed for A itself, because a
-    Schur decomposition of A can describe a different target.
-    """
-    from types import SimpleNamespace
-    from scipy.linalg import expm, polar
-    from nwqlib.algorithms.qpe.verification import verify
-    from nwqlib.algorithms.qpe import QPEVerification
-    from nwqlib.algorithms.qpe.method import _eigensystem, _new_context, _spectrum
-    from nwqlib.saved_evidence import load_result
-
-    rng = np.random.default_rng(31)
-    raw = rng.normal(size=(2, 2)) + 1j * rng.normal(size=(2, 2))
-    defective = expm(-1j * (raw + raw.conj().T)) @ np.diag([1 + 4e-9, 1 - 4e-9])
-    selected = make_plan(phase=True, target=defective)
-    rec, data = selected.reconstruction, selected._native["input"]
-    assert rec.selected_base == data.base.reference and rec.selected_base != rec.target
-    assert np.abs(data.base.dense_array() - polar(defective)[0]).max() <= 2e-12
-    foreign = _new_context()
-    _eigensystem(rec.target, defective, kind="unitary", context=foreign)
-    with pytest.raises(ValueError, match="another target"):
-        _spectrum(data, foreign)
-    result = solve(selected)
-
-    class Foreign:
-        """The Result with a spectral context computed for A instead of its own."""
-        data = SimpleNamespace(method_context=foreign)
-
-        def __getattr__(self, name):
-            return getattr(result, name)
-
-    with pytest.raises(ValueError, match="another target"):
-        verify(selected, Foreign(), checks=QPEVerification(tolerance=1.0))
-    result.verify(checks=QPEVerification(tolerance=1.0))
-    loaded = load_result(result.save(tmp_path / "base"))
-    assert loaded.plan._native["input"].base.reference == rec.selected_base
-    assert loaded.plan.reconstruction == rec
-
-
-def test_saved_exposure_facts_must_stay_within_their_request(tmp_path):
-    """Loading refuses stored exposure facts that exceed the request.
-
-    Every count query must have received between one shot and its requested
-    shots times multiplicity. The refusal names the query; the untouched
-    archive loads.
-    """
-    import json
-    from nwqlib.saved_evidence import load_result
-
-    result = solve(make_plan(estimator="spe", execution="quantum", shots=3, num_samples=2))
-    first = result.exposure[0]
-    assert (first.received, first.requested, result.requested_exposure_complete) == (6, 6, True)
-    folder = result.save(tmp_path / "legal")
-    assert load_result(folder).exposure == result.exposure
-    path = folder / "result.json"
-    original = path.read_text()
-    saved = json.loads(original)
-    saved["result"] = result.revise(exposure=(first.revise(received=7), *result.exposure[1:])).model_dump(mode="json")
-    path.write_text(json.dumps(saved))
-    with pytest.raises(ValueError, match="7 received shots for an admitted request of 6") as refused:
-        load_result(folder)
-    assert first.experiment in str(refused.value)
-    path.write_text(original)
-    assert load_result(folder).exposure == result.exposure

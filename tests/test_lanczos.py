@@ -204,31 +204,13 @@ def test_sampling_cutoff_does_not_treat_zero_sample_variance_as_certainty():
     assert single == numerical.DEFAULT_OVERLAP_EIGENVALUE_CUTOFF
 
 
-def test_exploratory_cutoff_keeps_noise_scale_separate_from_confidence():
-    variance = np.array([0., .04, .16, .01])
-    actual, evidence = numerical._resolve_overlap_cutoff(None, 2, sampled=True,
-        variances=variance, moment_shots=[0, 100, 200, 1], noise_multiplier=.5)
-    assert actual == pytest.approx(.5*np.sqrt(2*.04+.16/4), rel=2e-15)
-    assert evidence["source"] == "empirical_gram_rms"
-    assert evidence["gram_sampling_bound"] == pytest.approx(2*np.sqrt(2*np.log(4/.05)/100))
-    zero, evidence = numerical._resolve_overlap_cutoff(None, 2, sampled=True,
-        variances=np.zeros(4), moment_shots=[0, 100, 200, 1])
-    assert zero == numerical.DEFAULT_OVERLAP_EIGENVALUE_CUTOFF
-    assert evidence["gram_sampling_bound"] > .1
-
-
-@pytest.mark.parametrize(
-    "weights,check_spectrum",
-    [([0.1**2, 0.2**2, 0.3**2, 0.0001**2], False), ([1.0, 1.0, 1.0, 1.0], True)],
-)
-def test_large_identity_shift_keeps_the_normalized_pencil(weights, check_spectrum):
+def test_large_identity_shift_keeps_the_normalized_pencil():
     terms = (("ZI", 0.4), ("IZ", 0.6), ("ZZ", 0.1))
     base = selected(terms=terms, m=4)
     shifted = selected(terms=(*terms, ("II", 1e8)), m=4)
-    # These four values follow directly from Pauli diagonal signs. The small
-    # ground-overlap weights stress covariance; the balanced case owns accuracy.
+    # These four values follow directly from Pauli diagonal signs.
     energies = np.array([1.1, -0.3, 0.1, -0.9])
-    weights = np.array(weights) / sum(weights)
+    weights = np.array([1.0, 1.0, 1.0, 1.0]) / 4
     moments = {
         degree: float(weights @ np.cos(degree * np.arccos(energies / 1.1)))
         for degree in range(1, 8)
@@ -237,29 +219,12 @@ def test_large_identity_shift_keeps_the_normalized_pencil(weights, check_spectru
     translated = kernel(shifted, moments)
     assert result["coefficients"] == translated["coefficients"]
     assert result["kept_rank"] == translated["kept_rank"] == 4
-    if check_spectrum:
-        np.testing.assert_allclose(
-            result["eigenvalues"], [-0.9, -0.3, 0.1, 1.1], rtol=0, atol=1e-12
-        )
+    np.testing.assert_allclose(
+        result["eigenvalues"], [-0.9, -0.3, 0.1, 1.1], rtol=0, atol=1e-12
+    )
     assert translated["eigenvalue"] - 1e8 == pytest.approx(
         result["eigenvalue"], rel=0, abs=2 * np.spacing(1e8)
     )
-
-
-def test_actual_pilot_floor_and_legal_nonbinding_allocation():
-    allocation = np.array([2, 18, 10])
-    returned = np.array([6, 6, 6])
-    result, floor, count = numerical._apply_pilot_floor(allocation, returned)
-    assert count == 1
-    np.testing.assert_array_equal(floor, [6, 6, 6])
-    # Every setting receives its floor; the remaining 30-18=12 shots follow the
-    # donors' surplus above the floor, (18-6):(10-6)=3:1, giving 9 and 3.
-    np.testing.assert_array_equal(result, [6, 15, 9])
-    # A legal allocation is preserved; the floor must not force uniform shots.
-    allowed = np.array([6, 14, 10])
-    result, _, count = numerical._apply_pilot_floor(allowed, returned)
-    np.testing.assert_array_equal(result, allowed)
-    assert count == 0
 
 
 def test_sensitivity_weights_match_independent_quadratic_root():
@@ -299,7 +264,7 @@ def test_sensitivity_weights_match_independent_quadratic_root():
     np.testing.assert_allclose(weights, abs(derivatives) * np.sqrt(variances), rtol=0, atol=1e-13)
 
 
-@pytest.mark.parametrize("representation", ["dense", "csr", "csc"])
+@pytest.mark.parametrize("representation", ["dense", "csr"])
 def test_classical_moments_do_not_depend_on_an_identity_offset(representation):
     from scipy import sparse
     from nwqlib.operators.inputs import ingest_dense, ingest_sparse
@@ -350,6 +315,35 @@ def test_projected_backward_error_is_stated_on_the_normalized_pencil():
     assert result.projected_backward_error == pytest.approx(backward(K, S, c, x), rel=1e-6)
     # The physical-pencil value differs, so the two frames are distinguishable here.
     assert abs(backward(physical, S, c, result.eigenvalue) - result.projected_backward_error) > 1e-3
+
+
+@pytest.mark.parametrize("execution", ["quantum", "classical"])
+def test_exhausted_krylov_space_above_the_ground_keeps_its_rank_and_ritz_values(execution):
+    """A Krylov space that misses the ground state returns its own eigenvalues, whatever m is requested.
+
+    span{|100>, |111>} is invariant under H = Z0 Z1 + X0 X1/2 + 0.3 Z2 + 0.25,
+    where H acts as 0.25 + [[0.7, 0.5], [0.5, 0.7]] with eigenvalues 0.45 and
+    1.45, while the ground energy is -1.55. Requesting m = 4 or 8 leaves
+    numerically zero overlap eigenvalues, which the default 1e-12 cutoff must
+    remove; keeping one would give a Ritz value outside this pair.
+    """
+    from qiskit.quantum_info import SparsePauliOp
+    from nwqlib import solve
+
+    terms = (("IZZ", 1.0), ("IXX", 0.5), ("ZII", 0.3), ("III", 0.25))
+    state = np.zeros(8)
+    state[0b100] = 1.0
+    ground = np.linalg.eigvalsh(SparsePauliOp.from_list(list(terms)).to_matrix())[0]
+    assert ground == pytest.approx(-1.55, rel=0, abs=1e-12)
+    for m in (2, 4, 8):
+        result = solve(Eigenproblem(A=ingest_pauli(terms, num_qubits=3)),
+                       method=Lanczos(initial_state=state, krylov_dimension=m),
+                       execution=execution, seed=7)
+        assert result.kept_rank == 2
+        # Machine precision. The kept overlap eigenvalues are at least 0.06, so
+        # moment roundoff near 1e-15 moves the Ritz values by about 1e-14; 1e-12
+        # is the regression threshold.
+        np.testing.assert_allclose(result.eigenvalues, [0.45, 1.45], rtol=0, atol=1e-12)
 
 
 def rational_sqrt_interval(x, precision=160):

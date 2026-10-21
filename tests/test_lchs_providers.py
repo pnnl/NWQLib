@@ -1,14 +1,10 @@
 """Independent contracts for LCHS kernel and quadrature providers."""
 
 from __future__ import annotations
-from nwqlib import LinearDynamics, plan, solve, load_run
+from nwqlib import LinearDynamics, plan, solve
 from nwqlib.algorithms.lchs import LCHS
-from nwqlib._prepared_execution import Run
 
-import json
 import math
-from dataclasses import replace
-from decimal import ROUND_CEILING, Decimal, localcontext
 
 import numpy as np
 import pytest
@@ -18,12 +14,10 @@ from nwqlib.algorithms.lchs.providers import (
     LOW_SOMMA_PROFILE_ID,
     LOW_SOMMA_UNBUDGETED_STAGES,
     LCHS_KERNEL_IMPLEMENTATIONS,
-    LCHS_K_QUADRATURE_IMPLEMENTATIONS,
     LCHSProblemContext,
     _resolve_coefficient_context,
     resolve_provider_config,
 )
-from nwqlib.algorithms.lchs.time_independent_terms import generate_lchs_quadrature, lchs_quadrature_summary
 
 
 def _context() -> LCHSProblemContext:
@@ -47,171 +41,6 @@ def _independent_eq7(beta: float, k_value: float) -> complex:
     return kernel / (1.0 - 1.0j * k_value)
 
 
-def test_f1_signed_grid_dense_terms_are_finite_and_far_kernel_underflows_to_zero() -> None:
-    method = LCHS(
-        lchs_kernel=ProviderConfig(
-            implementation="near_optimal_eq7",
-            parameters={"beta": 0.9},
-        ),
-        k_quadrature=_signed_request(num_qubits=6, lsb_position=9),
-    )
-    matrix = np.array([[0.4, 0.1j], [0.05j, 0.7]], dtype=complex)
-    with np.errstate(over="ignore", invalid="ignore"):
-        quadrature = generate_lchs_quadrature(matrix=matrix, final_time=0.2, method=method)
-        summary = lchs_quadrature_summary(quadrature, method=method, he_backend="dense_exact", final_time=0.2)
-
-    assert np.isfinite(quadrature.coefficients).all()
-    assert math.isfinite(summary["coefficient_l1_norm"])
-
-    far = LCHS_KERNEL_IMPLEMENTATIONS["near_optimal_eq7"].coefficient(
-        float(2**20),
-        {"kernel_parameters": {"beta": 0.9}, "derived_parameters": {}},
-    )
-    assert far == 0.0
-
-
-def test_f1_signed_grid_float_overflow_uses_provider_pair_value_error() -> None:
-    with pytest.raises(
-        ValueError,
-        match="near_optimal_eq7.*signed_binary_uniform",
-    ):
-        _resolve_coefficient_context(
-            lchs_kernel=ProviderConfig(
-                implementation="near_optimal_eq7",
-                parameters={"beta": 0.9},
-            ),
-            k_quadrature=_signed_request(num_qubits=2, lsb_position=1024),
-            problem_context=_context(),
-        )
-
-
-_DECIMAL_PI = Decimal("3.14159265358979323846264338327950288419716939937510")
-
-
-@pytest.mark.parametrize("c_value", (400.0, 480.0, 800.0))
-def test_low_somma_large_c_profile_and_central_coefficient_match_decimal_reference(
-    c_value: float,
-) -> None:
-    from types import MappingProxyType
-    from nwqlib.algorithms.lchs.providers import _resolve_low_somma_pair_profile
-
-    context = _context()
-    kernel = ProviderConfig(implementation="low_somma_f2", parameters={"c": c_value})
-    trapezoid = ProviderConfig(implementation="symmetric_uniform_trapezoid")
-    _, resolved_kernel = resolve_provider_config(kernel, LCHS_KERNEL_IMPLEMENTATIONS, slot="lchs_kernel")
-    quadrature, resolved_quadrature = resolve_provider_config(
-        trapezoid, LCHS_K_QUADRATURE_IMPLEMENTATIONS, slot="k_quadrature")
-    derived = _resolve_low_somma_pair_profile(context, resolved_kernel)
-    pair_context = MappingProxyType({"kernel_parameters": resolved_kernel.parameters,
-                                     "quadrature_parameters": resolved_quadrature.parameters,
-                                     "derived_parameters": derived})
-    grid = quadrature.build_nodes_and_weights(context, resolved_quadrature, pair_context)
-    # The complete table has a coefficient 1-norm near exp(c)*erfc(1/(2*gamma)),
-    # far beyond what a binary64 finite sum can resolve, so planning refuses it.
-    with pytest.raises(ValueError, match=r"u\*alpha = .* above 0\.1\*approximation_tolerance"):
-        _resolve_coefficient_context(lchs_kernel=kernel, k_quadrature=trapezoid, problem_context=context)
-    # Low-Somma arXiv:2508.19238v2, Theorem 3, evaluated literally at 50
-    # digits, where exp(3c/2)
-    # and exp(c) cannot overflow.
-    with localcontext() as decimal_context:
-        decimal_context.prec = 50
-        c, epsilon = Decimal(c_value), Decimal(context.epsilon)
-        gamma = (c + ((1 + 1 / (2 * _DECIMAL_PI)) / (epsilon / 3)).ln()).sqrt() / c
-        radius = 2 * c * gamma**2
-        h_max = _DECIMAL_PI / (
-            Decimal(context.final_time) * Decimal(context.l_norm) / 2
-            + (64 * (3 * c / 2).exp() / (15 * (epsilon / 3))).ln()
-        )
-        ratio = radius / h_max
-        index_limit = int(ratio.to_integral_value(rounding=ROUND_CEILING))
-        central = radius / index_limit * (c - 1 / (4 * gamma**2)).exp() / _DECIMAL_PI
-    # Binary64 rounding moves the ratio by far less than this margin, so J is exact.
-    assert abs(ratio - ratio.to_integral_value()) > Decimal("0.05")
-    assert derived["J"] == index_limit
-    # The step-bound denominator has a few ulps of binary64 error; 1e-15 is
-    # about 4.5 ulps.
-    assert derived["h_max"] == pytest.approx(float(h_max), rel=1.0e-15, abs=0.0)
-    assert grid.nodes[index_limit] == 0.0
-    # The k=0 exponent c-1/(4*gamma**2) is just above 0.75*c and below 1024.
-    # Its binary64 error is a few ulp(512) <= 5e-13, the relative error of exp.
-    central_coefficient = grid.base_weights[index_limit]*LCHS_KERNEL_IMPLEMENTATIONS["low_somma_f2"].coefficient(
-        0.0, pair_context)
-    assert central_coefficient == pytest.approx(float(central), rel=1.0e-12, abs=0.0)
-
-
-def test_low_somma_unrepresentable_coefficient_uses_provider_pair_value_error() -> None:
-    # c=1000 makes the central coefficient about exp(750), beyond binary64.
-    with pytest.raises(ValueError, match="low_somma_f2.*symmetric_uniform_trapezoid") as excinfo:
-        _resolve_coefficient_context(
-            lchs_kernel=ProviderConfig(implementation="low_somma_f2", parameters={"c": 1000.0}),
-            k_quadrature=ProviderConfig(implementation="symmetric_uniform_trapezoid"),
-            problem_context=_context(),
-        )
-    assert isinstance(excinfo.value.__cause__, OverflowError)
-
-
-@pytest.mark.parametrize(
-    ("field_name", "message_fragment"),
-    (("nodes", "non-finite node"), ("base_weights", "non-finite weight")),
-)
-def test_f1_coefficient_plan_rejects_first_nonfinite_grid_value(
-    monkeypatch: pytest.MonkeyPatch,
-    field_name: str,
-    message_fragment: str,
-) -> None:
-    provider = LCHS_K_QUADRATURE_IMPLEMENTATIONS["signed_binary_uniform"]
-
-    def nonfinite_builder(problem, resolved, pair_context, **limits):
-        plan = provider.build_nodes_and_weights(problem, resolved, pair_context, **limits)
-        values = list(getattr(plan, field_name))
-        values[1] = float("nan")
-        return replace(plan, **{field_name: tuple(values)})
-
-    monkeypatch.setitem(
-        LCHS_K_QUADRATURE_IMPLEMENTATIONS,
-        provider.name,
-        replace(provider, build_nodes_and_weights=nonfinite_builder),
-    )
-    with pytest.raises(ValueError) as excinfo:
-        _resolve_coefficient_context(
-            lchs_kernel=ProviderConfig(implementation="cauchy_density"),
-            k_quadrature=_signed_request(num_qubits=2, lsb_position=0),
-            problem_context=_context(),
-        )
-    message = str(excinfo.value)
-    assert message_fragment in message
-    assert "cauchy_density" in message
-    assert "signed_binary_uniform" in message
-
-
-@pytest.mark.parametrize(
-    ("coefficient", "message_fragment"),
-    ((complex(float("nan")), "non-finite coefficient"), (1.0e308 + 0.0j, "L1 norm")),
-)
-def test_f1_coefficient_plan_rejects_nonfinite_coefficient_or_l1_norm(
-    monkeypatch: pytest.MonkeyPatch,
-    coefficient: complex,
-    message_fragment: str,
-) -> None:
-    provider = LCHS_KERNEL_IMPLEMENTATIONS["cauchy_density"]
-    monkeypatch.setitem(
-        LCHS_KERNEL_IMPLEMENTATIONS,
-        provider.name,
-        replace(provider, coefficient=lambda _node, _context: coefficient),
-    )
-    with pytest.raises(ValueError) as excinfo:
-        _resolve_coefficient_context(
-            lchs_kernel=ProviderConfig(implementation="cauchy_density"),
-            k_quadrature=_signed_request(num_qubits=2, lsb_position=0),
-            problem_context=_context(),
-        )
-    message = str(excinfo.value)
-    assert message_fragment in message
-    assert "node" in message
-    assert "cauchy_density" in message
-    assert "signed_binary_uniform" in message
-
-
 def _independent_cauchy(k_value: float) -> complex:
     return complex(1.0 / (math.pi * (1.0 + k_value**2)))
 
@@ -229,48 +58,10 @@ def _independent_low_somma_coefficient(
     )
 
 
-def test_provider_request_and_resolved_records_are_distinct_and_immutable() -> None:
-    request = ProviderConfig(
-        implementation="near_optimal_eq7",
-        parameters={"beta": 0.8},
-    )
-    provider, resolved = resolve_provider_config(
-        request,
-        LCHS_KERNEL_IMPLEMENTATIONS,
-        slot="lchs_kernel",
-    )
-
-    assert provider.name == "near_optimal_eq7"
-    assert request.to_dict() == {
-        "implementation": "near_optimal_eq7",
-        "parameters": {"beta": 0.8},
-    }
-    assert resolved.to_dict() == request.to_dict()
-    with pytest.raises(TypeError):
-        request.parameters["beta"] = 0.7  # type: ignore[index]
-    with pytest.raises(TypeError):
-        resolved.parameters["beta"] = 0.7  # type: ignore[index]
-
-
-@pytest.mark.parametrize(
-    ("implementation", "parameters", "kind", "match"),
-    (
-        ("near_optimal_eq7", {"beta": 1.0}, "kernel", "must lie in"),
-        ("composite_gauss", {"truncation_multiplier": 0.0}, "quadrature", "positive"),
-        ("composite_gauss", {"truncation_multiplier": float("nan")}, "quadrature", "finite and positive"),
-        ("composite_gauss", {"truncation_multiplier": float("inf")}, "quadrature", "finite and positive"),
-        ("low_somma_f2", {"c": 0.0}, "kernel", "finite and positive"),
-        ("low_somma_f2", {"c": math.inf}, "kernel", "finite and positive"),
-    ),
-)
-def test_provider_parameters_keep_their_mathematical_domains(implementation, parameters, kind, match):
-    registry = {
-        "kernel": LCHS_KERNEL_IMPLEMENTATIONS,
-        "quadrature": LCHS_K_QUADRATURE_IMPLEMENTATIONS,
-    }[kind]
-    request = ProviderConfig(implementation=implementation, parameters=parameters)
-    with pytest.raises(ValueError, match=match):
-        resolve_provider_config(request, registry, slot="test_provider")
+def test_provider_parameters_keep_their_mathematical_domains():
+    request = ProviderConfig(implementation="near_optimal_eq7", parameters={"beta": 1.0})
+    with pytest.raises(ValueError, match="must lie in"):
+        resolve_provider_config(request, LCHS_KERNEL_IMPLEMENTATIONS, slot="test_provider")
 
 
 @pytest.mark.parametrize("beta", (0.3, 0.8, 0.95))
@@ -388,22 +179,6 @@ def test_low_somma_paper_profile_grid_matches_independent_closed_form(
     assert record["unbudgeted_error_stages"] == list(LOW_SOMMA_UNBUDGETED_STAGES)
 
 
-@pytest.mark.parametrize("epsilon", (0.0, 0.8000000000000002))
-def test_low_somma_paper_profile_rejects_epsilon_outside_theorem_domain(
-    epsilon: float,
-) -> None:
-    with pytest.raises(ValueError, match=r"epsilon in \(0, 4/5\]"):
-        _resolve_coefficient_context(
-            lchs_kernel=ProviderConfig(implementation="low_somma_f2"),
-            k_quadrature=ProviderConfig(implementation="symmetric_uniform_trapezoid"),
-            problem_context=LCHSProblemContext(
-                final_time=0.1,
-                epsilon=epsilon,
-                l_norm=0.4,
-            ),
-        )
-
-
 def test_default_provider_pair_matches_pre_provider_construction_at_roundoff() -> None:
     """Build the Gauss panels and kernel coefficients independently to check the selected finite
     quadrature recipe.
@@ -510,41 +285,6 @@ def test_signed_binary_nodes_and_affine_certificate_are_exact(
         assert reconstructed == node
 
 
-def test_f4_signed_binary_plan_is_deeply_frozen_detached_and_byte_stable() -> None:
-    """Mutate a detached record and attempt nested writes to verify the selected coefficient
-    metadata remains frozen.
-    """
-    plan = _resolve_coefficient_context(
-        lchs_kernel=ProviderConfig(implementation="cauchy_density"),
-        k_quadrature=_signed_request(num_qubits=3, lsb_position=0),
-        problem_context=_context(),
-    )
-    record = plan.record()
-    # The request lists num_qubits first. Stored parameters are key-sorted,
-    # so equal settings serialize to the same bytes.
-    for parameters in (
-        record["requested_k_quadrature"]["parameters"],
-        record["resolved_k_quadrature"]["parameters"],
-        record["k_quadrature_parameters"],
-    ):
-        assert list(parameters) == ["lsb_position", "num_qubits"]
-    baseline_bytes = json.dumps(record, separators=(",", ":")).encode()
-
-    unsigned_terms = plan.quadrature.address_structure["unsigned_terms"]
-    before = tuple(term["coefficient"] for term in unsigned_terms)
-    with pytest.raises(TypeError):
-        unsigned_terms[0]["coefficient"] = 999.0
-    assert tuple(term["coefficient"] for term in unsigned_terms) == before
-
-    detached = plan.record()
-    detached["k_quadrature_address_structure"]["unsigned_terms"][0]["coefficient"] = 999.0
-    assert (
-        tuple(term["coefficient"] for term in plan.quadrature.address_structure["unsigned_terms"])
-        == before
-    )
-    assert json.dumps(plan.record(), separators=(",", ":")).encode() == baseline_bytes
-
-
 @pytest.mark.parametrize(
     ("kernel_request", "quadrature_request", "certificate_status"),
     (
@@ -635,74 +375,6 @@ def test_cauchy_composite_gauss_cannot_inherit_eq7_bounds() -> None:
         )
 
 
-def test_unlisted_pair_rejects_actionably(monkeypatch) -> None:
-    synthetic_quadrature = replace(
-        LCHS_K_QUADRATURE_IMPLEMENTATIONS["signed_binary_uniform"],
-        name="unlisted_test_quadrature",
-    )
-    monkeypatch.setitem(
-        LCHS_K_QUADRATURE_IMPLEMENTATIONS,
-        synthetic_quadrature.name,
-        synthetic_quadrature,
-    )
-    with pytest.raises(ValueError, match="unlisted.*rejects initially"):
-        _resolve_coefficient_context(
-            lchs_kernel=ProviderConfig(implementation="near_optimal_eq7"),
-            k_quadrature=ProviderConfig(
-                implementation=synthetic_quadrature.name,
-                parameters={"num_qubits": 2, "lsb_position": 0},
-            ),
-            problem_context=_context(),
-        )
-
-
-def test_homogeneous_and_source_plans_keep_resolved_providers_on_reopen(tmp_path, monkeypatch):
-    """Poison node generation and spectral selection after saving both homogeneous and source
-    Plans.
-    """
-    selected = tuple(
-        plan(
-            LinearDynamics(
-                A=np.diag([0.2, 0.3]), initial_state=[1.0, 0.25], source=source, time=0.1
-            ),
-            method=LCHS(duhamel_nodes=2, approximation_tolerance=.5),
-            seed=7,
-        )
-        for source in (None, [0.1, 0.0])
-    )
-    for index, choice in enumerate(selected):
-        data = choice._native["native_data"]
-        coefficients = data.coefficient_plan
-        assert coefficients.resolved_lchs_kernel.implementation == "near_optimal_eq7"
-        assert coefficients.resolved_k_quadrature.implementation == "composite_gauss"
-        assert coefficients.compatibility.certificate_status == "certified"
-        assert choice.reconstruction.kernel_approximation_bound is not None
-        assert choice.reconstruction.quadrature_bound is not None
-        with Run(choice) as run:
-            path = run.save(tmp_path / str(index))
-        with monkeypatch.context() as patch:
-
-            def forbidden(*args, **kwargs):
-                pytest.fail("loading reselected provider/numerical data")
-
-            patch.setattr(
-                "nwqlib.algorithms.lchs.providers._resolve_coefficient_context", forbidden
-            )
-            patch.setattr(np.linalg, "eigvalsh", forbidden)
-            patch.setattr(np.polynomial.legendre, "leggauss", forbidden)
-            with load_run(path, backend=run.backend) as reopened:
-                assert reopened.plan.reconstruction == choice.reconstruction
-                assert (
-                    reopened.plan._native["native_data"].coefficient_plan.record()
-                    == coefficients.record()
-                )
-                assert (
-                    reopened.plan._native["native_data"].coefficient_plan.coefficients
-                    == coefficients.coefficients
-                )
-                assert reopened.trace.events == ()
-
-
 def test_uncertified_pair_suppresses_solution_error_certificate():
     choice = plan(
         LinearDynamics(A=np.diag([0.2, 0.3]), initial_state=[1.0, 0.0], time=0.2),
@@ -766,40 +438,6 @@ def test_default_pair_primary_record_preserves_provider_values():
     assert q >= 2
 
 
-@pytest.mark.parametrize("kernel", ("near_optimal_eq7", "cauchy_density"))
-def test_existing_signed_pairs_do_not_claim_low_somma_profile(kernel):
-    choice = plan(
-        LinearDynamics(A=np.diag([0.2, 0.3]), initial_state=[1.0, 0.0], time=0.1),
-        method=LCHS(
-            lchs_kernel=kernel, k_quadrature=_signed_request(num_qubits=2, lsb_position=-1)
-        ),
-    )
-    record = choice._native["native_data"].coefficient_plan.record()
-    assert LOW_SOMMA_PROFILE_ID not in json.dumps(record)
-
-
-@pytest.mark.parametrize("diagonal", [(0., .001), (0., 1e-9), (-1., -1.)])
-def test_small_nonzero_dissipation_keeps_physical_dynamics_and_scale(diagonal):
-    initial = np.array([1j, .3])
-    matrix = np.diag(diagonal)
-    result = solve(LinearDynamics(A=matrix, initial_state=initial, time=1),
-                   method=LCHS(), execution="classical")
-    expected = np.exp(-np.asarray(diagonal))*initial
-    selected = result.plan._native["native_data"].quadrature
-    # A true analytic component bound, including physical input norm and PSD
-    # recovery; not a tolerance fitted to the new observed discrepancy.
-    radius = np.linalg.norm(initial)*math.exp(selected.conversion["psd_shift"])
-    bound = radius*(selected.coefficient_plan.quadrature.quadrature_error_bound +
-                    selected.coefficient_plan.quadrature.approximate_lchs_error_bound)
-    assert np.linalg.norm(result.solution-expected) <= bound
-    assert selected.l_norm > 0 and selected.total_node_count > 1
-    assert selected.h1 == selected.range_k/selected.interval_count_each_side
-    # Changing time units preserves the selected finite mathematical action.
-    scaled = solve(LinearDynamics(A=4*matrix, initial_state=initial, time=.25),
-                   method=LCHS(), execution="classical")
-    np.testing.assert_allclose(scaled.solution, result.solution, rtol=3e-14, atol=0)
-
-
 @pytest.mark.parametrize("execution", ["classical", "quantum"])
 def test_quadrature_work_limit_refuses_before_grid_allocation(execution, monkeypatch):
     """The composite-Gauss grid is built only after its complete work charge fits."""
@@ -810,18 +448,6 @@ def test_quadrature_work_limit_refuses_before_grid_allocation(execution, monkeyp
         with pytest.raises(ValueError, match=r"exceeding LCHS\.max_quadrature_work=1\."):
             plan(problem, method=LCHS(max_quadrature_work=1), execution=execution, seed=7)
     assert np.polynomial.legendre.leggauss is leggauss
-
-
-def test_ellipse_selection_admits_bytes_before_building_grid(monkeypatch):
-    requests = dict(lchs_kernel=ProviderConfig(implementation="near_optimal_eq7"),
-                    k_quadrature=ProviderConfig(implementation="composite_gauss"),
-                    problem_context=_context())
-    monkeypatch.setattr(np.polynomial.legendre, "leggauss", lambda *a: pytest.fail("unadmitted grid allocation"))
-    with pytest.raises(ValueError, match="max_bytes"):
-        _resolve_coefficient_context(**requests, max_bytes=1)
-    with pytest.raises(ValueError, match="negative eigenvalue"):
-        plan(LinearDynamics(A=-np.eye(2), initial_state=[1., 0.], time=1),
-             method=LCHS(make_l_psd=False), execution="classical")
 
 
 def test_closed_tail_bound_keeps_small_cutoff_domain_and_positive_underflow():

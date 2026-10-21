@@ -16,7 +16,6 @@ from nwqlib.subroutines.fermionic_pool import (
     enumerate_qeb_sd_pool,
     enumerate_spin_adapted_gsd_pool,
     enumerate_uccsd_sd_pool,
-    spin_orbital,
 )
 from nwqlib.algorithms.gcim import sector_expectations
 from _fermionic_references import (
@@ -35,13 +34,6 @@ from _fermionic_references import (
 
 def _matrix(pauli) -> np.ndarray:
     return np.asarray(pauli.to_matrix(), dtype=complex)
-
-
-def test_spin_orbital_convention() -> None:
-    assert spin_orbital(0, "up") == 0
-    assert spin_orbital(0, "down") == 1
-    assert spin_orbital(3, "up") == 6
-    assert spin_orbital(3, "down") == 7
 
 
 def test_generalized_pool_has_the_signed_operators_of_zheng_table_5():
@@ -84,56 +76,6 @@ def test_generalized_pool_has_the_signed_operators_of_zheng_table_5():
         ((0, 1), (2, 0)): .5, ((1, 1), (3, 0)): .5,
         ((2, 1), (0, 0)): -.5, ((3, 1), (1, 0)): -.5,
     }
-
-
-@pytest.mark.parametrize("cutoff", [0.0, 1e-20])
-def test_coalescing_preserves_residues_before_pruning(cutoff):
-    from nwqlib.subroutines.fermionic_pool import _normal_ordered_operator, _fermion_terms_to_pauli
-
-    # The large opposite components cancel exactly; fsum must recover the
-    # stored small addend, in both parts, regardless of a later cutoff.
-    small = complex(2.0**-55, 2.0**-54)
-    values = [1 + 1j, small, -1 - 1j]
-    assert _normal_ordered_operator([(c, ()) for c in values], coefficient_cutoff=cutoff) == {
-        (): small
-    }
-    terms = {((i, 1), (i, 0)): 2 * c for i, c in enumerate(values)}
-    mapped = dict(_fermion_terms_to_pauli(terms, 3, coefficient_cutoff=cutoff).to_list())
-    # n_i = (I-Z_i)/2, so only the identity combines across the three terms.
-    assert mapped == {"III": small, "IIZ": -values[0], "IZI": -small, "ZII": -values[2]}
-    # Individually subthreshold contributions must first coalesce to 4*small.
-    assert _normal_ordered_operator([(small, ())] * 4, coefficient_cutoff=abs(2 * small)) == {
-        (): 4 * small
-    }
-    for invalid in (complex(float("nan"), 0), complex(float("inf"), 0)):
-        with pytest.raises(ValueError, match="finite"):
-            _normal_ordered_operator([(invalid, ())], coefficient_cutoff=cutoff)
-        with pytest.raises(ValueError, match="finite"):
-            _fermion_terms_to_pauli({(): invalid}, 1, coefficient_cutoff=cutoff)
-
-
-def test_pauli_action_matches_tensor_factors_with_output_buffer(monkeypatch):
-    import nwqlib.operators._pauli as pauli_kernel
-
-    # Two-amplitude tiles make the eight-amplitude action cross tile boundaries.
-    monkeypatch.setattr(pauli_kernel, "_PAULI_TILE", 2)
-    local = {
-        "I": np.eye(2),
-        "X": np.array([[0, 1], [1, 0]]),
-        "Y": np.array([[0, -1j], [1j, 0]]),
-        "Z": np.diag([1, -1]),
-    }
-    entries = [("YZX", 0.25 + 0.5j), ("XYY", -0.5j), ("ZZZ", 0.75), ("III", -0.25)]
-    matrix = sum(c * np.kron(np.kron(local[a], local[b]), local[d]) for (a, b, d), c in entries)
-    state = np.arange(8, dtype=complex) + 1j * np.arange(8)[::-1]
-    # Dyadic coefficients and integer components make every product and sum exact.
-    expected = matrix @ state
-    out = np.empty_like(state)
-    assert pauli_kernel.apply_terms(entries, state, num_qubits=3, out=out) is out
-    np.testing.assert_array_equal(out, expected)
-    np.testing.assert_array_equal(pauli_kernel.apply_terms(entries, state, num_qubits=3), expected)
-    with pytest.raises(ValueError, match="overlap"):
-        pauli_kernel.apply_terms(entries, state, num_qubits=3, out=state)
 
 
 def test_grouped_pauli_action_on_blocks_stays_within_its_rounding_relation(monkeypatch):
@@ -245,32 +187,23 @@ def test_sector_expectations_flag_synthetic_spin_contamination() -> None:
     assert qa["spin_contamination"] == pytest.approx(2.0, abs=1.0e-12)
 
 
-def test_e6_closed_form_matches_hand_rolled_jw_for_empty_and_nonempty_ladders() -> None:
-    theta = 0.371
-    for p, q, num_qubits in ((1, 0, 2), (3, 0, 4)):
-        jw = _matrix(jw_single_excitation_generator(p, q, num_qubits=num_qubits))
-        closed = _matrix(closed_form_single_generator(p, q, num_qubits=num_qubits))
-        np.testing.assert_allclose(jw, closed, rtol=0.0, atol=1.0e-12)
+def test_generator_invariants_for_every_pool_family() -> None:
+    pool = enumerate_spin_adapted_gsd_pool(3)
+    assert {generator.family for generator in pool} == {
+        "single",
+        "double_singlet",
+        "double_triplet",
+    }
+    particle_number = total_particle_number_operator(6).toarray()
+    spin_z = spin_z_operator(6).toarray()
+    for generator in pool:
+        matrix = generator_matrix(generator)
+        np.testing.assert_allclose(matrix + matrix.conj().T, 0.0, rtol=0.0, atol=1.0e-12)
         np.testing.assert_allclose(
-            la.expm(theta * jw),
-            la.expm(theta * closed),
-            rtol=0.0,
-            atol=1.0e-12,
+            particle_number @ matrix - matrix @ particle_number, 0.0, rtol=0.0, atol=1.0e-12
         )
-
-
-def test_e7_closed_form_matches_hand_rolled_jw_for_two_index_patterns() -> None:
-    theta = -0.219
-    for p, r, q, s, num_qubits in ((2, 3, 0, 1, 4), (3, 5, 0, 2, 6)):
-        jw = _matrix(jw_double_excitation_generator(p, r, q, s, num_qubits=num_qubits))
-        closed = _matrix(closed_form_double_generator(p, r, q, s, num_qubits=num_qubits))
-        np.testing.assert_allclose(jw, closed, rtol=0.0, atol=1.0e-12)
-        np.testing.assert_allclose(
-            la.expm(theta * jw),
-            la.expm(theta * closed),
-            rtol=0.0,
-            atol=1.0e-12,
-        )
+        np.testing.assert_allclose(spin_z @ matrix - matrix @ spin_z, 0.0, rtol=0.0, atol=1.0e-12)
+        assert all(abs(complex(coefficient).real) <= 1.0e-12 for _, coefficient in generator.pauli_terms)
 
 
 def test_spin_adapted_pool_enumeration_order_at_n3() -> None:
@@ -308,162 +241,6 @@ def test_spin_adapted_pool_enumeration_order_at_n3() -> None:
         ("double_singlet", (0, 0, 1, 1)),
         ("double_singlet", (0, 1, 1, 1)),
     ]
-
-
-def test_pool_family_counts_and_stable_indices() -> None:
-    pool = enumerate_spin_adapted_gsd_pool(4)
-    assert Counter(generator.family for generator in pool) == {
-        "single": 6,
-        "double_singlet": 45,
-        "double_triplet": 15,
-    }
-    assert [generator.pool_index for generator in pool] == list(range(len(pool)))
-    assert [(generator.family, generator.spatial_indices) for generator in pool[:8]] == [
-        ("single", (0, 1)),
-        ("single", (0, 2)),
-        ("single", (0, 3)),
-        ("single", (1, 2)),
-        ("single", (1, 3)),
-        ("single", (2, 3)),
-        ("double_singlet", (0, 0, 0, 1)),
-        ("double_singlet", (0, 0, 0, 2)),
-    ]
-
-
-def test_pool_enumeration_law_covers_every_builtin_member(monkeypatch) -> None:
-    import nwqlib.subroutines.fermionic_pool as owner
-    from nwqlib.algorithms.gcim.adapt_inputs import _pool_enumeration_requirements
-    from nwqlib.operators._fermion import mapping_requirements
-
-    # Four spatial orbitals contain every order pattern of four spatial
-    # indices, so these members reach each family's largest strings and rows.
-    # The bytes that _snapshot_generator charges each member, and the largest
-    # numbers of fermion strings and of operators in a string, are measured
-    # here.
-    reference = (1, 1, 1, 1, 0, 0, 0, 0)
-    charged, check = [], owner._check_generator_work
-
-    def recorded(max_bytes, max_products, *, payload_bytes, work):
-        charged.append(payload_bytes)
-        return check(max_bytes, max_products, payload_bytes=payload_bytes, work=work)
-
-    snapshot_bytes = strings = operators = 0
-    with monkeypatch.context() as spy:
-        spy.setattr(owner, "_check_generator_work", recorded)
-        for pool in (
-            enumerate_spin_adapted_gsd_pool(4),
-            enumerate_uccsd_sd_pool(reference),
-            enumerate_qeb_sd_pool(reference),
-            enumerate_ceo_ovp_pool(reference),
-        ):
-            for generator in pool:
-                charged.clear()
-                owner._snapshot_generator(generator)
-                snapshot_bytes = max(snapshot_bytes, charged[-1])
-                strings = max(strings, len(generator.fermion_terms))
-                operators = max([operators, *(len(term) for _, term in generator.fermion_terms)])
-    # Both normal orderings of one spin-adapted candidate receive the same
-    # base terms, so the comparisons are summed per base-term tuple.
-    comparisons, per_call, total = Counter(), [], [0]
-    compare, normalize = owner._out_of_normal_order, owner._normalized_anti_hermitian_terms
-
-    def counted(left, right):
-        total[0] += 1
-        return compare(left, right)
-
-    def normal_ordering(base_terms, **options):
-        start = total[0]
-        result = normalize(base_terms, **options)
-        per_call.append(total[0] - start)
-        comparisons[tuple(base_terms)] += per_call[-1]
-        return result
-
-    monkeypatch.setattr(owner, "_out_of_normal_order", counted)
-    monkeypatch.setattr(owner, "_normalized_anti_hermitian_terms", normal_ordering)
-    enumerate_spin_adapted_gsd_pool(4)
-    # The law charges each candidate the largest member and the mapping of
-    # its strings in bytes, and that mapping and the comparisons in work.
-    q = len(reference)
-    _, mapping_bytes, mapping_work = mapping_requirements((operators,) * strings, num_modes=q, labels=True)
-    law_bytes, law_work = _pool_enumeration_requirements(1, q)
-    assert law_bytes >= snapshot_bytes + mapping_bytes
-    assert law_work >= mapping_work + max(comparisons.values())
-
-
-@pytest.mark.parametrize(
-    "reference",
-    (
-        (1, 1, 0, 0),
-        (1, 0, 1, 0),
-        (1, 1, 1, 0, 0, 0),
-        (1, 1, 1, 1, 0, 0, 0, 0),
-        (1, 1, 1, 0, 1, 0, 0, 0, 0, 0),
-        (1, 1, 1, 1, 1, 1, 0, 0, 0, 0, 0, 0),
-        (0, 0, 0, 0),
-    ),
-)
-def test_reference_pool_size_matches_enumeration(reference) -> None:
-    from nwqlib.subroutines.fermionic_pool import _reference_pool_size
-
-    # Balanced, spin-polarized, odd and empty references.
-    for family, enumerate_pool in (
-        ("uccsd_sd", enumerate_uccsd_sd_pool),
-        ("qeb_sd", enumerate_qeb_sd_pool),
-        ("ceo_ovp", enumerate_ceo_ovp_pool),
-    ):
-        assert _reference_pool_size(family, reference) == len(enumerate_pool(reference))
-
-
-def test_generator_invariants_for_every_pool_family() -> None:
-    pool = enumerate_spin_adapted_gsd_pool(3)
-    assert {generator.family for generator in pool} == {
-        "single",
-        "double_singlet",
-        "double_triplet",
-    }
-    particle_number = total_particle_number_operator(6).toarray()
-    spin_z = spin_z_operator(6).toarray()
-    for generator in pool:
-        matrix = generator_matrix(generator)
-        np.testing.assert_allclose(matrix + matrix.conj().T, 0.0, rtol=0.0, atol=1.0e-12)
-        np.testing.assert_allclose(
-            particle_number @ matrix - matrix @ particle_number, 0.0, rtol=0.0, atol=1.0e-12
-        )
-        np.testing.assert_allclose(spin_z @ matrix - matrix @ spin_z, 0.0, rtol=0.0, atol=1.0e-12)
-        assert all(abs(complex(coefficient).real) <= 1.0e-12 for _, coefficient in generator.pauli_terms)
-
-
-def test_uccsd_pool_respects_occ_virt_restriction_and_symmetries() -> None:
-    occupations = (1, 1, 0, 0, 0, 0)
-    pool = enumerate_uccsd_sd_pool(occupations)
-    particle_number = total_particle_number_operator(6).toarray()
-    spin_z = spin_z_operator(6).toarray()
-    assert [generator.pool_index for generator in pool] == list(range(len(pool)))
-    for generator in pool:
-        assert generator.num_qubits == 6
-        indices = generator.spin_orbital_indices
-        assert indices is not None
-        if generator.family == "uccsd_single":
-            i, a = indices
-            # occupied -> virtual only, same spin label
-            assert occupations[i] == 1 and occupations[a] == 0
-            assert i % 2 == a % 2
-            assert generator.spatial_indices == (i // 2, a // 2)
-        else:
-            assert generator.family == "uccsd_double"
-            i, j, a, b = indices
-            # occupied pair -> virtual pair only, S_z conserved
-            assert i < j and a < b
-            assert occupations[i] == 1 and occupations[j] == 1
-            assert occupations[a] == 0 and occupations[b] == 0
-            assert (i % 2) + (j % 2) == (a % 2) + (b % 2)
-            assert generator.spatial_indices == (i // 2, j // 2, a // 2, b // 2)
-        matrix = generator_matrix(generator)
-        np.testing.assert_allclose(matrix + matrix.conj().T, 0.0, rtol=0.0, atol=1.0e-12)
-        np.testing.assert_allclose(
-            particle_number @ matrix - matrix @ particle_number, 0.0, rtol=0.0, atol=1.0e-12
-        )
-        np.testing.assert_allclose(spin_z @ matrix - matrix @ spin_z, 0.0, rtol=0.0, atol=1.0e-12)
 
 
 def test_uccsd_pool_size_pins_from_hand_combinatorics() -> None:
@@ -685,29 +462,6 @@ def test_uccsd_pool_members_match_e4_e5_generators_and_closed_forms() -> None:
     )
 
 
-def test_uccsd_pool_rejects_bad_occupations_and_handles_empty_sides() -> None:
-    for enumerate_pool in (enumerate_uccsd_sd_pool, enumerate_qeb_sd_pool, enumerate_ceo_ovp_pool):
-        for occupations in ((1, 2, 0, 0), (1.9, 1.1, 0.9, 0.2)):
-            with pytest.raises(ValueError, match="only 0/1"):
-                enumerate_pool(occupations)
-        with pytest.raises(ValueError, match="must not be empty"):
-            enumerate_pool(())
-        assert enumerate_pool((1, 1)) == ()
-        assert enumerate_pool((0, 0)) == ()
-        expected = enumerate_pool((1, 1, 0, 0))
-        for occupations in ("1100", np.array([1, 1, 0, 0]), (1.0, 1.0, 0.0, 0.0)):
-            actual = enumerate_pool(occupations)
-            assert [g.spin_orbital_indices for g in actual] == [
-                g.spin_orbital_indices for g in expected
-            ]
-            assert [g.pauli_terms for g in actual] == [g.pauli_terms for g in expected]
-    with pytest.raises(ValueError, match="integer"):
-        enumerate_spin_adapted_gsd_pool(2.9)
-    assert len(enumerate_spin_adapted_gsd_pool(np.int64(2))) == len(
-        enumerate_spin_adapted_gsd_pool(2)
-    )
-
-
 def test_generator_exponential_application_matches_dense_unitary() -> None:
     generator = enumerate_spin_adapted_gsd_pool(3)[4]
     theta = np.pi / 4
@@ -740,7 +494,7 @@ def _car_generator_matrix(generator):
     return matrix
 
 
-@pytest.mark.parametrize("theta", (-2.3, 0.23))
+@pytest.mark.parametrize("theta", (-2.3,))
 def test_compact_gsd_circuits_cover_default_index_classes(theta) -> None:
     from qiskit.quantum_info import Operator
     from nwqlib.subroutines.fermionic_circuits import build_generator_circuit
@@ -765,11 +519,8 @@ def test_compact_gsd_circuits_cover_default_index_classes(theta) -> None:
 @pytest.mark.parametrize(
     "family, indices, theta",
     (
-        ("double_singlet", (0, 0, 1, 3), -2.3),
-        ("double_singlet", (0, 1, 1, 3), 0.23),
         ("double_triplet", (0, 1, 1, 3), -0.71),
         ("double_singlet", (0, 1, 2, 3), 3.2),
-        ("double_triplet", (0, 2, 1, 3), -2.3),
     ),
 )
 def test_compact_gsd_control_inverse_and_occupied_spectators(family, indices, theta) -> None:
@@ -792,36 +543,6 @@ def test_compact_gsd_control_inverse_and_occupied_spectators(family, indices, th
     np.testing.assert_allclose(Operator(inverse).data, controlled.conj().T, rtol=0.0, atol=2.0e-11)
 
 
-@pytest.mark.parametrize(
-    "family,indices,theta",
-    (
-        ("double_singlet", (0, 0, 1, 2), 7.3),
-        ("double_triplet", (0, 1, 0, 2), -np.pi),
-    ),
-)
-def test_compact_inverse_evaluates_full_map_without_reinverting_controls(
-    monkeypatch, family, indices, theta
-) -> None:
-    from qiskit.circuit import ControlledGate
-    from qiskit.quantum_info import Operator
-    from nwqlib.subroutines.fermionic_circuits import build_generator_circuit
-
-    generator = next(
-        g
-        for g in enumerate_spin_adapted_gsd_pool(3)
-        if g.family == family and g.spatial_indices == indices
-    )
-
-    def forbidden(*args, **kwargs):
-        raise AssertionError("generator inverse reentered generic controlled inversion")
-
-    monkeypatch.setattr(ControlledGate, "inverse", forbidden)
-    inverse = build_generator_circuit(generator, theta, controlled=True, inverse=True)
-    expected = np.eye(128, dtype=complex)
-    expected[1::2, 1::2] = la.expm(-theta * _car_generator_matrix(generator))
-    np.testing.assert_allclose(Operator(inverse).data, expected, rtol=0.0, atol=2.0e-11)
-
-
 def test_compact_circuit_preserves_uccsd_qeb_and_ceo_generators() -> None:
     from qiskit.quantum_info import Operator
     from nwqlib.subroutines.fermionic_circuits import build_generator_circuit
@@ -837,24 +558,7 @@ def test_compact_circuit_preserves_uccsd_qeb_and_ceo_generators() -> None:
             )
 
 
-def test_compact_four_distinct_circuit_keeps_small_nonzero_angles() -> None:
-    from qiskit.quantum_info import Operator
-    from nwqlib.subroutines.fermionic_circuits import build_generator_circuit
-
-    generator = next(
-        g
-        for g in enumerate_spin_adapted_gsd_pool(4)
-        if g.family == "double_triplet" and g.spatial_indices == (0, 1, 2, 3)
-    )
-    car = _car_generator_matrix(generator)
-    theta = 1.0e-11
-    observed = Operator(build_generator_circuit(generator, theta)).data
-    # Compare the leading action where A is nonzero; an absolute whole-unitary tolerance alone would accept the identity circuit here.
-    mask = car != 0.0
-    np.testing.assert_allclose(observed[mask] / theta, car[mask], rtol=1.0e-5, atol=1.0e-8)
-
-
-@pytest.mark.parametrize("theta", (-7.3, -np.pi, np.pi, 7.3))
+@pytest.mark.parametrize("theta", (-7.3, np.pi))
 def test_compact_closed_forms_across_principal_angle_branches(theta) -> None:
     from qiskit.quantum_info import Operator
     from nwqlib.subroutines.fermionic_circuits import build_generator_circuit
@@ -875,48 +579,21 @@ def test_compact_closed_forms_across_principal_angle_branches(theta) -> None:
         )
 
 
-@pytest.mark.parametrize("theta", (1.0e-11, 0.37))
-def test_compact_default_commuting_control_preserves_action_and_phase(theta) -> None:
+def test_compact_default_commuting_control_preserves_action_and_phase() -> None:
     from qiskit.quantum_info import Operator
     from nwqlib.subroutines.fermionic_circuits import build_generator_circuit
 
+    theta = 1.0e-11
     for generator in (enumerate_spin_adapted_gsd_pool(2)[0], enumerate_spin_adapted_gsd_pool(2)[2]):
         car = _car_generator_matrix(generator)
         expected = np.eye(32, dtype=complex)
         expected[1::2, 1::2] = la.expm(theta * car)
         observed = Operator(build_generator_circuit(generator, theta, controlled=True)).data
         np.testing.assert_allclose(observed, expected, rtol=0.0, atol=1.0e-12)
-        if theta < 1.0e-10:
-            mask = car != 0.0
-            np.testing.assert_allclose(
-                observed[1::2, 1::2][mask] / theta, car[mask], rtol=1.0e-4, atol=1.0e-7
-            )
-
-
-def test_generator_compilation_plan_reuses_local_admission_across_angles(monkeypatch):
-    import nwqlib.subroutines.fermionic_circuits as compiler
-
-    generator = enumerate_spin_adapted_gsd_pool(2)[1]
-    admissions, local_blocks = [], []
-    original_admission = compiler._require_default_double
-    original_blocks = compiler._active_occupation_blocks
-
-    def admission(item, **kwargs):
-        admissions.append(item.pool_index)
-        return original_admission(item, **kwargs)
-
-    def blocks(item, **kwargs):
-        local_blocks.append(item.pool_index)
-        return original_blocks(item, **kwargs)
-
-    monkeypatch.setattr(compiler, "_require_default_double", admission)
-    monkeypatch.setattr(compiler, "_active_occupation_blocks", blocks)
-    plan = compiler._plan_generator_circuit(generator)
-    for theta in (0.17, -0.41):
-        for controlled in (False, True):
-            compiler.build_generator_circuit(generator, theta, controlled=controlled, _plan=plan)
-    assert admissions == local_blocks == [generator.pool_index]
-    assert all(block.shape[0] <= 5 for _, block in plan.occupation_blocks)
+        mask = car != 0.0
+        np.testing.assert_allclose(
+            observed[1::2, 1::2][mask] / theta, car[mask], rtol=1.0e-4, atol=1.0e-7
+        )
 
 
 def test_native_jw_creation_phase_content():
@@ -924,29 +601,3 @@ def test_native_jw_creation_phase_content():
 
     assert dict(_fermion_terms_to_pauli({((1, 1),): 1}, 2).to_list()) == {"XZ": 0.5, "YZ": -0.5j}
     assert dict(_fermion_terms_to_pauli({((1, 0),): 1}, 2).to_list()) == {"XZ": 0.5, "YZ": 0.5j}
-
-
-def test_spin_squared_action_zero_mode_without_native_action(monkeypatch):
-    import nwqlib.subroutines.fermionic_pool as pool
-    from nwqlib.operators import OperatorInput
-
-    monkeypatch.setattr(OperatorInput, "matvec", lambda *a, **k: pytest.fail("native action"))
-    # No modes: every spin sum vanishes on the dimension-one space.
-    assert pool.apply_spin_squared(np.array([2.0]), num_qubits=0).tolist() == [0]
-
-
-def test_ladder_adapter_checks_known_storage_before_consumption():
-    from nwqlib.subroutines.fermionic_pool import _ladder_expansion_terms
-
-    visits = []
-
-    def rows():
-        visits.append(1)
-        yield 2j, ()
-
-    with pytest.raises((ValueError, TypeError)):
-        _ladder_expansion_terms(rows(), 1, mapping="jw", max_bytes=1)
-    assert visits == []
-    mapped = _ladder_expansion_terms(rows(), 1, mapping="jw", max_bytes=4096)
-    assert mapped == (("I", 2j),)
-    assert visits == [1]

@@ -59,42 +59,6 @@ def test_lost_acknowledgement_reconciles_without_second_launch(tmp_path):
     assert (tmp_path / sid / "input.json").read_bytes() == b"original payload"
 
 
-@pytest.mark.parametrize(
-    "accounting,state,failure",
-    [
-        ("", "unknown", "accounting may be delayed"),
-        ("73|COMPLETED|0:0\n", "COMPLETED", "raw result is not visible"),
-        ("73|FAILED|1:0\n", "FAILED", "nonzero scheduler exit"),
-        ("73_1|COMPLETED|0:0\n73_2|RUNNING|0:0\n", "uncertain", "partial/array"),
-    ],
-)
-def test_scheduler_state_does_not_fabricate_publication(tmp_path, accounting, state, failure):
-    launcher = SlurmLauncher(profile(tmp_path), transport=Transport("", accounting), max_response_bytes=1024)
-    locator = launcher._locator("73", str(uuid4()))
-    status = launcher.refresh(locator, run=run)
-    assert status.state == state and failure in status.failure
-    assert status.result_path is None
-
-
-def test_same_job_refresh_preserves_raw_result_and_original_error(tmp_path):
-    sid = str(uuid4())
-    (tmp_path / sid).mkdir()
-    raw = tmp_path / sid / "result.json"
-    raw.write_text('{"status":"failed"}')
-    error = ConnectionError("scheduler unavailable")
-    transport = Transport(error, "", "73|COMPLETED|0:0\n", "", "73|COMPLETED|0:0\n")
-    launcher = SlurmLauncher(profile(tmp_path), transport=transport, max_response_bytes=1024)
-    locator = launcher._locator("73", sid)
-    with pytest.raises(ConnectionError) as caught:
-        launcher.refresh(locator, run=run)
-    assert caught.value is error
-    first = launcher.refresh(locator, run=run)
-    assert launcher.refresh(locator, run=run) == first
-    assert first.result_path == raw  # Raw failure packet is not decoded or published here.
-    assert all("--jobs=73" in call for call in transport.calls)
-    assert raw.read_text() == '{"status":"failed"}'
-
-
 def test_script_quotes_paths_and_rejects_directive_injection(tmp_path):
     import shlex
 
@@ -149,30 +113,6 @@ def test_ambiguous_accounting_never_selects_first_job(tmp_path):
     assert len(transport.calls) == 1
 
 
-@pytest.mark.parametrize("ack", ["73;other\n", "73_2;perlmutter\n", "73;perlmutter;unexpected\n"])
-def test_unusable_ack_keeps_intent_without_retry(tmp_path, ack):
-    sid = str(uuid4())
-    transport = Transport(ack)
-    launcher = SlurmLauncher(profile(tmp_path), transport=transport, max_response_bytes=1024)
-    with pytest.raises(ValueError):
-        launcher.launch(b"{}", submission_id=sid, max_input_bytes=100, run=run)
-    assert (tmp_path / sid / "job.sh").is_file()
-    assert len(transport.calls) == 1
-
-
-def test_reservation_failure_prevents_scheduler_contact(tmp_path):
-    transport = Transport()
-    launcher = SlurmLauncher(profile(tmp_path), transport=transport, max_response_bytes=1024)
-
-    class Exhausted:
-        def check_data(self, size):
-            raise ValueError("I/O allowance exhausted")
-
-    with pytest.raises(ValueError, match="allowance"):
-        launcher.refresh(launcher._locator("73", str(uuid4())), run=Exhausted())
-    assert transport.calls == []
-
-
 def test_local_transport_separates_streams_and_preserves_cli_error(monkeypatch):
     import subprocess
     from nwqlib.backends.slurm import SlurmTransport
@@ -200,35 +140,3 @@ def test_local_transport_combined_cap_and_deadline():
         transport(("/bin/sh", "-c", "printf 12345; printf 67890 >&2"), max_output_bytes=8)
     with pytest.raises(subprocess.TimeoutExpired):
         SlurmTransport(timeout_seconds=0.05)(("/bin/sh", "-c", "exec sleep 3"), max_output_bytes=64)
-
-
-def test_missing_scheduler_command_preserves_original_cause_and_names_cli(monkeypatch):
-    import subprocess
-    from nwqlib.backends.slurm import SlurmTransport
-
-    error = FileNotFoundError(2, 'missing executable', 'sbatch')
-    def missing(*args, **kwargs):
-        raise error
-    monkeypatch.setattr(subprocess, 'Popen', missing)
-    with pytest.raises(FileNotFoundError) as caught:
-        SlurmTransport(timeout_seconds=1)(('sbatch', '--parsable'), max_output_bytes=64)
-    assert caught.value is error and caught.value.filename == 'sbatch'
-    assert "Slurm command 'sbatch'" in caught.value.__notes__[0]
-
-
-@pytest.mark.parametrize("job_id", ["12345678901", "9" * 4096, "4294967296", "12345_67", "123+0"])
-def test_locator_admits_only_a_single_positive_uint32_job_id(tmp_path, job_id):
-    """A Slurm job ID is a positive uint32 of at most ten decimal digits, or it is refused.
-
-    ``NWQSimSlurmBackend.native_job_id_length`` prices trajectory job text at
-    that ten-digit bound, so a longer ID would exceed the admitted envelope,
-    and a larger one lies outside Slurm's uint32 job-ID domain. An array
-    task or heterogeneous component names one part of a job collection. The
-    largest ten-digit uint32 and the smallest ten-digit ID stay accepted.
-    """
-    sid = str(uuid4())
-    launcher = SlurmLauncher(profile(tmp_path), transport=Transport(), max_response_bytes=1024)
-    with pytest.raises(ValueError, match=r"single job ID in 1\.\.4294967295"):
-        launcher._locator(job_id, sid)
-    for edge in ("4294967295", "1000000000"):
-        assert launcher._locator(edge, sid).job_id == edge

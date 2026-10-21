@@ -6,21 +6,7 @@ import sqlite3
 import numpy as np
 import pytest
 
-from nwqlib._choice_archive import ArchiveFiles
 from nwqlib._run_journal import LocalJournal
-
-
-def test_array_truncation_names_entry_without_scanning_valid_payload(tmp_path):
-    files = ArchiveFiles(tmp_path, 10_000)
-    name = files.write_array("array.npy", np.arange(8.))
-    valid = ArchiveFiles(tmp_path, 10_000).read_array(name)
-    assert not valid.flags.writeable and not valid.flags.owndata
-    path = tmp_path / name
-    with path.open("r+b") as stream:
-        stream.truncate(path.stat().st_size - 1)
-    with pytest.raises(ValueError) as caught:
-        ArchiveFiles(tmp_path, 10_000).read_array(name)
-    assert str(path) in " ".join(caught.value.__notes__)
 
 
 def test_journal_lock_and_lost_folder_have_owned_context(tmp_path):

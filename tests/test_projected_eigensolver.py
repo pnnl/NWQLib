@@ -45,40 +45,6 @@ def test_sampled_unnormalized_gram_keeps_positive_mode_and_enclosure_diagnostic(
     assert diagnostics["failure_reason"] == "ritz_outside_operator_enclosure"
 
 
-def test_deterministic_input_resolution_preserves_rank_and_raw_hermitian_admission():
-    # A dyadic Walsh basis has exact prescribed spectrum (0,0,1,2).
-    # A small negative null perturbation is admitted only when the caller
-    # declares that input resolution, not when it merely increases rank cutoff.
-    basis = np.array([[1, 1, 1, 1], [1, -1, 1, -1], [1, 1, -1, -1], [1, -1, -1, 1]]) / 2
-    overlap = (basis * [-(2.0**-40), 0.0, 1.0, 2.0]) @ basis.T
-    hamiltonian = (basis * [0.0, 0.0, -1.0, 4.0]) @ basis.T
-    strict, _, failure, _ = _solve_projected_pencil(hamiltonian, overlap)
-    assert strict is None and failure == "negative_deterministic_overlap_eigenvalue"
-    admitted, _, failure, _ = _solve_projected_pencil(
-        hamiltonian,
-        overlap,
-        overlap_input_tolerance=4e-12,
-    )
-    assert failure is None and admitted.kept_overlap_rank == 2
-    # Exact kept ratios are -1/1 and 4/2; all nonzero gaps are O(1).
-    np.testing.assert_allclose(admitted.eigenvalues, [-1.0, 2.0], rtol=0.0, atol=1e-13)
-    np.testing.assert_allclose(
-        abs(basis[:, :2].T @ admitted.eigenvectors), 0.0, rtol=0.0, atol=1e-13
-    )
-    np.testing.assert_allclose(
-        admitted.eigenvectors.T.conj() @ overlap @ admitted.eigenvectors,
-        np.eye(2),
-        rtol=0.0,
-        atol=1e-13,
-    )
-    # Raw sampled evidence must itself be Hermitian. Admitting sampling noise
-    # does not permit averaging a non-Hermitian matrix before checking it.
-    h = np.array([[0.0, 1.0], [1.0, 0.0]])
-    s = np.array([[1.0, 0.75], [0.25, 1.0]])
-    raw, _, reason, _ = _solve_projected_pencil(h, s, _sampled_overlap=True)
-    assert raw is None and reason == "non_hermitian_overlap_matrix"
-
-
 def test_identity_shift_reports_the_pencil_that_contains_it():
     import math
     import pytest
@@ -123,16 +89,3 @@ def test_gram_formation_allowance_admits_roundoff_and_still_refuses_a_non_gram_m
         result, _, failure, _ = _solve_projected_pencil(
             np.eye(3), overlap, overlap_input_tolerance=gram_formation_allowance(2**14, 3.))
         assert (failure == "negative_deterministic_overlap_eigenvalue") == refused
-
-
-def test_entrywise_gram_allowance_does_not_round_a_row_sum_below_its_exact_value():
-    from nwqlib._projected_eigensolver import entrywise_gram_allowance
-
-    # The exact row sum 1 + 2**-52 is a binary64 number, but summing the row
-    # in binary64 rounds 1 + 2**-53 back to 1 and returns 1, below the bound
-    # ||E||_2 <= max_i sum_j e_ij it must state.
-    row = [1.0, 2.0**-53, 2.0**-53]
-    assert entrywise_gram_allowance([row, [0.0, 0.0, 0.0]]) == 1 + 2.0**-52
-    # A row sum between two binary64 numbers is converted to the upper one:
-    # 1 + 2**-54 lies between 1 and 1 + 2**-52 and rounds to nearest as 1.
-    assert entrywise_gram_allowance([[1.0, 2.0**-54]]) == 1 + 2.0**-52

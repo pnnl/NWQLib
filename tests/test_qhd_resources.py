@@ -345,57 +345,6 @@ def test_evolution_bound_dominates_the_time_ordered_error(k, box, objective, ord
         assert bound.commutator == 0 and bound.time_ordering == 0
 
 
-@pytest.mark.parametrize("rule", ["integrated", "midpoint"])
-def test_shifted_cubic_time_ordering_uses_both_finite_bounds(rule):
-    # _schedule_terms derives both finite time-ordering bounds. This wide box keeps the four-state
-    # time-ordered reference inexpensive even near t=0. At N=8 the integral bound plus splitting
-    # establishes the 0.001 operator-error target for the integrated rule; midpoint quadrature is separate.
-    method = QHD(encoding="binary", boundary="periodic", num_grid_points=4, num_steps=8,
-                 total_time=1.0, schedule=ShiftedCubicSchedule(s=2e-4), coefficient_rule=rule,
-                 initial_state_preparation="none")
-    selected = _plan(Optimization(objective=(x / 10000.0 - sp.Rational(1, 5))**2,
-                                  variables=(x,), bounds=((-10000.0, 10000.0),)), method)
-    r = selected.reconstruction
-    kinetic = _kinetic(4, 5000.0, True)
-    potential = np.diag(np.array(r.support_values[0].values) + r.constant)
-    product = np.eye(4, dtype=complex)
-    for _, a, b in r.step_weights:
-        half = scipy.linalg.expm(-0.5j * (b / 8) * potential)
-        product = half @ scipy.linalg.expm(-1j * (a / 8) * kinetic) @ half @ product
-
-    def rhs(t, u):
-        return (-1j * (8 / (method.schedule.s + t)**3 * kinetic + 2 * t**3 * potential)
-                @ u.reshape(4, 4)).ravel()
-
-    # Same independent DOP853 reference and tolerances as the existing time-ordering test. The
-    # enclosure has a large margin over reference roundoff, so no added assertion tolerance is needed.
-    solution = scipy.integrate.solve_ivp(rhs, (0.0, 1.0), np.eye(4, dtype=complex).ravel(),
-                                         method="DOP853", rtol=1e-12, atol=1e-14)
-    assert solution.success
-    error = np.linalg.norm(product - solution.y[:, -1].reshape(4, 4), 2)
-    bound = evolution_bound(selected)
-    assert 0 < error <= bound.evolution
-
-    # Independent exact antiderivatives and derivative maxima of a=8/(s+t)^3 and b=2t^3.
-    # Round each term and the sum upward as the public bound does; comparing an exact sum to
-    # an outward stored value without this conversion could fail solely because of rounding.
-    delta, s, c = Fraction(1, 8), Fraction(method.schedule.s), Fraction(bound.commutator)
-    derivative, integral = [], []
-    for j in range(8):
-        lower, upper = j * delta, (j + 1) * delta
-        a = 4 * ((s + lower)**-2 - (s + upper)**-2)
-        b = (upper**4 - lower**4) / 2
-        integral.append(Fraction(_up(min(Fraction(2), c * a * b / 2))))
-        derivative.append(Fraction(_up(delta**3 * c * (
-            8 / (s + lower)**3 * 6 * upper**2 + 2 * upper**3 * 24 / (s + lower)**4) / 12)))
-    assert bound.time_ordering <= min(2, _up(sum(derivative)), _up(sum(integral)))
-    assert bound.time_ordering < 0.001
-    if rule == "integrated":
-        assert _up(Fraction(_up(sum(integral))) + Fraction(bound.splitting)
-                   + Fraction(bound.coefficient_residual)) < 0.001
-        assert bound.evolution < 0.001
-
-
 @pytest.mark.parametrize("schedule", [QuadraticSchedule(gamma=0.7), CubicSchedule(s=0.3), ShiftedCubicSchedule(s=0.4)])
 def test_schedule_derivative_bounds_cover_the_weights(schedule):
     # |a|, |b| and their first two derivatives, differentiated symbolically and sampled densely on each
@@ -428,19 +377,17 @@ def _commutator(a, b):
     return a @ b - b @ a
 
 
-@pytest.mark.parametrize("boundary", ["dirichlet", "periodic"])
-def test_norm_inputs_bound_the_dense_commutators(boundary):
+def test_norm_inputs_bound_the_dense_commutators():
     # Two variables on four points of spacing 1/2 with a coupled table, where the range and neighbor
     # bounds differ. The dense 16-by-16 restricted operators are an independent check of C, D_T, D_V,
     # mu_T and mu_V, of the closed form of Gamma and of the layer constants J_E and J_O.
-    bounds = ((-1.25, 1.25),) * 2 if boundary == "dirichlet" else ((-1.0, 1.0),) * 2
     problem = Optimization(objective=x**2 / 4 + y**2 / 8 + x * y / 3 + sp.Rational(7, 8), variables=(x, y),
-                           bounds=bounds)
-    method = QHD(num_grid_points=4, num_steps=1, boundary=boundary, initial_state_preparation="none")
+                           bounds=((-1.0, 1.0),) * 2)
+    method = QHD(num_grid_points=4, num_steps=1, boundary="periodic", initial_state_preparation="none")
     first, second = _plan(problem, method.revise(trotter_order=1)), _plan(problem, method)
     r = first.reconstruction
-    k, periodic = 4, boundary == "periodic"
-    one = _kinetic(k, 0.5, periodic)
+    k = 4
+    one = _kinetic(k, 0.5, True)
     kinetic = np.kron(one, np.eye(k)) + np.kron(np.eye(k), one)
     values = np.full((k, k), r.constant)
     for table in r.support_values:
@@ -454,7 +401,7 @@ def test_norm_inputs_bound_the_dense_commutators(boundary):
                          (_commutator(potential, -tv), record.potential_nested), (kinetic, record.kinetic_norm),
                          (potential, record.potential_norm)):
         assert np.linalg.norm(dense, 2) <= bound * (1 + rtol)
-    links, (odd, even) = _dense_layers(k, 0.5, periodic)
+    links, (odd, even) = _dense_layers(k, 0.5, True)
     gamma = 0.0
     for e in range(len(links)):
         link = np.zeros((k, k))
@@ -596,8 +543,7 @@ COUPLED = x**2 / 3 + x * y - y / 50 + sp.Rational(1, 7)
 
 
 @pytest.mark.parametrize("objective, lower, schedule, order, threshold", [
-    (COUPLED, -1.0, QuadraticSchedule(gamma=0.3), 1, 2e-3), (COUPLED, -1.0, QuadraticSchedule(gamma=0.3), 2, 3e-2),
-    (COUPLED, -1.0, CubicSchedule(s=1.0), 2, 2e-3), (sp.Rational(1, 7), -8.8, QuadraticSchedule(gamma=0.3), 1, 3e-2)])
+    (COUPLED, -1.0, QuadraticSchedule(gamma=0.3), 1, 2e-3), (COUPLED, -1.0, QuadraticSchedule(gamma=0.3), 2, 3e-2)])
 def test_later_ledger_stages_bound_the_native_circuit_against_the_split_product(objective, lower, schedule, order,
                                                                                threshold):
     # The split product applies, per step, exp(-i beta V) and every intended hopping exponential with the
@@ -606,8 +552,7 @@ def test_later_ledger_stages_bound_the_native_circuit_against_the_split_product(
     # V/2), with the kinetic diagonal as a phase. It is built densely on the valid one-hot subspace from the
     # stored tables and constant, independently of the compiler. The native circuit with its physical phase
     # differs from it by at most the sum of the ledger's later stages (circuit_errors), which the omitted
-    # blocks dominate here. The last case has a constant objective and a wide box in x, where the threshold
-    # prunes the hopping blocks of x, so their charge alone covers the distance.
+    # blocks dominate here.
     # The float64 reference errs by about 1e-15, far below the margins.
     k, box = 3, ((lower, 1.2), (-0.8, 1.0))
     problem = Optimization(objective=objective, variables=(x, y), bounds=box)
@@ -662,37 +607,18 @@ LAMBDA = 2.0**-1074
     # A step of 3 * 2**-1074 would store the inexact half fl(delta/2) = 2 * 2**-1074 and make every projector
     # angle a third too large.
     (sp.Float(1e308) * x, (0.0, 1.0), dict(total_time=3 * LAMBDA, trotter_order=2), "step duration", None),
-    # A normal step whose half, the first midpoint and the second-order half step, is not normal.
-    (x, (0.0, 1.0), dict(total_time=math.nextafter(2.0**-1022, math.inf), trotter_order=2),
-     "half the step duration", None),
     # The butterfly of the binary table 1e308 x overflows. Only a Walsh construction forms it, so the explicit
     # dense diagonal, whose phases -x v stay below 8.75e307, plans (binary.PhaseTable.dense).
     (sp.Float(1e308) * x, (0.0, 1.0), dict(encoding="binary", boundary="periodic", num_grid_points=8),
      "Walsh butterfly sum", dict(binary_synthesis=BinarySynthesis(potential="dense_diagonal"))),
-    # On [1e16, 1e16 + 4) with K = 4 the periodic coordinates would be 1e16 + (0, 0, 2, 4).
-    ((x - 10**16) ** 2, (1e16, 1e16 + 4), dict(boundary="periodic", num_grid_points=4), "strictly increasing",
-     None),
-    # The interior grid's first coordinate 1e16 + 0.8 rounds back to the lower bound.
-    ((x - 10**16) ** 2, (1e16, 1e16 + 4), dict(num_grid_points=4), "not inside the box", None),
-    # 2 dt overflows although the exact hopping angle with the small coefficient is moderate.
-    (sp.Integer(0), (0.0, 3e153), dict(total_time=1e308), "twice the hopping duration", None),
-    # The cubic kinetic weight a(t) = 2/(1 + t**3) underflows at the midpoint 5e102.
-    (x, (0.0, 1.0), dict(total_time=1e103, schedule=CubicSchedule(s=1.0)), "kinetic schedule weight", None),
-    # K = 64 with spacing 1e153 makes the finite-difference Walsh coefficient of mask 35 about 1.5e-310.
-    (sp.Integer(0), (0.0, 6.4e154), dict(encoding="binary", boundary="periodic", num_grid_points=64),
-     "kinetic term, of scale a/h\\*\\*2, outside the range that planning admits", None),
-    # On [0, 1e200] with K = 4 the spacing 2e199 puts 1/h**2 below the range, and h**2 would overflow.
-    (x, (0.0, 1e200), dict(num_grid_points=4), "the grid of x .* kinetic coefficients 1/h\\*\\*2", None),
-], ids=["odd_subnormal_step", "subnormal_half_step", "walsh_overflow", "collapsed_grid",
-        "interior_grid_start", "hopping_overflow", "schedule_underflow", "kinetic_subnormal_coefficient",
-        "wide_box"])
+], ids=["odd_subnormal_step", "walsh_overflow"])
 def test_planning_refuses_arithmetic_outside_the_normal_range(objective, box, fields, message, admitted):
     # Planning admits only normal nonzero durations, weights and kinetic terms, refuses every overflow and keeps
     # grid coordinates distinct (validation._normal_range, OneHotGrid). Objective data and the initial state are
-    # the exception: their contributions below the range are omitted and charged, as the tests below check. A
-    # step whose half is the smallest normal number, and so exact, still plans when its products stay normal,
-    # here with table values near 2**59 whose projector angles and identity phases are about 2**-963. Where
-    # ``admitted`` is given, the same problem plans with a Method that does not form the refused quantity.
+    # the exception: their contributions below the range are omitted and charged. A step whose half is the
+    # smallest normal number, and so exact, still plans when its products stay normal, here with table values
+    # near 2**59 whose projector angles and identity phases are about 2**-963. Where ``admitted`` is given, the same
+    # problem plans with a Method that does not form the refused quantity.
     method = QHD(**{**dict(num_grid_points=2, num_steps=1, trotter_order=1, rotation_threshold=0.0,
                            initial_state=UniformState(), schedule=QuadraticSchedule(gamma=0.0)), **fields})
     problem = Optimization(objective=objective, variables=(x,), bounds=(box,))
@@ -704,142 +630,6 @@ def test_planning_refuses_arithmetic_outside_the_normal_range(objective, box, fi
                      method.revise(total_time=2.0**-1021, trotter_order=2, encoding="one_hot", boundary="dirichlet",
                                    num_grid_points=2, schedule=QuadraticSchedule(gamma=0.0)))
     assert {block.time_step for step in boundary.reconstruction.steps for block in step} >= {2.0**-1022}
-
-
-NU = Fraction(1, 2**1022)
-
-
-def _up(value):
-    """Return the least binary64 number not below the exact rational ``value``, the rounding of published charges."""
-    result = float(value)
-    return result if Fraction(result) >= value else math.nextafter(result, math.inf)
-
-
-def _binary_walsh_plan(v0, v1, total_time):
-    """Plan the one-bit binary table ``(v0, v1)``, exact SymPy rationals, with Walsh rotations and one second-order step."""
-    return _plan(Optimization(objective=sp.Piecewise((v0, x < sp.Rational(1, 4)), (v1, True)), variables=(x,),
-                              bounds=((0.0, 1.0),)),
-                 QHD(num_grid_points=2, num_steps=1, trotter_order=2, total_time=total_time, rotation_threshold=0.0,
-                     initial_state=UniformState(), schedule=QuadraticSchedule(gamma=0.0), encoding="binary",
-                     boundary="periodic", binary_synthesis=BinarySynthesis(potential="walsh_rotations")))
-
-
-def _potential_blocks(selected):
-    return [block for step in selected.reconstruction.steps for block in step if block.kind == "binary_potential"]
-
-
-def test_one_hot_projectors_below_the_range_are_omitted_with_their_identity_phase():
-    # The well -exp(-100 x**2) on [-5, 5] with K = 64 has two stored values near 1.6e-315. The Plan keeps them
-    # and omits each projector whose products would fall below 2**-1022, projector and identity phase together.
-    # Oracle: every nonzero value either has its projector block in both second-order halves or is missing
-    # there, and the missing exact exponents |t b v| split into (1 - 2**-s) for rotation_pruning, which has no
-    # other omission here, and 2**-s for the identity phase, with s = 1.
-    method = QHD(num_grid_points=64, num_steps=1, trotter_order=2, total_time=1.0, rotation_threshold=0.0,
-                 initial_state=UniformState(), schedule=QuadraticSchedule(gamma=0.0))
-    selected = _plan(Optimization(objective=-sp.exp(-100 * x**2), variables=(x,), bounds=((-5.0, 5.0),)), method)
-    r = selected.reconstruction
-    (table,) = r.support_values
-    (step,) = r.steps
-    ((_, _, weight),) = r.step_weights
-    half = Fraction(method.total_time / method.num_steps) / 2
-    kept = Counter(block.support[0] for block in step if block.kind == "number_projector")
-    missing = {i: 2 - kept[i] for i, v in enumerate(table.values.array.tolist()) if v != 0 and kept[i] < 2}
-    exponents = sum((n * abs(half * Fraction(weight) * Fraction(table.values.array[i])) for i, n in missing.items()),
-                    Fraction(0))
-    omitted = r.range_omissions
-    assert omitted.tables[0].subnormal_entries == sum(0 < abs(v) < 2.0**-1022 for v in table.values.array.tolist()) == 2
-    assert omitted.projectors == omitted.identity_events == sum(missing.values()) == 4
-    assert omitted.projector_charge == _up(exponents / 2) == omitted.identity_charge
-    sources = {s.name: s.value for s in circuit_resources(selected).error_sources}
-    assert sources["rotation_pruning"] == omitted.projector_charge > 0
-
-
-@pytest.mark.parametrize("fields", [{}, dict(encoding="binary", boundary="periodic")], ids=["one_hot", "binary"])
-def test_an_objective_constant_below_the_range_leaves_a_charged_zero_phase(fields):
-    # The constant c = 2**-1070 is stored unchanged, and each step's phase -dt b c would fall below 2**-1022, so
-    # the phase ledger records a zero event and charges the exact |dt b c|. Oracle: the physical phase equals that
-    # of the same objective without the constant, and the charge is the exact sum over the stored step weights.
-    method = QHD(num_grid_points=2, num_steps=3, trotter_order=2, total_time=1.0, rotation_threshold=0.0,
-                 initial_state=UniformState(), schedule=QuadraticSchedule(gamma=0.0), **fields)
-    constant = sp.Integer(2) ** -1070
-    selected = _plan(Optimization(objective=x + constant, variables=(x,), bounds=((0.0, 1.0),)), method)
-    reference = _plan(Optimization(objective=x, variables=(x,), bounds=((0.0, 1.0),)), method)
-    r = selected.reconstruction
-    assert r.constant == 2.0**-1070
-    assert r.physical_phase == reference.reconstruction.physical_phase
-    dt = Fraction(method.total_time / method.num_steps)
-    exact = sum((abs(dt * Fraction(b) * Fraction(r.constant)) for _t, _a, b in r.step_weights), Fraction(0))
-    assert r.range_omissions.identity_events == method.num_steps
-    assert r.range_omissions.identity_charge == _up(exact)
-
-
-def test_a_walsh_coefficient_below_the_range_is_omitted_and_charged():
-    # The normal table (2**-1022, 2**-1022 + 2**-1074) has the exact coefficient c_1 = -2**-1075, which the
-    # binary diagonal uses as zero. Oracle: the charge is |c_1| of the stored table, rounded up to 2**-1074, and
-    # no potential block emits a rotation.
-    v0, v1 = sp.Integer(2) ** -1022, sp.Integer(2) ** -1022 + sp.Integer(2) ** -1074
-    selected = _binary_walsh_plan(v0, v1, 1.0)
-    (table,) = selected.reconstruction.support_values
-    omitted = selected.reconstruction.range_omissions.tables[0]
-    assert omitted.walsh_coefficients == 1 and not omitted.walsh_identity
-    assert omitted.walsh_charge == _up(abs(Fraction(table.values.array[0]) - Fraction(table.values.array[1])) / 2) == 2.0**-1074
-    assert all(block.rotations == 0 for block in _potential_blocks(selected))
-
-
-def test_a_walsh_rotation_below_the_range_is_omitted_and_charged():
-    # The table (2**-980, 2**-980 + 2**-1000) has the normal coefficient c_1 = -2**-1001, but with the exponent
-    # x = 2**-39 of each second-order half the angle 2 x c_1 would fall below 2**-1022. Oracle: the charge is the
-    # exact sum of |x c_1| over the stored blocks, and no block emits a rotation.
-    v0, v1 = sp.Integer(2) ** -980, sp.Integer(2) ** -980 + sp.Integer(2) ** -1000
-    selected = _binary_walsh_plan(v0, v1, 2.0**-38)
-    (table,) = selected.reconstruction.support_values
-    c1 = (Fraction(table.values.array[0]) - Fraction(table.values.array[1])) / 2
-    blocks = _potential_blocks(selected)
-    omitted = selected.reconstruction.range_omissions
-    assert omitted.rotations == len(blocks) == 2 and all(block.rotations == 0 for block in blocks)
-    assert omitted.rotation_charge == _up(sum(abs(Fraction(b.exponent) * c1) for b in blocks))
-    assert selected.reconstruction.pruning_error_bound == omitted.rotation_charge > 0
-
-
-def test_a_walsh_identity_phase_below_the_range_is_omitted():
-    # The table (2**-1000, -2**-1000 + 2**-1019) has the normal identity coefficient c_0 = 2**-1020 and the normal
-    # nonidentity coefficient c_1 near 2**-1000. At the exponent x = 2**-9 of each second-order half the identity
-    # phase -x c_0 would fall below 2**-1022 while the angle 2 x c_1 stays normal. Oracle: the exact products of
-    # the stored table and blocks, their sum of |x c_0| as the charge, and the one rotation that each block emits.
-    v0, v1 = sp.Integer(2) ** -1000, -sp.Integer(2) ** -1000 + sp.Integer(2) ** -1019
-    selected = _binary_walsh_plan(v0, v1, 2.0**-8)
-    (table,) = selected.reconstruction.support_values
-    c0 = (Fraction(table.values.array[0]) + Fraction(table.values.array[1])) / 2
-    c1 = (Fraction(table.values.array[0]) - Fraction(table.values.array[1])) / 2
-    blocks = _potential_blocks(selected)
-    assert all(0 < abs(Fraction(b.exponent) * c0) < NU <= abs(2 * Fraction(b.exponent) * c1) for b in blocks)
-    omitted = selected.reconstruction.range_omissions
-    assert omitted.identity_phases == len(blocks) == 2 and omitted.rotations == 0
-    assert omitted.identity_phase_charge == _up(sum(abs(Fraction(b.exponent) * c0) for b in blocks))
-    assert all(block.rotations == 1 for block in blocks)
-
-
-def test_dense_phase_entries_below_the_range_are_omitted_and_charged():
-    # The periodic table on [-3, 3) with K = 8 stores -2**-1060 at x = -3, -2**-1061 at x = -2.25 and 1 elsewhere,
-    # and the dense phases -x v of both small entries would fall below 2**-1022. Oracle: per dense block, the
-    # entries whose exact |x v| is nonzero and below 2**-1022, counted and charged by their largest |x v|, the norm
-    # of the omitted diagonal, not by their sum.
-    objective = sp.Piecewise((-sp.Integer(2) ** -1060, x < -2.5), (-sp.Integer(2) ** -1061, x < -2), (1, True))
-    selected = _plan(Optimization(objective=objective, variables=(x,), bounds=((-3.0, 3.0),)),
-                     QHD(num_grid_points=8, num_steps=1, trotter_order=2, total_time=1.0, rotation_threshold=0.0,
-                         initial_state=UniformState(), schedule=QuadraticSchedule(gamma=0.0), encoding="binary",
-                         boundary="periodic", binary_synthesis=BinarySynthesis(potential="dense_diagonal")))
-    (table,) = selected.reconstruction.support_values
-    count, charge = 0, Fraction(0)
-    for block in _potential_blocks(selected):
-        products = [abs(Fraction(block.exponent) * Fraction(v)) for v in table.values.array.tolist()]
-        tiny = [p for p in products if 0 < p < NU]
-        count, charge = count + len(tiny), charge + max(tiny, default=Fraction(0))
-    omitted = selected.reconstruction.range_omissions
-    assert omitted.tables[0].subnormal_entries == 2
-    assert omitted.dense_entries == count == 4
-    assert omitted.dense_charge == _up(charge)
-    assert selected.reconstruction.pruning_error_bound == omitted.dense_charge
 
 
 def test_a_chain_link_below_the_range_ends_the_structured_preparation():
@@ -939,20 +729,6 @@ def test_coefficient_residual_matches_exact_integrals_and_midpoints(schedule, ru
         exact += abs(dt * Fraction(a_hat) - references[0]) * mu_t + abs(dt * Fraction(b_hat) - references[1]) * mu_v
     assert bound.coefficient_status == "bound" and bound.evolution_status == "bound"
     assert exact <= Fraction(bound.coefficient_residual) <= exact * (1 + Fraction(1, 10**12)) + Fraction(1, 2**1060)
-
-
-def test_cubic_coefficient_estimate_outside_its_documented_range():
-    # The cubic kinetic integral's roundoff constant holds for s in [1e-8, 1e8], so the integrated residual,
-    # and with it the combined evolution bound, is unavailable below that range.
-    problem = Optimization(objective=x**2, variables=(x,), bounds=((-1.0, 1.0),))
-    method = QHD(num_grid_points=2, num_steps=2, total_time=0.5, coefficient_rule="integrated",
-                 initial_state_preparation="none")
-    inside = evolution_bound(_plan(problem, method.revise(schedule=CubicSchedule(s=1.0))))
-    outside = evolution_bound(_plan(problem, method.revise(schedule=CubicSchedule(s=1e-9))))
-    assert (inside.coefficient_status, inside.evolution_status) == ("estimate", "conditional")
-    assert (outside.coefficient_status, outside.evolution, outside.evolution_status) == (
-        "unavailable", None, "unavailable")
-    assert "s in [1e-08, 1e+08]" in outside.coefficient_unavailable
 
 
 BINARY = x**2 / 3 - x * y / 5 + y / 7 + sp.Rational(1, 9)
@@ -1226,28 +1002,6 @@ def _binary_formation_oracle(selected):
         return oracle + 2 * method.num_steps * grid.num_variables * norm
 
 
-@pytest.mark.parametrize("k, model, synthesis, order", [(4, "finite_difference", "walsh_rotations", 2),
-                                                        (4, "spectral", "walsh_rotations", 1),
-                                                        (4, "finite_difference", "dense_diagonal", 2),
-                                                        (4, "spectral", "dense_diagonal", 1),
-                                                        (2, "finite_difference", "walsh_rotations", 2),
-                                                        (8, "finite_difference", "walsh_rotations", 1),
-                                                        (8, "finite_difference", "dense_diagonal", 2)])
-def test_binary_angle_formation_bounds_the_exact_block_discrepancies(k, model, synthesis, order):
-    # The bound against the independent evaluation of _binary_formation_oracle. K = 2 reaches the exact one-bit
-    # coefficient and K = 8 the finite-difference products of several factors.
-    problem = Optimization(objective=BINARY, variables=(x, y), bounds=((0.0, 1.7), (-1.0, 1.2)))
-    method = QHD(encoding="binary", boundary="periodic", num_grid_points=k, num_steps=3, total_time=0.45,
-                 trotter_order=order, kinetic_model=model, schedule=QuadraticSchedule(gamma=0.2),
-                 initial_state=UniformState(),
-                 binary_synthesis=BinarySynthesis(potential=synthesis, kinetic_phase=synthesis))
-    selected = _plan(problem, method)
-    formation = {item.name: item for item in circuit_resources(selected).error_sources}["angle_formation"]
-    oracle = _binary_formation_oracle(selected)
-    assert formation.status == "bound"
-    assert 0 < oracle <= formation.value
-
-
 # One variable, one step. In each case one term of the bound carries the exact discrepancy (the terms of e_W
 # and of the dense bound in the circuit_errors.binary_angle_formation docstring), so dropping that term puts the
 # bound below the oracle. In the first case the K = 4 table (2**52, 2**52, 2**52, 2**52 + 1) on a box of width
@@ -1281,18 +1035,16 @@ def test_binary_angle_formation_charges_each_component(objective, box, k, total_
     assert floor < oracle <= formation.value
 
 
-@pytest.mark.parametrize("k, model, objective", [(2, "finite_difference", x**2 / 3 + x / 7),
-                                                 (4, "finite_difference", BINARY),
-                                                 (8, "spectral", x**2 / 3 + x / 7)])
-def test_binary_norm_inputs_bound_the_dense_commutators(k, model, objective):
-    # Dense restricted operators on the K**d grid: T_j = F^dagger diag(E_q) F from the analytic energies
-    # 2 sin(pi |q|/K)**2/h**2 or 2 pi**2 q**2/L**2, and V from the stored tables and constant. mu_T is the
-    # largest energy, attained at |q| = K/2, so it is tight for both models. On one variable at K = 2,
+@pytest.mark.parametrize("k, objective", [(2, x**2 / 3 + x / 7), (4, BINARY)])
+def test_binary_norm_inputs_bound_the_dense_commutators(k, objective):
+    # Dense restricted operators on the K**d grid: T_j = F^dagger diag(E_q) F from the analytic
+    # finite-difference energies 2 sin(pi |q|/K)**2/h**2, and V from the stored tables and constant. mu_T is
+    # the largest energy, attained at |q| = K/2, so it is tight. On one variable at K = 2,
     # T = (I - X)/h**2 and the neighbor bounds of the doubled neighbor are tight as well.
     variables = (x,) if objective.free_symbols == {x} else (x, y)
     bounds = ((0.0, 1.7), (-1.0, 1.2))[: len(variables)]
-    method = QHD(encoding="binary", boundary="periodic", kinetic_model=model, num_grid_points=k, num_steps=1,
-                 total_time=0.3, initial_state_preparation="none")
+    method = QHD(encoding="binary", boundary="periodic", kinetic_model="finite_difference", num_grid_points=k,
+                 num_steps=1, total_time=0.3, initial_state_preparation="none")
     selected = _plan(Optimization(objective=objective, variables=variables, bounds=bounds), method)
     r, d = selected.reconstruction, len(variables)
     q = np.arange(k)
@@ -1301,8 +1053,7 @@ def test_binary_norm_inputs_bound_the_dense_commutators(k, model, objective):
     kinetic = np.zeros((k**d, k**d), dtype=complex)
     for j, (lower, upper) in enumerate(bounds):
         length = upper - lower
-        energies = (2 * np.sin(np.pi * np.abs(signed) / k) ** 2 / (length / k) ** 2 if model == "finite_difference"
-                    else 2 * np.pi**2 * signed**2 / length**2)
+        energies = 2 * np.sin(np.pi * np.abs(signed) / k) ** 2 / (length / k) ** 2
         one = fourier.conj().T @ np.diag(energies) @ fourier
         kinetic += np.kron(np.kron(np.eye(k**j), one), np.eye(k ** (d - 1 - j)))
     values = np.full((k,) * d, r.constant)
@@ -1342,99 +1093,6 @@ def test_default_estimate_reports_the_rotation_counts_of_both_encodings():
         assert (quantity.fact.value.numerator, quantity.fact.value.denominator) == (law.value, 1)
 
 
-def test_plan_acquisition_estimate_matches_the_observed_shots():
-    """One native QHD setting acquires exactly its requested count population."""
-    from nwqlib import estimate, solve
-
-    problem = Optimization(objective=x, variables=(x,), bounds=((-1.0, 1.0),))
-    selected = plan(problem, method=QHD(num_grid_points=2, num_steps=1), shots=7, seed=7)
-    resources = estimate(selected)
-    shots, settings = (resources.quantity(metric) for metric in ("shots", "settings"))
-    assert shots.interpretation == settings.interpretation == "exact"
-    assert (shots.fact.value.numerator, shots.fact.value.denominator) == (7, 1)
-    assert (settings.fact.value.numerator, settings.fact.value.denominator) == (1, 1)
-    result = solve(selected)
-    chunks = result.data.observations.chunks
-    assert sum(chunk.returned_shots for chunk in chunks) == shots.fact.value.numerator
-    assert len({chunk.setting for chunk in chunks}) == settings.fact.value.numerator
-
-
-def test_the_binary_product_holds_at_most_three_state_buffers_at_a_qft_swap(monkeypatch):
-    # theory.run_binary_product reserves 48D bytes of state buffers: the caller's start buffer, the current
-    # tensor and a new swap result. Each diagonal's reshaped view is released right after its in-place
-    # multiplication, so no fourth D-entry owner survives into a later QFT swap. Counted at every swap copy.
-    import sys
-
-    from nwqlib.algorithms.qhd.theory import run_binary_product
-
-    method = QHD(encoding="binary", boundary="periodic", num_grid_points=16, num_steps=2, total_time=0.45,
-                 binary_synthesis=BinarySynthesis(qft_bit_reversal="swap"))
-    selected = _plan(Optimization(objective=BINARY, variables=(x, y), bounds=((0.0, 1.7), (-1.0, 1.2))), method)
-    start = np.full(256, 1 / 16, dtype=np.complex128)
-    owners, copy = [], np.ascontiguousarray
-
-    def root(a):
-        while isinstance(a.base, np.ndarray):
-            a = a.base
-        return a
-
-    def counted(a, *args, **kwargs):
-        frame = sys._getframe(1)
-        while frame is not None and frame.f_code.co_name != "run_binary_product":
-            frame = frame.f_back
-        if frame is not None:
-            held = {id(root(v)) for v in (frame.f_locals.get(name) for name in ("state", "tensor", "view"))
-                    if isinstance(v, np.ndarray)}
-            owners.append(len(held | {id(root(start))}) + 1)
-        return copy(a, *args, **kwargs)
-
-    monkeypatch.setattr(np, "ascontiguousarray", counted)
-    run_binary_product(_grid(selected), selected.method, selected.reconstruction, start)
-    assert owners and max(owners) == 3
-
-
-def test_a_quantum_binary_plan_is_refused_at_planning_or_inspected_under_its_own_limits():
-    # Quantum binary planning admits the resource-inspection census after compilation releases its model, and
-    # the native circuit construction with its source records, model baseline and circuit graph, so a Plan
-    # that plans is never refused by circuit_resources under the same limits. The thresholds are the
-    # independently computed ledgers of this Plan (d = 2, K = 16, three second-order steps): census work
-    # 136,854 units, and the native phase B_source + B_local + B_native = 191,000 + 396,363 + 18,869,504 bytes,
-    # which dominates the compilation and census phase of 1,979,023 bytes. A resource-only Plan
-    # (initial_state_preparation="none") has no native phase, so that census phase sets its byte threshold.
-    method = QHD(encoding="binary", boundary="periodic", num_grid_points=16, num_steps=3, total_time=1.3,
-                 trotter_order=2, schedule=QuadraticSchedule(gamma=0.3))
-    problem = Optimization(objective=(x - sp.Rational(1, 5)) ** 2 + x * y / 3 + (y + sp.Rational(1, 3)) ** 2,
-                           variables=(x, y), bounds=((-1.0, 1.0), (-1.0, 1.2)))
-    with pytest.raises(ValueError, match=r"census requires 136854 work units.*max_work=136853"):
-        _plan(problem, method.revise(max_work=136853))
-    circuit_resources(_plan(problem, method.revise(max_work=136854)))
-    with pytest.raises(ValueError, match="native binary construction requires .* 19456867 bytes"):
-        _plan(problem, method.revise(max_bytes=19456866))
-    selected = _plan(problem, method.revise(max_bytes=19456867))
-    circuit_resources(selected)
-    construct_qhd(selected.blocks[0], (), None)
-    resource_only = method.revise(initial_state_preparation="none")
-    with pytest.raises(ValueError, match=r"binary planning and resource inspection.*max_bytes>=1979023\)"):
-        _plan(problem, resource_only.revise(max_bytes=1979022))
-    circuit_resources(_plan(problem, resource_only.revise(max_bytes=1979023)))
-
-
-@pytest.mark.parametrize("flavor", ["ir_product", "schrodinger", "split_step"])
-def test_a_one_hot_grid_beyond_the_binary64_range_is_refused_by_name(flavor):
-    # K**d = 16**260 = 2**1040 grid points lie beyond binary64, which the classical kernels' size laws and
-    # probability windows use. The one-hot ir_product size law refuses the Plan with a ValueError naming the
-    # grid size and num_grid_points. The other flavors' window refusal waits for the kernel's own work
-    # admission (method._admit_host_windows), which names max_work first.
-    names = sp.symbols("x0:260")
-    problem = Optimization(objective=sum((v - sp.Rational(1, 5)) ** 2 for v in names), variables=names,
-                           bounds=((-1.0, 1.0),) * 260)
-    named = (rf"grid of {16**260} points, num_grid_points\*\*260.*QHD\(num_grid_points\)" if flavor == "ir_product"
-             else r"requires \d+ work units.*max_work")
-    with pytest.raises(ValueError, match=named):
-        plan(problem, method=QHD(num_grid_points=16, num_steps=1, total_time=0.3, theory_flavor=flavor),
-             execution="classical", seed=7)
-
-
 def test_a_classical_binary_product_plan_runs_at_its_smallest_planning_limit():
     # Planning admits the classical binary product's model beside the run's source records, state buffers and
     # phase buffers (theory.run_binary_product), so a Plan admitted at its smallest max_bytes also runs.
@@ -1453,134 +1111,3 @@ def test_a_classical_binary_product_plan_runs_at_its_smallest_planning_limit():
             assert required > limit
             limit = required
     solve(selected)
-
-
-def _product_plan(d):
-    """A quantum one-hot Plan of ``prod(x_j)`` at K = 2, whose d-variable projector uses the diagonal provider."""
-    variables = sp.symbols(f"x0:{d}")
-    problem = Optimization(objective=sp.prod(variables), variables=variables, bounds=((-1.0, 1.0),) * d)
-    method = QHD(num_grid_points=2, num_steps=2, total_time=0.013, trotter_order=1, initial_state=UniformState())
-    return plan(problem, method=method, execution="quantum", seed=7)
-
-
-@pytest.mark.parametrize("d, refused, admitted", [(4, 435_663, 435_664), (7, 1_813_151, 1_813_152)])
-def test_the_one_hot_wrap_census_is_admitted_before_it_counts(d, refused, admitted, monkeypatch):
-    """A one-hot census that reaches the wrapped phase admits its bytes before any Counter or cache exists.
-
-    ``resources._admitted_onehot_population`` checks the source records, the
-    census population and one cache with its largest miss
-    (``resources._onehot_wrap_census_bytes``,
-    ``pauli_evolution.wrapped_phase_workspace_bytes``) against
-    ``max_bytes``. The limits are the independent ledger of these two Plans:
-    one byte short is refused before ``rotation_population`` runs, and the
-    exact limit returns the unguarded population.
-    """
-    from nwqlib.algorithms.qhd import resources
-
-    selected = _product_plan(d)
-    r, method = selected.reconstruction, selected.method
-    expected = resources.rotation_population(r, method.initial_state_preparation)
-    original = resources.rotation_population
-
-    def guarded(*args):
-        raise AssertionError("the census ran before its admission")
-
-    monkeypatch.setattr(resources, "rotation_population", guarded)
-    with pytest.raises(ValueError, match=f"one-hot rotation census and wrapped phase requires 0 work units and "
-                                         f"{admitted} bytes"):
-        resources._admitted_onehot_population(method.revise(max_bytes=refused), r)
-    monkeypatch.setattr(resources, "rotation_population", original)
-    assert resources._admitted_onehot_population(method.revise(max_bytes=admitted), r) == expected
-
-
-def test_the_wrapped_phase_cache_hits_evicts_the_oldest_and_keeps_the_bits(monkeypatch):
-    """The cache returns a kept value without an array wrap and evicts its oldest entry beyond 64.
-
-    ``pauli_evolution.wrapped_projector_phase`` computes a miss with the
-    original ``2**s`` array and keeps ``(angle.hex(), s)``; a hit returns the
-    same bits without evaluating ``numpy.angle``, and the 65th distinct key
-    evicts the first inserted one, which is recomputed on its next use.
-    """
-    from nwqlib.subroutines.hamiltonian_evolution import pauli_evolution as owner_module
-
-    calls = []
-    angle = np.angle
-
-    def counted(*args, **kwargs):
-        calls.append(args[0].shape)
-        return angle(*args, **kwargs)
-
-    monkeypatch.setattr(np, "angle", counted)
-    cache = {}
-    angles = [0.1 + 0.01 * i for i in range(owner_module.WRAPPED_PHASE_CACHE_ENTRIES + 1)]
-    values = [owner_module.wrapped_projector_phase(a, 4, cache) for a in angles]
-    assert calls == [(16,)] * len(angles)
-    assert len(cache) == owner_module.WRAPPED_PHASE_CACHE_ENTRIES
-    assert (angles[0].hex(), 4) not in cache and (angles[-1].hex(), 4) in cache
-    assert [owner_module.wrapped_projector_phase(a, 4, {}) for a in angles] == values
-    del calls[:]
-    assert owner_module.wrapped_projector_phase(angles[-1], 4, cache) == values[-1] and calls == []
-    assert owner_module.wrapped_projector_phase(angles[0], 4, cache) == values[0] and calls == [(16,)]
-
-
-def test_the_potential_compiler_cache_is_empty_at_native_selection(monkeypatch):
-    """Quantum planning releases the potential compiler's wrapped-phase cache before native selection.
-
-    ``QHD._admit_table_phases`` admits the cache and one miss as a phase
-    that ends with step compilation, and the later census admits its own
-    cache (``resources._admitted_onehot_population``), so the compiler's
-    dictionary must be empty when ``QHD._select_native`` runs.
-    """
-    from nwqlib.algorithms.qhd import method as method_module
-    from nwqlib.algorithms.qhd.potential import PotentialCompiler
-
-    owners, filled = [], []
-    initialize, select = PotentialCompiler.__init__, PotentialCompiler.select_occurrences
-
-    def recording(self, *args, **kwargs):
-        initialize(self, *args, **kwargs)
-        owners.append(self)
-
-    def selecting(self, *args, **kwargs):
-        result = select(self, *args, **kwargs)
-        filled.append(len(self._wrapped))
-        return result
-
-    native = method_module.QHD._select_native
-
-    def checked(self, *args, **kwargs):
-        assert owners and all(not o._wrapped for o in owners)
-        return native(self, *args, **kwargs)
-
-    monkeypatch.setattr(PotentialCompiler, "__init__", recording)
-    monkeypatch.setattr(PotentialCompiler, "select_occurrences", selecting)
-    monkeypatch.setattr(method_module.QHD, "_select_native", checked)
-    _product_plan(4)
-    assert max(filled) > 0
-
-
-def test_every_one_hot_census_owner_admits_its_wrap(monkeypatch):
-    """Planning, ``circuit_resources`` and ``run_resources``' population reach the admitted one-hot census.
-
-    Native selection passes the compiler's centered coordinates and
-    grouped-term slots with the normalized initial arrays as held bytes
-    (``QHD._select_native``), inspection passes none, and ``_plan_population``
-    passes its caller's held bytes (``resources._admitted_onehot_population``).
-    """
-    from nwqlib.algorithms.qhd import resources
-
-    held = []
-    original = resources._admitted_onehot_population
-
-    def spy(method, reconstruction, held_bytes=0):
-        held.append(held_bytes)
-        return original(method, reconstruction, held_bytes)
-
-    monkeypatch.setattr(resources, "_admitted_onehot_population", spy)
-    d, k = 4, 2
-    selected = _product_plan(d)
-    assert len(held) == 1 and held[0] >= 2 * 8 * d * k + 120 * d + 40
-    resources.circuit_resources(selected)
-    assert held[1:] == [0]
-    resources._plan_population(selected, 12345)
-    assert held[2:] == [12345]

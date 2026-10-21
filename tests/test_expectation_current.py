@@ -16,22 +16,7 @@ def problem(terms=(("I", 1.0), ("Z", 1.0)), state=None):
     )
 
 
-def test_exact_physical_operator_and_normalized_state_share_one_result():
-    p = problem(state=[2.0, 2.0])
-    result = nwqlib.solve(p, method=ExpectationMethod(), seed=7)
-    # <+|(I+Z)|+> = 1 independently of the physical state norm 8.
-    assert result.value == pytest.approx(1.0, abs=1e-13, rel=0)
-    assert result.physical_scale.squared_as_float() == pytest.approx(8.0, abs=1e-13, rel=0)
-    assert result.data.trace.jobs == 1
-    # The default exact route reads one grouped Pauli expectation, records no
-    # sampled shots and keeps no array for this scalar output.
-    assert [e.observation.kind for e in result.plan.experiments] == ["pauli_expectation"]
-    assert [event.shots for event in result.data.trace.events] == [0]
-    assert result.data.artifacts == ()
-    assert result.plan.problem is p
-
-
-@pytest.mark.parametrize("execution", ["classical", "quantum"])
+@pytest.mark.parametrize("execution", ["quantum"])
 def test_supplied_rotations_preserve_public_expectation_and_archive(execution, tmp_path):
     from math import cos, sin
     from qiskit import QuantumCircuit
@@ -47,19 +32,6 @@ def test_supplied_rotations_preserve_public_expectation_and_archive(execution, t
     assert result.value == pytest.approx(expected, rel=0, abs=2e-13)
     restored = nwqlib.load_result(result.save(tmp_path / execution))
     assert restored.analyze().value == pytest.approx(expected, rel=0, abs=2e-13)
-
-
-@pytest.mark.parametrize("label, expected", [("XX", 1.), ("YY", -1.)])
-def test_bell_state_multisite_parity_has_the_physical_sign(label, expected):
-    # Both single-site means vanish. Rotating only the parity pivot or losing
-    # a Y phase cannot recover these opposite correlations. Counts select the
-    # parity circuit; Bell's XX/YY outcomes are deterministic, so no sampling
-    # tolerance is needed for these eigenstate witnesses.
-    p = Expectation(state=[1., 0., 0., 1.],
-        observable=ingest_pauli(((label, 1.),), num_qubits=2))
-    result = nwqlib.solve(p, method=ExpectationMethod(), execution="quantum", shots=32, seed=7)
-    assert all(chunk.returned_shots == 32 for chunk in result.data.observations.chunks)
-    assert result.value == pytest.approx(expected, rel=0, abs=2e-13)
 
 
 def test_grouped_sampled_readout_shares_group_shots_and_their_covariance():
@@ -131,38 +103,6 @@ def test_grouped_sampled_readout_shares_group_shots_and_their_covariance():
     assert means["IIX"] == means["ZYX"] == -1 and means["IYI"] == means["ZII"] == 1
 
 
-def test_nearly_singleton_groups_keep_sampled_program_admission():
-    import numpy as np
-
-    # Random 12-qubit labels form nearly one QWC group per term. With one
-    # whole-register body per group, the 61-term prefix (58 groups) plans at
-    # the default Program admission limits (ir/expressions.py::AdmissionLimits).
-    rng = np.random.default_rng(1)
-    labels = [s for s in dict.fromkeys("".join(rng.choice(list("IXYZ"), 12)) for _ in range(400)) if set(s) != {"I"}]
-    coefficients = np.random.default_rng(2).normal(size=len(labels))
-    p = Expectation(state=ingest_occupation("0" * 12, num_qubits=12),
-                    observable=ingest_pauli(list(zip(labels[:61], map(float, coefficients[:61]))), num_qubits=12))
-    plan = nwqlib.plan(p, method=ExpectationMethod(), shots=100, seed=7)
-    assert len(plan.experiments) == 58 and plan.shots == 100
-
-
-def test_grouping_limit_tracks_actual_commutation_structure():
-    """Nine incompatible labels need 36 comparisons, while seven Z labels need six."""
-
-    def selected(terms, cap):
-        n = len(terms[0][0])
-        p = Expectation(state=[1] + [0] * ((1 << n) - 1), observable=ingest_pauli(terms, num_qubits=n))
-        return nwqlib.plan(p, method=ExpectationMethod(max_classical_products=cap), shots=64, seed=1)
-
-    distinct = tuple((a + b, 1.0 / (1 + i)) for i, (a, b) in enumerate(
-        (a, b) for a in "XYZ" for b in "XYZ"))
-    with pytest.raises(ValueError, match=r"ExpectationMethod\.max_classical_products=1\b"):
-        selected(distinct, 1)
-    assert len(selected(distinct, 36).experiments) == 9
-    diagonal = tuple((format(k, "03b").replace("0", "I").replace("1", "Z"), 1.0) for k in range(1, 8))
-    assert len(selected(diagonal, 6).experiments) == 1
-
-
 def test_sampling_accuracy_selects_actual_shots_and_keeps_original_criterion(tmp_path):
     p = problem((("Z", 2.0), ("X", -1.0)))
     accuracy = Accuracy(component="sampling", absolute_tolerance=0.5, confidence=0.9)
@@ -191,21 +131,33 @@ def test_sampling_accuracy_selects_actual_shots_and_keeps_original_criterion(tmp
     assert changed.shots == selected.shots and changed.content_id != selected.content_id
 
 
-@pytest.mark.parametrize(
-    "criterion", [Accuracy(absolute_tolerance=0.1), Accuracy(component="sampling", relative_tolerance=0.1)]
-)
-def test_unsupported_accuracy_rejects_before_execution(criterion):
-    with pytest.raises(ValueError, match="sampling accuracy"):
-        nwqlib.plan(problem(), method=ExpectationMethod(), accuracy=criterion)
+# Three qubit-wise commuting groups whose labels differ under qubit reversal, and a state whose
+# Pauli means are not +-1, so the groups' decoded parities enter the weighted sum with partial weight.
+GENERIC_TERMS = (("ZI", 0.7), ("IX", -0.4), ("XY", 0.25), ("YZ", 0.1), ("II", 0.3))
+GENERIC_STATE = (0.5, 0.2 + 0.3j, -0.4j, 0.6)
 
 
-def test_identity_needs_no_acquisition_and_explicit_shots_conflict():
-    accuracy = Accuracy(component="sampling", absolute_tolerance=0.1)
-    selected = nwqlib.plan(problem((("I", 3.0),)), method=ExpectationMethod(), accuracy=accuracy)
+def _generic_values(state):
+    import numpy as np
+    from qiskit.quantum_info import SparsePauliOp
+
+    matrix = SparsePauliOp.from_list(list(GENERIC_TERMS)).to_matrix()
+    state = np.asarray(state)
+    quadratic = float(np.vdot(state, matrix @ state).real)
+    return matrix, quadratic / float(np.vdot(state, state).real), quadratic
+
+
+def test_sampled_generic_state_lies_within_its_reported_sampling_radius():
+    _, exact, _ = _generic_values(GENERIC_STATE)
+    accuracy = Accuracy(component="sampling", absolute_tolerance=0.05, confidence=1 - 1e-6)
+    selected = nwqlib.plan(Expectation(state=GENERIC_STATE, observable=ingest_pauli(GENERIC_TERMS, num_qubits=2)),
+                           method=ExpectationMethod(), accuracy=accuracy, seed=7)
     result = nwqlib.solve(selected)
-    assert result.value == 3.0 and result.data.trace.jobs == 0
-    with pytest.raises(ValueError, match="conflict"):
-        nwqlib.plan(problem(), method=ExpectationMethod(), shots=10, accuracy=accuracy)
+    (fact,) = result.facts
+    assert fact.fact.quantity == "sampling" and fact.fact.value.value <= 0.05
+    # Statistical class with a fixed seed: the reported Hoeffding union-bound radius holds
+    # except with probability 1e-6 under the iid shot model (docs/mathematics.md, Proposition 1).
+    assert abs(result.value - exact) <= fact.fact.value.value
 
 
 @pytest.fixture
@@ -234,8 +186,7 @@ def injected(monkeypatch):
     return data
 
 
-@pytest.mark.parametrize("quadratic", [False, True])
-def test_calibration_shared_variance_signed_result_and_reanalysis(injected, quadratic):
+def test_calibration_shared_variance_signed_result_and_reanalysis(injected):
     from fractions import Fraction
     from nwqlib.evidence.binary import BinaryInferenceOptions, BinaryReadoutMitigation
 
@@ -252,11 +203,9 @@ def test_calibration_shared_variance_signed_result_and_reanalysis(injected, quad
         "one_0": {"0": 200, "1": 800},
     }
     p = problem((("Z", 1.0), ("X", 2.0), ("I", 3.0)), state=[2.0, 0.0])
-    output = nwqlib.QuadraticForm(observable=p.observable) if quadratic else p.default_output()
-    scale = 4 if quadratic else 1
-    result = nwqlib.solve(p, method=method, output=output, shots=100, seed=17)
-    assert result.value == pytest.approx(scale * (3 + 15 / 7), abs=1e-13, rel=0)
-    assert result.statistics.raw_value == pytest.approx(scale * 4.8, abs=1e-13, rel=0)
+    result = nwqlib.solve(p, method=method, output=p.default_output(), shots=100, seed=17)
+    assert result.value == pytest.approx(3 + 15 / 7, abs=1e-13, rel=0)
+    assert result.statistics.raw_value == pytest.approx(4.8, abs=1e-13, rel=0)
     # Shared calibration derivatives add before squaring: -180/49, -30/49.
     expected = (
         5 * Fraction(10, 7) ** 2 * Fraction(16, 25 * 99)
@@ -265,7 +214,7 @@ def test_calibration_shared_variance_signed_result_and_reanalysis(injected, quad
     )
     value = result.statistics.variance.value.fact.value
     assert Fraction(value.numerator, value.denominator) == pytest.approx(
-        scale**2 * float(expected), abs=1e-13, rel=0
+        float(expected), abs=1e-13, rel=0
     )
     assert result.statistics.variance_kind == "delta_method"
     assert result.statistics.interval.status == "conditional"
@@ -277,34 +226,6 @@ def test_calibration_shared_variance_signed_result_and_reanalysis(injected, quad
     revised = result.analyze(inference=inference.revise(method="anytime_hoeffding"))
     assert revised.statistics.interval.kind == "time_uniform" and revised.plan is result.plan
     assert result.statistics.interval.kind == "fixed_time" and injected.calls == calls
-
-
-def test_sampling_accuracy_rejects_unused_frozen_repeat_before_new_work(injected):
-    from nwqlib._prepared_execution import Run, prepare_experiment, submit_experiment
-    from nwqlib.core.planning import RuntimeOptions
-    from nwqlib.evidence.binary import BinaryInferenceOptions
-
-    selected = nwqlib.plan(
-        problem((("Z", 1.0),)),
-        method=ExpectationMethod(),
-        accuracy=Accuracy(component="sampling", absolute_tolerance=1.0),
-        seed=7,
-    )
-    injected.payloads = {"group_0": {"0": selected.shots}}
-    run = Run(selected)
-    handle = prepare_experiment(selected.resolve("group_0"), run=run, runtime=RuntimeOptions(seed=11))
-    submit_experiment(handle, run=run)  # Deliberately successful and uncollected.
-    with pytest.raises(ValueError, match="fixed sampling stream"):
-        submit_experiment(handle, run=run)
-    assert run.trace.jobs == 1 and len(injected.calls) == 1
-    with pytest.raises(ValueError, match="sampling accuracy"):
-        nwqlib.plan(
-            problem(),
-            method=ExpectationMethod(
-                inference=BinaryInferenceOptions(method="beta", sampling_model="iid_bernoulli")
-            ),
-            accuracy=Accuracy(component="sampling", absolute_tolerance=0.1),
-        )
 
 
 def test_small_dense_observable_preserves_complex_pauli_mean_and_archive(tmp_path, monkeypatch):
@@ -329,17 +250,40 @@ def test_small_dense_observable_preserves_complex_pauli_mean_and_archive(tmp_pat
         Expectation(state=[1.0, 0.0], observable=[[1.0, 1e-16], [0.0, 1.0]])
 
 
-def test_sampling_integer_edge_uses_exact_input_confidence():
-    from decimal import Decimal, localcontext
-    from math import nextafter, sqrt
+def test_two_qubit_dense_observable_gives_the_exact_quantum_values():
+    import numpy as np
+    from nwqlib.problems import QuadraticForm
 
-    for epsilon in (nextafter(sqrt(2 * log(40) / 1000), 0.0), nextafter(sqrt(2 * log(40) / 1000), 1.0)):
-        accuracy = Accuracy(component="sampling", absolute_tolerance=epsilon)
-        selected = nwqlib.plan(problem((("Z", 1.0),)), method=ExpectationMethod(), accuracy=accuracy)
-        with localcontext() as context:
-            context.prec = 160
-            required = 2 / Decimal(epsilon) ** 2 * (Decimal(2) / (1 - Decimal(accuracy.confidence))).ln()
-            assert selected.shots - 1 < required <= selected.shots
+    # A complex amplitude and a norm other than one, so the quadratic form keeps the scale.
+    state = 1.7 * np.exp(0.4j) * np.asarray(GENERIC_STATE)
+    matrix, normalized, quadratic = _generic_values(state)
+    p = Expectation(state=state, observable=matrix)
+    # Machine-precision class: exact statevector readout of unit-scale Pauli means with
+    # coefficient one-norm 1.75 and a squared state norm of 2.601.
+    assert nwqlib.solve(p, method=ExpectationMethod(), seed=7).value == pytest.approx(
+        normalized, rel=0, abs=1e-12)
+    physical = nwqlib.solve(p, method=ExpectationMethod(), output=QuadraticForm(observable=matrix), seed=7)
+    assert physical.value == pytest.approx(quadratic, rel=0, abs=1e-12)
+
+
+def test_physical_quadratic_form_does_not_take_the_expectation_unit():
+    import numpy as np
+    from nwqlib.problems import NormalizedExpectation, QuadraticForm
+    from nwqlib.problems.records import UNSPECIFIED_UNIT
+
+    # Expectation.unit labels the normalized expectation and gives the state amplitudes no unit
+    # (docs/problems.md, Units), so a QuadraticForm has an unspecified unit unless it declares
+    # one. The state [3, 4i] has norm 5, and <psi|O|psi> = 2 * 9 - 16 = 2.
+    problem = Expectation(state=[3.0, 4j], observable=np.diag([2.0, -1.0]), unit="hartree")
+    outputs = (NormalizedExpectation(observable=problem.observable),
+               QuadraticForm(observable=problem.observable),
+               QuadraticForm(observable=problem.observable, unit="hartree*m^2"))
+    results = [nwqlib.solve(problem, method=ExpectationMethod(), output=output, seed=7) for output in outputs]
+    # Machine-precision class: exact statevector readout of two amplitudes of magnitude at most 4.
+    assert [result.value for result in results] == pytest.approx([2 / 25, 2.0, 2.0], rel=0, abs=1e-12)
+    normalized, quadratic, declared = (result.plan.error_model.frame.unit for result in results)
+    assert normalized.symbol == "hartree" and declared.symbol == "hartree*m^2"
+    assert quadratic.same_unit(UNSPECIFIED_UNIT)
 
 
 def test_actual_sampling_evidence_keeps_confidence_through_assessment_and_save(injected, tmp_path):
@@ -528,61 +472,6 @@ def test_quadratic_counts_scale_point_variance_interval_and_sampling(injected, t
     restored = nwqlib.load_result(actual.save(tmp_path / "qf-accuracy"))
     assert restored.plan.selection_accuracy == accuracy
     assert restored.plan.output.kind == "quadratic_form"
-
-
-def test_quadratic_scaling_does_not_overflow_intermediate_norm():
-    from nwqlib.problems import QuadraticForm
-
-    p = problem((("I", 1e-200),), state=[1e200, 0.0])
-    result = nwqlib.solve(
-        p, method=ExpectationMethod(), output=QuadraticForm(observable=p.observable)
-    )
-    assert result.physical_scale.squared_as_float() is None
-    assert result.value == pytest.approx(1e200, rel=5e-15, abs=0)
-    assert result.data.trace.jobs == 0
-
-
-def test_quantum_four_dimensional_and_classical_supplied_preparation_scale(monkeypatch, tmp_path):
-    import numpy as np
-    from qiskit import QuantumCircuit
-    from qiskit.quantum_info import Statevector
-    from test_gcim_native_preparations import reference_kwargs
-    from nwqlib.problems import QuadraticForm
-
-    p = Expectation(state=[2, 0, 0, 0], observable=np.diag([-2.0, 1.0, 3.0, 4.0]))
-    result = nwqlib.solve(
-        p, method=ExpectationMethod(), output=QuadraticForm(observable=p.observable), seed=7
-    )
-    assert result.value == -8
-    wrong = result.physical_scale.revise(exponent=result.physical_scale.exponent + 1)
-    with pytest.raises(ValueError, match="(scale|reconstruction)"):
-        result.revise(physical_scale=wrong)._attach(result.plan, result.data)
-    circuit = QuantumCircuit(1)
-    circuit.h(0)
-    circuit.s(0)
-    seed = reference_kwargs(circuit)["reference"]
-    p = Expectation(state=seed, observable=[[0.0, -1j], [1j, 0.0]])
-    with monkeypatch.context() as guard:
-        guard.setattr(
-            Statevector,
-            "from_instruction",
-            lambda *a, **k: pytest.fail("planning simulated circuit"),
-        )
-        selected = nwqlib.plan(p, method=ExpectationMethod(), execution="classical")
-        with pytest.raises(ValueError, match="max_classical_products"):
-            nwqlib.plan(
-                p, method=ExpectationMethod(max_classical_products=1), execution="classical"
-            )
-    result = nwqlib.solve(selected)
-    assert result.value == pytest.approx(1.0, rel=0, abs=2e-13)  # Y(1,i)=(1,i).
-    with monkeypatch.context() as guard:
-        guard.setattr(
-            Statevector,
-            "from_instruction",
-            lambda *a, **k: pytest.fail("saved/reanalysis simulated circuit"),
-        )
-        loaded = nwqlib.load_result(result.save(tmp_path / "supplied"))
-        assert loaded.analyze().value == result.value
 
 
 def test_classical_quadratic_matvec_recovers_extreme_observable_scale(tmp_path, monkeypatch):

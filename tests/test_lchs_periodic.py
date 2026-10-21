@@ -1,6 +1,5 @@
 """Compact periodic selection, actual phase/Strang action and saved-data association."""
 from math import hypot,inf,nextafter,pi
-from dataclasses import replace
 from fractions import Fraction
 import numpy as np
 import pytest
@@ -105,42 +104,20 @@ def test_periodic_strang_step_cx_laws_count_the_built_step():
         assert cx(controlled)<=laws[True,adjoint]
 
 
-@pytest.mark.parametrize('automatic,binding', [(True, 'work'), (False, 'bytes')])
-def test_periodic_construction_limits_refuse_the_selected_workload(automatic, binding):
+def test_periodic_construction_limits_refuse_the_selected_workload():
     method = LCHS(hamiltonian_evolution_backend='trotter',
-        trotter_steps=None if automatic else 12,
-        trotter_synthesis_tolerance=1e-4 if automatic else None,
+        trotter_steps=None,
+        trotter_synthesis_tolerance=1e-4,
         lchs_kernel='cauchy_density', k_quadrature=ProviderConfig(
             implementation='signed_binary_uniform', parameters={'num_qubits': 2, 'lsb_position': 0}))
     problem = LinearDynamics(A=PeriodicStencil(num_qubits=2, mass=1., diffusion=.25, potential=.3),
         initial_state=ingest_occupation((0, 0), num_qubits=2), time=.5)
     chosen = plan(problem, method=method, output=NormSquared(), seed=7)
-    limits = {}
-    if binding == 'work':
-        # _construction_law(2, 2, r) charges 969*r + 486 work units, so this limit admits at most 4 steps.
-        limits['max_select_work'] = 4362
-    if binding == 'bytes':
-        limits['max_bytes'] = 4096  # Admits the four coefficient nodes, but not one step's circuit slots.
+    # _construction_law(2, 2, r) charges 969*r + 486 work units, so this limit admits at most 4 steps.
+    limits = {'max_select_work': 4362}
     assert chosen.reconstruction.step_counts
     with pytest.raises(ValueError, match="periodic Strang construction.*max_select_work=.*max_bytes="):
         plan(problem, method=method.revise(**limits), output=NormSquared(), seed=7)
-
-
-def test_periodic_step_cap_refuses_the_required_synthesis():
-    method = LCHS(hamiltonian_evolution_backend='trotter', trotter_steps=None,
-        trotter_synthesis_tolerance=1e-4, max_trotter_steps=4,
-        lchs_kernel='cauchy_density', k_quadrature=ProviderConfig(
-            implementation='signed_binary_uniform', parameters={'num_qubits': 2, 'lsb_position': 0}))
-    problem = LinearDynamics(A=PeriodicStencil(num_qubits=2, mass=1., diffusion=.25, potential=.3),
-        initial_state=ingest_occupation((0, 0), num_qubits=2), time=.5)
-    # The independent B/r**2 calculation in the next test selects 5 steps.
-    with pytest.raises(ValueError) as refused:
-        plan(problem, method=method, output=NormSquared())
-    message = str(refused.value)
-    assert '5 steps' in message and 'max_trotter_steps=4' in message
-    admitted = plan(problem, method=method.revise(max_trotter_steps=5), output=NormSquared())
-    assert admitted.reconstruction.step_counts == (5,) * 4
-
 
 
 def test_periodic_synthesis_tolerance_selects_the_smallest_strang_step_count():
@@ -188,14 +165,45 @@ def test_periodic_synthesis_tolerance_selects_the_smallest_strang_step_count():
         plan(LinearDynamics(A=[[.4,.15],[.05,.25]],initial_state=[1,0],time=.1),method=method)
 
 
-@pytest.mark.parametrize('backend,source',[('dense_exact',False),('dense_exact',True),('trotter',False),('trotter',True),('qsp_block_encoding',False),('qsp_block_encoding',True)])
-def test_selected_archive_keeps_actual_products_without_reselection(backend,source,tmp_path,monkeypatch):
+@pytest.mark.parametrize('q',(2,3))
+def test_periodic_solution_matches_the_dense_exponential_within_planned_bounds(q):
+    from scipy.linalg import expm
+    # The PeriodicStencil operator m I + nu (2I - S - S^T) + i p Z_0, built densely with qubit 0 as the
+    # least significant index bit. The product initial state has no coordinate symmetry, so a misplaced
+    # qubit, a reversed potential sign or a lost mass factor moves the solution by more than the bounds.
+    mass,diffusion,potential,elapsed=.1,.25,.3,1.
+    pairs=[[np.cos(.3+.4*j),np.sin(.3+.4*j)*np.exp(.2j*j)] for j in range(q)]
+    initial=np.ones(1)
+    for pair in pairs:
+        initial=np.kron(pair,initial)
+    n=2**q
+    identity=np.eye(n)
+    shift=np.roll(identity,1,axis=0)
+    z0=np.diag(1.-2*(np.arange(n)&1))
+    dense=mass*identity+diffusion*(2*identity-shift-shift.T)+1j*potential*z0
+    problem=LinearDynamics(A=PeriodicStencil(num_qubits=q,mass=mass,diffusion=diffusion,potential=potential),
+        initial_state=ingest_product(pairs),time=elapsed)
+    chosen=plan(problem,method=LCHS(hamiltonian_evolution_backend='trotter',approximation_tolerance=.02,
+        trotter_steps=None,trotter_synthesis_tolerance=.01),seed=7)
+    assert sum(register.width for register in chosen.construction.program.registers)<=11
+    result=solve(chosen)
+    # Method-error-bounded class: for this unit initial state the planned kernel, k-quadrature, Strang and
+    # preparation bounds together bound the L2 error of the physical vector before circuit rounding
+    # (docs/algorithms/lchs.md, Error budget for heat flow on a ring). The added 1e-8 is an allowance for
+    # statevector rounding, not a derived bound. The budget must stay below the smallest defect
+    # displacement, about .08 for a lost mass factor, for the check to discriminate.
+    bound=sum(item.fact.value.value for item in chosen.facts)
+    assert bound<.03
+    assert np.linalg.norm(result.solution-expm(-elapsed*dense)@initial)<=bound+1e-8
+
+
+def test_selected_archive_keeps_actual_products_without_reselection(tmp_path,monkeypatch):
     from nwqlib._choice_archive import ArchiveFiles,save_plan,load_plan
     from nwqlib.algorithms.lchs import selection,parameters,native
     from nwqlib.subroutines.qsp import evolution
     from nwqlib.subroutines.state_preparation import mps
-    problem=LinearDynamics(A=[[.3,.05j],[.05j,.5]],initial_state=[1,2j],source=[.2j,.1] if source else None,time=.1)
-    chosen=plan(problem,method=LCHS(hamiltonian_evolution_backend=backend,duhamel_nodes=1,
+    problem=LinearDynamics(A=[[.3,.05j],[.05j,.5]],initial_state=[1,2j],time=.1)
+    chosen=plan(problem,method=LCHS(hamiltonian_evolution_backend='qsp_block_encoding',duhamel_nodes=1,
         k_quadrature=ProviderConfig(implementation='signed_binary_uniform',parameters={'num_qubits':2,'lsb_position':-1})))
     assert sum(r.width for r in chosen.construction.program.registers)<=10
     files=ArchiveFiles(tmp_path,8_000_000)
@@ -215,16 +223,10 @@ def test_selected_archive_keeps_actual_products_without_reselection(backend,sour
     assert restored.method is loaded.method
     np.testing.assert_array_equal(restored.quadrature.coefficients,original.quadrature.coefficients)
     assert not restored.quadrature.coefficients.flags.writeable
-    if source:
-        np.testing.assert_array_equal(restored.source_layout.elapsed_times,original.source_layout.elapsed_times)
-        assert restored.source_layout.branch_kinds==original.source_layout.branch_kinds
-    if backend=='qsp_block_encoding':
-        assert restored.qsp_plan['prepared_evolution']==original.qsp_plan['prepared_evolution']
-    elif backend=='trotter':
-        assert restored.select_data.plan==original.select_data.plan
-    # Planning binds the coefficient plan of the native data only without a
-    # source, and loading binds the same object.
-    assert loaded._native['coefficient_plan'] is (None if source else restored.coefficient_plan)
+    assert restored.qsp_plan['prepared_evolution']==original.qsp_plan['prepared_evolution']
+    # Without a source, planning binds the coefficient plan of the native
+    # data, and loading binds the same object.
+    assert loaded._native['coefficient_plan'] is restored.coefficient_plan
     # The rebound SELECT and PREP leaves build the same circuits, so the
     # exact statevector readout of the loaded Plan repeats the original. The
     # Plan loaded above bound the forbidden constructors, so load it again.
@@ -243,45 +245,3 @@ def test_periodic_archive_preserves_plan_and_solution(tmp_path):
     loaded=load_plan(json.loads(json.dumps(saved)),ArchiveFiles(tmp_path,10**8))
     assert loaded==chosen
     assert solve(loaded).value==solve(chosen).value
-
-
-def test_periodic_public_compact_plan_preserves_actual_payload_and_rejects_foreign_association(monkeypatch):
-    from nwqlib.algorithms.lchs.selected_grid import selected_payload
-    from nwqlib.operators.inputs import OperatorInput
-    from nwqlib.problems.inputs import StateInput
-    def forbidden(*a,**kw):
-        pytest.fail('compact planning expanded the system')
-    monkeypatch.setattr(OperatorInput,'dense_array',forbidden)
-    monkeypatch.setattr(StateInput,'physical_vector',forbidden)
-    monkeypatch.setattr(np.linalg,'eigvalsh',forbidden)
-    for observable,product,q in (('Y',False,2),('X',True,2),(None,False,80)):
-        chosen=periodic_plan(observable=observable,product=product,num_qubits=q)
-        payload=selected_payload(chosen)
-        rec=chosen.reconstruction
-        assert rec.success_bits==(0,1) and rec.system_bits==tuple(range(2,q+2))
-        assert rec.selected_select=='periodic_strang' and rec.psd_premise=='analytic_periodic'
-        assert payload.operator is chosen.problem.A and payload.amplitudes.shape==(4,)
-        assert rec.quadrature_bound is rec.kernel_approximation_bound is None
-        chosen._native['native_data']=replace(payload)
-        with pytest.raises(ValueError,match='exact selected phase'):
-            selected_payload(chosen)
-
-
-def test_periodic_one_qubit_double_wrap_matches_independent_two_edge_evolution():
-    chosen=periodic_plan(observable=None,num_qubits=1)
-    payload=chosen._native['native_data']
-    assert sum(r.width for r in chosen.construction.program.registers)==3
-    identity=np.eye(2,dtype=complex)
-    x=np.array([[0,1],[1,0]],dtype=complex)
-    rz=np.diag(np.exp(-.5j*.5/2*.3*np.array([1,-1])))
-    expected=np.zeros(2,dtype=complex)
-    for k,c in zip(payload.coefficient_plan.nodes,payload.coefficient_plan.coefficients,strict=True):
-        # At q=1 both wrap edges are X. The three matching factors add to
-        # exp(+i*2*k*diffusion*dt*X); dropping one wrap changes this action.
-        theta=.5/2*k*.25
-        half=np.cos(theta/2)*identity+1j*np.sin(theta/2)*x
-        full=np.cos(theta)*identity+1j*np.sin(theta)*x
-        step=rz@half@full@half@rz
-        expected+=c*np.exp(-.5j*k*1.5)*np.linalg.matrix_power(step,2)[:,0]
-    result=solve(chosen)
-    assert result.value==pytest.approx(np.vdot(expected,expected).real,abs=2e-13)

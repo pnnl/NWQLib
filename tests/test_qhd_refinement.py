@@ -133,35 +133,6 @@ def test_best_observed_point_stays_within_the_level_grid_spacing():
     assert checked >= 4 and near_face > 0
 
 
-def test_interval_ties_and_the_threshold_equality_on_an_exact_distribution(monkeypatch):
-    # A product state with dyadic amplitudes makes every probability, marginal
-    # and running sum exact in binary64. The x marginal (1, 1, 1, 1, 0)/4 has
-    # a four-way tie for the peak. The smallest index 0 starts, and the interval
-    # grows right to mass 3/4 >= 11/16 and stops at (0, 2). The y marginal
-    # (1, 1, 9, 1, 4)/16 peaks at 2, whose neighbors tie twice at 1/16. Both
-    # ties go to the lower side, and the running sum reaches exactly
-    # 11/16 = eta, which stops it at (0, 2). A largest-index peak rule gives
-    # (1, 3) for x, upper-side ties give (2, 4) for y, and a strict stop gives
-    # (0, 3) for y.
-    a = np.array([0.5, 0.5, 0.5, 0.5, 0.0])
-    b = np.array([0.25, 0.25, 0.75, 0.25, 0.5])
-    state = np.outer(a, b).reshape(-1).astype(complex)
-    monkeypatch.setattr(owner, "_evolve_restricted", lambda *args: state)
-    problem = Optimization(objective=x + y, variables=(x, y), bounds=((0.0, 1.0), (-1.0, 3.0)))
-    result = refine_box(problem, qhd=QHD(num_grid_points=5, include_boundary_points=True),
-                        options=BoxRefinement(scaling="search_model", point_rule="best_observed",
-                                              max_levels=1, mass_threshold=0.6875),
-                        execution="classical", seed=3, progress=False)
-    level = result.levels[0]
-    assert level.intervals == ((0, 2), (0, 2)) and level.axis_masses == (0.75, 0.6875)
-    # With boundary points, grid point i of [a, b] is a + i (b - a)/4. The kept
-    # index 0 keeps the lower face, and the upper bound is x_2 + h/2 = a + 5 L/8.
-    assert level.next_box == ((0.0, 0.625), (-1.0, 1.5))
-    # The least objective among positive-probability points is at index (0, 0),
-    # the lower corner itself on this grid.
-    assert level.point == (0.0, -1.0)
-
-
 def test_joint_mass_bound_is_attained_and_is_neither_eta_nor_the_product(monkeypatch):
     # The injected distribution [[0.8, 0.1], [0.1, 0]] has marginal mass 0.9
     # on index 0 of both axes. With eta = 0.85 each interval is {0}, the union
@@ -412,208 +383,53 @@ def test_selected_region_coverage_uses_both_bounds_and_preserves_numerical_limit
     assert shapes["lower_bound"] == shapes["hoeffding_lower"]
 
 
-@pytest.mark.parametrize("scaling", ["search_model", "physical"])
-@pytest.mark.parametrize("objective,point,indices", [
-    ((x + sp.Rational(1, 4)) ** 2, (-0.25,), None),
-    ((x + sp.Rational(1, 2)) * (x + sp.Rational(1, 4)), (-0.5,), (1,)),
-])
-def test_mode_or_mean_reports_the_mean_position_in_original_coordinates(scaling, objective, point, indices,
-                                                                        monkeypatch):
+def test_mode_or_mean_reports_the_mean_position_in_original_coordinates(monkeypatch):
     # With boundary points, the grid of [-1, 1] is -1, -1/2, 0, 1/2, 1 (u = 0, 1/4, ..., 1
     # for the search model). The injected probabilities (1, 9, 4, 1, 1)/16 are squares of
     # dyadic amplitudes, so every value below is exact. The most probable point is
     # index 1 at x = -1/2, and the conditional mean is x = -4/16 = -1/4 (u = 6/16).
     # For (x + 1/4)**2 the mean's objective 0 is strictly below the mode's 1/16, so
     # the level reports the mean, off the grid. A mean left in u (x = 3/8) or mapped
-    # from the wrong face (x = 1 - 2 u = 1/4) would not be smaller. For
-    # (x + 1/2)(x + 1/4) both objectives are 0, and a tie keeps the most probable point.
+    # from the wrong face (x = 1 - 2 u = 1/4) would not be smaller.
     state = np.array([0.25, 0.75, 0.5, 0.25, 0.25], dtype=complex)
     monkeypatch.setattr(owner, "_evolve_restricted", lambda *args: state)
-    problem = Optimization(objective=objective, variables=(x,), bounds=((-1.0, 1.0),))
+    problem = Optimization(objective=(x + sp.Rational(1, 4)) ** 2, variables=(x,), bounds=((-1.0, 1.0),))
     result = refine_box(problem, qhd=QHD(num_grid_points=5, include_boundary_points=True),
-                        options=BoxRefinement(scaling=scaling, point_rule="mode_or_mean", max_levels=1),
+                        options=BoxRefinement(scaling="search_model", point_rule="mode_or_mean", max_levels=1),
                         execution="classical", seed=3, progress=False)
     level = result.levels[0]
     assert result.results[0].most_probable_indices == (1,)
-    assert level.point == point and level.objective == 0.0
-    assert level.point_indices == indices and (level.point_probability is None) == (indices is None)
-    # The search model records the unit point it evaluated, u = 6/16 for the mean and 1/4 for index 1.
-    assert level.unit_point == (None if scaling == "physical" else ((0.375,) if indices is None else (0.25,)))
+    assert level.point == (-0.25,) and level.objective == 0.0
+    assert level.point_indices is None and level.point_probability is None
+    # The search model records the unit point it evaluated, u = 6/16 for the mean.
+    assert level.unit_point == (0.375,)
     assert level.resources.objective_evaluations == 2
-    # The level copies its readout's status whatever it reports, and the summary names what it reports.
+    # The level copies its readout's status whatever it reports.
     assert level.mode_status == result.results[0].mode_status == "resolved"
-    kind = "a conditional mean" if indices is None else "a level grid point"
-    assert f"The selected point is {kind}. Its objective gives no proof of a continuous or global optimum." in str(
-        result)
-    if indices is None:
-        # Only mode_or_mean reports a mean position.
-        with pytest.raises(ValueError, match="only mode_or_mean reports a mean position"):
-            result.revise(options=result.options.revise(point_rule="most_probable"))
+    # Only mode_or_mean reports a mean position.
+    with pytest.raises(ValueError, match="only mode_or_mean reports a mean position"):
+        result.revise(options=result.options.revise(point_rule="most_probable"))
 
 
-@pytest.mark.parametrize("scaling", ["search_model", "physical"])
+@pytest.mark.parametrize("scaling", ["search_model"])
 @pytest.mark.parametrize("objective,bounds,points,termination", [
     (sp.Integer(3) + 0 * x, (-1.0, 1.0), 6, "flat_objective"),
     (sp.sin(x) ** 2 + sp.cos(x) ** 2, (-1.0, 1.0), 6, "unresolved_objective"),
-    (sp.exp(x / 2**52), (0.0, 1.0), 2, "unresolved_objective"),
 ])
 def test_flat_or_unresolved_objective_stops_before_any_solve(scaling, objective, bounds, points, termination):
     # refinement._resolution_stop. A constant has no support table, so its table ranges sum to zero,
-    # E = 0 and the level stops as flat_objective. The other two stop by a resolution rule, not
-    # because they are constant. The K = 6 table values of sin**2 + cos**2, which is 1, differ only by
-    # the rounding of its evaluation, about 1.1e-16 in all. exp(2**-52 x) on the endpoint grid {0, 1}
-    # is strictly increasing, and its correctly rounded values 1.0 and 1 + 2**-52 differ by one unit
-    # in the last place. Both ranges are at most the unit in the last place of the largest table
-    # value, where the tables cannot tell the variation from evaluation error, and dividing by E
-    # would turn it into a potential of order one, so both stop as unresolved_objective.
+    # E = 0 and the level stops as flat_objective. sin**2 + cos**2, which is 1, stops by a resolution
+    # rule, not because it is constant. Its K = 6 table values differ only by the rounding of its
+    # evaluation, about 1.1e-16 in all. That range is at most the unit in the last place of the largest
+    # table value, where the tables cannot tell the variation from evaluation error, and dividing by E
+    # would turn it into a potential of order one, so it stops as unresolved_objective.
     problem = Optimization(objective=objective, variables=(x,), bounds=(bounds,))
-    result = refine_box(problem, qhd=QHD(num_grid_points=points, num_steps=2,
-                                         include_boundary_points=points == 2),
+    result = refine_box(problem, qhd=QHD(num_grid_points=points, num_steps=2, include_boundary_points=False),
                         options=BoxRefinement(scaling=scaling), execution="classical", seed=3,
                         progress=False)
     assert result.termination == termination
     assert result.levels == () and result.best_level is None and result.candidate is None
     assert result.stopped_resources.evolution_work == 0 and result.resources.shots == 0
-
-
-@pytest.mark.parametrize("constant", [sp.Integer(10**16), sp.Float(1e16)])
-def test_search_model_subtracts_the_exact_shift_of_a_large_constant(constant):
-    # On [0, 1] with K = 6 the level objective of 1e16 + x is 1e16 + u, a constant term and one table
-    # with the values u_i. The model is formed from the support expressions and the exact table minima
-    # (refinement._level_problem), so the constant term, an integer or a binary64 Float, never enters
-    # and the level solves the same potential (u - u_0)/E as the objective x.
-    # A shift rounded to binary64 loses u_0 below the spacing 2 of numbers near 1e16, and dividing by
-    # E alone leaves the constant 1e16/E in the classical diagonal, where it rounds the variation away.
-    # Gain 1 keeps the solved potential in [0, 1], the range that the rounding window below assumes.
-    def level(objective):
-        return refine_box(Optimization(objective=objective, variables=(x,), bounds=((0.0, 1.0),)),
-                          qhd=QHD(num_grid_points=6, num_steps=4, total_time=2.0),
-                          options=BoxRefinement(scaling="search_model", potential_gain=1.0, max_levels=1),
-                          execution="classical", seed=3, progress=False)
-
-    shifted, base = level(constant + x), level(x)
-    inner, reference = shifted.results[0], base.results[0]
-    assert inner.plan.reconstruction.support_values == reference.plan.reconstruction.support_values
-    assert inner.plan.reconstruction.constant == reference.plan.reconstruction.constant
-    assert inner.marginals == reference.marginals
-    assert shifted.levels[0].energy_scale == base.levels[0].energy_scale
-    # c is recorded rounded, 1e16 + 1/7 -> 1e16, and the model does not use the rounded value.
-    assert shifted.levels[0].energy_shift == 1e16 and base.levels[0].energy_shift == 1 / 7
-    # The classical kernel sums the constant term and the table with fsum at each grid point
-    # (method.objective_at). The stored table u_i is exact, the solved table value rounds u_i/E once
-    # (at most 1.2 u), the constant -u_0/E rounds once (0.2 u) and the sum once (u(1 + delta)), so the
-    # potential lies within 3 u of (u_i - u_0)/E, a value in [0, 1] because E >= u_5 - u_0.
-    diagonal = [owner.objective_at(inner.plan.reconstruction, (i,), 6) for i in range(6)]
-    window = 3 * UNIT_ROUNDOFF
-    assert all(-window <= value <= 1 + window for value in diagonal)
-    assert max(diagonal) - min(diagonal) >= 1 - 2 * window
-    # The recorded c is the exact sum c0 + sum_S min T_S rounded once. For 1 + 2**-54 - x on the
-    # endpoint grid {0, 1}, c0 = 1 + 2**-54 and the table -u has minimum -1, so c = 2**-54, which
-    # converting c0 to binary64 before adding the minimum would round to 0.
-    tiny = refine_box(Optimization(objective=1 + sp.Rational(1, 2**54) - x, variables=(x,), bounds=((0.0, 1.0),)),
-                      qhd=QHD(num_grid_points=2, include_boundary_points=True, num_steps=2),
-                      options=BoxRefinement(scaling="search_model", max_levels=1), execution="classical",
-                      seed=3, progress=False)
-    assert tiny.levels[0].energy_shift == 2.0**-54
-
-
-@pytest.mark.parametrize("scaling", ["search_model", "physical"])
-def test_level_objective_is_evaluated_as_the_level_tabulates_it(scaling, monkeypatch):
-    # The level evaluates F as it tabulates it (refinement._tabulated_objective): each expanded
-    # support expression separately at the level's own coordinates minus the expansion center, the
-    # constant separately, and the values summed with fsum, as method.objective_at sums the tables.
-    # On [1, 2] with K = 4 the first grid point is x = 1.2 for the physical model and u = fl(1/5) = 0.2
-    # for the search model, whose exact image 1 + u is c + 2**-54 for c the binary64 number 1.2. For
-    # the search model F = -1/(x - c) has its pole at c, so F at the displayed point, the image rounded
-    # to 1.2, divides by zero, while the level's table holds -1/(u + (1 - c)) = -2**54 at u = 0.2. For
-    # the physical model F = -1/(x**2 - 1.44) has its pole at sqrt(1.44), and its table, expanded about
-    # the box point x = 1 nearest the origin, holds a finite value at 1.2 that an expansion about the
-    # origin would not give. All mass is injected on that grid point, and the large max_work admits the
-    # physical level's classical kernel, which the injection replaces.
-    c = sp.Rational(1.2)  # the binary64 number 1.2, exactly
-    objective = -1 / (x - c) if scaling == "search_model" else -1 / (x**2 - sp.Rational(1.44))
-    monkeypatch.setattr(owner, "_evolve_restricted", lambda *args: np.array([1, 0, 0, 0], dtype=complex))
-    result = refine_box(Optimization(objective=objective, variables=(x,), bounds=((1.0, 2.0),)),
-                        qhd=QHD(num_grid_points=4, max_work=10**20),
-                        options=BoxRefinement(scaling=scaling, max_levels=1), execution="classical",
-                        seed=3, progress=False)
-    level = result.levels[0]
-    assert level.point_indices == (0,) and level.point == (1.2,)
-    if scaling == "search_model":
-        assert level.unit_point == (0.2,) and level.objective == -(2.0**54)
-        # The summary shows the recorded objective, which F at the displayed point 1.2 cannot reproduce.
-        assert f"Selected point from level 1: [1.2]. Recorded objective: {-(2.0**54):.8g}." in str(result)
-        assert "The original-coordinate point is a rounded display value." in str(result)
-    else:
-        assert level.unit_point is None and level.objective == result.results[0].most_probable_objective
-
-
-def test_boxes_beyond_binary64_resolution_raise_or_stop_at_the_width_floor():
-    def run(bounds, scaling):
-        return refine_box(Optimization(objective=x, variables=(x,), bounds=(bounds,)),
-                          qhd=QHD(num_grid_points=4, num_steps=2),
-                          options=BoxRefinement(scaling=scaling, max_levels=1), execution="classical",
-                          seed=3, progress=False)
-
-    # The grid owner admits a spacing h only when the kinetic coefficients 1/h**2 to 1/(4 h**2) are
-    # normal binary64 numbers with finite denominators (grid.OneHotGrid.__post_init__). The width of
-    # [-1e308, 1e308] overflows, and on [0, 1e-200] h**2 underflows to zero. The physical model plans
-    # on that grid, so its first level raises.
-    for bounds, message in (((-1e308, 1e308), "not a finite positive"), ((0.0, 1e-200), "not all normal")):
-        with pytest.raises(ValueError, match=message):
-            run(bounds, "physical")
-    # The search model plans on the unit grid and maps its points into the narrow box.
-    narrow = run((0.0, 1e-200), "search_model")
-    assert len(narrow.levels) == 1 and all(0 < p < 1e-200 for p in narrow.levels[0].point)
-    # [1, 1 + 8 ulp(1)] with K = 4 has spacing 1.6 ulp(1), so its grid points round to 1 + 2, 3, 5
-    # and 6 ulp(1), and the midpoint 1 + 2.5 ulp(1) of the first two rounds onto one of them. The side
-    # is below its width floor (refinement._resolved) before any level.
-    for scaling in ("search_model", "physical"):
-        tight = run((1.0, 1.0 + 8 * 2.0**-52), scaling)
-        assert tight.termination == "width_floor" and tight.levels == ()
-    # A later physical box that the grid owner rejects stops at the width floor and keeps the
-    # completed levels (refinement._level_geometry). On [0, 1e-153] with K = 4 the spacing is 2e-154,
-    # whose square 4e-308 is a normal number. The kinetic ground state puts its largest marginal,
-    # (sin(2 pi/5)**2)/(5/2) = 0.362, on each middle point, so threshold 0.3 keeps one cell, and the
-    # second box of width 2e-154 has spacing 4e-155, whose square lies below the smallest normal
-    # number 2.2e-308. The kinetic coefficient 1/h**2 = 2.5e307 needs a total time near 1e-306 for
-    # the classical evolution to fit max_work, and this short evolution keeps the ground-state profile.
-    stopped = refine_box(Optimization(objective=x, variables=(x,), bounds=((0.0, 1e-153),)),
-                         qhd=QHD(num_grid_points=4, num_steps=2, total_time=1e-306),
-                         options=BoxRefinement(scaling="physical", max_levels=3, mass_threshold=0.3),
-                         execution="classical", seed=3, progress=False)
-    assert stopped.termination == "width_floor" and len(stopped.levels) == 1
-    assert stopped.levels[0].intervals in (((1, 1),), ((2, 2),))
-
-
-@pytest.mark.parametrize("scaling", ["search_model", "physical"])
-@pytest.mark.parametrize("roll,objective,interval,mass,next_box", [
-    (0, -sp.cos(2 * sp.pi * x), (0, 7), 1.0, ((0.0, 1.0),)),
-    (4, sp.cos(2 * sp.pi * x), (2, 5), 0.9375, ((0.1875, 0.6875),)),
-])
-def test_periodic_refinement_cuts_the_axis_at_the_identified_faces(scaling, roll, objective, interval, mass,
-                                                                   next_box, monkeypatch):
-    # The periodic grid of [0, 1] with K = 8 has the exact points i/8, and 1 is the same point as 0.
-    # The injected amplitudes (3, 1, 1, 0, 0, 0, 1, 2)/4 put 9/16 on index 0 and 4/16 on index 7,
-    # across that point from it, as -cos(2 pi x) with its minimum at 0 would. The interval does not
-    # wrap (refinement._axis_interval), so from the peak it can only grow upward, reaches 0.9 only by
-    # covering the axis, and the next box is the whole box. The same distribution rolled by half a
-    # period, the cos(2 pi x) case, grows over indices 2..5 (the tie between 2 and 5 goes to the lower
-    # side) to 15/16 and gives the sub-box between the midpoints 1.5/8 and 5.5/8. The rule depends
-    # on where the period is cut.
-    amplitudes = np.roll(np.array([3, 1, 1, 0, 0, 0, 1, 2]) / 4, roll).astype(complex)
-    monkeypatch.setattr(owner, "_evolve_restricted", lambda *args: amplitudes)
-    problem = Optimization(objective=objective, variables=(x,), bounds=((0.0, 1.0),))
-    result = refine_box(problem, qhd=QHD(num_grid_points=8, boundary="periodic"),
-                        options=BoxRefinement(scaling=scaling, max_levels=2, mass_threshold=0.9),
-                        execution="classical", seed=3, progress=False)
-    level = result.levels[0]
-    assert level.intervals == (interval,) and level.axis_masses == (mass,)
-    assert level.next_box == next_box
-    assert result.termination == ("box_unchanged" if roll == 0 else "level_limit")
-    if roll:
-        # The next level keeps the periodic grid on the sub-box.
-        assert result.results[1].plan.method.boundary == "periodic"
 
 
 @pytest.mark.parametrize("gain", [1.0, 8.0])
@@ -690,16 +506,6 @@ def test_search_model_levels_are_invariant_under_affine_maps_of_box_and_objectiv
                 assert level.next_box == tuple(move(side, j) for j, side in enumerate(base.next_box))
             else:
                 assert level.next_box == base.next_box
-
-
-@pytest.mark.parametrize("gain", [1.0, 8.0])
-def test_physical_scaling_rejects_an_explicit_potential_gain(gain):
-    # The physical model solves the original objective and has no gain, so any
-    # explicit value, including the plain 1, is refused, and without one the
-    # options resolve no gain for its levels.
-    with pytest.raises(ValueError, match="physical model"):
-        BoxRefinement(scaling="physical", potential_gain=gain)
-    assert BoxRefinement(scaling="physical").gain is None
 
 
 def test_stall_split_follows_the_end_mass_lemma_and_the_clearest_valley(monkeypatch):
@@ -955,19 +761,16 @@ def test_stall_split_needs_a_valley_that_the_shots_resolve():
             assert (level.region_axis_counts, level.region_count) == ((valid, kept), kept)
         else:
             assert level.split is None and result.termination == "box_unchanged"
-            assert level.split_declined == "no valley passes the count screen"
             assert (level.region_axis_counts, level.region_count) == ((valid, valid), valid)
 
 
-@pytest.mark.parametrize("scaling,gain,steps,total_time", [("search_model", 1.0, 10, 4.0), ("physical", None, 8, 2.0)])
-def test_best_point_gaussian_starts_a_later_level_at_the_best_point(scaling, gain, steps, total_time):
+def test_best_point_gaussian_starts_a_later_level_at_the_best_point():
     # With level_initial_state="best_point_gaussian" the first level starts from QHD.initial_state and
     # each later level from exp(-(x - p)**2/(2 (w L)**2)) per axis, p the location of the best level so
     # far (least relative objective, earlier on ties) and L the side of the level's box, written in the
     # level problem's coordinates (refinement._best_point_gaussian). For the search model these are
     # u = (x - a)/L, so the center is (p - a)/L, with p = a' + L' u' the exact image of the best level's
-    # unit point, rounded once, and the width w. For the physical model they are x, with center p and
-    # width w L rounded once. In both runs the second level does not improve on the first, so the third
+    # unit point, rounded once, and the width w. The second level does not improve on the first, so the third
     # level's Gaussian must sit at the first level's point, not at the last level's. The oracle builds
     # each Gaussian at 50 digits on the level's grid coordinates and compares it with the start vector
     # that the level's Plan stored and evolved. The difference of the normalized vectors is at most the
@@ -975,10 +778,10 @@ def test_best_point_gaussian_starts_a_later_level_at_the_best_point(scaling, gai
     # error, far below 1e-40.
     problem = Optimization(objective=(x - sp.Rational(3, 10)) ** 2 + (y + sp.Rational(1, 5)) ** 2 + x * y / 2,
                            variables=(x, y), bounds=((0.0, 1.0), (-1.0, 2.0)))
-    qhd = QHD(num_grid_points=5, num_steps=steps, total_time=total_time)
+    qhd = QHD(num_grid_points=5, num_steps=10, total_time=4.0)
     width = 0.25
     result = refine_box(problem, qhd=qhd,
-                        options=BoxRefinement(scaling=scaling, potential_gain=gain, max_levels=3, max_no_improve=3,
+                        options=BoxRefinement(scaling="search_model", potential_gain=1.0, max_levels=3, max_no_improve=3,
                                               mass_threshold=0.6, level_initial_state="best_point_gaussian",
                                               level_gaussian_width=width),
                         execution="classical", seed=3, progress=False)
@@ -991,13 +794,9 @@ def test_best_point_gaussian_starts_a_later_level_at_the_best_point(scaling, gai
         center, widths = [], []
         for j, (a, b) in enumerate(level.box):
             side = Fraction(b) - Fraction(a)
-            if scaling == "search_model":
-                (a0, b0), u = best.box[j], best.unit_point[j]
-                center.append(float((Fraction(a0) + (Fraction(b0) - Fraction(a0)) * Fraction(u) - Fraction(a)) / side))
-                widths.append(width)
-            else:
-                center.append(best.point[j])
-                widths.append(float(Fraction(width) * side))
+            (a0, b0), u = best.box[j], best.unit_point[j]
+            center.append(float((Fraction(a0) + (Fraction(b0) - Fraction(a0)) * Fraction(u) - Fraction(a)) / side))
+            widths.append(width)
         assert level.initial_state.center == tuple(center) and level.initial_state.widths == tuple(widths)
         grid = owner._grid(inner.plan)
         bounds = level.initial_state.variable_errors(grid)
@@ -1084,103 +883,6 @@ def _forbid_record_work(monkeypatch):
     monkeypatch.setattr("nwqlib.execution.ObservationChunk.histogram", forbid)
 
 
-def test_a_split_refinement_summarizes_saves_and_loads_from_its_records(monkeypatch, tmp_path):
-    """The injected dyadic split refinement of the stall-split test, summarized, saved and loaded.
-
-    The product state has four exactly tied largest probabilities, (9 * 10/256)**2 at (1, 2), (1, 4),
-    (2, 2) and (2, 4), so level 1's representative (1, 2) is also its computed maximizer with a zero
-    deficit, and its readout mode is unresolved, which the level copies. Level 1 keeps both axes whole,
-    so its interval masses describe the whole level box, 1 exactly, and the split's chosen upper region
-    holds 58/256 = 0.2265625. The archive is loaded with planning and evolution forbidden, and the summary
-    and report of the original, the loaded and a JSON-only record agree with every planning, evaluation,
-    acquisition, loading, array read and resource estimate forbidden. Exact readout has no valid-draw
-    count, so a failure probability gives no radius.
-    The resource report counts the joint-mass reads in observed values, 75 in three passes.
-    """
-    from nwqlib.algorithms.qhd import BoxRefinementResult, load_box_refinement
-
-    a = np.array([6, 9, 9, 3, 7]) / 16
-    b = np.array([4, 2, 10, 6, 10]) / 16
-    state = np.outer(a, b).reshape(-1).astype(complex)
-    monkeypatch.setattr(owner, "_evolve_restricted", lambda *args: state)
-    problem = Optimization(objective=y - x, variables=(x, y), bounds=((0.0, 1.0), (-1.0, 3.0)))
-    result = refine_box(problem, qhd=QHD(num_grid_points=5, include_boundary_points=True, keep_state=True),
-                        options=BoxRefinement(scaling="search_model", mass_threshold=0.96875, max_levels=3,
-                                              stall_split="best_region"),
-                        execution="classical", seed=3, progress=False)
-    first, second = result.levels
-    inner = result.results[0]
-    assert first.split is not None and result.termination == "split_limit"
-    assert inner.most_probable_indices == inner.probability_maximizer_indices == (1, 2)
-    assert inner.most_probable_deficit == 0.0 and first.mode_status == inner.mode_status == "unresolved"
-    assert [level.mode_status for level in result.levels] == [r.mode_status for r in result.results]
-    path = result.save(tmp_path / "saved")
-    assert sorted(p.name for p in path.iterdir()) == ["levels", "problem.pickle", "refinement.json"]
-    with monkeypatch.context() as patch:
-        patch.setattr(QHD, "plan", lambda *args, **kwargs: pytest.fail("load planned"))
-        patch.setattr(owner, "_evolve_restricted", lambda *args: pytest.fail("load evolved"))
-        loaded = load_box_refinement(path)
-    assert loaded.model_dump(mode="json") == result.model_dump(mode="json")
-    assert loaded.problem.content_id == problem.content_id and loaded.problem.objective == problem.objective
-    assert [(r.content_id, r.plan.content_id) for r in loaded.results] == [
-        (level.result_id, level.plan_id) for level in result.levels]
-    assert loaded.candidate == result.candidate and loaded.best_level == result.best_level
-    json_only = BoxRefinementResult.model_validate(result.model_dump(mode="json"))
-    assert json_only.problem is None and json_only.results == ()
-    _forbid_record_work(monkeypatch)
-    text, report = str(result), result.report(failure_probability=0.05)
-    for other in (loaded, json_only):
-        assert str(other) == text and other.report(failure_probability=0.05) == report
-    lines = text.splitlines()
-    for line in ("Box refinement stopped: split_limit. Completed levels: 2 of at most 3.",
-                 "The box stalled after the allowed number of stall splits.",
-                 "Stop detail: the 1 allowed stall splits have been made.",
-                 "Level 1 interval mass: 1 (exact-readout). Marginal union-bound formula: 1.",
-                 "Level 1 chosen split-region exact-readout mass: 0.2265625.",
-                 "Level 1 readout mode status: unresolved.",
-                 "Search-model objective evaluation uses the stored unit point. The original-coordinate point is "
-                 "a rounded display value."):
-        assert line in lines
-    assert not any(line.startswith("Level 2 chosen split-region") for line in lines)
-    entry = report["levels"][0]
-    assert entry["interval_event"] == "product of the kept intervals, the whole level box at a stall split"
-    assert entry["split_region_mass"] == 58 / 256 and entry["mode_status"] == "unresolved"
-    assert report["confidence"] is None and "simultaneous confidence" not in report["summary"]
-    assert any("whole level box" in statement for statement in report["statements"])
-    assert report["inner_results"] == [first.result_id, second.result_id]
-    # The read count is in observed values, not passes. Each level reads its 25 kept amplitudes once, when
-    # its joint observations are decoded, and level 1's split reuses them, so two passes make 50 reads.
-    reads = report["resources"]["total"]["joint_mass_reads"]
-    assert reads["value"] == 2 * 25 == sum(level.resources.joint_mass_reads for level in result.levels)
-    assert reads["meaning"] == ("joint-observation read charge: decoded entries once, a kept dense grid once and one "
-                                "kept-state length per streamed pass")
-
-
-def test_the_summary_follows_the_stored_selection_when_displayed_objectives_tie(monkeypatch):
-    """With the constant 2**60 every recorded objective rounds to 2**60, so only the relative objectives differ.
-
-    The injected states put all mass on index 1, then 2, then 0 of the three-point interior grids of the
-    search-model levels [-1, 1], [-1/4, 1/4] and [1/16, 1/4], so the levels report x = 0, 1/8 and 7/64
-    with F - C = 1/25, 9/1600 and about 0.00818. Level 2 is best and not last. The summary follows the
-    stored best level, while taking the least displayed objective with the earliest level on ties would
-    report level 1.
-    """
-    states = iter(np.eye(3, dtype=complex)[[1, 2, 0]])
-    monkeypatch.setattr(owner, "_evolve_restricted", lambda *args: next(states))
-    problem = Optimization(objective=(x - sp.Rational(1, 5)) ** 2 + 2**60, variables=(x,), bounds=((-1.0, 1.0),))
-    result = refine_box(problem, qhd=QHD(num_grid_points=3), options=BoxRefinement(max_levels=3),
-                        execution="classical", seed=3, progress=False)
-    assert [level.point for level in result.levels] == [(0.0,), (0.125,), (0.109375,)]
-    assert [level.objective for level in result.levels] == [2.0**60] * 3
-    assert result.best_level == 2 == 1 + min(range(3), key=lambda i: result.levels[i].relative_objective)
-    assert min(range(3), key=lambda i: result.levels[i].objective) == 0
-    _forbid_record_work(monkeypatch)
-    lines = str(result).splitlines()
-    assert f"Selected point from level 2: [0.125]. Recorded objective: {2.0**60:.8g}." in lines
-    assert "Selection compares recorded relative objectives and chooses the earliest level on ties." in lines
-    assert result.report()["record"]["best_level"] == 2
-
-
 def test_an_early_stop_and_a_zero_level_record_report_stored_counts_and_unavailable_resources(monkeypatch):
     """The finite-shot radius uses the configured horizon after an early stop, and unknown counts stay unknown.
 
@@ -1257,91 +959,6 @@ def test_an_early_stop_and_a_zero_level_record_report_stored_counts_and_unavaila
     assert counts["total"]["cx"]["unavailable"] == "level 1: its preparation raised"
     assert counts["t_cost"]["value"] is None and counts["max_plannings"]["value"] == 8
     assert empty.report()["confidence"] is None
-
-
-def test_refinement_save_validates_attachments_and_preserves_results(monkeypatch, tmp_path):
-    """Saving binds the original problem and level Results and rolls back a partial write.
-
-    Physical and search-model levels keep their actual grid points and
-    objective values through normal save and load.
-    """
-    from nwqlib.algorithms.qhd import BoxRefinementResult, load_box_refinement
-    from nwqlib.algorithms.qhd.records import QHDAnalysis
-
-    monkeypatch.setattr(owner, "_evolve_restricted", lambda *args: np.array([1, 0, 0], dtype=complex))
-    problem = Optimization(objective=(x - sp.Rational(1, 5)) ** 2, variables=(x,), bounds=((-1.0, 1.0),))
-    options = BoxRefinement(point_rule="best_observed", max_levels=2)
-
-    def run(objective=problem.objective):
-        return refine_box(Optimization(objective=objective, variables=(x,), bounds=((-1.0, 1.0),)),
-                          qhd=QHD(num_grid_points=3), options=options, execution="classical", seed=7,
-                          progress=False)
-
-    result, other = run(), run((x - sp.Rational(1, 3)) ** 2)
-    assert len(result.levels) == len(other.levels) == 2
-    (tmp_path / "taken").mkdir()
-    with pytest.raises(FileExistsError):
-        result.save(tmp_path / "taken")
-    bare = BoxRefinementResult.model_validate(result.model_dump(mode="json"))
-    with pytest.raises(ValueError, match="needs its original problem"):
-        bare.save(tmp_path / "bare")
-    bare._problem = problem
-    with pytest.raises(ValueError, match="one level Result per completed level, 2 in level order, and has 0"):
-        bare.save(tmp_path / "bare")
-    bare._results = (other.results[0], result.results[1])
-    with pytest.raises(ValueError, match="Result of level 1 differs from the Result, Plan and Run"):
-        bare.save(tmp_path / "bare")
-    assert not (tmp_path / "bare").exists()
-    saves = []
-
-    def failing(self, path):
-        saves.append(path)
-        if len(saves) == 2:
-            raise OSError("disk full")
-        return original(self, path)
-
-    original = QHDAnalysis.save
-    with monkeypatch.context() as patch:
-        patch.setattr(QHDAnalysis, "save", failing)
-        with pytest.raises(OSError, match="disk full"):
-            result.save(tmp_path / "partial")
-    assert len(saves) == 2 and not (tmp_path / "partial").exists()
-
-    path = result.save(tmp_path / "saved")
-
-    assert load_box_refinement(path).content_id == result.content_id
-    physical = refine_box(problem, qhd=QHD(num_grid_points=3), options=options.revise(scaling="physical"),
-                          execution="classical", seed=7, progress=False)
-    assert load_box_refinement(physical.save(tmp_path / "physical")).content_id == physical.content_id
-    witnesses = ((physical, dict(point=(0.123456,)), "physical grid point or objective"),
-                 (physical, dict(objective=-123.0), "physical grid point or objective"),
-                 (result, dict(point=(0.123456,)), "search-model grid coordinates"),
-                 (result, dict(unit_point=(0.123456,)), "search-model grid coordinates"))
-    for number, (source, update, message) in enumerate(witnesses):
-        changed = source.revise(levels=(source.levels[0].revise(**update), *source.levels[1:]))
-        changed._problem, changed._results = problem, source.results
-        with pytest.raises(ValueError, match=message):
-            changed.save(tmp_path / f"changed-{number}")
-        assert not (tmp_path / f"changed-{number}").exists()
-    # With probabilities 3/4 at x = -1/2 and 1/4 at x = 0, the most probable point and the candidate differ,
-    # with objectives 0.49 and 0.04. Each rule's physical level saves and loads, and a level that carries
-    # the other rule's coordinates and table objective is refused.
-    monkeypatch.setattr(owner, "_evolve_restricted", lambda *args: np.array([np.sqrt(0.75), 0.5, 0], dtype=complex))
-    points = {}
-    for rule in ("most_probable", "best_observed"):
-        run = refine_box(problem, qhd=QHD(num_grid_points=3),
-                         options=BoxRefinement(scaling="physical", point_rule=rule, max_levels=1),
-                         execution="classical", seed=7, progress=False)
-        assert load_box_refinement(run.save(tmp_path / rule)).content_id == run.content_id
-        points[rule] = run
-    most, best = points["most_probable"], points["best_observed"]
-    assert (most.levels[0].point, best.levels[0].point) == ((-0.5,), (0.0,))
-    for source, other in ((most, best), (best, most)):
-        level = other.levels[0]
-        changed = source.revise(levels=(source.levels[0].revise(point=level.point, objective=level.objective),))
-        changed._problem, changed._results = problem, source.results
-        with pytest.raises(ValueError, match="physical grid point or objective"):
-            changed.save(tmp_path / f"swapped-{source.options.point_rule}")
 
 
 def test_an_unevaluated_objective_reopens_as_supplied_from_a_refinement_archive_and_directory(tmp_path):

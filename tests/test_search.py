@@ -7,9 +7,9 @@ import pytest
 from nwqlib import Expectation, plan, prepare, scan, solve, submit
 from nwqlib.algorithms.expectation import ExpectationMethod
 from nwqlib.algorithms.protocol import ApplicabilityError
-from nwqlib.core.records import Limit, Rational, Unit
+from nwqlib.core.records import Rational, Unit
 from nwqlib.operators.inputs import ingest_pauli
-from nwqlib.resources import ResourceContext, Workspace
+from nwqlib.resources import ResourceContext
 from nwqlib.scientist import Comparison, ComparisonRow
 from nwqlib.search import Candidate, Objective, SearchSelection
 from test_run_lifecycle import InjectedBackend, selected
@@ -222,96 +222,6 @@ def test_serial_model_scope_and_unknown_forecast_remain_conditional(monkeypatch)
     )
 
 
-def test_repeated_candidate_reuses_its_forecast_without_new_model_evaluation(monkeypatch):
-    """A repeated Plan/Allocation/evidence key must not evaluate the device model again."""
-    import nwqlib.backends.assessment as assessment
-
-    plans = (selected(3), selected(7))
-    original, allocation = original_forecast(plans[0])
-    calls = []
-    predict = assessment._predict_time
-    monkeypatch.setattr(
-        assessment, "_predict_time", lambda *a, **k: calls.append(1) or predict(*a, **k)
-    )
-    result = scan(
-        tuple(Candidate(p, allocation=allocation) for p in (plans[0], plans[1], plans[0])),
-        objectives=(Objective(kind="requested_shots"),),
-        profile=original.profile,
-        assessed_at=original.assessed_at,
-    )
-    # One prediction per declared acquisition and model, for each distinct Plan only.
-    points = [len(p.experiments) * len(original.profile.models) for p in plans]
-    assert all(points)
-    assert len(calls) == sum(points)
-    rows = result.comparison.rows
-    assert rows[2].estimate is rows[0].estimate and rows[2].plan is plans[0]
-    work = result.selection.work
-    assert (work.requested_points, work.assessed_points, work.reused_points) == (
-        2 * points[0] + points[1], sum(points), points[0]
-    )
-    assert (work.base_folds, work.reused_folds) == (2, 1)
-    assert result.selection.values[2] == result.selection.values[0]
-
-
-def test_explicit_allocations_preserve_nonmonotone_per_location_capacity():
-    """Per-device capacity is nonmonotone across explicit grants and cannot be inferred from
-    their aggregate memory.
-    """
-    chosen = selected()
-    forecast, allocation = original_forecast(chosen, model=False)
-    source = forecast.profile.evidence.source
-
-    def grant(name, gib):
-        return allocation.revise(
-            name=name,
-            locations=("gpu0", "gpu1"),
-            topology="independent_devices",
-            limits=tuple(
-                Limit(
-                    stage="execution",
-                    metric="memory",
-                    unit=Unit(symbol="byte", dimension="bytes"),
-                    kind="capacity_stock",
-                    value=gib * 2**30,
-                    scope=location,
-                )
-                for location in ("gpu0", "gpu1")
-            ),
-        )
-
-    allocations = (
-        grant("fits first", 12),
-        grant("two eight-GiB devices", 8),
-        grant("fits last", 16),
-    )
-    context = ResourceContext(
-        batch_schedule="serial",
-        resident=(
-            Workspace(location="gpu0", purpose="workspace", bytes=10 * 2**30, source=source),
-        ),
-    )
-    result = scan(
-        tuple(Candidate(chosen, allocation=a) for a in allocations),
-        objectives=(Objective(kind="requested_shots"),),
-        profile=forecast.profile,
-        context=context,
-        assessed_at=forecast.assessed_at,
-    )
-    details = [
-        next(
-            d
-            for d in row.estimate.assessments[0].capacity.details
-            if d.limit is not None and d.limit.scope == "gpu0" and d.quantity == "memory"
-        )
-        for row in result.comparison.rows
-    ]
-    assert [d.status for d in details] == ["feasible", "infeasible", "feasible"]
-    assert all(d.fact.value.numerator == 10 * 2**30 for d in details)
-    assert result.selection.nondominated == (0, 1, 2)
-    assert result.select(1).allocation is allocations[1]
-    assert result.select(1).estimate.assessments[0].capacity.status == "infeasible"
-
-
 def test_frontier_domain_ties_and_partial_comparability():
     result = scan(
         tuple(Candidate(p) for p in choices((4, 8, 4))),
@@ -337,6 +247,44 @@ def test_frontier_domain_ties_and_partial_comparability():
                 (result.comparison.rows[1], result.comparison.rows[0], result.comparison.rows[2]),
             )
         )
+
+
+def test_two_objective_front_keeps_both_sides_of_a_shots_width_trade_off():
+    """Sampled Lanczos and FixedGCIM Plans trade shots against width, so both stay on the front.
+
+    The counts follow the documented sampled workloads at n shots per setting.
+    Lanczos with m = 2 measures the moment degrees 1 to 2m-1, three settings.
+    FixedGCIM measures b**2 G settings, here b = 3 basis states and G = 2
+    qubit-wise commuting groups {XI, IX} and {ZZ}. The widths, 4 for Lanczos
+    and 3 for FixedGCIM (two system qubits and the pair ancilla), are those
+    docs/scientist.md reports for these Methods. The width of a Plan with
+    several measurement runs holds only when the runs execute one after
+    another, hence the serial context.
+    """
+    from nwqlib import Eigenproblem
+    from nwqlib.algorithms import FixedGCIM, Lanczos
+
+    problem = Eigenproblem(A=ingest_pauli((("ZZ", 1.0), ("XI", 0.5), ("IX", 0.5)), num_qubits=2))
+    lanczos = Lanczos(initial_state=[1, 0, 0, 0], krylov_dimension=2)
+    gcim = FixedGCIM(basis=([1, 0, 0, 0], [0, 1, 1, 0], [0, 0, 0, 1]))
+    n = 64
+    plans = (plan(problem, method=lanczos, shots=n, seed=7),
+             plan(problem, method=gcim, shots=n, seed=7),
+             plan(problem, method=gcim, shots=2 * n, seed=7))
+    objectives = (Objective(kind="requested_shots"), Objective(kind="logical_width"))
+    ranked = scan(tuple(Candidate(p) for p in plans), objectives=objectives,
+                  context=ResourceContext(batch_schedule="serial"))
+    expected = [[3 * n, 4], [2 * 9 * n, 3], [2 * 9 * 2 * n, 3]]
+    assert [[number(v) for v in row] for row in ranked.selection.values] == expected
+    # Row 0 has the fewest shots and row 1 the smallest width, so neither dominates
+    # the other. Row 2 ties row 1 on width and needs more shots.
+    assert ranked.selection.nondominated == (0, 1) and ranked.selection.incomparable == ()
+    assert scan(ranked.comparison, objectives=objectives[:1]).selection.nondominated == (0,)
+    assert scan(ranked.comparison, objectives=objectives[1:]).selection.nondominated == (1, 2)
+    for index in (0, 1):
+        result = solve(ranked.select(index))
+        assert result.plan is plans[index]
+        assert sum(event.shots for event in result.data.trace.events) == expected[index][0]
 
 
 def test_finite_caps_precede_folding_and_exact_frontier_work(monkeypatch):

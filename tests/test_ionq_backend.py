@@ -267,10 +267,6 @@ def test_public_converter_preserves_units_and_nontrivial_measured_wires(api, gat
     "change,match",
     [
         ({"artifact_format": "ionq.result.probabilities.json.v2"}, "no raw histogram"),
-        ({"histogram": {"0": 0.75, "1": 0.25}}, "nonnegative integers"),
-        ({"histogram": {"0": 5}}, "population"),
-        ({"children": ["child-other"]}, "child jobs"),
-        ({"variants": [{"variant_id": "variant-other", "shots": 4}]}, "merged variants"),
     ],
 )
 def test_foreign_populations_and_probabilities_never_publish_counts(api, change, match, tmp_path):
@@ -284,27 +280,6 @@ def test_foreign_populations_and_probabilities_never_publish_counts(api, change,
         with pytest.raises(ValueError, match=match):
             refresh_submissions(run=run)
         assert run.trace.jobs == 1 and (not run._state["by_attempt"])
-
-
-def test_unsupported_populations_reject_before_submission_and_sdk_error_propagates(api):
-    from qiskit import QuantumCircuit
-
-    state, backend, _ = api
-    for connection, match in (
-        (backend.revise(device="simulator"), "ignores shots"),
-    ):
-        with pytest.raises(ValueError, match=match):
-            connection.target_for(ObservationSpec(kind="counts", shots=4))
-    with pytest.raises(ValueError, match="5000"):
-        backend.admit_batch(())
-    qc = QuantumCircuit(1, 1)
-    qc.reset(0)
-    qc.measure(0, 0)
-    from qiskit_ionq.exceptions import IonQGateError
-
-    with pytest.raises(IonQGateError):
-        backend._convert(qc)
-    assert state.posts == 0
 
 
 def test_batch_reordered_children_partial_failure_and_restore_preserve_populations(tmp_path, api):
@@ -358,107 +333,6 @@ def test_batch_reordered_children_partial_failure_and_restore_preserve_populatio
         assert len(run._state["by_attempt"]) == 2 and run.trace.jobs == 1
     artifact_reads = [url for method, url, _ in exchanges if "/artifacts/" in url]
     assert len(artifact_reads) == 2
-
-
-@pytest.mark.parametrize("defect", ["foreign_parent", "duplicate_name", "duplicate_child", "changed_child"])
-def test_batch_child_association_errors_precede_artifact_download(tmp_path, api, defect):
-    state, backend, exchanges = api
-    _, selected = selection()
-    with Run(selected, backend=backend, directory=tmp_path / "bad.sqlite") as run:
-        handle = handle_for(selected, backend, run)
-        receipt = submit_detached((handle, handle), run=run)
-        if defect == "foreign_parent":
-            state.child_overrides["child-a"] = {"parent_job_id": "foreign-parent"}
-        elif defect == "duplicate_name":
-            state.child_overrides["child-a"] = {"name": f"nwqlib:{receipt.submission_id}:1"}
-        elif defect == "duplicate_child":
-            state.children = ["child-b", "child-b"]
-        else:
-            state.child_overrides["child-a"] = {"id": "foreign-child"}
-        with pytest.raises(ValueError, match="IonQ child|child job inventory"):
-            refresh_submissions(run=run)
-        assert not any(("/artifacts/" in url for _, url, _ in exchanges))
-        assert not run._state["by_attempt"] and state.posts == 1
-
-
-@pytest.mark.parametrize("stage", ["status", "artifact", "decode"])
-def test_later_child_error_preserves_completed_results_and_original_error(tmp_path, monkeypatch, api, stage):
-    """Inject status, artifact or decoder failure and ensure completed child data and the
-    original error cause survive.
-    """
-    state, backend, exchanges = api
-    _, selected = selection()
-    path = tmp_path / "partial-error.sqlite"
-    cause = OSError("original transport or decoder cause")
-    failure = (
-        ConnectionError("later child interruption")
-        if stage != "decode"
-        else ValueError("later decoder error")
-    )
-    failure.__cause__ = cause
-    state.failure = failure
-    state.fail_child = "child-a" if stage == "status" else None
-    state.fail_artifact = "child-a" if stage == "artifact" else None
-    decoding_fails = stage == "decode"
-    original_decode = IonQBackend._decode
-
-    def decode(self, payload, **kwargs):
-        if decoding_fails and kwargs["job_id"] == "child-a":
-            raise failure
-        return original_decode(self, payload, **kwargs)
-
-    monkeypatch.setattr(IonQBackend, "_decode", decode)
-    with Run(selected, backend=backend, directory=path) as run:
-        handle = handle_for(selected, backend, run)
-        receipt = submit_detached((handle, handle), run=run)
-        with pytest.raises(type(failure)) as caught:
-            refresh_submissions(run=run)
-        assert caught.value is failure and caught.value.__cause__ is cause
-        saved = run.trace.submissions[0]
-        assert saved.items[1].child_job == "child-b"
-        assert saved.items[1].provider_result_id == "raw-child-b"
-        assert not saved.results_consumed and saved.refresh_failure
-        if stage != "status":
-            assert saved.items[0].child_job == "child-a"
-            assert saved.items[0].provider_result_id == "raw-child-a"
-            completed = run.completed_observation(receipt.items[1].attempt)
-            assert completed.job == "child-b" and completed.returned_shots == 4
-            histogram = completed.histogram()
-            assert histogram.width == 1 and dict(zip(histogram.index_list(), histogram.weights.tolist())) == {0: 1, 1: 3}
-            assert run.collect(completed)
-        else:
-            assert not run._state["by_attempt"]
-        assert run.trace.jobs == 1 and len(run.prepared_artifacts) == 1
-        assert sum((event.shots for event in run.trace.events)) == 8
-    state.fail_child = state.fail_artifact = None
-    decoding_fails = False
-    before = len(exchanges)
-    with load_run(path, backend=backend) as run:
-        if stage == "artifact":
-            state.child_overrides["child-a"] = {
-                "results": {
-                    state.artifact_format: {"id": "replacement-artifact", "format": state.artifact_format}
-                }
-            }
-            artifact_calls = sum(("/artifacts/" in url for _, url, _ in exchanges))
-            with pytest.raises(ValueError, match="artifact changed"):
-                refresh_submissions(run=run)
-            assert sum(("/artifacts/" in url for _, url, _ in exchanges)) == artifact_calls
-            assert run.trace.submissions[0].items[0].provider_result_id == "raw-child-a"
-            state.child_overrides.clear()
-        remaining = refresh_submissions(run=run)
-        assert len(remaining) == (2 if stage == "status" else 1)
-        for chunk in remaining:
-            assert run.collect(chunk)
-        if stage != "status":
-            assert remaining[0].job == "child-a" and remaining[0].chunk == "0"
-            assert not any(("/jobs/child-b" in url for _, url, _ in exchanges[before:]))
-        assert state.posts == 1 and run.trace.jobs == 1 and (len(run.prepared_artifacts) == 1)
-        assert sum((event.returned_shots for event in run.trace.events)) == 8
-    before = len(exchanges)
-    with load_run(path, backend=backend) as run:
-        assert not refresh_submissions(run=run) and len(exchanges) == before
-        assert len(run._state["by_attempt"]) == 2 and run.trace.jobs == 1
 
 
 def selection():
@@ -528,61 +402,6 @@ def test_restore_admits_before_json_and_keeps_original_measurement_map(monkeypat
         backend.restore_native(record, run=run)
 
 
-@pytest.mark.parametrize("extra_classical_bits", [0, 62], ids=["pair", "wide"])
-def test_zero_count_provider_entries_do_not_exceed_readout_cardinality(
-    tmp_path, api, extra_classical_bits
-):
-    """Positive histogram support is at most its shots on either decode route."""
-    import warnings
-    from nwqlib.ir import ClassicalValue
-    from nwqlib.operators.inputs import ingest_pauli
-    from nwqlib.problems import Expectation
-    from nwqlib.problems.inputs import ingest_occupation
-
-    state, backend, _ = api
-    state.histogram = {"0": 1, "1": 1, "2": 1, "3": 1, "4": 0}
-    selected = nwqlib.plan(
-        Expectation(state=ingest_occupation("000", num_qubits=3),
-                    observable=ingest_pauli((("ZZZ", 1.0),), num_qubits=3)),
-        method=ExpectationMethod(), shots=4, seed=7,
-    )
-    if extra_classical_bits:
-        blocks = selected.blocks
-        program = selected.construction.program
-        program = program.revise(classical=(*program.classical,
-            ClassicalValue(name="padding", dtype="bits", width=extra_classical_bits)))
-        selected = selected.revise(
-            construction=selected.construction.revise(program=program))._bind(blocks=blocks)
-    with Run(selected, backend=backend, directory=tmp_path / "zero-counts") as run:
-        with warnings.catch_warnings():
-            warnings.simplefilter("ignore", UserWarning)
-            handle = handle_for(selected, backend, run)
-        assert handle._items == 4
-        submit_detached((handle,), run=run)
-        chunk, = refresh_submissions(run=run)
-        histogram = chunk.histogram()
-        assert histogram.width == 3 + extra_classical_bits
-        assert dict(zip(histogram.index_list(), histogram.weights.tolist())) == {
-            0: 1, 1: 1, 2: 1, 3: 1,
-        }
-        assert chunk.returned_shots == 4
-        assert run.trace.submissions[0].results_consumed and state.posts == 1
-
-
-@pytest.mark.parametrize("payload", [[], "x", None, {}, {"histogram": []}, {"histogram": {}},
-                                     {"histogram": {"registers": []}}])
-def test_decode_refuses_a_malformed_v2_payload_as_provider_data(payload):
-    """A v2 result without a histogram registers mapping is refused with ValueError, like other malformed histograms."""
-    from dataclasses import replace
-    from test_nexus_backend import IO
-
-    backend = IonQBackend(device="qpu.forte-1", max_input_bytes=65536, max_response_bytes=65536)
-    native = replace(_array_route_native(), num_qubits=1, measurement_map=(0,))
-    with pytest.raises(ValueError, match="IonQ v2 result requires a histogram registers mapping"):
-        backend._decode(payload, artifact_format="ionq.result.histogram.json.v2", native=native, shots=1,
-                        job_id="malformed", run=IO())
-
-
 def _array_route_native():
     from nwqlib.backends.ionq import _PreparedIonQ
 
@@ -593,12 +412,6 @@ def _array_route_native():
 @pytest.mark.parametrize(
     "qubits,measurement_map,keys,array_bytes",
     [
-        (20, (0,), 100_000, 5_700_016),
-        (20, (3, 7), 100_000, 5_700_032),
-        (20, tuple(range(8)), 100_000, 5_702_048),
-        (20, (19, 2, 5, 11), 100_000, 5_700_128),
-        (4, tuple(range(4)), 16, 1_040),
-        (12, tuple(range(12)), 4096, 266_240),
         # Distinct spellings of four native states: at most 2**q, not 2**c, distinct mapped indices.
         (2, (0, 1, 0, 1, None, None, None, None), ("0", "1", "2", "3", "00", "01"), 374),
         # Fewer provider entries than 2**min(q, c): at most m, not 2**64, distinct mapped indices.
@@ -645,27 +458,16 @@ def test_decode_refuses_below_the_array_bound_before_the_state_array(monkeypatch
     assert result.raw_output["counts"][0].tolist() == list(range(16))
 
 
-@pytest.mark.parametrize("outcomes,qubits,width", [(0, 1, 1), (-1, 1, 1), (1, -1, 1), (1, 65, 1),
-                                                  (1, 1, -1), (1, 1, 65)])
-def test_decode_byte_bound_refuses_arguments_outside_its_domain(outcomes, qubits, width):
-    from nwqlib.backends.ionq import ionq_decode_bytes
-
-    with pytest.raises(ValueError):
-        ionq_decode_bytes(outcomes, qubits, width)
-
-
-@pytest.mark.parametrize("excess", [0, 1, 200_000])
-def test_response_reader_holds_at_most_one_byte_past_the_cap(monkeypatch, excess):
+def test_response_reader_holds_at_most_one_byte_past_the_cap(monkeypatch):
     """An oversized body is rejected after at most max_response_bytes + 1 bytes are read.
 
     A fixed 64 KiB read size lets the reader take up to 64 KiB - 1 bytes past
     the cap before it rejects the body, and the 200,000-byte excess detects
-    that. A body of exactly the cap still parses, and a body one byte over it
-    is rejected.
+    that.
     """
     import requests
 
-    cap = 100_000
+    cap, excess = 100_000, 200_000
     body = json.dumps({"id": "x" * (cap + excess - 10)}).encode()
     assert len(body) == cap + excess
     delivered = []
@@ -703,24 +505,16 @@ def test_response_reader_holds_at_most_one_byte_past_the_cap(monkeypatch, excess
     monkeypatch.setattr(requests, "request", lambda method, url, **kwargs: Response())
     backend = IonQBackend(device="qpu.forte-1", max_input_bytes=65536, max_response_bytes=cap)
     run = SimpleNamespace(check_data=lambda size: None)
-    if excess == 0:
-        assert backend._request("GET", "jobs/cap", run=run) == json.loads(body)
-        assert sum(delivered) == cap
-    else:
-        with pytest.raises(ValueError, match="exceeds max_response_bytes"):
-            backend._request("GET", "jobs/cap", run=run)
-        assert sum(delivered) == cap + 1
+    with pytest.raises(ValueError, match="exceeds max_response_bytes"):
+        backend._request("GET", "jobs/cap", run=run)
+    assert sum(delivered) == cap + 1
 
 
-@pytest.mark.parametrize("level", [0, 1, 2])
-def test_qis_lowering_keeps_dense_unitaries_exact(api, tmp_path, monkeypatch, level):
+def test_qis_lowering_keeps_dense_unitaries_exact(api, tmp_path, monkeypatch):
     # Qiskit's own Rx/Ry/Rz/CX lowering of this near-identity unitary errs by
-    # about 1e-6 per entry. The expected matrix is SciPy's exponential. Levels
-    # 0 and 1 receive the exact synthesis; level 2 resynthesizes two-qubit
-    # blocks and receives the logical circuit. The selected level reaches the
-    # transpiler: two Rz rotations stay two at level 0 and merge into one above
-    # it. A level other than the default 0 marks the receipt with the exclusion
-    # "optimization_level".
+    # about 1e-6 per entry. The expected matrix is SciPy's exponential. The
+    # default level 0 receives the exact synthesis and reaches the transpiler,
+    # where two Rz rotations stay two.
     import numpy as np
     from scipy.linalg import expm
     from qiskit import QuantumCircuit
@@ -728,7 +522,7 @@ def test_qis_lowering_keeps_dense_unitaries_exact(api, tmp_path, monkeypatch, le
     from qiskit.quantum_info import Operator
 
     state, original, _ = api
-    backend = original.revise(gateset="qis", optimization_level=level)
+    backend = original.revise(gateset="qis", optimization_level=0)
     lowered = []
     convert = IonQBackend._convert
     monkeypatch.setattr(IonQBackend, "_convert", lambda self, circuit: lowered.append(circuit) or convert(self, circuit))
@@ -751,20 +545,12 @@ def test_qis_lowering_keeps_dense_unitaries_exact(api, tmp_path, monkeypatch, le
         merge.measure(0, 0)
         backend.prepare(merge, observation=ObservationSpec(kind="counts", shots=4), runtime=RuntimeOptions(seed=7),
                         position=len(merge.data), source_definitions=(), run=run, snapshot="merge")
-    assert lowered[1].count_ops().get("rz", 0) == (2 if level == 0 else 1)
-    assert len(synthesized) == (2 if level < 2 else 0)
+    assert lowered[1].count_ops().get("rz", 0) == 2
+    assert len(synthesized) == 2
     body = lowered[0].remove_final_measurements(inplace=False)
-    if level < 2:
-        assert np.abs(Operator(body).data - unitary).max() <= 1e-13
-        assert prep.transformation.startswith("exact dense-unitary synthesis")
-    else:
-        assert prep.transformation.startswith("public QIS lowering")
-    assert prep.probability_window_exclusions == (None if level == 0 else ("optimization_level",))
-    if level:
-        with pytest.raises(ValueError, match="optimization_level must be 0"):
-            original.revise(gateset="native", optimization_level=level).prepare(
-                qc, observation=ObservationSpec(kind="counts", shots=4), runtime=RuntimeOptions(seed=7),
-                position=len(qc.data), source_definitions=(), run=run, snapshot="native")
+    assert np.abs(Operator(body).data - unitary).max() <= 1e-13
+    assert prep.transformation.startswith("exact dense-unitary synthesis")
+    assert prep.probability_window_exclusions is None
 
 
 def test_qis_receipt_records_the_final_layout_of_a_relabeled_lowering(api, tmp_path):

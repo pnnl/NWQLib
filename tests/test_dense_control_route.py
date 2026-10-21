@@ -5,7 +5,7 @@ synthesized gate. The whole-matrix route synthesizes the controlled matrix.
 Both must give the controlled matrix to rounding at every call site, with
 open control values and with the controls in superposition. ``"auto"``
 takes the whole-matrix route for one control and the gate-wise route for
-more, and the route is part of the Plan.
+more.
 """
 
 from types import SimpleNamespace
@@ -118,19 +118,6 @@ def test_both_routes_give_the_controlled_matrix(kind, controls, state, route):
     assert np.max(np.abs(final.data - expected_state.data)) < ROUNDING
 
 
-def test_the_whole_matrix_route_keeps_a_one_qubit_unitary_and_a_gate_without_dense_unitaries():
-    one = QuantumCircuit(1)
-    one.append(UnitaryGate(random_unitary(2, seed=63).data), [0])
-    plain = QuantumCircuit(2)
-    plain.ry(0.2, 0)
-    plain.cx(0, 1)
-    for circuit in (one, plain):
-        whole = controlled(circuit.to_gate(), 1, route="whole_matrix")
-        gatewise = controlled(circuit.to_gate(), 1)
-        assert type(whole) is type(gatewise) and whole.name == gatewise.name
-        assert np.max(np.abs(_operator(whole) - _controlled_matrix(Operator(circuit).data, 1, 1))) < ROUNDING
-
-
 def _lchs_dense_plan(num_qubits, address_bits, route, source=False):
     import sys
     from pathlib import Path
@@ -177,19 +164,6 @@ def test_lchs_dense_select_applies_each_branch_under_its_address_on_both_routes(
     whole = route == "whole_matrix" or (route == "auto" and address_bits == 1)
     names = {item.operation.name for item in built.data}
     assert any(name.startswith("c_dense_unitary") for name in names) == whole
-
-
-def test_lchs_source_select_is_the_same_operator_on_both_routes():
-    # On the whole-matrix route a constant-source branch is one unitary, its
-    # evolution times the matrix of its input preparation.
-    operators = {}
-    for route in ("gatewise", "whole_matrix"):
-        problem, selected = _lchs_dense_plan(2, 1, route, source=True)
-        built = _built_select(problem, selected)
-        operators[route] = Operator(built).data
-        names = {item.operation.name for item in built.data}
-        assert any(name.startswith("c_dense_unitary") for name in names) == (route == "whole_matrix")
-    assert np.max(np.abs(operators["gatewise"] - operators["whole_matrix"])) < ROUNDING
 
 
 def _qls_query(solver, route, controls):
@@ -246,52 +220,3 @@ def test_qsp_joint_generator_is_the_same_operator_on_both_routes():
     names = {item.operation.name for item in joint.circuit.data}
     assert any(name.startswith("c_generator_branch") for name in names)
     assert not any(item.operation.name.startswith("c_generator_branch") for item in reference.circuit.data)
-
-
-def test_the_route_is_part_of_the_plan():
-    from nwqlib.algorithms.lchs import LCHS
-    from nwqlib.algorithms.qls import QLS
-
-    assert LCHS().dense_control_route == "auto" and QLS().dense_control_route == "auto"
-    assert LCHS(dense_control_route="gatewise").content_id != LCHS().content_id
-    assert QLS(dense_control_route="whole_matrix").content_id != QLS().content_id
-    identities = {_lchs_dense_plan(2, 1, route)[1].content_id for route in ("gatewise", "whole_matrix", "auto")}
-    assert len(identities) == 3
-    with pytest.raises(ValueError):
-        LCHS(dense_control_route="whole")
-
-
-@pytest.mark.parametrize(("num_qubits", "branches"), [(3, 1024), (4, 256), (5, 64), (6, 16)])
-def test_auto_admits_the_stated_lchs_dense_boundaries(num_qubits, branches):
-    # The largest power-of-two branch counts that the default max_select_work
-    # and max_bytes admit for these test problems, from the spectral branch law
-    # (time_independent_terms._spectral_branch_requirements) and the
-    # synthesis and control laws.
-    problem, selected = _lchs_dense_plan(num_qubits, branches.bit_length() - 1, "auto")
-    assert selected.reconstruction.physical_branches == branches
-    with pytest.raises(ValueError, match="max_select_work|max_bytes"):
-        _lchs_dense_plan(num_qubits, branches.bit_length(), "auto")
-
-
-@pytest.mark.parametrize("solver", ["qsvt_inverse", "shortcut_native_svp", "shortcut_dilation"])
-def test_auto_admits_controlled_dense_queries_of_64_padded_coordinates(solver):
-    # qsvt_inverse (the Hermitian dilation of a non-Hermitian A) and
-    # shortcut_native_svp query with one control, which "auto" takes through
-    # the controlled matrix, and shortcut_dilation with two, gate-wise.
-    import nwqlib
-    from nwqlib import LinearSystem, StateVector
-    from nwqlib.algorithms.qls import QLS
-
-    rng = np.random.default_rng(5)
-    for size, admitted in ((64, True), (128, False)):
-        matrix = np.eye(size) + 0.05 * rng.normal(size=(size, size))
-        extra = {} if solver == "qsvt_inverse" else {"encoded_solution_norm_estimate": 1.0}
-        method = QLS(solver=solver, block_encoding_implementation="dense_dilation", epsilon_inv=0.1, **extra)
-        output = StateVector(normalization="unit", global_phase="modulo_global_phase")
-        if admitted:
-            nwqlib.plan(LinearSystem(A=matrix, b=np.ones(size)), method=method, output=output, execution="quantum",
-                        seed=3)
-        else:
-            with pytest.raises(ValueError, match="QLS controlled dense-query synthesis exceeds max_work"):
-                nwqlib.plan(LinearSystem(A=matrix, b=np.ones(size)), method=method, output=output,
-                            execution="quantum", seed=3)

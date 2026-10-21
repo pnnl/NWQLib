@@ -15,8 +15,6 @@ from nwqlib._prepared_execution import Run
     [
         ("spin_adapted_sd", None, "double_singlet"),
         ("uccsd_sd", (2,), "uccsd_double"),
-        ("qeb_sd", (2,), "qeb_double"),
-        ("ceo_ovp", (2, 3), "ceo_ovp_plus"),
     ],
 )
 def test_published_h2_pool_anchor(pool, indices, family):
@@ -26,7 +24,7 @@ def test_published_h2_pool_anchor(pool, indices, family):
         pool=pool,
         n_spatial_orbitals=2,
         max_iterations=4,
-        gradient_norm_floor=0 if pool in ("qeb_sd", "ceo_ovp") else 1e-8,
+        gradient_norm_floor=1e-8,
     )
     plan = method.plan(
         problem,

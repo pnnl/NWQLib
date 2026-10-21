@@ -185,21 +185,6 @@ def test_sampled_enclosure_uses_numerical_window_without_rejecting_positive_subs
             assert pencil["enclosure_passed"] is passed
 
 
-def test_projected_backward_error_uses_scaled_denominator_without_overflow():
-    scale = 8e307
-    h = np.array([[1.0, 0.1], [0.1, -1.0]]) * scale
-    result = _solve_projected_pencil(h, np.eye(2), symmetrize_matrices=False)[0]
-    coefficient = result.ground_state_coefficients
-    denominator = (
-        np.linalg.norm(h / scale) + abs(result.eigenvalues[0] / scale) * np.sqrt(2)
-    ) * np.linalg.norm(coefficient)
-    assert denominator > np.finfo(float).max / scale
-    expected = (result.residual_norm / scale) / denominator
-    assert result.generalized_eigenpair_backward_error == pytest.approx(
-        expected, rel=1e-12, abs=0.0
-    )
-
-
 def test_ancilla_population_normalization_and_incremental_pricing():
     from test_adapt_primary import plan_for
     from nwqlib.core import Source

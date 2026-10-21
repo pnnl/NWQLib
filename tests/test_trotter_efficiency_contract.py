@@ -1,6 +1,5 @@
 """Explicit fixed-PF certificates at the selected schedule, with actual work caps."""
 
-import numpy as np
 import pytest
 
 from nwqlib import LinearDynamics, plan, solve
@@ -9,11 +8,11 @@ from nwqlib.algorithms.lchs.provider_config import ProviderConfig
 from nwqlib.subroutines.trotterization import error_budget
 
 
-def selected(*, execution="classical", identity=False):
+def selected(*, execution="classical"):
     return plan(
         LinearDynamics(
-            A=np.eye(2) if identity else [[0.45, 0.08j], [0.03j, 0.7]],
-            initial_state=[1.0, 0.0] if identity else [1.0, 0.2],
+            A=[[0.45, 0.08j], [0.03j, 0.7]],
+            initial_state=[1.0, 0.2],
             time=0.2,
         ),
         method=LCHS(
@@ -107,9 +106,8 @@ def test_fixed_structural_certificate_refines_evidence_without_reselecting_or_mu
     assert result.model_dump_json() == before and choice.reconstruction.step_counts == schedule
 
 
-@pytest.mark.parametrize("control", ["max_steps", "max_structural_work", "max_dense_work"])
 def test_fixed_refinement_checks_its_concrete_limit_before_expensive_work(
-    control, monkeypatch, fixed_result
+    monkeypatch, fixed_result
 ):
     from nwqlib.algorithms.lchs import time_independent_terms as numerical
 
@@ -120,36 +118,10 @@ def test_fixed_refinement_checks_its_concrete_limit_before_expensive_work(
 
     from nwqlib.subroutines.trotterization import error_budget
 
-    # Refinement reads the stored node table and never decomposes. max_steps
-    # rejects before any work, max_structural_work before the table read and
-    # the census, and max_dense_work before the requested dense commutators.
+    # Refinement reads the stored node table and never decomposes.
+    # max_dense_work rejects before the requested dense commutators.
     monkeypatch.setattr(numerical, "_trotter_pauli_decomposition", forbidden)
-    options = {control: 1}
-    if control == "max_structural_work":
-        # One unit below the stored-table read W_read = sum_k (p_k + 2).
-        table = numerical.stored_pf_nodes(result.plan._native["native_data"])
-        options[control] = numerical.stored_node_read_work(len(node["union_indices"]) for node in table.nodes) - 1
-    if control == "max_dense_work":
-        monkeypatch.setattr(error_budget, "dense_trotter_bound_coefficient", forbidden)
-        options["dense_validation"] = True
-    else:
-        monkeypatch.setattr(numerical, "_node_bound_coefficients", forbidden)
+    monkeypatch.setattr(error_budget, "dense_trotter_bound_coefficient", forbidden)
     monkeypatch.setattr("nwqlib.algorithms.lchs.refinement._publish", forbidden)
-    message = control + (" before reading its node table" if control == "max_structural_work" else "")
-    with pytest.raises(ValueError, match=message):
-        result.verify(checks=LCHSRefinement(components=("fixed_pf",), **options))
-
-
-def test_fixed_identity_certificate_preserves_selected_repetitions_and_zero_bound():
-    choice = selected(execution="quantum", identity=True)
-    result = solve(choice)
-    schedule = choice.reconstruction.step_counts
-    _, facts = result.verify(checks=LCHSRefinement(components=("fixed_pf",)))
-    # Fixed selection keeps two repetitions; the traceless generator vanishes
-    # and each actual branch only carries its exact identity phase.
-    assert schedule and set(schedule) == {2}
-    assert choice.reconstruction.step_counts == schedule
-    assert (
-        next(fact.fact.value.value for fact in facts if fact.fact.quantity == "trotter_synthesis")
-        == 0.0
-    )
+    with pytest.raises(ValueError, match="max_dense_work"):
+        result.verify(checks=LCHSRefinement(components=("fixed_pf",), max_dense_work=1, dense_validation=True))

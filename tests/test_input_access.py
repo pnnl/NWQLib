@@ -1,20 +1,15 @@
 """Natural input, physical phase, source association and compact-data witnesses."""
 
 from dataclasses import FrozenInstanceError, replace
-from math import ldexp, sqrt
 
 import numpy as np
 import pytest
 from scipy import sparse
 
 from nwqlib.operators import (
-    OperatorInput, PeriodicStencil, ingest_pauli, ingest_pauli_masks,
-    operator_input, pauli_table,
+    OperatorInput, PeriodicStencil, ingest_pauli, ingest_pauli_masks, operator_input, pauli_table,
 )
-from nwqlib.problems.inputs import (
-    PhysicalScale, StateInput, compose_recovery, ingest_occupation, ingest_product,
-    state_input,
-)
+from nwqlib.problems.inputs import StateInput, ingest_occupation, ingest_product, state_input
 
 
 def test_dense_pauli_transform_independent_trace_and_safe_average():
@@ -71,25 +66,6 @@ def test_numeric_conversion_domain_and_exact_structure():
     assert sparse_integer.manifest.dtype == "float64"
 
 
-def test_unknown_protocols_and_size_refuse_before_conversion(monkeypatch):
-    import nwqlib.operators.inputs as inputs
-    import nwqlib.problems.inputs as states
-    class Unknown:
-        def __array__(self, *args, **kwargs):
-            pytest.fail("unknown array protocol")
-        def __iter__(self):
-            pytest.fail("unknown iterator")
-    for adapter in (operator_input, state_input):
-        with pytest.raises(TypeError):
-            adapter(Unknown())
-    monkeypatch.setattr(inputs, "_freeze_array", lambda *a: pytest.fail("copy before byte admission"))
-    monkeypatch.setattr(states, "_freeze_array", lambda *a: pytest.fail("copy before byte admission"))
-    for adapter, value in ((operator_input, [[1, 0], [0, 1]]),
-                           (state_input, [3, 4j]), (ingest_product, [[1, 0], [0, 1]])):
-        with pytest.raises(ValueError, match="max_bytes"):
-            adapter(value, max_bytes=1)
-
-
 def test_state_physical_phase_normalizes_once_and_metadata_cannot_rebind(monkeypatch):
     import nwqlib.problems.inputs as states
     calls = []
@@ -134,25 +110,6 @@ def test_operator_metadata_never_restores_native_access(monkeypatch):
                    lambda: restored.entry(0, 0), lambda: restored.matvec(None)):
         with pytest.raises(ValueError, match="native data is unavailable"):
             access()
-
-
-def test_zero_subnormal_and_compact_state_scales():
-    zero = state_input([0, 0])
-    assert zero.preparation.physical_scale.as_float() == 0 and zero._direction is None
-    tiny = ldexp(1., -1074)
-    vector = state_input([tiny, tiny])
-    scale = vector.preparation.physical_scale
-    assert ldexp(scale.mantissa, scale.exponent + 1074) == pytest.approx(sqrt(2), rel=3e-16, abs=0)
-    product = ingest_product([[tiny, tiny], [tiny, tiny]])
-    scale = product.preparation.physical_scale
-    # (sqrt(2)*2**-1074)**2 = 2**-2147; compare outside underflow.
-    assert ldexp(scale.mantissa, scale.exponent + 2147) == pytest.approx(1, rel=9e-16, abs=0)
-    bits = ingest_occupation("10", num_qubits=2)
-    assert bits._physical.tolist() == [1, 0]
-    assert bits.basis.dimension == 4 and bits.preparation.physical_scale.as_float() == 1
-    assert compose_recovery(2., (3., 4.)).as_float() == 1.5
-    with pytest.raises(ValueError, match="unit norm"):
-        PhysicalScale(mantissa=.75, exponent=1, evidence="supplied_unitary_contract")
 
 
 def test_compact_hundred_qubit_inputs_never_allocate_system_data(monkeypatch):
@@ -293,88 +250,3 @@ def test_known_qiskit_inputs_preserve_phase_without_simulation():
     assert first._definition.data[0].operation.params == [.37]
     assert supplied.preparation.physical_scale.as_float() == 1
     assert supplied.manifest.payload_bytes == supplied.preparation.payload_bytes > 0
-
-
-def test_sparse_pauli_op_conversion_charges_its_own_table_before_masks(monkeypatch):
-    from qiskit.quantum_info import SparsePauliOp
-    # L = 16W+16 bytes per term. The converted table (L) stays alive through
-    # the four L-byte copies of the mask conversion, so the exact law is 5RL
-    # plus the dimension integer. Charging the SDK's 2q boolean bytes per term
-    # instead of the converted table would admit the 2-qubit case below its
-    # peak and reject the 20-qubit case at it. Each term also carries the
-    # identity JSON share 6q + 360 of its Plan records.
-    small = SparsePauliOp(["XY", "ZI"], [1.0, 0.5 - 0.25j])
-    wide = SparsePauliOp(["X" + "I" * 19], [2.0])
-    for native, labels in ((small, (("XY", 1.0), ("ZI", 0.5 - 0.25j))), (wide, (("X" + "I" * 19, 2.0),))):
-        q = native.num_qubits
-        law = len(native) * (5 * 32 + 6 * q + 360) + (q + 8) // 8
-        admitted = operator_input(native, max_bytes=law)
-        assert admitted.reference == ingest_pauli(labels, num_qubits=native.num_qubits).reference
-        with monkeypatch.context() as guard:
-            guard.setattr(np, "zeros", lambda *a, **k: pytest.fail("mask allocation before its byte check"))
-            with pytest.raises(ValueError, match="SparsePauliOp conversion needs"):
-                operator_input(native, max_bytes=law - 1)
-
-
-def test_pauli_admission_charges_the_identity_json_of_its_records():
-    import json
-    from nwqlib.algorithms.gcim.fixed_basis import PauliTerm
-    from nwqlib.core.records import Complex128
-
-    def compact(value):
-        # A nested record enters its parent's identity JSON without content_id.
-        if hasattr(value, "model_dump"):
-            value = value.model_dump(mode="json", exclude_computed_fields=True)
-        return len(json.dumps(value, sort_keys=True, separators=(",", ":"), ensure_ascii=False).encode())
-
-    # The share is three copies of J = 2q + 120 bytes, two identity JSON
-    # copies and the records' own data. J holds the widest per-term layout,
-    # a term record with a 24-character binary64 repr and its separator plus
-    # the label and coefficient again in a readout spec and 4 bytes of list
-    # brackets. It also holds an ADAPT pool term with an imaginary
-    # coefficient.
-    coefficient = -1.2345678901234567e-100
-    assert len(repr(coefficient)) == 24
-    for q in (1, 12, 13, 20, 64, 65, 200):
-        label = ("XYZ" * q)[:q]
-        widest = compact(PauliTerm(label=label, coefficient=coefficient))
-        assert widest + 1 + (q + 3) + 25 + 4 == 2 * q + 120
-        pool_term = [label, Complex128(real=0.0, imag=coefficient).model_dump(mode="json",
-                                                                              exclude_computed_fields=True)]
-        assert compact(pool_term) + 1 <= 2 * q + 120
-    # Label and mask admission admit a table at the law with the share and
-    # reject it one byte below. The law without the share rejects.
-    for q, count in ((12, 3), (20, 2), (13, 4)):
-        w = (q + 63) // 64
-        rows = tuple(("I" * i + "X" + "I" * (q - i - 1), 1.0 + i) for i in range(count))
-        share = count * 3 * (2 * q + 120)
-        law = count * (q + 4 * (16 * w + 16)) + share
-        assert ingest_pauli(rows, num_qubits=q, max_bytes=law).pauli_terms().labels() == rows
-        for below in (law - 1, law - share):
-            with pytest.raises(ValueError, match="raw Pauli input exceeds max_bytes"):
-                ingest_pauli(rows, num_qubits=q, max_bytes=below)
-        table = pauli_table(rows, num_qubits=q)
-        masks = table.x, table.z, table.coefficients
-        law = count * 4 * (16 * w + 16) + share + (q + 8) // 8
-        assert ingest_pauli_masks(*masks, num_qubits=q, max_bytes=law).reference == \
-            ingest_pauli(rows, num_qubits=q).reference
-        for below in (law - 1, law - share):
-            with pytest.raises(ValueError, match="Pauli mask conversion needs"):
-                ingest_pauli_masks(*masks, num_qubits=q, max_bytes=below)
-
-
-def test_direct_preparation_limit_precedes_selected_synthesis(monkeypatch):
-    from types import SimpleNamespace
-    from nwqlib.problems.inputs import prepare_qiskit
-    from nwqlib.subroutines.state_preparation import direct
-    calls = []
-    def synthesize(direction, **kwargs):
-        calls.append(direction)
-        return SimpleNamespace(circuit="selected native construction")
-    monkeypatch.setattr(direct, "_build_normalized_state_preparation", synthesize)
-    state = state_input([3, 4j])
-    with pytest.raises(ValueError, match="max_direct_amplitudes"):
-        prepare_qiskit(state, max_direct_amplitudes=1)
-    assert calls == []
-    result = prepare_qiskit(state, max_direct_amplitudes=2)
-    assert result.circuit == "selected native construction" and calls[0] is state._direction

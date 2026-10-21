@@ -135,7 +135,7 @@ Public circuit builders build the circuit the Plan fixed. Resource estimation is
 
 The package root loads its public names lazily, on first access, through PEP 562. The public API is what each module's `__all__` and the [API reference](api/index.md) list. Importing metadata must not load the full scientific stack or any vendor SDK. A native subpackage that the caller imports explicitly may load the SDK it requires.
 
-`tests/test_shared_contracts.py` checks lazy loading, and `tests/test_foundation_imports.py` checks the currently declared public names. When a public name changes on purpose, these tests change with it.
+`tests/test_shared_contracts.py` checks lazy loading.
 
 ### API stability {#api-stability}
 

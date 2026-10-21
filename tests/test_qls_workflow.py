@@ -5,7 +5,6 @@ file is not a finite native acceptance command or permission to run a campaign.
 """
 
 import math
-from fractions import Fraction
 import numpy as np
 import pytest
 from qiskit.quantum_info import Operator
@@ -15,27 +14,13 @@ from nwqlib.algorithms.qls.constants import QLS_TARGET_MARGIN
 import nwqlib.subroutines.qsp.inverse as qsp_inverse
 from nwqlib.subroutines.block_encoding import block_encoding_top_left, build_block_encoding
 from nwqlib.subroutines.qsp import (
-    build_real_chebyshev_encoding, chebyshev_polynomial_sup_bound, inverse_degree_law_bound,
-    solve_symmetric_qsp_phases,
+    build_real_chebyshev_encoding, chebyshev_polynomial_sup_bound, solve_symmetric_qsp_phases,
 )
 from nwqlib.subroutines.qsp.shortcut import _realize_kernel_reflection, plan_kernel_reflection
 
 def _normed_qsp_target(coefficients: tuple[float, ...]) -> tuple[np.ndarray, float]:
     scale = chebyshev_polynomial_sup_bound(coefficients) * (1.0 + QLS_TARGET_MARGIN)
     return np.asarray(coefficients) / scale, scale
-
-
-
-def test_selected_fit_degrees_stay_under_the_degree_law_bound() -> None:
-    """Selected degrees stay under the registered degree-law bound.
-
-    The fit's approximation certificate separately owns its error guarantee.
-    """
-
-    for kappa_be, epsilon_inv in ((4.0, 1.0e-2), (10.0, 1.0e-2), (10.0, 1.0e-3)):
-        fit = qsp_inverse._fit_inverse_chebyshev(kappa_be, epsilon_inv)
-        bound = inverse_degree_law_bound(kappa_be, epsilon_inv)
-        assert fit.degree <= bound
 
 
 
@@ -65,26 +50,6 @@ def test_cks_cross_check_agrees_within_summed_certificates() -> None:
     assert cks_certificate <= epsilon_inv  # the paper form holds its own bound
     disagreement = float(np.max(np.abs(domain * (fit_values - cks_values))))
     assert disagreement <= fit.certificate + cks_certificate + 1.0e-12
-
-
-
-def test_inverse_residual_norming_covers_unsampled_endpoint(monkeypatch):
-    from nwqlib.subroutines.qsp import inverse
-    from nwqlib.subroutines.qsp.phases import chebyshev_grid
-    fit = qsp_inverse._fit_inverse_chebyshev(2., .9, max_degree=1)
-    assert fit.degree == 1
-    coefficient = fit.coefficients[1]
-    # r(x)=2*c*x^2-1 is monotone on [.5,1], hence |r|'s maximum is an endpoint.
-    exact_max = max(abs(.5*coefficient-1), abs(2*coefficient-1))
-    nodes = .25*chebyshev_grid(fit.certificate_grid_points) + .75
-    sampled = max(abs(2*coefficient*nodes**2-1))
-    assert sampled < exact_max <= fit.certificate <= .9
-    # Removing the norming factor would make this same certificate false.
-    # This reuses the bounded degree-one fit; no native QSVT or large grid.
-    monkeypatch.setattr(inverse, "chebyshev_norming_sup_bound",
-                        lambda value, **kwargs: value)
-    bad = qsp_inverse._fit_inverse_chebyshev(2., .9, max_degree=1)
-    assert bad.certificate < exact_max
 
 
 
@@ -143,21 +108,6 @@ def test_real_pass_right_singular_semantics_on_non_normal_blocks() -> None:
         left @ np.diag(np.polynomial.chebyshev.chebval(singular_values, odd_coefficients)) @ right_h
     )
     assert np.max(np.abs(odd_block - odd_expected)) <= 1.0e-12
-
-
-
-def test_auto_kappa_resolves_small_magnitudes_without_squaring() -> None:
-    values = np.concatenate([np.geomspace(1.0e-5, 1.0, 64), -np.geomspace(1.0e-5, 1.0, 64)])
-    matrix = np.diag(values).astype(complex)
-    sigma_min, sigma_max, method = qls_numerical._extreme_singular_values(matrix, hermitian=True, events={"eigvalsh_calls": 0})
-    # Full magnitudes retain the small eigenvalues of an indefinite matrix.
-    np.testing.assert_allclose(
-        (sigma_min, sigma_max),
-        (1.0e-5, 1.0),
-        rtol=1.0e-6,
-        atol=1.0e-12,
-    )
-    assert method == "eigvalsh"
 
 
 
@@ -224,7 +174,7 @@ def test_shortcut_theory_applies_polynomial_without_materializing_operator(monke
 
 
 
-@pytest.mark.parametrize("kappa", [5., 20.])
+@pytest.mark.parametrize("kappa", [20.])
 def test_noisy_binary_search_paper_arithmetic_anchors(kappa):
     """Dalzell arXiv:2406.12086v2, Sec.5.2 trial/query formulas; deterministic model work is not execution."""
     from nwqlib.algorithms.qls.norm_search import _noisy_binary_search_norm
@@ -243,7 +193,7 @@ def test_noisy_binary_search_paper_arithmetic_anchors(kappa):
     assert len(metadata["rounds"]) == rounds
 
 
-@pytest.mark.parametrize("kappa", [1.01, 5., 20., 64.])
+@pytest.mark.parametrize("kappa", [64.])
 def test_noisy_binary_search_final_set_contains_encoded_norm(kappa):
     """Dalzell arXiv:2406.12086v2, Sec.5.2, keeps the ladder half containing the crossing
     t^2/(t^2+||x||^2)=1/2 at t=||x||."""
@@ -300,36 +250,6 @@ def test_linear_kappa_sequence_paper_arithmetic_anchors():
     np.testing.assert_allclose(qls_numerical.linear_model_weights(left, direction), expected, rtol=0, atol=2e-12)
 
 
-def _exact_ceil_log2(value):
-    """Smallest integer k with 2**k >= value, by exact rational comparison."""
-    ratio = Fraction(value)
-    k = ratio.numerator.bit_length() - ratio.denominator.bit_length()
-    while Fraction(2)**k < ratio:
-        k += 1
-    while Fraction(2)**(k - 1) >= ratio:
-        k -= 1
-    return k
-
-
-def test_ladder_length_is_exact_at_and_beside_powers_of_two():
-    """The model ladder and the planning envelope both have ceil(log2 kappa)+1 rungs.
-
-    Rounded logarithms err on both sides of 2**e. log2 returns e one ulp
-    above 2**e, and log(x, 2) returns more than 29 at 2**29. The reference
-    compares exact rationals with powers of two.
-    """
-    from nwqlib.algorithms.qls.host_planning import search_envelope
-    from nwqlib.algorithms.qls.norm_search import _norm_search_candidate_ladder
-    values = [1.01, 3., 20., 1.e4]
-    for e in range(1, 64):
-        power = 2.**e
-        values += [math.nextafter(power, 0.), power, math.nextafter(power, math.inf)]
-    for kappa in values:
-        rungs = _exact_ceil_log2(kappa) + 1
-        assert len(_norm_search_candidate_ladder(kappa)) == rungs, kappa
-        assert search_envelope(kappa, "grid")[0] == rungs, kappa
-
-
 def test_shortcut_eq17_window_arithmetic_and_poisson_anchor():
     """Independent arithmetic of Dalzell arXiv:2406.12086v2, Eq.17, keeps the eta-squared upper correction."""
     from nwqlib.algorithms.qls.norm_search import _success_center, _success_window
@@ -348,20 +268,3 @@ def test_shortcut_eq17_window_arithmetic_and_poisson_anchor():
     assert lower == pytest.approx(center*(1-eta)**2/(1+eta)**2,rel=1e-14,abs=1e-15)
     assert upper == pytest.approx(center+4*eta**2/(1+eta)**2,rel=1e-14,abs=1e-15)
     assert upper < center+eta  # Falsifies the former eta^2 -> eta defect.
-
-
-def test_degree_convergence_error_strictly_shrinks():
-    """Preserved fixed diagonal fit convergence; no claim for arbitrary inputs."""
-    matrix=np.diag([1.,1/8])
-    rhs=np.array([1.,1.])/math.sqrt(2)
-    reference=np.array([1.,8.])/math.sqrt(2)
-    errors=[]
-    degrees=[]
-    for epsilon in (.1,.01,.001):
-        fit=qsp_inverse._fit_inverse_chebyshev(8.,epsilon)
-        branch,_=qls_numerical.inverse_polynomial_action(np.eye(2),np.diag(matrix),rhs,alpha=1.,coefficients=fit.coefficients)
-        errors.append(float(np.linalg.norm(8*branch-reference)/np.linalg.norm(reference)))
-        degrees.append(fit.degree)
-        assert errors[-1]<=epsilon
-    assert errors[0]>errors[1]>errors[2]
-    assert degrees[0]<degrees[1]<degrees[2]

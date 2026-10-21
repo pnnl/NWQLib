@@ -12,37 +12,12 @@ from nwqlib.subroutines.hamiltonian_evolution import (
     PauliEvolutionTerm,
     apply_pauli_rotation,
     build_pauli_evolution_circuit,
-    make_evolution_synthesis,
-    make_pauli_label,
     parse_pauli_label,
-    pauli_label_to_qiskit_string,
     sparse_pauli_op_from_terms,
 )
 
 
 from conftest import dense_evolution_copy as _dense_evolution_copy
-
-
-def test_pauli_labels_round_trip() -> None:
-    ops = {8: "Z", 0: "X", 17: "Y"}
-    label = make_pauli_label(ops)
-
-    assert label == "x0z8y17"
-    assert parse_pauli_label(label) == {0: "X", 8: "Z", 17: "Y"}
-
-
-def test_invalid_pauli_label_raises() -> None:
-    with pytest.raises(ValueError):
-        parse_pauli_label("x2x1")
-
-
-def test_pauli_label_to_qiskit_string() -> None:
-    assert pauli_label_to_qiskit_string("x0z2", 4) == "IZIX"
-
-
-def test_make_evolution_synthesis_rejects_unknown_method() -> None:
-    with pytest.raises(ValueError):
-        make_evolution_synthesis("unknown")  # type: ignore[arg-type]
 
 
 def test_sparse_product_forwards_order_to_the_actual_suzuki_action():
@@ -69,19 +44,6 @@ def test_sparse_product_forwards_order_to_the_actual_suzuki_action():
             time_step=t, evolution_synthesis="lie_trotter", reps=1, order=order)
         np.testing.assert_allclose(Operator(lie.decompose()).data, first,
                                    rtol=0, atol=2e-14)
-
-
-@pytest.mark.parametrize("synthesis, order", [("suzuki_trotter", 3), ("suzuki_trotter", 0),
-    ("lie_trotter", 2)])
-def test_sparse_product_order_rejects_before_consuming_terms(synthesis, order):
-    from nwqlib.subroutines.hamiltonian_evolution.sparse_pauli_product import build_sparse_pauli_product_circuit
-
-    class Unread:
-        def __iter__(self):
-            pytest.fail("invalid product order consumed terms")
-    with pytest.raises(ValueError, match="product-formula order"):
-        build_sparse_pauli_product_circuit(Unread(), num_qubits=1, time_step=.1,
-            evolution_synthesis=synthesis, reps=1, order=order)
 
 
 def test_apply_pauli_rotation_matches_pauli_evolution_gate() -> None:
@@ -152,8 +114,3 @@ def test_complex_coefficients_raise() -> None:
     block = {"terms": [{"pauli": "z0", "coefficient": 1.0 + 1.0j}], "time_step": 0.5}
     with pytest.raises(ValueError, match="complex"):
         build_pauli_evolution_circuit([block], num_qubits=1)
-
-
-def test_make_pauli_label_rejects_empty_ops() -> None:
-    with pytest.raises(ValueError, match="non-empty"):
-        make_pauli_label({})

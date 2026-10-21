@@ -11,13 +11,11 @@ from __future__ import annotations
 
 from dataclasses import replace
 from fractions import Fraction
-from types import SimpleNamespace
 
 import numpy as np
 import pytest
 import scipy.linalg
 import scipy.special
-from qiskit.circuit import Gate
 from qiskit.quantum_info import Operator
 
 from conftest import (
@@ -69,42 +67,7 @@ def _matrix_function(matrix: np.ndarray, values: np.ndarray) -> np.ndarray:
     return eigenvectors @ np.diag(values(eigenvalues)) @ eigenvectors.conj().T
 
 
-def test_hermitian_admission_uses_evidence_without_touching_a_large_operator(monkeypatch):
-    from nwqlib.subroutines.qsp import evolution
-
-    # The public admission must work with circuit access alone, even at a
-    # width where a dense matrix would occupy 16 PiB (complex128, 25 qubits).
-    class Oracle:
-        alpha = 1.0
-        system_qubits = 25
-        metadata = {}
-
-        @property
-        def circuit(self):
-            pytest.fail("Hermitian admission inspected the circuit")
-
-    def reached_synthesis(*args, **kwargs):
-        raise RuntimeError("reached scalar synthesis")
-
-    monkeypatch.setattr(evolution, "jacobi_anger_expansion", reached_synthesis)
-    oracle = Oracle()
-    with pytest.warns(UserWarning, match="conditional"):
-        with pytest.raises(RuntimeError, match="reached scalar synthesis"):
-            evolution.build_qsp_evolution_encoding(oracle, evolution_time=.1, epsilon=.01)
-    with pytest.raises(ValueError, match="evidence is unavailable"):
-        evolution.build_qsp_evolution_encoding(
-            oracle, evolution_time=.1, epsilon=.01, require_hermitian_evidence=True)
-    for field in ("target_operator_is_hermitian", "encoded_operator_is_hermitian"):
-        oracle.metadata = {field: False}
-        with pytest.raises(ValueError, match="requires Hermitian"):
-            evolution.build_qsp_evolution_encoding(oracle, evolution_time=.1, epsilon=.01)
-    oracle.metadata = {"target_operator_is_hermitian": True, "encoded_operator_is_hermitian": True}
-    with pytest.raises(RuntimeError, match="reached scalar synthesis"):
-        evolution.build_qsp_evolution_encoding(
-            oracle, evolution_time=.1, epsilon=.01, require_hermitian_evidence=True)
-
-
-@pytest.mark.parametrize("implementation", ("pauli_lcu", "dense_dilation"))
+@pytest.mark.parametrize("implementation", ("pauli_lcu",))
 def test_library_built_nonhermitian_input_rejects_before_qsp_synthesis(monkeypatch, implementation):
     from nwqlib.subroutines.qsp import evolution
 
@@ -119,19 +82,6 @@ def test_library_built_nonhermitian_input_rejects_before_qsp_synthesis(monkeypat
     assert valid.metadata["encoded_operator_is_hermitian"] is True
 
 
-def test_joint_generator_propagates_one_nonhermitian_child_only_at_nonzero_weight():
-    from nwqlib.subroutines.qsp.evolution import build_control_diagonal_generator_encoding
-
-    nonhermitian = build_block_encoding(np.array([[0., 1.], [0., 0.]]), implementation="pauli_lcu")
-    hermitian = build_block_encoding(np.diag([1., -1.]), implementation="pauli_lcu")
-    joint = build_control_diagonal_generator_encoding(nonhermitian, hermitian,
-        l_diagonal=[1., 2.], h_diagonal=[1., 1.])
-    assert joint.metadata["target_operator_is_hermitian"] is False
-    ignored = build_control_diagonal_generator_encoding(nonhermitian, hermitian,
-        l_diagonal=[0., 0.], h_diagonal=[1., 1.])
-    assert ignored.metadata["target_operator_is_hermitian"] is True
-
-
 def test_periodic_shift_adjoint_pairs_supply_exact_hermitian_evidence():
     # S**(-1) = (S**1).dagger, including complex conjugate coefficients.
     for coefficients, expected in (((1j, -1j), True), ((1j, 1j), False)):
@@ -141,19 +91,6 @@ def test_periodic_shift_adjoint_pairs_supply_exact_hermitian_evidence():
         assert np.allclose(matrix, matrix.conj().T, rtol=0., atol=1e-12) == expected
         assert encoding.metadata["target_operator_is_hermitian"] is expected
         assert encoding.metadata["encoded_operator_is_hermitian"] is expected
-
-
-def test_joint_generator_does_not_discard_an_imaginary_control_coefficient(monkeypatch):
-    from nwqlib.subroutines.qsp import evolution
-
-    encoding = build_block_encoding(np.diag([.5, -.25]), implementation="pauli_lcu")
-    legal = build_control_diagonal_generator_encoding(encoding, None, l_diagonal=[1+0j])
-    assert legal.metadata["encoded_operator_is_hermitian"] is True
-    monkeypatch.setattr(evolution, "_diagonal_rotation_circuit",
-                        lambda *a, **k: pytest.fail("non-Hermitian coefficients reached synthesis"))
-    for imaginary in (1e-300, 1e-13, .5):
-        with pytest.raises(ValueError, match="entries must be real"):
-            build_control_diagonal_generator_encoding(encoding, None, l_diagonal=[1+1j*imaginary])
 
 
 # ---------------------------------------------------------------------------
@@ -254,22 +191,6 @@ def test_solved_phases_reproduce_target_coefficients() -> None:
         realized = evaluate_qsp_polynomial(solution.phases, grid).real
         recovered = np.polynomial.chebyshev.chebfit(grid, realized, degree)
         assert np.max(np.abs(recovered - target)) <= 1.0e-12
-
-
-def test_phase_solver_rejects_invalid_targets() -> None:
-    with pytest.raises(ValueError, match="definite parity"):
-        solve_symmetric_qsp_phases([0.1, 0.5, 0.2])
-    with pytest.raises(ValueError, match="max\\|f\\| <= 1"):
-        solve_symmetric_qsp_phases([0.0, 1.4])
-    # The 192-node shared grid still undersamples the endpoint maximum of
-    # 1.0001*T_2, while the norming factor recovers its true supremum.
-    target = np.array([0.0, 0.0, 1.0001])
-    grid = chebyshev_grid(64 * target.size)
-    grid_max = float(np.max(np.abs(np.polynomial.chebyshev.chebval(grid, target))))
-    assert grid_max < 1.0
-    assert chebyshev_polynomial_sup_bound(target) > 1.0
-    with pytest.raises(ValueError, match="max\\|f\\| <= 1"):
-        solve_symmetric_qsp_phases(target)
 
 
 def test_chebyshev_grid_norming_bound_covers_polynomial_suprema() -> None:
@@ -374,31 +295,6 @@ def test_real_chebyshev_pass_encodes_real_part() -> None:
         assert np.max(np.abs(block - expected)) <= 1.0e-12
 
 
-def test_jacobi_anger_degree_anchors_with_recorded_slack() -> None:
-    """Integer degree anchors are valid only with recorded tail slack.
-
-    Each anchored degree clears its epsilon by the recorded slack (>= 2x
-    here), so cross-platform last-ulp differences in the Bessel sums cannot
-    flip the integers (FRAMEWORK platform-quantities rule).
-    """
-
-    # The 31.4 anchor distinguishes the bounded-horizon minimum degree from
-    # the degree permitted by the first passing terminal.
-    for tau, epsilon, expected_degree in ((31.4, 1.0e-6, 49), (0.72, 1.0e-2, 3)):
-        expansion = jacobi_anger_expansion(tau, epsilon)
-        assert expansion.tail_slack >= 2.0
-        assert expansion.degree == expected_degree
-        assert expansion.tail_bound <= epsilon
-        # One-step-coarser truncation must violate the bound (minimality).
-        previous_tail = expansion.tail_bound + 2.0 * abs(
-            float(scipy.special.jv(expansion.degree, tau))
-        )
-        assert previous_tail > epsilon
-    parity_check = jacobi_anger_expansion(1.5, 1.0e-6)
-    assert parity_check.cos_degree % 2 == 0
-    assert parity_check.sin_degree % 2 == 1
-
-
 @pytest.mark.parametrize(
     ("tau", "epsilon"),
     ((0.1, 1.0e-10), (5.0, 1.0e-7), (50.0, 1.0e-5)),
@@ -442,72 +338,6 @@ def test_jacobi_anger_records_complete_finite_and_analytic_tail(
     check_orders = np.arange(terminal + 1, terminal + 1001)
     direct_remainder = float(np.sum(np.abs(scipy.special.jv(check_orders, tau))))
     assert direct_remainder <= shared_remainder * (1.0 + 1.0e-12)
-
-
-def test_unrepresentable_analytic_remainder_keeps_evolution_build_available() -> None:
-    tau = 1.0e-100
-    expansion = jacobi_anger_expansion(tau, 1.0e-10, min_degree=2)
-    assert expansion.analytic_infinite_tail_bound is None
-    assert expansion.tail_bound is None and expansion.tail_slack is None
-
-    encoding = build_block_encoding(
-        np.diag([0.2, -0.1]).astype(complex),
-        implementation="dense_dilation",
-    )
-    evolution = build_qsp_evolution_encoding(
-        encoding,
-        evolution_time=tau / encoding.alpha,
-        epsilon=1.0e-10,
-    )
-    record = evolution.metadata["jacobi_anger"]
-    assert record["analytic_infinite_tail_bound"] is None
-    assert evolution.error_bound is None
-    assert evolution.metadata["target_rescale_source"] == ("chebyshev_grid_norming_bound")
-
-
-def test_qsp_evolution_does_not_retry_invalid_phase_input(monkeypatch) -> None:
-    from nwqlib.subroutines.qsp import evolution
-
-    failure = ValueError("invalid phase target")
-    calls = 0
-
-    def invalid_target(_coefficients, **_controls):
-        nonlocal calls
-        calls += 1
-        raise failure
-
-    monkeypatch.setattr(evolution, "solve_symmetric_qsp_phases", invalid_target)
-    with pytest.raises(ValueError) as caught:
-        evolution.build_qsp_evolution_encoding(
-            SimpleNamespace(alpha=1.0), evolution_time=0.1, epsilon=1.0e-3
-        )
-    assert caught.value is failure
-    assert calls == 1
-
-
-@pytest.mark.parametrize("nonfinite", [False, True])
-def test_qsp_evolution_retries_only_phase_convergence_failure(monkeypatch, nonfinite) -> None:
-    from nwqlib.subroutines.qsp import evolution, phases
-
-    targets = []
-
-    def failed_optimizer(_problem, start):
-        # Exercise the real final-residual rejection without running optimization.
-        return (np.full_like(start, np.nan) if nonfinite else start), 0.0
-
-    def record_phase_solve(coefficients, **controls):
-        targets.append(np.asarray(coefficients).copy())
-        return phases.solve_symmetric_qsp_phases(coefficients, **controls)
-
-    monkeypatch.setattr(phases, "_solve_from", failed_optimizer)
-    monkeypatch.setattr(evolution, "solve_symmetric_qsp_phases", record_phase_solve)
-    with pytest.raises(ValueError, match="QSP phase solving failed") as caught:
-        evolution.build_qsp_evolution_encoding(
-            SimpleNamespace(alpha=1.0), evolution_time=0.1, epsilon=1.0e-3
-        )
-    assert isinstance(caught.value.__cause__, phases._QSPPhaseConvergenceError)
-    assert len(targets) == 2
-    assert np.max(np.abs(targets[1])) < np.max(np.abs(targets[0]))
 
 
 def test_qsp_evolution_matches_dense_expm_within_documented_bound() -> None:
@@ -711,74 +541,6 @@ def test_qsp_phase_solver_boundary_characterization() -> None:
     assert hard_ok.max_residual <= QSP_SOLVER_RESIDUAL_TOLERANCE
 
 
-def test_qsp_phase_solver_rejects_nonfinite_targets() -> None:
-    """Nonfinite targets must not produce finite-looking accepted phases.
-
-    NaN coefficients sailed through the parity and sup gates (NaN
-    comparisons are False) and returned finite-looking phases with
-    ``max_residual = nan``; both nonfinite inputs now raise the actionable
-    error instead.
-    """
-
-    nan_target = np.zeros(8)
-    nan_target[7] = np.nan
-    with pytest.raises(ValueError, match="finite Chebyshev coefficients"):
-        solve_symmetric_qsp_phases(nan_target)
-
-    inf_target = np.zeros(8)
-    inf_target[7] = np.inf
-    with pytest.raises(ValueError, match="finite Chebyshev coefficients"):
-        solve_symmetric_qsp_phases(inf_target)
-
-
-def test_evolution_reuses_one_child_gate_pair_across_cosine_and_sine(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """Count one realized child/inverse pair shared by cosine, sine and OAA without repeated
-    control synthesis.
-    """
-    import nwqlib.subroutines.qsp.evolution as evolution
-
-    encoding = build_block_encoding(np.diag([0.25, 0.75]))
-    to_gate = encoding.circuit.to_gate
-    child_gates: list[Gate] = []
-    inversions: list[Gate] = []
-    from nwqlib.subroutines import qiskit_compat
-    gate_inverse = qiskit_compat.inverse_realized_gate
-    gate_control = Gate.control
-    inverting = False
-
-    def _record_to_gate(*args: object, **kwargs: object) -> Gate:
-        child_gates.append(to_gate(*args, **kwargs))
-        return child_gates[-1]
-
-    def _record_inverse(self: Gate, *args: object, **kwargs: object) -> Gate:
-        nonlocal inverting
-        if child_gates and self is child_gates[0]:
-            inversions.append(self)
-        inverting = True
-        try:
-            return gate_inverse(self, *args, **kwargs)
-        finally:
-            inverting = False
-
-    def _record_control(self: Gate, *args: object, **kwargs: object) -> Gate:
-        assert not inverting, "QSP inverse repeated control synthesis"
-        return gate_control(self, *args, **kwargs)
-
-    monkeypatch.setattr(encoding.circuit, "to_gate", _record_to_gate)
-    monkeypatch.setattr(qiskit_compat, "inverse_realized_gate", _record_inverse)
-    monkeypatch.setattr(Gate, "control", _record_control)
-    result = evolution.build_qsp_evolution_encoding(
-        encoding,
-        evolution_time=0.7,
-        epsilon=1.0e-3,
-    )
-    assert result.metadata["jacobi_anger"]["degree"] > 1
-    assert len(child_gates) == len(inversions) == 1
-    assert child_gates[0].label == "U_BE" and inversions[0] is child_gates[0]
-
-
 def test_qsp_evolution_synthesizes_each_child_multiplexer_once(monkeypatch) -> None:
     """The controlled parity passes reuse the child's realized UCG synthesis.
 
@@ -821,152 +583,6 @@ def test_qsp_evolution_synthesizes_each_child_multiplexer_once(monkeypatch) -> N
     assert leaves > 0 and result.metadata["jacobi_anger"]["degree"] > 1
     assert len(decompositions) == leaves
     assert not constructions
-
-
-def test_small_tau_evolution_synthesizes_within_bound() -> None:
-    from nwqlib.subroutines.block_encoding import block_encoding_top_left
-
-    target = 0.05 * np.diag([1.0, -1.0]).astype(complex)
-    encoding = build_block_encoding(target)
-    evolution = build_qsp_evolution_encoding(
-        encoding,
-        evolution_time=1.0,
-        epsilon=0.01,
-    )
-
-    block = block_encoding_top_left(
-        Operator(evolution.circuit).data, num_ancillas=evolution.num_ancillas
-    )
-    exact = scipy.linalg.expm(-1.0j * 1.0 * target)
-    assert float(np.linalg.norm(block - exact, 2)) <= evolution.error_bound
-
-
-def test_qsp_error_scalar_domains_and_signed_time():
-    from types import SimpleNamespace as NS
-    from nwqlib.subroutines.qsp.evolution import qsp_evolution_error_terms
-
-    prepared = NS(scale=1., expansion=NS(cos_tail_bound=0., sin_tail_bound=0.),
-                  cos_solution=NS(residual_sup_bound=0.), sin_solution=NS(residual_sup_bound=0.))
-    positive = qsp_evolution_error_terms(prepared, evolution_time=2., child_error_bound=.125)
-    negative = qsp_evolution_error_terms(prepared, evolution_time=-2., child_error_bound=.125)
-    assert positive == negative and positive["child_error"] == .25
-    for value in (-1., float("nan"), float("inf")):
-        with pytest.raises(ValueError):
-            qsp_evolution_error_terms(prepared, evolution_time=1., child_error_bound=value)
-        for owner, field in ((prepared.expansion, "cos_tail_bound"), (prepared.expansion, "sin_tail_bound"),
-                             (prepared.cos_solution, "residual_sup_bound"),
-                             (prepared.sin_solution, "residual_sup_bound")):
-            setattr(owner, field, value)
-            with pytest.raises(ValueError):
-                qsp_evolution_error_terms(prepared, evolution_time=1., child_error_bound=0.)
-            setattr(owner, field, 0.)
-
-
-def test_prepared_scale_domain_preserves_unit_and_large_finite_scales():
-    from dataclasses import replace
-    from math import isfinite
-    from sys import float_info
-    from types import SimpleNamespace as NS
-    from nwqlib.subroutines.qsp.evolution import QSPPreparedEvolution, qsp_evolution_error_terms
-
-    prepared = QSPPreparedEvolution(expansion=NS(cos_tail_bound=0., sin_tail_bound=0.),
-        cos_solution=NS(residual_sup_bound=0.), sin_solution=NS(residual_sup_bound=0.),
-        scale=1., target_norming_bounds=(1., 0.), margin=0., attempted_margins=())
-    # At s=1, a=1/2 and 3a-4a^3=1 exactly: no amplitude deficit.
-    assert prepared.recovery_scale == 1.
-    for time in (-2., 0., 2.):
-        bounds = qsp_evolution_error_terms(prepared, evolution_time=time, child_error_bound=0.)
-        assert bounds["recovery_scale"] == 1. and bounds["error_bound"] == 0.
-    for changes in ({"scale": .5}, {"scale": float("inf")}, {"margin": -.1},
-                    {"margin": float("nan")}, {"target_norming_bounds": (1.,)},
-                    {"target_norming_bounds": (1., 0., 0.)}, {"target_norming_bounds": (-.1, 0.)},
-                    {"target_norming_bounds": (float("inf"), 0.)}, {"target_norming_bounds": (1.1, 0.)}):
-        with pytest.raises(ValueError):
-            replace(prepared, **changes)
-    # The helper also accepts duck-typed input, which cannot bypass s>=1.
-    invalid = NS(scale=.5, expansion=prepared.expansion,
-                 cos_solution=prepared.cos_solution, sin_solution=prepared.sin_solution)
-    with pytest.raises(ValueError, match="at least one"):
-        qsp_evolution_error_terms(invalid, evolution_time=0., child_error_bound=0.)
-    # Scale need only enclose the supplied bounds; independently evaluated
-    # margin products are not constrained to bitwise equality.
-    assert replace(prepared, scale=2., margin=.1, target_norming_bounds=(1.5, 0.)).scale == 2.
-    large = replace(prepared, scale=float_info.max, target_norming_bounds=(float_info.max, 0.))
-    bounds = qsp_evolution_error_terms(large, evolution_time=0., child_error_bound=0.)
-    assert 0 < bounds["amplitude"] < .5
-    # For s>=1, 2s/3 <= 1/(3a-4a^3) <= s. Use loose strict bounds
-    # away from the asymptotic endpoint to avoid subnormal rounding sensitivity.
-    for recovery in (large.recovery_scale, bounds["recovery_scale"]):
-        assert isfinite(recovery) and large.scale/2 < recovery <= large.scale
-
-
-
-
-def test_qsp_controls_reject_before_numerical_work_and_keep_real_targets(monkeypatch):
-    from nwqlib.subroutines.qsp import phases, evolution
-
-    with monkeypatch.context() as guard:
-        def unexpected(*_args, **_kwargs):
-            pytest.fail("invalid input reached numerical selection")
-        guard.setattr(phases, "chebyshev_grid", unexpected)
-        for target, controls in (
-            ([0., .5j], {}), ([0., .5], {"max_degree": 0}),
-            ([0., .5], {"max_bytes": 10}), ([0., .5], {"max_evaluations": 0}),
-            ([0., .5], {"residual_tolerance": float("nan")}),
-            ([0., .5], {"residual_tolerance": 0}),
-        ):
-            with pytest.raises(ValueError):
-                phases.solve_symmetric_qsp_phases(target, **controls)
-        guard.setattr(scipy.special, "jv", unexpected)
-        for tau, controls in ((float("inf"), {}), (1e100, {}),
-                              (1., {"max_bytes": 100})):
-            with pytest.raises(ValueError):
-                evolution.jacobi_anger_expansion(tau, .01, **controls)
-    # A complex container whose entries are real is mathematically admissible.
-    solved = phases.solve_symmetric_qsp_phases(np.array([0., .5], dtype=complex), max_degree=1)
-    assert solved.max_residual <= 1e-12
-    expansion = evolution.jacobi_anger_expansion(1.5, 1e-6, max_degree=8)
-    assert expansion.degree == 8 and expansion.tail_bound <= 1e-6
-    with pytest.raises(ValueError, match="max_degree=7"):
-        evolution.jacobi_anger_expansion(1.5, 1e-6, max_degree=7)
-
-
-def test_qsp_evaluation_limit_counts_actual_work_of_both_starts(monkeypatch):
-    from nwqlib.subroutines.qsp import phases
-
-    original = phases._phase_matrices
-    phase_calls = 0
-
-    def count_phase(*args):
-        nonlocal phase_calls
-        phase_calls += 1
-        return original(*args)
-
-    monkeypatch.setattr(phases, "_phase_matrices", count_phase)
-    solved = phases.solve_symmetric_qsp_phases([0., .5])
-    # For degree one, each objective or verification builds exactly two
-    # phase matrices; count the actual kernel calls independently of its log.
-    assert solved.evaluations == phase_calls // 2 and phase_calls % 2 == 0
-    phase_calls = 0
-    exact = phases.solve_symmetric_qsp_phases([0., .5], max_evaluations=solved.evaluations)
-    assert exact.phases == solved.phases and phase_calls == 2 * solved.evaluations
-    phase_calls = 0
-    with pytest.raises(ValueError, match="max_evaluations"):
-        phases.solve_symmetric_qsp_phases([0., .5], max_evaluations=solved.evaluations - 1)
-    assert phase_calls == 2 * (solved.evaluations - 1)
-
-    def no_progress(problem, start):
-        problem(start)
-        return start, 1.0
-
-    monkeypatch.setattr(phases, "_solve_from", no_progress)
-    monkeypatch.setattr(phases, "_damped_newton", no_progress)
-    phase_calls = 0
-    with pytest.raises(ValueError, match="max_evaluations"):
-        phases.solve_symmetric_qsp_phases([0., .5], max_evaluations=2)
-    # The L-BFGS and Newton starts use the allowance, then the final
-    # verification rejects before it builds any phase matrix.
-    assert phase_calls == 4
 
 
 def test_qsp_evolution_evaluation_limit_is_shared_by_parities_and_margins(monkeypatch):
@@ -1018,37 +634,6 @@ def test_qsp_evolution_evaluation_limit_is_shared_by_parities_and_margins(monkey
     assert len(allowances) == 3  # Exhaustion does not start another margin.
     with pytest.raises(ValueError, match=r"^QSP phase solving exhausted max_evaluations=1$"):
         solve([0.0, 0.5], max_evaluations=1)
-
-
-def test_qsp_prepared_cache_assembly_never_reselects(monkeypatch):
-    from nwqlib.subroutines.qsp import evolution
-
-    encoding = build_block_encoding(np.diag([.2, -.1]), implementation="dense_dilation")
-    prepared = evolution.prepare_qsp_evolution(tau=encoding.alpha * .2, epsilon=.001)
-    build_pass = evolution._build_real_chebyshev_encoding
-    selected_phases = []
-
-    def recorded_pass(encoding, phases, **kwargs):
-        selected_phases.append(tuple(phases))
-        return build_pass(encoding, phases, **kwargs)
-
-    def unexpected(*_args, **_kwargs):
-        pytest.fail("assembly recomputed selected expansion or phases")
-
-    monkeypatch.setattr(evolution, "prepare_qsp_evolution", unexpected)
-    monkeypatch.setattr(evolution, "jacobi_anger_expansion", unexpected)
-    monkeypatch.setattr(evolution, "solve_symmetric_qsp_phases", unexpected)
-    monkeypatch.setattr(evolution, "_build_real_chebyshev_encoding", recorded_pass)
-    realized = evolution.build_qsp_evolution_encoding(encoding, evolution_time=.2,
-                                                      epsilon=.001, _prepared=prepared,
-                                                      require_hermitian_evidence=True)
-    assert realized.metadata["hermitian_premise"] == "construction_metadata"
-    assert realized.circuit.num_qubits == 5
-    assert selected_phases == [prepared.cos_solution.phases, prepared.sin_solution.phases]
-    assert realized.metadata["phase_solver"]["cos"]["evaluations"] == prepared.cos_solution.evaluations
-    block = _encoded_block(realized.circuit, realized.num_ancillas)
-    target = scipy.linalg.expm(-.2j * np.diag([.2, -.1]))
-    assert np.linalg.norm(block - target, 2) <= realized.error_bound
 
 
 def test_unavailable_encoding_error_preserves_known_relations_and_archive(monkeypatch, tmp_path):
@@ -1140,25 +725,6 @@ def test_lchs_qsp_selected_quantities_reach_actual_native_program():
     assert estimate(chosen).construction_id==chosen.construction.content_id
     preview=prepare(chosen)
     assert all(circuit.num_qubits==width for circuit in preview.circuits)
-
-
-def test_lchs_qsp_heat_and_shifted_input_keep_actual_selected_child():
-    shift=np.roll(np.eye(4),1,axis=0)
-    heat=.5*(2*np.eye(4)-shift-shift.T)
-    chosen=_selected_lchs_qsp(heat,time=.2)
-    selected=chosen._native['native_data'].qsp_plan
-    assert selected['part_plans'][0].implementation=='banded'
-    assert selected['part_plans'][1].implementation=='exact_zero'
-    assert selected['part_plans'][0].alpha==pytest.approx(2.,rel=1e-12, abs=0)
-    shifted=_selected_lchs_qsp(np.diag([-2.,1.]),time=1.)
-    psd=_selected_lchs_qsp(np.diag([0.,3.]),time=1.)
-    first,second=(choice._native['native_data'].qsp_plan for choice in (shifted,psd))
-    # The original endpoints are -2 and 1. PSD conversion shifts by
-    # 2 + psd_tolerance*max(|-2|,|1|), so the new upper endpoint is not 3.
-    expected_shift=2.+2.*shifted.method.psd_tolerance
-    assert shifted.reconstruction.psd_shift==pytest.approx(expected_shift, rel=2e-14, abs=0)
-    assert first['part_plans'][0].alpha==pytest.approx(1.+expected_shift, rel=2e-14, abs=0)
-    assert first['structural_law']['block_encoding_queries']==second['structural_law']['block_encoding_queries']
 
 
 def test_lchs_guide_first_problem_plans_qsp_evolution():

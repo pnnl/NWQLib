@@ -187,9 +187,6 @@ class PreparedArtifact(Record):
         boundaries: Resolved boundary of each trajectory point in declaration
             order, with the end-position shorthand resolved before backend
             preparation, and empty for other readouts.
-        template_seed: Seed of the per-construction backend template that the
-            backend prepared this circuit from, or None when the backend used
-            no template.
         statevector_roundoff: The bound ``(t, e)`` on the error of the classical
             phase correction of this execution's saved statevectors, the
             componentwise maxima over the record's saved states. It is
@@ -238,7 +235,6 @@ class PreparedArtifact(Record):
     probability_window_exclusions: tuple[Text, ...] | None = None
     body_length: Count | None = None
     boundaries: tuple[Count, ...] = ()
-    template_seed: Count | None = None
     statevector_roundoff: tuple[Nonnegative, Nonnegative] | None = None
 
     @property
@@ -349,7 +345,7 @@ class PreparedArtifact(Record):
                     or self.population != "unconditional" or self.payload is not None
                     or self.native_quantum_layout or self.native_classical_layout or self.logical_to_native
                     or self.backend_configuration_id is not None or self.provider_options_json is not None
-                    or self.probability_window_exclusions is not None or self.template_seed is not None):
+                    or self.probability_window_exclusions is not None):
                 raise ValueError("host preparation cannot fabricate quantum lowering or population")
         elif (self.logical is None or self.selected_kernel_id is not None
               or self.host_preparation_work_reserved or self.observation.kind == "host_scalars"):

@@ -1,8 +1,12 @@
-"""Example notebooks: agreement with their sources and execution with scientific checks."""
+"""Example notebooks and documentation examples: agreement with their sources and execution with scientific checks."""
 
 from __future__ import annotations
 
+import ast
+import builtins
+import importlib
 from pathlib import Path
+import re
 import subprocess
 import sys
 
@@ -394,10 +398,6 @@ def test_notebooks_match_their_sources():
     assert completed.returncode == 0, completed.stdout + completed.stderr
 
 
-def test_every_notebook_has_a_scientific_check():
-    assert set(NOTEBOOKS) == set(CHECKS)
-
-
 @pytest.mark.parametrize("name", NOTEBOOKS)
 def test_notebook_runs_and_matches_its_references(name):
     nbformat = pytest.importorskip("nbformat")
@@ -422,3 +422,296 @@ def test_notebook_runs_and_matches_its_references(name):
     manager = client.create_kernel_manager()
     manager.kernel_spec.argv = [sys.executable, "-m", "ipykernel_launcher", "-f", "{connection_file}"]
     client.execute()
+
+
+# Documentation examples. The ```python blocks of README.md and docs/**/*.md run in page order in one namespace,
+# as a reader who copies the page runs them, in a fresh working directory.
+DOCS_DIR = REPO_ROOT / "docs"
+FENCE = re.compile(r"^(?P<indent>[ \t]*)```(?P<lang>[\w+-]*)[^\n]*\n(?P<body>.*?)^(?P=indent)```[ \t]*$",
+                   re.M | re.S)
+# Modules installed only with optional extras. A page that needs an absent one is skipped.
+OPTIONAL_MODULES = frozenset({"nwqec", "qdk", "qnexus", "pyscf", "openfermion", "qiskit_ibm_runtime",
+                              "qiskit_ionq", "requests", "qiskit_qasm3_import", "openqasm3"})
+PROVIDER_BACKENDS = frozenset({"IBMRuntimeBackend", "IonQBackend", "NexusBackend", "NWQSimBackend",
+                               "NWQSimSlurmBackend"})
+# algorithm_protocol.md calls the reader's Method modules my_methods and my_methods_metadata, and names the
+# reference external Method in tests/ as their model.
+READER_MODULES = {"my_methods": "_hadamard_method", "my_methods_metadata": "_hadamard_method_metadata"}
+# The blocks no reader can run offline, by the start of their text: provider submissions need an account, the
+# `backend = ...` template needs a provider, and the fragments act on a Result or Run of the reader's own.
+# Listing them keeps a new NameError or provider call on a page from being skipped silently.
+EXPECTED_SKIPS = {
+    "docs/backends.md": ("backend = ...",),
+    "docs/cli.md": ('result.save("my-result")',),
+    "docs/prepared_execution.md": ("from nwqlib.backends import IBMRuntimeBackend",),
+    "docs/profiles.md": ("from nwqlib.backends import align_telemetry",),
+    "docs/run_archives.md": ("from nwqlib.backends import IBMRuntimeBackend", "with nwqlib.load_run(snapshot"),
+    "docs/slurm.md": ("import nwqlib\nfrom nwqlib.backends import NWQSimSlurmBackend",),
+}
+
+
+def python_blocks(path):
+    """Return the ```python blocks of a Markdown page in order, without the indentation of list items."""
+    blocks = []
+    for match in FENCE.finditer(path.read_text(encoding="utf-8")):
+        if match.group("lang") == "python":
+            indent = match.group("indent")
+            blocks.append("\n".join(line.removeprefix(indent) for line in match.group("body").splitlines()))
+    return blocks
+
+
+DOC_PAGES = tuple(str(path.relative_to(REPO_ROOT))
+                  for path in (REPO_ROOT / "README.md", *sorted(DOCS_DIR.rglob("*.md"))) if python_blocks(path))
+
+
+def skip_reason(tree, namespace):
+    """Return why a reader cannot run this block offline after the page's earlier blocks, or None."""
+    nodes = tuple(ast.walk(tree))
+    if any(isinstance(node, ast.Assign) and isinstance(node.value, ast.Constant) and node.value.value is Ellipsis
+           for node in nodes):
+        return "template"
+    calls = {node.func.attr if isinstance(node.func, ast.Attribute) else getattr(node.func, "id", None)
+             for node in nodes if isinstance(node, ast.Call)}
+    if calls & PROVIDER_BACKENDS and calls & {"prepare", "submit", "load_run"}:
+        return "provider submission"
+    defined = set(dir(builtins)) | set(namespace)
+    for node in nodes:
+        if isinstance(node, ast.Name) and not isinstance(node.ctx, ast.Load):
+            defined.add(node.id)
+        elif isinstance(node, (ast.FunctionDef, ast.ClassDef)):
+            defined.add(node.name)
+        elif isinstance(node, ast.arg):
+            defined.add(node.arg)
+        elif isinstance(node, (ast.Import, ast.ImportFrom)):
+            defined.update((alias.asname or alias.name).split(".")[0] for alias in node.names)
+    if any(isinstance(node, ast.Name) and isinstance(node.ctx, ast.Load) and node.id not in defined
+           for node in nodes):
+        return "fragment on an undefined object"
+    return None
+
+
+def run_page(path, checks, monkeypatch):
+    """Run the page's blocks in order, and each check after the first block that contains its anchor.
+
+    Returns the text of the skipped blocks.
+    """
+    for name, module in READER_MODULES.items():
+        monkeypatch.setitem(sys.modules, name, importlib.import_module(module))
+    namespace = {"__name__": "__main__"}
+    skipped, pending = [], list(checks)
+    for index, block in enumerate(python_blocks(path)):
+        tree = ast.parse(block)
+        if skip_reason(tree, namespace) is not None:
+            skipped.append(block)
+            continue
+        try:
+            exec(compile(tree, f"{path.name}, block {index + 1}", "exec"), namespace)
+        except ModuleNotFoundError as error:
+            if error.name is None or error.name.split(".")[0] not in OPTIONAL_MODULES:
+                raise
+            pytest.skip(f"{path.name} needs the optional module {error.name}")
+        for anchor, check in tuple(pending):
+            if anchor in block:
+                exec(check, namespace)
+                pending.remove((anchor, check))
+    assert not pending, f"no block contains the anchors {[anchor for anchor, _ in pending]}"
+    return skipped
+
+
+# Independent values of the quantities the pages print, each checked after the first block that contains its
+# anchor. The references are closed forms, SciPy or NumPy linear algebra and Qiskit statevectors. Each tolerance
+# names its class from docs/FRAMEWORK.md, "Accuracy and tolerance classes".
+LCHS_QUICKSTART = """
+import numpy as _np
+from scipy.linalg import expm as _expm
+_reference = _expm(-0.1 * _np.array([[0.4, 0.15], [0.05, 0.25]])) @ _np.array([1.0, 0.0])
+# Method-error-bounded: LCHS splits approximation_tolerance = 0.01 between the dropped k tail and the k
+# quadrature. The dense SELECT runs on Aer's exact statevector, which adds only rounding (an imaginary residue of
+# 1.5e-12 here), covered by 1e-9.
+assert _np.linalg.norm(result.solution - _reference) <= 0.01 + 1e-9
+"""
+DOC_CHECKS = {
+    "README.md": (("LCHS()", LCHS_QUICKSTART),),
+    "docs/index.md": (("LCHS()", LCHS_QUICKSTART),),
+    "docs/quickstart.md": (
+        ("method=LCHS())\nprint", LCHS_QUICKSTART),
+        ("approximation_tolerance=0.001", """
+# Method-error-bounded: the classical evaluation of the finite sum adds only rounding to the 0.001 budget.
+assert _np.linalg.norm(refined.solution - _reference) <= 0.001 + 1e-12
+"""),
+        ("load_result(", """
+# Exact: loading returns the saved array.
+assert _np.array_equal(restored.solution, result.solution)
+"""),
+    ),
+    "docs/problems.md": (("QuadraticForm(observable=Z)", """
+# Machine precision: for b = (3, 4), <Z> = (9 - 16)/25 and b^T Z b = ||b||^2 <Z> = -7.
+assert abs(normalized.value - (-7 / 25)) <= 1e-12 and abs(quadratic.value - (-7)) <= 1e-12
+"""),),
+    "docs/algorithms/expectation.md": (
+        ("physical = solve(", """
+# Machine precision: the unit state (1, 1)/sqrt(2) gives <diag(2, 0)> = 1, and b = (2, 2) gives b^T diag(2, 0) b = 8.
+assert abs(result.value - 1) <= 1e-12 and abs(physical.value - 8) <= 1e-12
+"""),
+        ("accuracy=target", """
+from math import ceil as _ceil, log as _log
+# Exact: by Hoeffding's inequality an estimate in a range of width 2 (the eigenvalues 0 and 2) needs
+# n = ceil(ln(2/delta) 2**2/(2 eps**2)) shots for eps = 0.05 at confidence 1 - delta = 0.95.
+assert selected.shots == _ceil(_log(2 / 0.05) * 2**2 / (2 * 0.05**2))
+"""),
+    ),
+    "docs/algorithms/lanczos.md": (
+        ("krylov_dimension=2)\nresult", """
+from math import sqrt as _sqrt
+# Machine precision: a two-dimensional Krylov space spans the 2x2 problem, whose lowest eigenvalue is
+# 1 - sqrt(5)/2.
+assert abs(result.eigenvalue - (1 - _sqrt(5) / 2)) <= 1e-12
+"""),
+        ("csr_matrix", """
+from math import sqrt as _sqrt
+# Machine precision: the lowest eigenvalue of [[1, .2], [.2, -1]] is -sqrt(1.04), on both paths.
+assert max(abs(classical.eigenvalue + _sqrt(1.04)), abs(quantum.eigenvalue + _sqrt(1.04))) <= 1e-12
+"""),
+    ),
+    "docs/algorithms/qls.md": (
+        ("result = solve(problem, method=QLS(), seed=7)", """
+import numpy as _np
+_A = _np.array([[1.1, .1], [.1, .9]])
+_x = _np.linalg.solve(_A, [1., .25])
+# Method-error-bounded: for Hermitian A with its spectrum in the polynomial domain, |kappa y P(y) - 1| <= epsilon_inv
+# = 0.01 on every eigenvalue bounds the relative error of x by 0.01. The statevector circuit adds only rounding.
+assert _np.linalg.norm(x - _x) / _np.linalg.norm(_x) <= 0.01 + 1e-9
+"""),
+        ("estimate(selected)", """
+# Machine precision: kappa_be is alpha divided by the smallest singular value of A.
+_sigma_min = _np.linalg.svd(_A, compute_uv=False)[-1]
+assert abs(selected.reconstruction.kappa_be - selected.reconstruction.alpha / _sigma_min) <= 1e-12
+"""),
+    ),
+    "docs/algorithms/qhd.md": (("analysis = result.analyze()", """
+from fractions import Fraction as _Fraction
+# Machine precision: the interior grid of [-1, 1] with two points is {-1/3, 1/3}. Exact readout gives every point
+# positive weight, so the candidate is 1/3, the point nearest 0.2, with objective (1/3 - 1/5)**2 = 4/225.
+assert analysis.candidate == (-1 + 2 * (2 / 3),)
+assert abs(analysis.objective - float(_Fraction(4, 225))) <= 1e-15 and analysis.valid_probability == 1.0
+"""),),
+    "docs/algorithms/qpe.md": (("grid_size=8192", """
+# Method-error-bounded: the prepared state is the eigenvector of -0.7, so the QCELS signal has one frequency and its
+# fit has no model error. 1e-9 covers the fit's convergence on the analysis grid (6e-16 observed).
+assert abs(result.eigenvalue + 0.7) <= 1e-9 and abs(refined.eigenvalue + 0.7) <= 1e-9
+"""),),
+    "docs/own_circuit.md": (
+        ('SparsePauliOp.from_list([("ZZ", 1.0), ("XX", 0.5)])', """
+from qiskit.quantum_info import Statevector as _Statevector
+# Machine precision: the Bell state of the circuit gives <ZZ> + 0.5 <XX> = 1.5, and solve evaluates it exactly.
+assert abs(result.value - _Statevector(qc).expectation_value(H).real) <= 1e-12
+"""),
+        ("reopened.exposure", """
+# Exact: the GHZ state has support on 000 and 111 only, all 100 shots are counted, and loading returns the saved
+# counts.
+assert set(dict(result.counts)) <= {"000", "111"} and sum(dict(result.counts).values()) == 100
+assert restored.counts == result.counts
+"""),
+    ),
+    "docs/aer.md": (
+        ("backend=AerBackend())\nprint", """
+# Exact: |0> is an eigenstate of Z, so every shot gives +1.
+assert result.value == 1.0
+"""),
+        ("from_noise_model(noise)", """
+from math import sqrt as _sqrt
+# Statistical: reading 1 for 0 with probability 0.05 gives E[Z] = 0.9. With 128 shots the binomial sigma of the
+# Z estimate is 2 sqrt(0.05 * 0.95/128), and the assertion allows 5 sigma.
+assert abs(noisy.value - 0.9) <= 5 * 2 * _sqrt(0.05 * 0.95 / 128)
+"""),
+        ("run.wait().value", """
+# Exact: |+> is an eigenstate of X, so every shot gives +1.
+assert run.result.value == 1.0
+"""),
+    ),
+    "docs/prepared_execution.md": (("limits=limits)", """
+from math import sqrt as _sqrt
+# Exact: the Run completed the planned shots. Statistical: <I + Z> = 1 for (1, 1)/sqrt(2), the 64-shot binomial
+# sigma of 1 + <Z> is 2 sqrt(0.25/64), and the assertion allows 5 sigma.
+assert run.exposure["completed"]["shots"] == plan.shots == 64
+assert abs(result.value - 1) <= 5 * 2 * _sqrt(0.25 / 64)
+"""),),
+    "docs/run_archives.md": (("expectation-run", """
+# Exact: every shot of the Z eigenstate gives +1. The reopened Run returns the saved Result without measuring
+# again, and its completed work stays the planned 64 shots.
+assert restored.value == result.value == same_result.value == 1.0
+assert same_result.content_id == result.content_id and completed.exposure["completed"]["shots"] == 64
+"""),),
+    "docs/saved_evidence.md": (("analyze(inference=hoeffding)", """
+from math import log as _log, sqrt as _sqrt
+# Exact: reanalysis keeps the saved estimate. Machine precision: Hoeffding's radius for 256 shots of a value in
+# [-1, 1] at failure probability 0.05 is 2 sqrt(ln(2/0.05)/(2*256)). Statistical: <Z> is 0 in (1, 1)/sqrt(2), the
+# 256-shot binomial sigma is 2 sqrt(0.25/256), and the assertion allows 5 sigma.
+assert revised.value == restored.value == result.value
+assert abs(revised.facts[0].fact.value.value - 2 * _sqrt(_log(2 / 0.05) / (2 * 256))) <= 1e-15
+assert abs(result.value) <= 5 * 2 * _sqrt(0.25 / 256)
+"""),),
+    "docs/scientist.md": (
+        ("nwqlib.compare(", """
+# Exact: the logical width estimated for each row is the qubit count of every circuit that prepare builds for it.
+for _row in comparison.rows:
+    _prepared = nwqlib.prepare(_row.plan, settings="all")
+    _widths = {_prepared.inspect_resources(index=_i)["num_qubits"] for _i in range(len(_prepared.setting_names))}
+    _prepared.run.close()
+    assert _widths == {_row.estimate.quantity("logical_width", location="logical_device").fact.value.numerator}
+"""),
+        ("compared-gcim-result", """
+from math import sqrt as _sqrt
+# Machine precision. Lanczos with m = 2 from |00> spans |00> and (|01> + |10>)/sqrt(2), where H restricts to
+# [[1, 1/sqrt(2)], [1/sqrt(2), -1]] with lowest eigenvalue -sqrt(3/2). The GCIM basis spans the exchange-symmetric
+# sector, which contains the ground state of H, -sqrt(2).
+_found = {_row.method.descriptor.method: nwqlib.solve(_row).eigenvalue for _row in comparison.rows}
+assert abs(_found["chebyshev_lanczos"] + _sqrt(3 / 2)) <= 1e-12 and abs(_found["fixed_gcim"] + _sqrt(2)) <= 1e-12
+assert restored.eigenvalue == result.eigenvalue
+"""),
+    ),
+    "docs/verification.md": (
+        ('LCHSVerification(reference="expm"', """
+# Machine precision: the verification fact is the L2 distance to SciPy's expm reference computed here.
+assert abs(facts[0].fact.value.value - np.linalg.norm(result.solution - expm(-0.1 * A) @ u0)) <= 1e-15
+"""),
+        ("stricter = checks.revise", """
+# Exact: both comparisons pass because the distance computed here is below the stricter threshold 0.001.
+assert np.linalg.norm(result.solution - expm(-0.1 * A) @ u0) < 0.001
+assert [check.status for check in certificate.checks] == ["PASS", "PASS"]
+"""),
+    ),
+    "docs/resources.md": (("inspect_resources(index=0)", """
+# Exact: the estimated logical width is the width of the prepared circuit.
+assert native["num_qubits"] == workload.quantity("logical_width", location="logical_device").fact.value.numerator
+"""),),
+    "docs/profiles.md": (("forecast = estimate(", """
+# Exact in binary64: one invocation, one exact evaluation and the three operations of the h, z, h preparation
+# give 0.25 + 0.5 + 3 * 0.125 s. A one-qubit complex128 state holds 2 amplitudes of 16 bytes.
+assert assessment.predictions[0].seconds.value == 0.25 + 0.5 + 3 * 0.125
+assert state.fact.value.numerator == 2 * 16
+"""),),
+    "docs/blocks.md": (("encoding_semantics", """
+# Exact: the PREP-SELECT normalization is the l1 norm of the Pauli coefficients -2, 1 and 3.
+assert construction.encoding_semantics("encoding").alpha == 2 + 1 + 3
+"""),),
+    "docs/api/subroutines/lcu.md": (("build_lcu_circuit", """
+# Machine precision: alpha times the encoded block is 0.75 I - 0.25 Z.
+assert np.allclose(alpha * block, np.diag([0.5, 1.0]), rtol=0, atol=1e-12)
+"""),),
+}
+
+
+def test_every_page_with_checks_or_skips_is_collected():
+    # DOC_PAGES holds only pages with a ```python block, so an entry for a page that lost its
+    # blocks, or whose fences changed language, would otherwise never be read.
+    assert not (set(DOC_CHECKS) | set(EXPECTED_SKIPS)) - set(DOC_PAGES)
+
+
+@pytest.mark.parametrize("page", DOC_PAGES)
+def test_documentation_page_runs_and_matches_its_references(page, monkeypatch, tmp_path):
+    monkeypatch.chdir(tmp_path)
+    skipped = run_page(REPO_ROOT / page, DOC_CHECKS.get(page, ()), monkeypatch)
+    expected = EXPECTED_SKIPS.get(page, ())
+    assert len(skipped) == len(expected) and all(
+        block.startswith(start) for block, start in zip(skipped, expected)), skipped

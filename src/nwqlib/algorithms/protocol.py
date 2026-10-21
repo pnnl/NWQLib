@@ -1,6 +1,5 @@
 """Immutable scientific Method configuration and direct execution behavior."""
 
-import inspect
 from typing import ClassVar
 
 from nwqlib.core.records import Record, Source, Text
@@ -134,8 +133,8 @@ class Method(Record):
 
         The default prepares the first setting, or every setting for
         `settings="all"`. A Method that chooses its next circuit from earlier results
-        overrides it to prepare that circuit. The hook receives `"all"` only after
-        `prepare_all_refusal` returned `None`.
+        overrides it to prepare that circuit. NWQLib passes `settings` on every call,
+        and passes `"all"` only after `prepare_all_refusal` returned `None`.
 
         Args:
             plan (Plan): The Plan.
@@ -153,22 +152,12 @@ class Method(Record):
         it to return its reason and what can be prepared instead. Otherwise the
         inherited preparation would prepare, and count against the Run's limits,
         every setting of the Plan, including ones the Method never submits. The
-        default returns `None` when `prepare` accepts the `settings` keyword, and
-        otherwise a refusal, because a `prepare` override without that keyword never
-        receives `"all"`.
+        default returns `None`.
 
         Returns:
             reason (str | None): The reason, or `None`.
         """
-        parameters = inspect.signature(self.prepare).parameters.values()
-        if any(item.name == "settings" or item.kind is item.VAR_KEYWORD for item in parameters):
-            return None
-        return (
-            f"{type(self).__name__}.prepare does not accept the settings keyword, so it can prepare "
-            "only the setting it submits first. prepare(plan) with the default settings='first' prepares "
-            "that setting. An override that accepts settings and passes it to Method.prepare also "
-            "serves settings='all'"
-        )
+        return None
 
     def execute(self, plan, *, run):
         """Advance the Run's work and return the Result when it is complete, or None while it is pending.

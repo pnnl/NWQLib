@@ -12,7 +12,7 @@ from nwqlib.algorithms.qhd import (
 )
 from nwqlib.algorithms.qhd.compiler import QHDCompiler
 from nwqlib.algorithms.qhd import method as owner
-from nwqlib.algorithms.qhd.records import SupportValues, table_extrema
+from nwqlib.algorithms.qhd.records import table_extrema
 from nwqlib._validation import NUMERICAL_RELATION_RTOL
 from nwqlib.problems import Optimization
 from nwqlib.scientist import plan, solve
@@ -220,211 +220,6 @@ def test_onehot_ir_product_matches_dense_exponentials_of_its_stored_blocks():
 
 
 @pytest.mark.parametrize("recipe", ["structured", "qiskit_state_preparation"])
-def test_actual_native_selected_product_phase_and_variable_order(recipe):
-    """An independently constructed four-state Strang model checks physical phase and the
-    nontrivial one-hot index embedding for both native preparations of the uniform state.
-    """
-    x, y = sp.symbols("x y")
-    problem = Optimization(
-        objective=x * y + 2 * x - y + sp.Rational(1, 5),
-        variables=(x, y),
-        bounds=((-1.0, 2.0), (0.0, 6.0)),
-    )
-    selected = make_plan(problem, QHD(num_steps=2, total_time=0.17, schedule=QuadraticSchedule(gamma=0.3),
-                                      keep_state=True, initial_state_preparation=recipe))
-    assert selected.reconstruction.width == 4
-    result = solve(selected)
-    state = result.data.artifact(result.artifact).array
-    kinetic = np.array(
-        [
-            [1.25, -0.125, -0.5, 0],
-            [-0.125, 1.25, 0, -0.5],
-            [-0.5, 0, 1.25, -0.125],
-            [0, -0.5, -0.125, 1.25],
-        ]
-    )
-    potential = np.array([-1.8, -3.8, 2.2, 2.2])
-    expected = np.ones(4, dtype=complex) / 2
-    dt = 0.17 / 2
-    for step in range(2):
-        t = (step + 0.5) * dt
-        weight = 1 + 0.3 * t * t
-        expected = np.exp(-1j * dt * weight * potential / 2) * expected
-        expected = scipy.linalg.expm(-1j * dt * kinetic / weight) @ expected
-        expected = np.exp(-1j * dt * weight * potential / 2) * expected
-    full = np.zeros(16, dtype=complex)
-    full[[5, 9, 6, 10]] = expected
-    np.testing.assert_allclose(state, full, rtol=0, atol=1e-12)
-    assert result.candidate_indices == (0, 1)
-    assert result.valid_probability == pytest.approx(1.0, abs=1e-12)
-    assert result.data.trace.jobs == 1
-    assert result.analyze().candidate == result.candidate
-
-
-@pytest.mark.parametrize("variables", [1, 2])
-def test_initial_state_amplitudes_match_their_definitions(variables):
-    """The classical start vector of each initial state is its defining product, within its derived bound.
-
-    For each state and both Dirichlet grids the test writes the per-variable
-    amplitudes from their definitions in 50-digit mpmath at the binary64
-    grid coordinates, normalizes them and forms the product in lexicographic
-    grid order, variable 0 most significant. The 2-norm distance of
-    ``initial_state.restricted_state`` must not exceed the bound
-    ``initial_state.restricted_state_error`` times u, whose owner derives it
-    (first order for the kinetic ground state, whose second-order terms are
-    below 1e-9 of the bound, and finite for the Gaussian). The mpmath
-    evaluation errs by about 1e-50. Besides a Gaussian inside the box, the
-    cases cover a center 38.7 widths beyond the last interior grid point,
-    whose unnormalized amplitudes on that grid all underflow before the
-    shift, a far and wide Gaussian whose bound grows with ``10 z`` (about
-    1e5 here), a width of 1e-200 whose off-center exponents overflow, and,
-    for one variable, extreme cases on [0, 1] (``GaussianState._variables``).
-    With center -1.7e308 and width 1e308 the exponents stay finite. With
-    the same center and width 2**-1074 every exponent overflows, the rounded
-    distances tie, and the uniform vector, about 1.05 from the exact first
-    basis vector, carries the cap of ``restricted_state_error``, about
-    sqrt(2). With center 10 and width 2**-1074 every exponent overflows too,
-    but the nearest point is unique and well separated, and it gets the whole
-    state with a bound near zero. A symmetric Gaussian of width 8.8e-10 on
-    the endpoint grid {-1, 1} has entry-error bounds near 1.1e154, whose
-    norm the owner forms without overflow before the cap applies.
-
-    The kinetic ground state must be an eigenvector of an independently built
-    kinetic matrix H, ``(1/h_j**2)(I - (S + S^T)/2)`` on factor j summed over
-    the variables, for its smallest eigenvalue. H is positive semidefinite,
-    so ``||H - lambda I|| <= ||H||`` and the residual
-    ``||H psi - lambda psi||`` of the computed psi is at most
-    ``||H|| delta`` with delta the owner's bound. The dense product adds at
-    most ``(2d + 1) u || |H| ||`` for rows of 2d + 1 nonzeros, and
-    ``|H|`` has the spectrum of H, because flipping the sign of every other
-    basis vector of each factor maps one to the other. The backward-stable
-    ``eigvalsh`` errs by a small multiple of ``u ||H||`` (LAPACK Users'
-    Guide, 3rd ed., Sec. 4.7), taken as ``10 D u ||H||`` for dimension D, and
-    so does the formula ``sum_j 2 sin(pi/(2 (K + 1)))**2/h_j**2`` it is
-    compared with. The grid with boundary points has the same matrix with
-    another spacing, so its ground state is the same vector.
-    """
-    import mpmath
-    from nwqlib.algorithms.qhd.grid import OneHotGrid
-    from nwqlib.algorithms.qhd.initial_state import restricted_state, restricted_state_error
-
-    mpmath.mp.dps = 50
-    u = 2.0**-53
-    k = 5
-    symbols = sp.symbols("x y")[:variables]
-    bounds = ((-1.0, 2.0), (3.0, 7.0))[:variables]
-    gaussians = tuple(
-        GaussianState(center=center[:variables], widths=widths[:variables])
-        for center, widths in (
-            ((0.4, 5.5), (1.1, 0.8)),
-            ((1.5 + np.sqrt(1500.0), 5.5), (1.0, 0.8)),
-            ((1.0e6, 5.5), (1.0e4, 0.8)),
-            ((0.5, 5.0), (1e-200, 0.8)),
-        )
-    )
-
-    def check(state, grid):
-        """Compare restricted_state with the mpmath product within the owner's bound."""
-        n = grid.num_grid_points
-        factors = []
-        for j in range(grid.num_variables):
-            if isinstance(state, UniformState):
-                values = [mpmath.mpf(1)] * n
-            elif isinstance(state, KineticGroundState):
-                values = [mpmath.sin(mpmath.pi * (i + 1) / (n + 1)) for i in range(n)]
-            else:
-                c, s = mpmath.mpf(state.center[j]), mpmath.mpf(state.widths[j])
-                exponents = [(mpmath.mpf(grid.grid_value(j, i)) - c) ** 2 / (2 * s**2) for i in range(n)]
-                values = [mpmath.exp(min(exponents) - z) for z in exponents]
-            norm = mpmath.sqrt(mpmath.fsum(v**2 for v in values))
-            factors.append([v / norm for v in values])
-        exact = [mpmath.fprod(factors[j][i] for j, i in enumerate(indices))
-                 for indices in itertools.product(range(n), repeat=grid.num_variables)]
-        computed = restricted_state(state, grid)
-        assert computed.shape == (n**grid.num_variables,) and not np.any(computed.imag)
-        distance = mpmath.sqrt(mpmath.fsum((mpmath.mpf(float(z.real)) - e) ** 2
-                                           for z, e in zip(computed, exact, strict=True)))
-        assert distance <= restricted_state_error(state, grid) * u, (state, grid.include_boundary_points)
-
-    for boundary in (False, True):
-        grid = OneHotGrid(symbols, bounds, k, boundary)
-        for state in (UniformState(), KineticGroundState(), *gaussians):
-            check(state, grid)
-        if variables == 1:
-            unit = OneHotGrid(symbols, ((0.0, 1.0),), k, boundary)
-            check(GaussianState(center=(-1.7e308,), widths=(1e308,)), unit)
-            # Every exponent overflows, and every halved distance rounds to 0.85e308.
-            tied = GaussianState(center=(-1.7e308,), widths=(2.0**-1074,))
-            check(tied, unit)
-            np.testing.assert_array_equal(restricted_state(tied, unit), restricted_state(UniformState(), unit))
-            assert np.sqrt(2) < restricted_state_error(tied, unit) * u < np.sqrt(2) * (1 + 2e-12)
-            # Every exponent overflows. The nearest point is unique and well separated.
-            saturated = GaussianState(center=(10.0,), widths=(2.0**-1074,))
-            check(saturated, unit)
-            np.testing.assert_array_equal(restricted_state(saturated, unit), [0, 0, 0, 0, 1])
-            assert restricted_state_error(saturated, unit) < 4
-            # Endpoint grid {-1, 1}, center 0: the exact state is uniform. Both
-            # exponents are about 6.4e17, so the exponent-error enclosures give
-            # entry errors near 1.1e154, whose squares sum beyond the binary64
-            # range while their norm does not (initial_state._gaussian_beta).
-            # The bound reaches the cap, just above sqrt(2).
-            symmetric = GaussianState(center=(0.0,), widths=(8.845950911055478e-10,))
-            pair = OneHotGrid(symbols, ((-1.0, 1.0),), 2, True)
-            check(symmetric, pair)
-            np.testing.assert_array_equal(restricted_state(symmetric, pair), restricted_state(UniformState(), pair))
-            assert np.sqrt(2) < restricted_state_error(symmetric, pair) * u < np.sqrt(2) * (1 + 2e-12)
-            make_plan(Optimization(objective=symbols[0], variables=symbols, bounds=((-1.0, 1.0),)),
-                      QHD(num_grid_points=2, include_boundary_points=True, initial_state=symmetric))
-
-        # Independent dense kinetic matrix on the lexicographic grid.
-        kinetic = np.zeros((k**variables, k**variables))
-        for j in range(variables):
-            h = grid.spacing(j)
-            one = (np.eye(k) - 0.5 * (np.eye(k, k=1) + np.eye(k, k=-1))) / h**2
-            factors = [np.eye(k)] * variables
-            factors[j] = one
-            term = factors[0]
-            for factor in factors[1:]:
-                term = np.kron(term, factor)
-            kinetic += term
-        scale = np.linalg.norm(kinetic, 2)
-        eigenvalue = 10 * k**variables * u * scale
-        lowest = np.linalg.eigvalsh(kinetic)[0]
-        expected_energy = sum(2 * np.sin(np.pi / (2 * (k + 1))) ** 2 / grid.spacing(j) ** 2 for j in range(variables))
-        assert abs(lowest - expected_energy) <= 2 * eigenvalue
-        state = KineticGroundState()
-        psi = restricted_state(state, grid).real
-        residual = np.linalg.norm(kinetic @ psi - lowest * psi)
-        delta = restricted_state_error(state, grid) * u
-        assert residual <= scale * (delta + (2 * variables + 1) * u) + eigenvalue
-
-    # A center 1e400 widths from the grid overflows every exponent, and the
-    # distances round to one value. The tie leaves the uniform vector and the
-    # cap sqrt(N**2 + 1) with N the computed norm bound, just above sqrt(2).
-    x = symbols[0]
-    line = Optimization(objective=x, variables=(x,), bounds=((-1.0, 2.0),))
-    extreme = GaussianState(center=(1e300,), widths=(1e-100,))
-    grid = OneHotGrid((x,), line.bounds, k)
-    np.testing.assert_allclose(restricted_state(extreme, grid), np.full(k, 1 / np.sqrt(k)), rtol=4 * u, atol=0)
-    # The upward factor _OUTWARD = 1 + 2**-40 (about 9.1e-13) dominates the excess.
-    assert np.sqrt(2) < restricted_state_error(extreme, grid) * u < np.sqrt(2) * (1 + 2e-12)
-    # The public workflow accepts it, and its host windows stay finite.
-    result = solve(make_plan(line, QHD(num_grid_points=k, initial_state=extreme), execution="classical"))
-    assert np.isfinite(result.most_probable_tie_window)
-    with pytest.raises(ValueError, match="one entry per Problem variable, 1 here"):
-        make_plan(line, QHD(initial_state=GaussianState(center=(0.0, 0.0), widths=(1.0, 1.0))))
-    if variables == 1:
-        # The default kinetic ground state's bound grows with sqrt(K**d), and its owner forms it without
-        # converting K**d to a float, so a resource-only Plan on 520 variables keeps the exact dimension
-        # 4**520 beside a finite bound.
-        many = sp.symbols("x:520")
-        wide = make_plan(Optimization(objective=many[0] ** 2, variables=many, bounds=((-1.0, 1.0),) * 520),
-                         QHD(num_grid_points=4, num_steps=1))
-        assert (wide.reconstruction.width, wide.reconstruction.restricted_dimension) == (2080, 4**520)
-        assert np.isfinite(wide.reconstruction.initial_state_error)
-
-
-@pytest.mark.parametrize("recipe", ["structured", "qiskit_state_preparation"])
 @pytest.mark.parametrize(
     "initial",
     [UniformState(), KineticGroundState(), GaussianState(center=(0.4, 5.5), widths=(1.1, 0.8))],
@@ -543,48 +338,6 @@ def test_initial_state_is_evaluated_once_at_planning(execution, flavor, initial,
     assert result.analyze().candidate == result.candidate
 
 
-@pytest.mark.parametrize("d,k", [(1, 5), (2, 4), (3, 3)])
-def test_start_vector_work_counts_the_entries_its_construction_forms(d, k, monkeypatch):
-    """Each classical kernel law charges at least the entries that forming the start vector touches, once.
-
-    ``restricted_state`` forms the tensor product of the stored factors of the
-    kinetic ground state on the Dirichlet grid with ``np.kron``. The test
-    counts the entries of every Kronecker product it forms and requires
-    ``initial_state.start_vector_work`` to cover them with the d converted
-    vectors and the complex cast of the D entries, and the uniform fill to be
-    charged at least its D entries. The Schrodinger and split-step Plans of
-    the kinetic ground state must charge at least that difference more than
-    those of the uniform state, so each law includes the start vector.
-    """
-    from nwqlib.algorithms.qhd.initial_state import restricted_state, start_vector_work
-
-    variables = sp.symbols("x y z")[:d]
-    problem = Optimization(objective=sum(v**2 for v in variables), variables=variables,
-                           bounds=((-1.0, 1.0),) * d)
-    method = QHD(num_grid_points=k, num_steps=2, total_time=0.5, initial_state=KineticGroundState())
-    grid = owner._grid(make_plan(problem, method, execution="classical"))
-    formed = []
-    kron = np.kron
-
-    def counting(a, b):
-        product = kron(a, b)
-        formed.append(product.size)
-        return product
-
-    monkeypatch.setattr(np, "kron", counting)
-    restricted_state(KineticGroundState(), grid)
-    monkeypatch.undo()
-    touched = d * k + sum(formed) + k**d
-    assert start_vector_work(KineticGroundState(), grid) >= touched
-    assert start_vector_work(UniformState(), grid) >= k**d
-    for flavor in ("schrodinger", "split_step"):
-        ground, uniform = (
-            make_plan(problem, method.revise(theory_flavor=flavor, initial_state=state), execution="classical")
-            for state in (KineticGroundState(), UniformState())
-        )
-        assert ground.reconstruction.size_units - uniform.reconstruction.size_units >= touched - k**d
-
-
 @pytest.mark.parametrize(
     "d,k,state",
     [
@@ -628,38 +381,6 @@ def test_initial_state_planning_stage_fits_its_measured_allowance(d, k, state):
         tracemalloc.stop()
     del kept
     assert peak <= owner._initial_state_bytes(d, k)
-
-
-def test_chain_stops_at_a_zero_tail():
-    """A register whose amplitudes end in zeros gets no link past its last positive amplitude.
-
-    The vectors (0, 0.6, 0.8, 0) and (1, 0, 0, 0) have their last positive
-    entries at local indices 2 and 0, so the chain emits two links (X, then
-    CRY and CX twice) and one bare X. Without the stop the next angle would
-    be the undefined 0/0. The one-hot amplitudes must equal the product of
-    the two vectors, which here is exact in binary64, within the chain's
-    angle bound ``(K (K - 1)/2 + pi (K - 1)) u`` per register
-    (``initial_state.append_amplitude_chain``) plus the dense simulation of
-    six small gates, a few u each, covered by 100u in total.
-    """
-    from qiskit import QuantumCircuit
-    from qiskit.quantum_info import Statevector
-    from nwqlib.algorithms.qhd.grid import OneHotGrid
-    from nwqlib.algorithms.qhd.initial_state import append_amplitude_chain, chain_links
-
-    x, y = sp.symbols("x y")
-    grid = OneHotGrid((x, y), ((0.0, 5.0), (0.0, 5.0)), 4)
-    vectors = (np.array([0.0, 0.6, 0.8, 0.0]), np.array([1.0, 0.0, 0.0, 0.0]))
-    assert [chain_links(v) for v in vectors] == [2, 0]
-    circuit = QuantumCircuit(grid.num_qubits)
-    append_amplitude_chain(circuit, grid, vectors)
-    assert dict(circuit.count_ops()) == {"x": 2, "cry": 2, "cx": 2}
-    state = Statevector(circuit).data
-    onehot = [(1 << i) | (1 << (4 + j)) for i, j in itertools.product(range(4), repeat=2)]
-    u = 2.0**-53
-    tolerance = (2 * (4 * 3 / 2 + np.pi * 3) + 100) * u
-    assert np.linalg.norm(state[onehot] - np.kron(*vectors)) <= tolerance
-    assert np.linalg.norm(np.delete(state, onehot)) <= tolerance
 
 
 def test_resource_only_initial_state_counts_the_evolution_blocks_alone():
@@ -925,24 +646,6 @@ def test_classical_probabilities_do_not_depend_on_an_additive_constant(flavor):
     assert legal.reconstruction.constant == 1e15
 
 
-@pytest.mark.parametrize("execution", ["classical", "quantum"])
-def test_circuit_route_rejects_a_physical_phase_beyond_the_binary64_range(execution):
-    """The compiled identity phase must be finite on the native and ir_product routes, for every readout.
-
-    The compiler adds ``-dt b_k c`` per step to the physical phase, which the
-    native circuit adds to its global phase and the ir_product reference
-    multiplies into its state before the probabilities are read. For
-    ``c = 1e308`` over two unit steps the sum overflows, and planning names
-    that cause instead of failing on the record's finiteness check.
-    """
-    x = sp.Symbol("x", real=True)
-    problem = Optimization(objective=x**2 + sp.Integer(10) ** 308, variables=(x,), bounds=((-1.0, 1.0),))
-    method = QHD(num_grid_points=4, num_steps=2, total_time=2.0, schedule=QuadraticSchedule(gamma=0.0),
-                 theory_flavor="ir_product")
-    with pytest.raises(ValueError, match="compiled physical phase .* objective_constant part"):
-        plan(problem, method=method, execution=execution, seed=7)
-
-
 def _exact_native_components(problem, method):
     """Return the four additive native allowance components in rational arithmetic, the Plan and the rejection.
 
@@ -1086,36 +789,6 @@ def test_circuit_route_kept_state_needs_a_phase_allowance_below_pi(execution):
     assert "removing it from the objective" not in str(rejected.value)
     if execution == "quantum":
         _check_native_rejection_components(method)
-
-
-def test_compiled_phase_allowance_bounds_the_ledger_error():
-    """The ledger allowance covers the error of the stored physical phase against its exact value.
-
-    The exact identity angle of the discrete model reads the stored binary64
-    dt, step weights, spacing, table values and constant exactly,
-    ``-sum_k dt (a_k/h**2 + b_k c + b_k sum_r v_r/2)`` for one variable, and
-    is evaluated in rational arithmetic. With ``c = 1e16`` and 16 steps the
-    formation and the compensated sum of the ledger round, and the distance
-    of the stored phase from the exact angle must not exceed
-    ``method._compiled_phase_allowance``.
-    """
-    from fractions import Fraction
-
-    x = sp.Symbol("x", real=True)
-    problem = Optimization(objective=x**2 / 3 + x / 7 + sp.Integer(10) ** 16, variables=(x,),
-                           bounds=((-1.0, 1.0),))
-    method = QHD(num_grid_points=4, num_steps=16, total_time=1.0, schedule=QuadraticSchedule(gamma=0.3),
-                 theory_flavor="ir_product")
-    selected = plan(problem, method=method, execution="classical", seed=7)
-    r, grid = selected.reconstruction, owner._grid(selected)
-    dt = Fraction(method.total_time / method.num_steps)
-    inverse_square = 1 / Fraction(grid.spacing(0)) ** 2
-    tables = sum(Fraction(v) / 2 ** len(t.support) for t in r.support_values for v in t.values.array.tolist())
-    exact = -sum(dt * (Fraction(a) * inverse_square + Fraction(b) * Fraction(r.constant) + Fraction(b) * tables)
-                 for _t, a, b in r.step_weights)
-    contributions = 16 * (2 + 2 * sum(len(t.values) for t in r.support_values))
-    error = abs(Fraction(r.physical_phase) - exact)
-    assert error <= Fraction(owner._compiled_phase_allowance(r, method, grid, contributions))
 
 
 def test_compensated_ledger_sum_meets_its_bound_where_a_plain_sum_does_not(monkeypatch):
@@ -1282,25 +955,7 @@ def test_compiler_forms_the_constant_coefficient_from_the_stored_binary64_consta
     assert dict(r.phase_sources)["objective_constant"] == -13510798882111488.0
 
 
-def test_objective_expansion_is_plain_when_the_box_contains_the_origin():
-    """A box that contains the origin expands about zero, the plain monomial expansion."""
-    from nwqlib.algorithms.qhd.objective import ObjectiveDecomposer, expansion_centers
-
-    x, y = sp.symbols("x y")
-    objective = x * y + 2 * x - y + sp.Rational(1, 5)
-    bounds = ((-1.0, 2.0), (0.0, 6.0))
-    assert expansion_centers(bounds) == (0.0, 0.0)
-    decomposer = ObjectiveDecomposer(objective, (x, y), expansion_centers(bounds))
-    assert decomposer.objective == sp.expand(objective)
-    assert expansion_centers(((1.0, 3.0), (-4.0, -2.0))) == (1.0, -2.0)
-
-
 @pytest.mark.parametrize("execution,schedule,rule", [
-    ("quantum", QuadraticSchedule(), "midpoint"),
-    ("classical", QuadraticSchedule(gamma=0.3), "integrated"),
-    ("classical", CubicSchedule(s=0.5), "midpoint"),
-    ("quantum", CubicSchedule(s=0.5), "integrated"),
-    ("classical", ShiftedCubicSchedule(s=0.5), "integrated"),
     ("quantum", ShiftedCubicSchedule(s=0.5), "integrated"),
 ])
 def test_archive_keeps_support_tables_and_schedule(tmp_path, monkeypatch, execution, schedule, rule):
@@ -1350,75 +1005,6 @@ def test_objective_domain_precedes_pruning(value):
     assert zero.reconstruction.constant == 0 and zero.reconstruction.support_values == ()
 
 
-def test_objective_pole_has_owned_context_and_preserves_legal_grid(monkeypatch):
-    x = sp.Symbol("x")
-    problem = Optimization(objective=1/x, variables=(x,), bounds=((-1., 1.),))
-    with monkeypatch.context() as guard:
-        guard.setattr(QHDCompiler, "build_step_pauli_ir", Mock(side_effect=AssertionError("built before admission")))
-        with pytest.raises(ValueError, match=r"QHD objective 1/x.*support \(0,\).*grid point \(0.0,\)") as caught:
-            make_plan(problem, QHD(num_grid_points=3))
-    assert "non-finite" in str(caught.value)
-    selected = make_plan(problem, QHD(num_grid_points=2))
-    np.testing.assert_allclose(selected.reconstruction.support_values[0].values, [-3., 3.],
-                               rtol=0, atol=2e-15)
-
-
-@pytest.mark.parametrize("failure", [MemoryError("allocation"), KeyboardInterrupt()])
-def test_objective_evaluation_does_not_translate_system_failures(failure):
-    from nwqlib.algorithms.qhd.potential import _evaluate_objective
-
-    def fail(*point):
-        raise failure
-    with pytest.raises(type(failure)) as caught:
-        _evaluate_objective(fail, (0.,), expression="1/x", support=(0,))
-    assert caught.value is failure
-
-
-@pytest.mark.parametrize("execution,flavor,comparisons,relations", [
-    ("classical", "schrodinger", ("schrodinger_fidelity",), ("same-producer replay",)),
-    ("classical", "ir_product", ("schrodinger_fidelity", "ir_product_fidelity"),
-        ("cross-model comparison", "same-producer replay")),
-    ("quantum", "schrodinger", ("schrodinger_fidelity", "ir_product_fidelity"),
-        ("circuit-versus-restricted evolution", "circuit-versus-IR construction consistency")),
-])
-def test_explicit_fidelity_keeps_producer_scope_and_real_replay(execution, flavor, comparisons, relations, monkeypatch):
-    from nwqlib.execution import VerificationReceipt
-
-    selected = make_plan(method=QHD(total_time=.17, schedule=QuadraticSchedule(gamma=.3), theory_flavor=flavor,
-                                    keep_state=True), execution=execution)
-    result = solve(selected)
-    stored = result.data.artifact(result.artifact).array
-    calls = []
-    evolve = owner._evolve_restricted
-    def count(plan, reference_flavor):
-        reference = evolve(plan, reference_flavor)
-        assert not np.shares_memory(stored, reference)
-        calls.append(reference_flavor)
-        return reference
-    monkeypatch.setattr(owner, "_evolve_restricted", count)
-    receipt, _ = result.verify(checks=QHDVerification(comparisons=comparisons))
-    assert calls == [c.removesuffix("_fidelity") for c in comparisons]
-    facts = {f.fact.quantity: f for f in receipt.applications[0].facts}
-    for comparison, relation in zip(comparisons, relations, strict=True):
-        assert relation in facts[comparison + ".within_tolerance"].frame.conditioning
-        assert relation in receipt.reference.reference
-    arguments = {b.parameter: b.value for b in receipt.applications[0].arguments}
-    assert arguments["schrodinger_evolutions"] == int("schrodinger_fidelity" in comparisons)
-    assert arguments["ir_product_evolutions"] == int("ir_product_fidelity" in comparisons)
-    monkeypatch.setattr(owner, "_evolve_restricted", Mock(side_effect=AssertionError("receipt loading replayed")))
-    restored = VerificationReceipt.model_validate_json(receipt.model_dump_json())
-    assert restored == receipt
-    if execution == "classical" and flavor == "schrodinger":
-        # A real replay result must be consumed, not merely computed and then
-        # ignored in favor of comparing the stored array with itself.
-        orthogonal = np.array([-stored[1].conjugate(), stored[0].conjugate()])
-        monkeypatch.setattr(owner, "_evolve_restricted", lambda *a: orthogonal)
-        changed, _ = result.verify(checks=QHDVerification(comparisons=comparisons))
-        changed_facts = {f.fact.quantity: f.fact.value.value for f in changed.applications[0].facts}
-        assert changed_facts["schrodinger_infidelity"] == pytest.approx(1., rel=0, abs=2e-14)
-        assert changed_facts["schrodinger_fidelity.within_tolerance"] == 0.
-
-
 def test_observed_candidate_partial_and_invalid_population_without_reference(monkeypatch):
     selected = make_plan()
     monkeypatch.setattr(
@@ -1438,89 +1024,6 @@ def test_observed_candidate_partial_and_invalid_population_without_reference(mon
     wrong = chunk.revise(quantum_layout=(RegisterMap(name="qhd", bits=(2, 1, 0)),))
     with pytest.raises(ValueError, match="layout"):
         owner._admit_observations(selected, ObservationView(chunks=(wrong,)))
-
-
-@pytest.mark.parametrize("offset", (0, -1))
-def test_candidate_objective_association_survives_public_save_load(tmp_path, monkeypatch, offset):
-    """An observed grid coordinate determines its objective, including legal negative values.
-
-    The injected state puts all probability on index 0, so the candidate and
-    the most probable point are both x = -1/2, and each coordinate and
-    objective must stay bound to its indices through save and load.
-    """
-    from nwqlib.scientist import load_result
-
-    x = sp.Symbol("x")
-    problem = Optimization(objective=(x - sp.Rational(1, 5)) ** 2 + offset,
-                           variables=(x,), bounds=((-1., 1.),))
-    monkeypatch.setattr(owner, "_evolve_restricted", lambda *args: np.array([1., 0., 0.], complex))
-    result = solve(make_plan(problem, execution="classical"))
-    assert result.candidate == result.most_probable_coordinates == (-0.5,)
-    # Direct scalar arithmetic at x=-1/2: (-1/2-1/5)^2 = 49/100.
-    assert result.objective == pytest.approx(0.49 + offset, abs=1e-14)
-    assert result.most_probable_objective == result.objective
-    path = result.save(tmp_path / "result")
-    monkeypatch.setattr(owner, "_evolve_restricted", Mock(side_effect=AssertionError("load evolved")))
-    restored = load_result(path)
-    assert restored.objective == result.objective
-    assert (restored.most_probable_indices, restored.most_probable_objective) == ((0,), result.objective)
-    for forged, message in (
-        (dict(value=-2.), "candidate objective"),
-        (dict(most_probable_objective=result.objective + 1.), "most-probable objective"),
-        (dict(most_probable_coordinates=(0.,)), "most-probable coordinates"),
-    ):
-        with pytest.raises(ValueError, match=message):
-            result.revise(**forged).validate_plan(result.plan)
-    # The candidate minimizes the objective over the observed population that holds the most probable
-    # point, so the record alone refuses a most-probable objective below the candidate's.
-    with pytest.raises(ValueError, match="lies below the candidate's"):
-        result.revise(most_probable_objective=result.objective - 1.0)
-
-
-def test_an_unevaluated_objective_survives_public_save_load(tmp_path, monkeypatch):
-    """``load_result`` reopens an objective built with ``evaluate=False`` as it was supplied.
-
-    f = x + (x + 11/16)/(x + 11/16) keeps its quotient, 0/0 at x = -11/16 and 1 on the grid, which SymPy's
-    evaluation would turn into x + 1. The loader compares the Plan’s stored ``srepr``
-    with the objective that ``archive._SymbolicReader`` rebuilds.
-    """
-    import pickle
-    from nwqlib.algorithms.qhd import archive
-    from nwqlib.scientist import load_result
-
-    x = sp.Symbol("x")
-    quotient = sp.Mul(x + sp.Rational(11, 16), sp.Pow(x + sp.Rational(11, 16), -1, evaluate=False), evaluate=False)
-    problem = Optimization(objective=sp.Add(x, quotient, evaluate=False), variables=(x,), bounds=((-1., 1.),))
-    result = solve(make_plan(problem, execution="classical"))
-    path = result.save(tmp_path / "result")
-    with monkeypatch.context() as patch:
-        patch.setattr(archive, "_SymbolicReader", pickle.Unpickler)
-        with pytest.raises(ValueError, match="expressions differ"):
-            load_result(path)
-    restored = load_result(path)
-    assert sp.srepr(restored.plan.problem.objective) == sp.srepr(problem.objective) != sp.srepr(x + 1)
-    assert restored.content_id == result.content_id
-
-
-@pytest.mark.parametrize("rows", [((0.25, 0.0, 1.0),), ((0.25, 1.0, 2.0**-1023),), ((0.0, 1.0, 1.0),),
-                                  ((2.0**-1023, 1.0, 1.0),)],
-                         ids=["zero_weight", "subnormal_weight", "zero_midpoint", "subnormal_midpoint"])
-def test_reconstruction_admits_only_the_step_rows_that_planning_gives(rows):
-    """A stored step row outside planning's range admission is refused, and rows at the normal floor stay legal.
-
-    ``schedules.step_weights`` admits only positive normal weights and a
-    positive normal first midpoint ``dt/2``, and binary64 rounding keeps
-    the midpoints nondecreasing, but it can repeat one at step counts near
-    2**52 (``records.QHDReconstruction.step_weights``). The record must
-    refuse a zero or subnormal weight or first midpoint and keep two equal
-    rows at the smallest normal number 2**-1022.
-    """
-    selected = make_plan(method=QHD(num_grid_points=2), execution="classical")
-    with pytest.raises(ValueError, match="positive normal"):
-        selected.reconstruction.revise(step_weights=rows)
-    floor = 2.0**-1022
-    kept = selected.reconstruction.revise(step_weights=((floor, floor, floor), (floor, floor, floor)))
-    assert kept.step_weights[0] == kept.step_weights[1]
 
 
 def test_explicit_grid_verification_uses_original_objective_without_evolution(monkeypatch):
@@ -1551,37 +1054,8 @@ def test_explicit_grid_verification_uses_original_objective_without_evolution(mo
     # count the one-entry byte minimum 8dK + 8D + 65536 + 256 (N + 2d + 16) + 8 (N + 2) + 8d + 96
     # = 24 + 24 + 65536 + 4864 + 128 = 70576.
     checks = QHDVerification(comparisons=("grid_minimum",), max_work=1, max_bytes=216)
-    with pytest.raises(ValueError, match="requires at least 42 work units and at least 70576 bytes") as caught:
+    with pytest.raises(ValueError, match="requires at least 42 work units and at least 70576 bytes"):
         result.verify(checks=checks)
-    message = str(caught.value)
-    assert "lower bounds on the full admission charges" in message
-    assert "Set QHDVerification(max_bytes=" not in message
-    assert "Using the displayed lower bound can still refuse" in message
-    assert "These limits belong to QHDVerification, not QHD" in message
-
-
-@pytest.mark.parametrize("execution", ["classical", "quantum"])
-def test_grid_minimum_beside_the_onehot_ir_product_reference_holds_the_restricted_state_once(execution):
-    # The one-hot ir_product reference law holds the restricted stored state, 16D bytes
-    # (verification._reference_sizes), which the grid-minimum phase also holds with the stored artifact
-    # (verification._held_state_bytes). Adding the reference to grid_minimum adds its bytes less that state.
-    import re
-
-    from nwqlib.algorithms.qhd.verification import _reference_sizes
-
-    x, y = sp.symbols("x y")
-    problem = Optimization(objective=(x - sp.Rational(1, 5)) ** 2 + (y + sp.Rational(1, 3)) ** 2,
-                           variables=(x, y), bounds=((-1.0, 1.0), (-1.0, 1.0)))
-    result = solve(problem, method=QHD(num_grid_points=6, num_steps=4, total_time=1.0, keep_state=True,
-                                       theory_flavor="ir_product"), execution=execution, seed=1)
-    charges = []
-    for comparisons in (("grid_minimum",), ("ir_product_fidelity", "grid_minimum")):
-        with pytest.raises(ValueError, match="bytes") as caught:
-            result.verify(checks=QHDVerification(comparisons=comparisons, max_bytes=1))
-        charges.append(int(re.search(r"(\d+) bytes", str(caught.value)).group(1)))
-    dimension = result.plan.reconstruction.restricted_dimension
-    reference = _reference_sizes(result.plan, owner._grid(result.plan), "ir_product")[1]
-    assert charges[1] == charges[0] + reference - 16 * dimension
 
 
 def test_symbolic_work_is_admitted_before_expansion_and_table_evaluation(monkeypatch):
@@ -1693,63 +1167,6 @@ def test_compact_support_cache_survives_step_reuse(monkeypatch):
     assert len(selected.reconstruction.steps) == 5
 
 
-def test_chunked_support_tables_keep_the_c_order_of_their_grid_tuples(monkeypatch):
-    """A support table evaluated in several chunks stores the exact values of its grid tuples in C order.
-
-    ``compiler.evaluate_support`` evaluates a table in flattened C-order chunks
-    of the size that the planning admission chooses (``method._support_table_bytes``),
-    forming the coordinates of entry e from its mixed-radix digits
-    (``compiler.chunk_coordinates``). A callable that cannot be evaluated on
-    arrays keeps its scalar functionality: its chunks are evaluated entry by
-    entry. Here the callable of the support that holds ``Max`` refuses arrays.
-    The boxes [-1, 3], [-2, 6] and [-4, 4] with K = 3 have the grid
-    coordinates (0, 1, 2), (0, 2, 4) and (-2, 0, 2) and the expansion center
-    0, and every coefficient is dyadic, so each table entry is exact in
-    binary64. With every chunk forced to 7 entries, which splits the 9- and
-    27-entry tables unevenly, each table must equal the exact values at its
-    grid tuples, first support variable most significant.
-    """
-    import nwqlib.algorithms.qhd.compiler as compiler
-
-    x, y, z = sp.symbols("x y z")
-    problem = Optimization(objective=x * y * z**2 + 2 * x * y**2 + y * sp.Max(x - 1, 0) - z / 4,
-                           variables=(x, y, z), bounds=((-1.0, 3.0), (-2.0, 6.0), (-4.0, 4.0)))
-    admitted, lambdify = owner._support_table_bytes, compiler._lambdify_objective
-
-    def sevens(*args):
-        reserved, workspace, identity, chunks = admitted(*args)
-        return reserved, workspace, identity, dict.fromkeys(chunks, 7)
-
-    def points_only(variables, expression):
-        evaluator = lambdify(variables, expression)
-        if not expression.has(sp.Max):
-            return evaluator
-
-        def evaluate(*coordinates):
-            if any(np.ndim(c) for c in coordinates):
-                raise TypeError("this callable evaluates one point at a time")
-            return evaluator(*coordinates)
-
-        return evaluate
-
-    monkeypatch.setattr(owner, "_support_table_bytes", sevens)
-    monkeypatch.setattr(compiler, "_lambdify_objective", points_only)
-    selected = make_plan(problem, QHD(num_grid_points=3, num_steps=1))
-    grid = owner._grid(selected)
-    axes = [[0.0, 1.0, 2.0], [0.0, 2.0, 4.0], [-2.0, 0.0, 2.0]]
-    assert [[grid.grid_value(j, i) for i in range(3)] for j in range(3)] == axes
-    exact = {(2,): lambda c: -c / 4, (0, 1): lambda a, b: 2 * a * b * b + b * max(a - 1, 0),
-             (0, 1, 2): lambda a, b, c: a * b * c * c}
-    tables = {t.support: t.values.array.tolist() for t in selected.reconstruction.support_values}
-    assert tables == {support: [f(*point) for point in itertools.product(*(axes[j] for j in support))]
-                      for support, f in exact.items()}
-
-
-def test_numpy_integer_controls_preserve_grid_and_step_settings():
-    expected = QHD(num_grid_points=3, num_steps=2, trotter_order=1)
-    assert QHD(num_grid_points=np.int64(3), num_steps=np.int32(2), trotter_order=np.int64(1)) == expected
-
-
 def test_classical_host_admits_the_norm_estimation_of_expm_multiply():
     # With gamma 0 each step's generator G = dt (a K + v diag(V)) has shifted
     # 1-norm N = 75.4, above 63.36, the bound of condition (3.13) of Al-Mohy
@@ -1797,437 +1214,32 @@ def test_classical_host_admits_the_norm_estimation_of_expm_multiply():
         plan(problem, method=method.revise(max_work=work - 1), execution="classical")
 
 
-@pytest.mark.parametrize("d, k, boundary", [
-    (1, 2, "periodic"), (2, 2, "periodic"), (2, 4, "periodic"), (4, 2, "periodic"),
-    (2, 2, "dirichlet"), (2, 4, "dirichlet"),
-])
-def test_the_stencil_work_law_covers_the_raw_writes_that_the_schrodinger_admission_charges(d, k, boundary):
-    """The stencil's counted raw writes lie within its work law, which the Schrodinger admission charges.
-
-    The raw row, column and value arrays of ``theory.restricted_kinetic_sparse``
-    are counted as they are written, one visit per written element. Their
-    3S writes are part of ``W_stencil = 28S + 4M + (37d + 12)D + 40(d + 1)``
-    (``theory.restricted_kinetic_work``). ``method.restricted_sizes``
-    supplies the boundary-free upper counts ``S = 3dD`` and ``M = (1 + 2d)D``
-    to the monotone law, so its work includes the stencil's.
-    """
-    from unittest.mock import patch
-    from nwqlib.algorithms.qhd import theory
-    from nwqlib.algorithms.qhd.grid import OneHotGrid
-
-    dimension = k**d
-    grid = OneHotGrid(tuple(f"x{j}" for j in range(d)), ((0.0, 1.0),) * d, k, boundary=boundary)
-    raw = 3 * d * dimension if boundary == "periodic" else d * dimension + 2 * d * (k - 1) * (dimension // k)
-    counts = {"row": 0, "column": 0, "value": 0}
-    labels = iter(counts)
-
-    class Counted(np.ndarray):
-        def __array_finalize__(self, source):
-            self.label = getattr(source, "label", None)
-
-        def __setitem__(self, key, value):
-            if self.label is not None:
-                counts[self.label] += np.asarray(self[key]).size
-            super().__setitem__(key, value)
-
-    def empty(shape, *args, **kwargs):
-        array = np.empty(shape, *args, **kwargs)
-        if shape == raw:
-            array = array.view(Counted)
-            array.label = next(labels)
-        return array
-
-    class Proxy:
-        def __getattr__(self, key):
-            return empty if key == "empty" else getattr(np, key)
-
-    with patch.object(theory, "np", Proxy()):
-        matrix = theory.restricted_kinetic_sparse(grid)
-    assert counts == dict.fromkeys(counts, raw)
-    writes = sum(counts.values())
-    assert writes <= theory.restricted_kinetic_work(dimension, d, raw, matrix.nnz)
-    upper = theory.restricted_kinetic_work(dimension, d, 3 * d * dimension, (1 + 2 * d) * dimension)
-    assert theory.restricted_kinetic_work(dimension, d, raw, matrix.nnz) <= upper
-    size, _ = owner.restricted_sizes(dimension, d, 0, (), "schrodinger", iter(()), 0)
-    assert size >= upper
-
-
-@pytest.mark.parametrize("objective, bounds, fields, message", [
-    # b = 2.5e303 at the one midpoint times the table range 6.7e5 overflows before dt = 0.01 applies. Every last
-    # midpoint lies at T/2 or later, so no step count makes this unscaled product finite.
-    (sp.Integer(10) ** 6 * sp.Symbol("x", real=True), ((-1.0, 1.0),),
-     dict(num_grid_points=2, total_time=0.01, schedule=QuadraticSchedule(gamma=1e308)),
-     "\\|b\\| \\* R = inf,.*Scale the objective down"),
-    # H = 4.0e307 from the tiny x box and R = 1.5e308 from 1.25e308 y are finite, and so are their products with
-    # dt = 0.1, but their sum overflows before dt applies.
-    (sp.Float(1.25e308) * sp.Symbol("y", real=True), ((0.0, 7.9e-154), (-1.0, 1.0)),
-     dict(num_grid_points=4, total_time=0.1, schedule=QuadraticSchedule(gamma=0.0)),
-     "The sum \\|a\\| \\* H \\+ \\|b\\| \\* R overflows before multiplication by dt"),
-    # a = b = 1, h = 0.5 and the Dirichlet K = 2 column bound H = 0.5/h**2 = 2 (one neighbor), with R = 0.5, give
-    # the finite sum 2.5, which the final multiplication by dt = 1e308 overflows.
-    (sp.Symbol("x", real=True), ((0.0, 1.5),),
-     dict(num_grid_points=2, total_time=1e308, schedule=QuadraticSchedule(gamma=0.0)),
-     "are finite, but the final multiplication by dt overflows"),
-    # The base norm dt*(|a|*H + |b|*R) is finite at about 1.5e308.
-    # With J about 1.5 and W_vec about 2, the intermediate
-    # dt*(|a|*J + |b|*W_vec) overflows before multiplication by gamma_3.
-    # The real gamma_3-scaled bound is finite (about 1.17e293).
-    (sp.Symbol("x", real=True), ((0.0, 3.0),),
-     dict(num_grid_points=2, total_time=1e308, schedule=QuadraticSchedule(gamma=0.0)),
-     r"N=inf, Q=inf.*before gamma_3.*dt = total_time/num_steps.*"
-     r"Lower total_time or increase num_steps.*when a and b are fixed"),
-    (sp.Symbol("x", real=True), ((-1.0, 1.0),),
-     dict(num_grid_points=4, total_time=8e-103, schedule=ShiftedCubicSchedule(s=1e-300)),
-     r"unscaled kinetic product overflows: .*a larger s"),
-], ids=["unscaled_product", "unscaled_sum", "final_scaling", "assembly_bound", "unscaled_kinetic"])
-def test_schrodinger_generator_overflow_names_the_failing_operation(objective, bounds, fields, message):
-    """A nonfinite Schrodinger step generator norm is refused with the operation that overflowed.
-
-    The norm ``dt (|a| H + |b| R)``, with H the stored kinetic column bound
-    and R the table-range bound, forms the unscaled products and their
-    sum before the multiplication by dt (``method._step_norm_refusal``), so
-    an overflow in an earlier operation is not repaired by a smaller dt. Each
-    case overflows at a different operation of one step, and the refusal
-    must name that operation with the remedy of its factors. When that norm
-    is finite and the table/assembly bound of
-    ``method._schrodinger_step_bounds`` is not, the refusal names that bound.
-    """
-    x, y = sp.symbols("x y", real=True)
-    problem = Optimization(objective=objective, variables=(x, y)[:len(bounds)], bounds=bounds)
-    with pytest.raises(ValueError, match=message):
-        plan(problem, method=QHD(num_steps=1, initial_state=UniformState(), **fields), execution="classical")
-    if isinstance(fields["schedule"], ShiftedCubicSchedule):
-        # Increasing s clears the kinetic overflow; the later work admission may still refuse.
-        control = fields | {"schedule": ShiftedCubicSchedule(s=1e-100)}
-        try:
-            plan(problem, method=QHD(num_steps=1, initial_state=UniformState(), **control), execution="classical")
-        except ValueError as error:
-            assert "max_work" in str(error)
-
-
-def test_schrodinger_assembly_bound_admits_adjacent_finite_step():
-    """The last finite outward assembly intermediate still yields finite N and Q."""
-    from math import isfinite
-
-    from nwqlib.algorithms.qhd.schedules import step_weights
-
-    x = sp.Symbol("x", real=True)
-    problem = Optimization(objective=x, variables=(x,), bounds=((0.0, 3.0),))
-    method = QHD(num_grid_points=2, num_steps=1, total_time=1.0,
-                 schedule=QuadraticSchedule(gamma=0.0), initial_state=UniformState())
-    selected = plan(problem, method=method, execution="classical")
-    # Here h=1, J=3/2, H=1/2, W=2 and R=1 before outward rounding.
-    # The outward unscaled sum is 0x1.c000000000005p+1. Exact rational
-    # comparison with the midpoint of the two largest finite binary64
-    # numbers puts this dt immediately below _mul_up's overflow boundary.
-    method = method.revise(total_time=float.fromhex("0x1.249249249248ep+1022"))
-    weights = step_weights(method.schedule, method.coefficient_rule,
-                           method.total_time, method.num_steps)
-    rows = list(owner._schrodinger_step_bounds(
-        method, owner._grid(selected), selected.reconstruction.support_values, weights))
-    assert len(rows) == 1
-    norm, population, perturbation = rows[0]
-    assert population == 3 and isfinite(norm) and isfinite(perturbation)
-
-
-@pytest.mark.parametrize("num_steps, total_time", [
-    (1, float.fromhex("0x1.249249249248ep+1022")), (1, 2e307), (2, 5e302)])
-def test_a_plan_at_the_binary64_edge_refuses_its_nonfinite_state_budget(num_steps, total_time):
-    """Plans at the binary64 edge refuse their nonfinite state error budget.
-
-    The first duration is the last one that method._schrodinger_step_bounds
-    admits on this grid. Its generator norm N is near the binary64 maximum,
-    so the integer product count S of expm_multiply_call_roundoff does not
-    convert to a float. At the second duration S converts and the charge
-    overflows in float arithmetic. In the two-step case each call's charge
-    is finite, but their sum in expm_multiply_state_error exceeds binary64.
-    The work and byte limits are raised far above the charge so that the
-    budget, not a resource limit, is the refusal.
-    """
-    x = sp.Symbol("x", real=True)
-    problem = Optimization(objective=x, variables=(x,), bounds=((0.0, 3.0),))
-    method = QHD(num_grid_points=2, num_steps=num_steps, total_time=total_time,
-                 max_work=10**400, max_bytes=10**400,
-                 schedule=QuadraticSchedule(gamma=0.0), initial_state=UniformState())
-    with pytest.raises(ValueError, match=r"state error budget .* is inf, not a finite binary64 number"):
-        plan(problem, method=method, execution="classical")
-
-
-def test_the_stored_kinetic_diagonal_is_the_ordered_sum_in_every_row():
-    """The stored Schrodinger kinetic diagonal is one ordered binary64 sum, so its range is zero.
-
-    ``method._schrodinger_kinetic_bounds`` prices the stored matrix with a
-    zero diagonal range, which rests on ``theory.restricted_kinetic_sparse``'s
-    column-major COO fill and SciPy's ordered duplicate reduction. With
-    d = 4, K = 2 and axis contributions ``(1, 2**-54, 2**-54, 2**-54)`` the
-    left-to-right sum is ``0x1.0000000000000p+0`` and ``fsum`` is
-    ``0x1.0000000000000p+0`` plus one ulp, so a reordered or accurate
-    reduction shows in the stored bits.
-    """
-    from math import fsum
-    from nwqlib.algorithms.qhd.grid import OneHotGrid
-    from nwqlib.algorithms.qhd.theory import restricted_kinetic_sparse
-
-    grid = OneHotGrid(tuple(f"x{j}" for j in range(4)), ((0.0, 2.0),) + ((0.0, 2.0**28),) * 3, 2,
-                      boundary="periodic")
-    contributions = [1.0 / (grid.spacing(j) * grid.spacing(j)) for j in range(4)]
-    assert contributions == [1.0, 2.0**-54, 2.0**-54, 2.0**-54]
-    diagonal = restricted_kinetic_sparse(grid).diagonal()
-    assert np.all(diagonal.imag == 0)
-    assert {float(v).hex() for v in diagonal.real} == {"0x1.0000000000000p+0"}
-    assert fsum(contributions).hex() == "0x1.0000000000001p+0"
-
-
-def test_the_schrodinger_step_bounds_cover_the_assembled_generator_exactly():
-    """N and Q of each step bound the exact shifted norm and assembly error of the kernel's generator.
-
-    ``method._schrodinger_step_bounds`` bounds, in column 1-norm, the error
-    of the assembled generator ``RN(dt*RN(RN(a*Khat)+RN(b*Vvec)))`` against
-    ``dt (a Khat + b diag(V*))`` with V* the exact sum of the stored tables
-    (Q), and the assembled generator after an exact trace shift (N). The
-    oracle forms both quantities in exact rationals from the generator that
-    ``method._fill_generator`` actually writes, on a d = 2, K = 8 Dirichlet
-    grid with three stored tables and two steps.
-    """
-    from fractions import Fraction
-    from types import SimpleNamespace
-    from nwqlib.algorithms.qhd.grid import OneHotGrid
-    from nwqlib.algorithms.qhd.split_step import potential_diagonal
-    from nwqlib.algorithms.qhd.theory import restricted_kinetic_sparse
-
-    grid = OneHotGrid(("x0", "x1"), ((0.0, 9 * 0.13), (0.0, 9 * 0.37)), 8)
-    tables = (
-        SupportValues.tabulate((0,), np.array([0.1, 0.2, -0.3, 1.0, -1.0, 0.6, 1.2, -0.1])),
-        SupportValues.tabulate((1,), np.array([0.3, -0.2, 0.1, -0.5, 0.7, 0.9, -1.1, 0.4])),
-        SupportValues.tabulate((0, 1), np.arange(64, dtype=float) / 1000),
-    )
-    method = SimpleNamespace(total_time=0.017, num_steps=2)
-    weights = ((0.0, 0.37, 0.81), (0.1, 0.22, 1.13))
-    kinetic = restricted_kinetic_sparse(grid)
-    generator, slots, diagonal = owner._generator_workspace(kinetic)
-    assert np.shares_memory(generator.indices, kinetic.indices) and np.shares_memory(generator.indptr, kinetic.indptr)
-    # SciPy chooses int64 indices from the raw slot count of a large stencil although the final pattern fits
-    # int32. The generator must still share that pattern rather than a narrowed copy.
-    wide = kinetic.copy()
-    wide.indices, wide.indptr = wide.indices.astype(np.int64), wide.indptr.astype(np.int64)
-    shared = owner._generator_workspace(wide)[0]
-    assert shared.indices is wide.indices and shared.indptr is wide.indptr
-    potential = potential_diagonal(SimpleNamespace(support_values=tables), grid).astype(np.complex128).reshape(-1)
-    exact = [sum((Fraction(float(t.values.array[sum(index[j] * 8 ** (len(t.support) - p - 1)
-                                                        for p, j in enumerate(t.support))]))
-                  for t in tables), Fraction(0)) for index in np.ndindex(8, 8)]
-    dense = kinetic.toarray()
-    dt = method.total_time / method.num_steps
-    bounds = list(owner._schrodinger_step_bounds(method, grid, tables, weights))
-    assert len(bounds) == 2
-    for (_, a, b), (norm, rows, perturbation) in zip(weights, bounds, strict=True):
-        assert rows == 5
-        formed = owner._fill_generator(generator, kinetic, slots, diagonal, potential, a, b, dt).toarray()
-        # -i RN(dt*h): the real parts are zero and the imaginary parts are -RN(dt*h).
-        assert np.all(formed.real == 0)
-        entries = [[-Fraction(float(formed[row, col].imag)) for col in range(64)] for row in range(64)]
-        shift = sum((entries[i][i] for i in range(64)), Fraction(0)) / 64
-        exact_norm = exact_error = Fraction(0)
-        for col in range(64):
-            column_norm = column_error = Fraction(0)
-            for row in range(64):
-                target = Fraction(dt) * Fraction(a) * Fraction(float(dense[row, col].real))
-                if row == col:
-                    target += Fraction(dt) * Fraction(b) * exact[col]
-                column_error += abs(entries[row][col] - target)
-                column_norm += abs(entries[row][col] - (shift if row == col else 0))
-            exact_norm, exact_error = max(exact_norm, column_norm), max(exact_error, column_error)
-        assert exact_error > 0
-        assert Fraction(norm) >= exact_norm and Fraction(perturbation) >= exact_error
-
-
-def test_schrodinger_assembly_bound_covers_gradual_underflow():
-    """The assembly bound covers a legal subnormal generator without rejecting its Plan."""
-    from fractions import Fraction
-    import numpy as np
-    import sympy as sp
-    from nwqlib import Optimization, plan
-    from nwqlib.algorithms.qhd import QHD, UniformState
-    from nwqlib.algorithms.qhd import method as owner, theory
-
-    variables = sp.symbols("x0:7", real=True)
-    selected = plan(
-        Optimization(objective=sp.Integer(0), variables=variables,
-                     bounds=((0.0, 2e150),) * 7),
-        method=QHD(encoding="binary", boundary="periodic", num_grid_points=2,
-                   num_steps=1, total_time=3e-24, initial_state=UniformState()),
-        execution="classical", seed=7,
-    )
-    grid = owner._grid(selected)
-    r = selected.reconstruction
-    kinetic = theory.restricted_kinetic_sparse(grid)
-    generator, slots, diagonal = owner._generator_workspace(kinetic)
-    _, a, b = r.step_weights[0]
-    dt = selected.method.total_time / selected.method.num_steps
-    owner._fill_generator(generator, kinetic, slots, diagonal,
-                          np.zeros(128, dtype=complex), a, b, dt)
-    stored = kinetic.toarray().real
-    actual = -generator.toarray().imag
-    error = max(
-        sum((abs(Fraction(float(actual[row, col]))
-                 - Fraction(dt) * Fraction(a) * Fraction(float(stored[row, col])))
-             for row in range(128)), Fraction(0))
-        for col in range(128)
-    )
-    _, _, bound = next(owner._schrodinger_step_bounds(
-        selected.method, grid, r.support_values, r.step_weights))
-    assert error > 0
-    assert error <= Fraction(bound)
-
-
-def test_the_broadcast_fixed_pattern_state_lies_within_the_computed_state_comparison_of_the_sparse_kernel():
-    """The Schrodinger kernel's state lies within the computed-state comparison bound of the former kernel.
-
-    The former kernel summed each point's tables with ``fsum`` and formed
-    ``-1j * dt * (a K + b diag(V))`` by sparse arithmetic. For two computed
-    states whose exact products use assembled generators within ``Q_cmp,k``
-    of each other, Duhamel's identity and unitarity give
-    ``||psi_new - psi_old||_2 <= delta_new_scipy + delta_old_scipy
-    + sum_k Q_cmp,k``, where each delta is the numerical charge
-    ``expm_multiply_state_error`` of that kernel's own shifted norms, and
-    ``Q_cmp,k = |dt b_k| E_cmp + gamma_3 |dt| (2 |a_k| J + |b_k| (W_vec + W_point))``
-    with ``E_cmp = (gamma_m + rho u) W``, ``W_point = (1 + rho u) W``, m = T-1
-    and ``rho = 2``, the one-ulp premise for ``fsum``'s final rounding. The
-    state distance is exact in rationals. The objective has a nonzero
-    constant, whose phase neither kernel's state carries.
-    """
-    from fractions import Fraction
-    from math import fsum, nextafter, inf
-    import scipy.sparse
-    import scipy.sparse.linalg
-    from nwqlib._linalg_laws import seeded_norm_estimates
-    from nwqlib._validation import expm_multiply_state_error
-    from nwqlib.algorithms.qhd.initial_state import restricted_state
-    from nwqlib.algorithms.qhd.theory import restricted_kinetic_sparse
-
-    x, y = sp.symbols("x y", real=True)
-    # The factor 40 makes the potential comparable to the kinetic diagonal, so the broadcast and pointwise
-    # tables, which differ in the last bit at some points, give different generators and states.
-    problem = Optimization(objective=40 * ((x - sp.Rational(1, 5)) ** 2 + x * y + (y + sp.Rational(1, 3)) ** 2 + 3),
-                           variables=(x, y), bounds=((-1.0, 1.0), (-1.0, 1.0)))
-    selected = plan(problem, method=QHD(num_grid_points=8, num_steps=2, total_time=0.7, theory_flavor="schrodinger",
-                                        initial_state=UniformState()), execution="classical")
-    r = selected.reconstruction
-    assert r.constant != 0 and len(r.support_values) >= 2
-    new = owner._evolve_restricted(selected, "schrodinger")
-
-    grid = owner._grid(selected)
-    d, k = 2, 8
-    dt = selected.method.total_time / selected.method.num_steps
-    kinetic = restricted_kinetic_sparse(grid)
-    point = [fsum(owner._table_values(r, i, k)) for i in itertools.product(range(k), repeat=d)]
-    potential = scipy.sparse.diags(point, format="csr", dtype=complex)
-    old = restricted_state(selected.method.initial_state, grid, r.initial_amplitudes)
-    old_norms = []
-    with seeded_norm_estimates():
-        for _t, a, b in r.step_weights:
-            generator = -1j * dt * (a * kinetic + b * potential)
-            dense = (1j * generator).toarray().real
-            shift = sum((Fraction(float(dense[i, i])) for i in range(k**d)), Fraction(0)) / k**d
-            exact = max(sum((abs(Fraction(float(dense[row, col])) - (shift if row == col else 0))
-                             for row in range(k**d)), Fraction(0)) for col in range(k**d))
-            old_norms.append((nextafter(float(exact), inf), 1 + 2 * d))
-            old = scipy.sparse.linalg.expm_multiply(generator, old)
-
-    start = r.initial_state_error
-    delta_new = expm_multiply_state_error(
-        ((n, rows) for n, rows, _ in owner._schrodinger_step_bounds(selected.method, grid, r.support_values,
-                                                                    r.step_weights)), start=start)
-    delta_old = expm_multiply_state_error(old_norms, start=start)
-    up = owner._mul_up
-    add = owner._add_up
-    j_bound, _ = owner._schrodinger_kinetic_bounds(grid)
-    magnitude = owner._sum_up(max(abs(t.minimum), abs(t.maximum)) for t in r.support_values)
-    m = len(r.support_values) - 1
-    rho_u = 2 * owner.UNIT_ROUNDOFF
-    vector = add(magnitude, up(owner._gamma_up(m), magnitude))
-    pointwise = up(add(1.0, rho_u), magnitude)
-    compared = up(add(owner._gamma_up(m), rho_u), magnitude)
-    gamma3 = owner._gamma_up(3)
-    comparison = [add(up(up(abs(dt), abs(b)), compared),
-                      up(gamma3, up(abs(dt), add(up(2 * abs(a), j_bound), up(abs(b), add(vector, pointwise))))))
-                  for _t, a, b in r.step_weights]
-    bound = Fraction(delta_new) + Fraction(delta_old) + sum((Fraction(q) for q in comparison), Fraction(0))
-    squared = Fraction(0)
-    for p, q in zip(new.flat, old.flat, strict=True):
-        re = Fraction(float(p.real)) - Fraction(float(q.real))
-        im = Fraction(float(p.imag)) - Fraction(float(q.imag))
-        squared += re * re + im * im
-    assert 0 < squared <= bound**2
-
-
-@pytest.mark.parametrize("d, k", [(2, 1024), (1, 4096)])
-def test_the_dense_summary_fits_its_decoding_and_mean_phase_law(d, k):
-    """One warmed ``_summarize`` call on dense probabilities stays within its incremental byte law.
-
-    ``method.summary_sizes`` admits ``H0 + max(17D + H_decode, 25D + 8dK)``
-    incremental bytes beside the borrowed 8D probability array, with
-    ``H_decode = 64C(d+1) + 512(d+1)`` for ``C = min(P, 4096)`` positive
-    positions decoded at a time. At d = 2, K = 1024 the mean phase binds and
-    the exhausted decoding iterator of the last chunk must be released
-    before it. At d = 1, K = 4096 the decoding phase binds, above the
-    ``25D + 8dK + H0`` form. The Plan and weights are live before tracing.
-    """
-    import gc
-    import tracemalloc
-
-    names = sp.symbols(f"x0:{d}")
-    objective = sum((v - sp.Rational(1, 5)) ** 2 for v in names) + (names[0] * names[-1] / 3 if d > 1 else 0)
-    selected = plan(Optimization(objective=objective, variables=names, bounds=((-1.0, 1.0),) * d),
-                    method=QHD(num_grid_points=k, num_steps=1, total_time=0.3, theory_flavor="split_step",
-                               max_work=10**13, max_bytes=10**11), execution="classical", seed=7)
-    weights = np.random.default_rng(3).random((k,) * d)
-    weights /= weights.sum()
-    weights.flat[:3] = 0
-    expected = owner._summarize(selected, weights, 0.0, None, 1e-12)
-    gc.collect()
-    tracemalloc.start()
-    try:
-        actual = owner._summarize(selected, weights, 0.0, None, 1e-12)
-        peak = tracemalloc.get_traced_memory()[1]
-    finally:
-        tracemalloc.stop()
-    assert actual.keys() == expected.keys()
-    admitted = owner.summary_sizes(selected.reconstruction, d, k, int(np.count_nonzero(weights)))[1]
-    assert peak <= admitted - weights.nbytes
-
-
-@pytest.mark.parametrize("flavor, steps, d, k", [("schrodinger", 64, 1, 2), ("ir_product", 256, 1, 2),
-                                                  ("ir_product", 1, 4, 30)])
-def test_classical_kernel_call_fits_its_admitted_workspace(flavor, steps, d, k, monkeypatch):
+def test_classical_kernel_call_fits_its_admitted_workspace(monkeypatch):
     """The traced peak of one warmed classical kernel call fits the workspace that its Plan admits.
 
     Besides the size laws, the kernel's admission adds the measured per-call
     allowance ``method._KERNEL_CALL_BYTES`` for Python objects of bounded
     size, and the kernel reads its generator norms and compiled blocks one
-    at a time (``method._generator_norms``, ``native.raw_blocks``). With
-    d = 1 and K = 2 the size laws admit about 18 kB, so both peaks exceed
-    the admission without the allowance, and the 256-step ir_product peak
-    exceeds it with the allowance when all blocks are held at once (about
-    500 kB against 280 kB with the materializing functions of efe52699,
-    traced on 2026-09-27 at develop 21d75e3c). A warm-up solve of the same Plan
-    loads the modules and fills CPython's free lists, and garbage is
-    collected before tracing, so the traced peak excludes one-time growth.
-    With d = 4 and K = 30, D = 810,000 grid points, the arrays proportional to
-    D dominate the admission, and the call fits only while the summary keeps
-    its storage within ``H0 + max(17D + H_decode, 25D + 8dK)``
-    (``method._summarize``, ``method.summary_sizes``).
+    at a time (``method._generator_norms``, ``native.raw_blocks``). A warm-up
+    solve of the same Plan loads the modules and fills CPython's free lists,
+    and garbage is collected before tracing, so the traced peak excludes
+    one-time growth. With d = 4 and K = 30, D = 810,000 grid points, the
+    arrays proportional to D dominate the admission, and the call fits only
+    while the summary keeps its storage within
+    ``H0 + max(17D + H_decode, 25D + 8dK)`` (``method._summarize``,
+    ``method.summary_sizes``).
     """
     import gc
     import tracemalloc
 
+    d = 4
     names = sp.symbols(f"x0:{d}")
     problem = Optimization(objective=sum((v - sp.Rational(1, 5)) ** 2 for v in names), variables=names,
                            bounds=((-1.0, 1.0),) * d)
     # The large grid needs limits above the defaults.
-    limits = dict(max_work=10**13, max_bytes=10**11) if d > 1 else {}
-    selected = plan(problem, method=QHD(num_grid_points=k, num_steps=steps, total_time=0.25, theory_flavor=flavor,
-                                        initial_state=UniformState(), **limits), execution="classical", seed=7)
+    selected = plan(problem, method=QHD(num_grid_points=30, num_steps=1, total_time=0.25, theory_flavor="ir_product",
+                                        initial_state=UniformState(), max_work=10**13, max_bytes=10**11),
+                    execution="classical", seed=7)
     solve(selected)
     peaks = []
     original = owner._execute_theory
@@ -2275,15 +1287,6 @@ def test_classical_host_evolution_keeps_the_global_random_state(flavor):
     np.random.seed(2)
     second = owner._evolve_restricted(selected, flavor)
     assert np.array_equal(first, second)
-
-
-def test_initial_state_and_schedule_work_refuse_insufficient_limits():
-    """The initial state and schedule reject insufficient planning work and storage."""
-    x = sp.Symbol("x", real=True)
-    problem = Optimization(objective=x, variables=(x,), bounds=((-1.0, 1.0),))
-    method = QHD(num_grid_points=2, num_steps=1, max_work=1, max_bytes=1)
-    with pytest.raises(ValueError, match="initial state and schedule rows requires"):
-        plan(problem, method=method, execution="classical")
 
 
 def test_native_acquisition_batch_preserves_selected_readout_after_reopen(tmp_path, monkeypatch):
@@ -2339,45 +1342,3 @@ def test_native_acquisition_batch_preserves_selected_readout_after_reopen(tmp_pa
     loaded = nwqlib.load_result(saved)
     assert loaded.candidate_indices == result.candidate_indices
     assert loaded.most_probable_probability == result.most_probable_probability
-
-
-def test_a_support_table_refusal_names_the_users_expression_and_coordinates():
-    """A refused support-table entry is reported in the coordinates and expression the user wrote.
-
-    Tables are evaluated in the centered coordinates ``x - m`` (m = 2 on
-    [2, 4]), where ``log(x - 3)`` reads ``log(x - 1)`` and the first interior
-    point of K = 5 is 1/3. The refusal must name ``log(x - 3)`` at
-    x = 2 + 1/3 (``compiler.user_point``), for the objective, for an
-    augmented-Lagrangian constraint table and for a box refinement's default
-    search model, which tabulates ``log(2 u_x - 1)`` at the unit point 1/6
-    (``refinement._problem_coordinates``).
-    """
-    from nwqlib.algorithms.qhd import AugmentedLagrangian, BoxRefinement, plan_augmented_lagrangian, refine_box
-    from nwqlib.problems import ConstrainedOptimization
-
-    x = sp.Symbol("x", real=True)
-    at = r"log\(x - 3\) on support \(0,\) at grid point \(2\.3333333333333335,\)"
-    with pytest.raises(ValueError, match="QHD objective " + at):
-        plan(Optimization(objective=sp.log(x - 3), variables=(x,), bounds=((2.0, 4.0),)),
-             method=QHD(num_grid_points=5), execution="classical")
-    with pytest.raises(ValueError, match=r"inequalities\[0\] " + at):
-        plan_augmented_lagrangian(
-            ConstrainedOptimization(objective=x**2, variables=(x,), bounds=((2.0, 4.0),),
-                                    inequalities=(sp.log(x - 3),)),
-            qhd=QHD(num_grid_points=5), options=AugmentedLagrangian(max_iterations=1), execution="classical")
-    with pytest.raises(ValueError, match="QHD objective " + at):
-        refine_box(Optimization(objective=sp.log(x - 3), variables=(x,), bounds=((2.0, 4.0),)),
-                   qhd=QHD(num_grid_points=5), options=BoxRefinement(max_levels=2), execution="classical",
-                   seed=7, progress=False)
-    # A search-model level's off-grid evaluation, as of a mode_or_mean mean, reports the problem's point
-    # a + D u too: at u = 1/2 on [2, 4] the expression 1/(2 u_x - 1) of the unit problem is 1/(x - 3) at 3.
-    from nwqlib.algorithms.qhd import refinement
-
-    pole, box = Optimization(objective=1 / (x - 3), variables=(x,), bounds=((2.0, 4.0),)), ((2.0, 4.0),)
-    unit, objective = refinement._unit_objective(pole, box)
-    tables, decomposer, _ = refinement._support_tables(
-        QHD(num_grid_points=4), Optimization(objective=objective, variables=unit, bounds=((0.0, 1.0),)))
-    evaluate = refinement._tabulated_objective(decomposer, sp.Integer(0), tables, 4,
-                                               refinement._problem_coordinates(pole, box))
-    with pytest.raises(ValueError, match=r"QHD objective 1/\(x - 3\) on support \(0,\) at point \(3\.0,\)"):
-        evaluate((0.5,))

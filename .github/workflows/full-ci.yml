@@ -100,9 +100,18 @@ jobs:
       - run: ruff check .
       - run: python -m mkdocs build --strict
       - run: python docs/scripts/policy_lint.py --site-dir site
+      # Only the stable job executes the example notebooks, the slowest tests, and
+      # measures report-only coverage. The latest job runs the rest of the suite against
+      # the newest releases. --dist worksteal lets an idle worker take tests queued on
+      # another, so the long tests do not wait in one worker's queue.
       - name: Run full test suite with coverage
-        run: OMP_NUM_THREADS=1 python -m pytest -n auto --cov=nwqlib --cov-report=xml --cov-report=term
+        if: matrix.environment == 'stable'
+        run: OMP_NUM_THREADS=1 python -m pytest -n auto --dist worksteal --durations=25 --cov=nwqlib --cov-report=xml --cov-report=term
+      - name: Run test suite without notebook execution
+        if: matrix.environment == 'latest'
+        run: OMP_NUM_THREADS=1 python -m pytest -n auto --dist worksteal --durations=25 --deselect tests/test_examples.py::test_notebook_runs_and_matches_its_references
       - name: Publish coverage summary
+        if: matrix.environment == 'stable'
         run: |
           python - <<'PY' >> "$GITHUB_STEP_SUMMARY"
           import xml.etree.ElementTree as ET

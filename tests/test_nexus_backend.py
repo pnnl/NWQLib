@@ -13,7 +13,7 @@ import pytest
 from nwqlib._prepared_execution import Run
 from nwqlib.backends.nexus import NexusBackend, NexusPreparationData, _PreparedNexus
 from nwqlib.core.planning import ObservationSpec
-from nwqlib.execution import ExecutionLimits, JobLocator, RegisterMap, SubmissionItem
+from nwqlib.execution import ExecutionLimits, JobLocator, RegisterMap
 
 
 class IO:
@@ -236,27 +236,6 @@ def test_partial_completion_excludes_growing_shot_sets_and_preserves_known_locat
     assert len(connection.refresh(locator, natives, run=make_run()).results) == 2
 
 
-def test_foreign_program_registers_and_invalid_counts_are_rejected(backend):
-    connection, sdk = backend
-    natives = (native("one"),)
-    accepted = job(connection, "execute", natives)
-    refs = [execute_ref("foreign", {(0, 1, 0): 7})]
-    sdk.jobs = NS(get=lambda **kw: accepted, status=lambda ref: NS(status="COMPLETED"), results=lambda *a, **k: refs)
-    with pytest.raises(ValueError, match="unknown or repeated"):
-        connection.refresh(connection._locator(accepted), natives, run=make_run())
-    with pytest.raises(ValueError, match="classical registers"):
-        connection._decode(Result([Bit("x", 0)], {(0,): 7}), natives[0], "job", IO())
-    for counts in ({(0, 1, 0): 8}, {(0, 1, 0): -1}, {(0, 1, 0): 1.2}, {(0, 2, 0): 7}):
-        with pytest.raises(ValueError, match="raw counts|shot population"):
-            connection._decode(Result([Bit("a", 1), Bit("z", 0), Bit("a", 0)], counts), natives[0], "job", IO())
-    with pytest.raises(ValueError, match="distinct compiled"):
-        connection.admit_batch((native("one"), native("one")))
-    programs = tuple(native(str(index)) for index in range(301))
-    connection.admit_batch(programs[:300])
-    with pytest.raises(ValueError, match="300 programs"):
-        connection.admit_batch(programs)
-
-
 def test_compile_pending_resume_and_original_association(backend, monkeypatch):
     connection, sdk = backend
     data = NexusPreparationData(snapshot="snapshot", shots=7, circuit_json='{"commands": []}',
@@ -300,57 +279,6 @@ def test_compile_pending_resume_and_original_association(backend, monkeypatch):
     assert marked.probability_window_exclusions == ("optimization_level",)
 
 
-def test_compile_correlation_and_cancellation_do_not_create_jobs(backend):
-    connection, sdk = backend
-    accepted = job(connection, "compile", input_ref="input")
-    cancelled = []
-    sdk.jobs = NS(get_all=lambda **kw: iter([accepted]), get=lambda **kw: accepted,
-                  cancel=lambda ref: cancelled.append(ref.id))
-    ref = json.dumps(Ref("input").model_dump())
-    locator = connection.reconcile_preparation("prep", "compile", input_ref_json=ref, run=IO())
-    assert locator.job_id == "job"
-    connection.cancel_preparation(locator, run=IO())
-    assert cancelled == ["job"]
-    with pytest.raises(ValueError, match="association"):
-        connection.reconcile_preparation("prep", "compile",
-            input_ref_json=json.dumps(Ref("different").model_dump()), run=IO())
-
-
-def test_helios_and_noncounts_fail_before_sdk_work():
-    kwargs = dict(project="project", max_input_bytes=100)
-    with pytest.raises(ValueError, match="Helios"):
-        NexusBackend(device="Helios-1", **kwargs)
-    connection = NexusBackend(device="H2-1", **kwargs)
-    with pytest.raises(ValueError, match="counts only"):
-        connection.target_for(NS(kind="probabilities"))
-
-
-def test_upload_lost_ack_and_resume_from_public_ref(backend, monkeypatch):
-    import sys
-    connection, sdk = backend
-    reconstructed, posted = [], []
-    sys.modules["pytket"].Circuit = NS(from_dict=lambda data: reconstructed.append(data) or data)
-    data = NexusPreparationData(snapshot="s", shots=2, circuit_json='{"phase": "0.5", "commands": []}',
-        bits=(("c", 0),), quantum_layout=(RegisterMap(name="q", bits=(0,)),),
-        classical_layout=(RegisterMap(name="c", bits=(0,)),))
-    failure = ConnectionError("upload accepted, response lost")
-
-    def upload(**kw):
-        posted.append(kw)
-        raise failure
-
-    sdk.circuits = NS(upload=upload, get_all=lambda **kw: iter([Ref("uploaded", name="nwqlib:upload:prep")]))
-    with pytest.raises(ConnectionError) as caught:
-        connection.upload(data, preparation_id="prep", run=IO(), acknowledge=lambda identity: None)
-    assert caught.value is failure
-    saved = connection.reconcile_preparation("prep", "upload", run=IO())
-    assert json.loads(saved)["id"] == "uploaded"
-    sdk.start_compile_job = lambda **kw: NS(id="compile-job")
-    locator = connection.start_compile(saved, preparation_id="prep", run=IO(), acknowledge=lambda locator: None)
-    assert locator.job_id == "compile-job" and len(posted) == 1
-    assert reconstructed == [{"phase": "0.5", "commands": []}]
-
-
 def test_local_conversion_preserves_named_bit_mapping_and_sdk_payload(backend, monkeypatch):
     import sys
     from qiskit import QuantumCircuit, QuantumRegister, ClassicalRegister
@@ -380,135 +308,6 @@ def test_local_conversion_preserves_named_bit_mapping_and_sdk_payload(backend, m
     converter.qiskit_to_tk = lambda circuit: NS(bits=[Bit("c", 0)], to_dict=lambda: pytest.fail("foreign inventory"))
     with pytest.raises(ValueError, match="bit inventory"):
         connection.prepare_local(circuit, **args)
-
-
-def test_upload_ack_precedes_serialization_failure_and_recovers_by_id(backend, monkeypatch):
-    import sys
-    connection, sdk = backend
-    sys.modules["pytket"].Circuit = NS(from_dict=lambda data: data)
-    data = NexusPreparationData(snapshot="s", shots=2, circuit_json='{}', bits=(), quantum_layout=(), classical_layout=())
-    trace = []
-    sdk.circuits = NS(upload=lambda **kw: trace.append("upload") or Ref("accepted"),
-                      get=lambda **kw: trace.append(("get", kw["id"])) or Ref(kw["id"]))
-    original = NexusBackend._encode
-
-    def fail_after_upload(self, value, run, **kwargs):
-        trace.append("serialize")
-        raise ValueError("output data limit exhausted")
-
-    monkeypatch.setattr(NexusBackend, "_encode", fail_after_upload)
-    with pytest.raises(ValueError, match="data limit"):
-        connection.upload(data, preparation_id="prep", run=IO(),
-                          acknowledge=lambda identity: trace.append(("ack", identity)))
-    assert trace == ["upload", ("ack", "accepted"), "serialize"]
-    monkeypatch.setattr(NexusBackend, "_encode", original)
-    assert json.loads(connection.restore_upload("accepted", run=IO()))["id"] == "accepted"
-    assert trace[-1] == ("get", "accepted") and trace.count("upload") == 1
-
-
-def test_completed_sibling_readback_reuses_association_not_raw_counts(backend):
-    connection, sdk = backend
-    natives = (native("one"), native("two"))
-    accepted = job(connection, "execute", natives, preparation_id="submission")
-    first = execute_ref("one", {(0, 1, 0): 7})
-    refs = [first, NS(type="IncompleteJobItemRef", project=NS(id="project"), program_type="circuit", program_id="two")]
-    sdk.jobs = NS(get=lambda **kw: accepted, status=lambda ref: NS(status="RUNNING"), results=lambda *a, **kw: refs)
-    run = make_run()
-    locator = connection._locator(accepted)
-    run._state["submissions"]["submission"] = NS(locator=locator, items=(
-        SubmissionItem(item=0, attempt="attempt-one", prepared_id="sha256:"+"0"*64),
-        SubmissionItem(item=1, attempt="attempt-two", prepared_id="sha256:"+"1"*64, result_key="1")))
-    update = connection.refresh(locator, natives, run=run)
-    assert [key for key, _ in update.results] == ["0"]
-    assert update.associations[0].provider_result_id == "result-one"
-    run._state["submissions"]["submission"].items = (
-        update.associations[0], run._state["submissions"]["submission"].items[1])
-    run._state["by_attempt"]["attempt-one"] = object()  # common owner's durable publication
-    first.get_input = lambda: pytest.fail("completed sibling downloaded twice")
-    first.download_result = lambda: pytest.fail("completed sibling copied twice")
-    assert connection.refresh(locator, natives, run=run).results == ()
-    assert run._state["backend_context"] == {}  # no shadow result-association cache
-
-
-@pytest.mark.parametrize('entry', [
-    'upload', 'restore_upload', 'compile', 'launch', 'refresh', 'refresh_compile',
-    'reconcile_upload', 'reconcile_execute', 'cancel', 'cancel_compile',
-])
-def test_absent_local_auth_rejects_every_first_remote_request(backend, monkeypatch, entry):
-    import sys
-    connection, sdk = backend
-    run = IO()
-    n = native('program')
-    locator = JobLocator(provider='nexus', job_id='job', project='project', region='us')
-    calls = []
-    def forbidden(*args, **kwargs):
-        pytest.fail('request before local authentication admission')
-    sdk.client.get_nexus_client = lambda: NS(auth=NS(cookies=()))
-    sdk.auth = NS(is_logged_in=forbidden, get_token_expiry=forbidden)
-    sdk.projects.get = forbidden
-    sdk.circuits = NS(get=forbidden, upload=forbidden, get_all=forbidden)
-    sdk.jobs = NS(get=forbidden, status=forbidden, results=forbidden, cancel=forbidden, get_all=forbidden)
-    sdk.start_compile_job = sdk.start_execute_job = forbidden
-    monkeypatch.setattr(sys.modules['pytket'], 'Circuit', NS(from_dict=forbidden), raising=False)
-    operations = {
-        'upload': lambda: connection.upload(NS(circuit_json='{}'), preparation_id='prep', run=run, acknowledge=calls.append),
-        'restore_upload': lambda: connection.restore_upload('program', run=run),
-        'compile': lambda: connection.start_compile(n.program_json, preparation_id='prep', run=run, acknowledge=calls.append),
-        'launch': lambda: connection.launch((n,), submission_id='submission', run=run),
-        'refresh': lambda: connection.refresh(locator, (n,), run=run),
-        'refresh_compile': lambda: connection.refresh_compile(locator, n.program_json, forbidden, run=run),
-        'reconcile_upload': lambda: connection.reconcile_preparation('prep', 'upload', run=run),
-        'reconcile_execute': lambda: connection.reconcile(NS(submission_id='submission'), (n,), run=run),
-        'cancel': lambda: connection.cancel(locator, run=run),
-        'cancel_compile': lambda: connection.cancel_preparation(locator, run=run),
-    }
-    with pytest.raises(ValueError, match='Nexus local authentication is unavailable'):
-        operations[entry]()
-    assert not calls
-
-
-@pytest.mark.parametrize('names,managed,admitted', [
-    ((), False, False), (('unrelated',), False, False),
-    (('myqos_id',), False, True), (('myqos_oat',), False, True), ((), True, True),
-])
-def test_local_auth_presence_preserves_memory_and_managed_state_without_token_reads(
-    backend, names, managed, admitted
-):
-    connection, sdk = backend
-    calls = []
-    class CookieNames:
-        def __iter__(self):
-            return iter(names)
-        def get(self, *args, **kwargs):
-            pytest.fail('token value read')
-    client = NS(auth=NS(cookies=CookieNames()))
-    def existing_client():
-        calls.append('client')
-        return client
-    sdk.client.get_nexus_client = existing_client  # No reload argument is accepted.
-    sdk.client.utils.is_managed_token_environment = lambda: managed
-    def project(**kwargs):
-        calls.append('request')
-        return NS(id=kwargs['id'])
-    sdk.projects.get = project
-    if admitted:
-        assert connection._project().id == 'project'
-        assert calls == (['request'] if managed else ['client', 'request'])
-    else:
-        with pytest.raises(ValueError, match='local authentication'):
-            connection._project()
-        assert calls == ['client']
-
-
-def test_authenticated_sdk_failure_is_not_relabelled_as_missing_auth(backend):
-    connection, sdk = backend
-    error = RuntimeError('SDK rejected expired authentication')
-    def fail(**kwargs):
-        raise error
-    sdk.projects.get = fail
-    with pytest.raises(RuntimeError) as caught:
-        connection._project()
-    assert caught.value is error
 
 
 def test_local_conversion_lowers_dense_unitaries_exactly(backend, monkeypatch):

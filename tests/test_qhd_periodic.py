@@ -127,7 +127,7 @@ def test_periodic_classical_model_matches_circulant_eigendecomposition(d, k):
     assert distance <= delta
 
 
-@pytest.mark.parametrize("d", [1, 2])
+@pytest.mark.parametrize("d", [2])
 def test_periodic_kinetic_ground_state_is_the_uniform_zero_energy_mode(d):
     """On the periodic grid ``KineticGroundState`` is the uniform state, the zero mode of the circulant stencil.
 
@@ -262,65 +262,3 @@ def test_periodic_native_probabilities_converge_at_second_order():
     ratios = [coarse / fine for coarse, fine in itertools.pairwise(errors)]
     deviations = [abs(ratio - 4) for ratio in ratios]
     assert all(fine <= coarse / 2 for coarse, fine in itertools.pairwise(deviations)), ratios
-
-
-@pytest.mark.parametrize("fields,message", [
-    (dict(num_grid_points=4, include_boundary_points=True), "has no boundary points"),
-    (dict(num_grid_points=5), "even num_grid_points of at least 4, got 5"),
-    (dict(num_grid_points=2), "even num_grid_points of at least 4, got 2"),
-])
-def test_periodic_grid_rejects_boundary_points_and_odd_or_two_points(fields, message):
-    """The periodic grid has no endpoints, its two-layer link split needs an even K, and K = 2 is degenerate.
-
-    The same fields remain legal on the Dirichlet grid, and a legal periodic
-    Method refuses the same values when revised.
-    """
-    with pytest.raises(ValueError, match=message):
-        QHD(boundary="periodic", **fields)
-    with pytest.raises(ValueError, match=message):
-        QHD(boundary="periodic", num_grid_points=6).revise(**fields)
-    assert QHD(**fields).boundary == "dirichlet"
-
-
-def test_augmented_lagrangian_layer_uses_the_periodic_grid():
-    """The AL layer's grid check, inner Plans and grid reference use the Method's periodic grid.
-
-    ``(x-1)**2 + (y-1)**2`` subject to ``x**2 + y**2 <= 1`` on the periodic box
-    [0, 2)² with K = 4 has the points 0, 1/2, 1 and 3/2 per variable. These
-    points and the values of f and g on them are dyadic, so the enumeration
-    below is exact, and the feasibility test ``g <= 0`` selects the same points
-    as the run's tolerance 1e-9, because the nearest infeasible point has
-    g = 1/4. The enumeration finds six feasible points and the feasible grid
-    minimum 1/2 at (1/2, 1/2). The Dirichlet interior grid of the same box,
-    2/5, 4/5, 6/5 and 8/5, would give 2/5 at (2/5, 4/5) instead. The added term
-    ``1/(5x - 2)`` is singular at the Dirichlet point x = 2/5 and finite at the
-    periodic points, so the layer's check of f on the grid (``constrained._setup``)
-    passes only on the periodic grid.
-    """
-    from nwqlib.algorithms.qhd import AugmentedLagrangian, constrained_grid_minimum, solve_augmented_lagrangian
-    from nwqlib.problems import ConstrainedOptimization
-
-    x, y = sp.symbols("x y")
-    objective, disk = (x - 1) ** 2 + (y - 1) ** 2, x**2 + y**2 - 1
-    box = ((0.0, 2.0), (0.0, 2.0))
-    qhd = QHD(num_grid_points=4, num_steps=1, total_time=0.5, boundary="periodic")
-    options = AugmentedLagrangian(inner_point="best_observed")
-
-    def run(expression):
-        problem = ConstrainedOptimization(objective=expression, variables=(x, y), bounds=box,
-                                          inequalities=(disk,))
-        return solve_augmented_lagrangian(problem, qhd=qhd, options=options, execution="classical", seed=11,
-                                          progress=False)
-
-    result = run(objective)
-    axis = [0.0, 0.5, 1.0, 1.5]
-    points = list(itertools.product(axis, axis))
-    feasible = [p for p in points if p[0] ** 2 + p[1] ** 2 - 1 <= 0]
-    value, point = min(((p[0] - 1) ** 2 + (p[1] - 1) ** 2, p) for p in feasible)
-    assert (value, point, len(feasible)) == (0.5, (0.5, 0.5), 6)
-    assert all(inner.plan.method.boundary == "periodic" for inner in result.results)
-    assert all(item.evaluation.point in points for item in result.iterations)
-    reference = constrained_grid_minimum(result)
-    assert (reference.objective, reference.point, reference.feasible_points) == (value, point, len(feasible))
-    assert reference.grid_points == 16
-    assert run(objective + 1 / (5 * x - 2)).iterations

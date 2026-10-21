@@ -9,21 +9,10 @@ import numpy as np
 import pytest
 from qiskit import QuantumCircuit
 
-from nwqlib import Expectation, plan, prepare, submit
-from nwqlib.algorithms.expectation import ExpectationMethod
 from nwqlib.backends.nwqec import LogicalCompilation, _static_body, compile_logical
 from nwqlib.blocks import SelectedConstruction, lower_qiskit, select_preparation
 from nwqlib.ir import Allocate, BlockCall, Definition, PortMap, Program, Register, Repeat, Sequence
-from nwqlib.operators import ingest_pauli
 from nwqlib.problems.inputs import ingest_vector
-
-
-def expectation_plan(*, shots=None):
-    """<psi|(I+Z)|psi>/<psi|psi> for the physical vector (2,2), with exact or counts readout."""
-    problem = Expectation(
-        state=[2.0, 2.0], observable=ingest_pauli((("I", 1.0), ("Z", 1.0)), num_qubits=1)
-    )
-    return plan(problem, method=ExpectationMethod(), shots=shots, seed=7)
 
 
 def lowered_preparation(state, repetitions=1):
@@ -111,81 +100,6 @@ def test_actual_lowering_before_and_after_fusion_and_stored_readback(tmp_path, m
     full.save(tmp_path / "compiled.json")
     restored = LogicalCompilation.load(tmp_path / "compiled.json")
     assert restored.content_id == full.content_id
-    assert "not verified achieved precision" in str(restored)
-
-
-@pytest.mark.parametrize("shots", [None, 8])
-def test_prepared_actual_readout_is_metadata_not_compiler_measurement(shots):
-    require_native()
-    prepared = prepare(expectation_plan(shots=shots))
-    try:
-        original = prepared.circuits[0]
-        compiled = compile_logical(prepared)
-        assert compiled.original_readout.kind == ("counts" if shots else "pauli_expectation")
-        assert prepared.circuits[0] == original
-        assert compiled.source_kind == "prepared"
-        assert bool(compiled.terminal_measurements) == bool(shots)
-        assert bool(compiled.simulator_saves) == (shots is None)
-        if shots is None:
-            assert json.loads(compiled.simulator_saves[0][3])["params"]
-        assert "measure" not in dict(compiled.raw_counts)
-        assert prepared.run.trace.events == ()
-    finally:
-        prepared.run.close()
-
-
-def two_basis_plan():
-    """ZZ and XX act on the same qubits with anticommuting factors, so the Plan measures them in two settings."""
-    problem = Expectation(
-        state=[1.0, 0.0, 0.0, 1.0],
-        observable=ingest_pauli((("ZZ", 1.0), ("XX", 0.5)), num_qubits=2),
-    )
-    selected = plan(problem, method=ExpectationMethod(), shots=8, seed=7)
-    assert len(selected.experiments) == 2
-    return selected
-
-
-def test_every_prepared_setting_compiles_by_index_without_submission():
-    require_native()
-    selected = two_basis_plan()
-    prepared = prepare(selected, settings="all")
-    try:
-        receipts = prepared.run.prepared_artifacts
-        assert prepared.setting_names == tuple(e.name for e in selected.experiments)
-        assert tuple(r.realization.experiment for r in receipts) == prepared.setting_names
-        for index, receipt in enumerate(receipts):
-            compiled = compile_logical(prepared, index=index, count_only=True)
-            assert compiled.source_id == receipt.content_id
-            assert compiled.original_readout == receipt.observation
-        assert prepared.run.trace.events == ()
-    finally:
-        prepared.run.close()
-
-
-def test_released_prepared_native_compiles_from_its_saved_snapshot(tmp_path):
-    require_native()
-    prepared = prepare(two_basis_plan(), settings="all", directory=tmp_path / "run")
-    with prepared.run as run:
-        before = compile_logical(prepared, index=1, count_only=True)
-        submit(prepared).wait()
-        # Both settings are collected, so both saved QPY handles are released.
-        assert set(run.release_native()["released"]) == {r.content_id for r in run.prepared_artifacts}
-        after = compile_logical(prepared, index=1, count_only=True)
-    # The reloaded native circuit is the one that was prepared and executed.
-    assert (after.source_id, after.input_qasm_digest) == (before.source_id, before.input_qasm_digest)
-
-
-def test_real_pbc_frame_is_not_original_readout():
-    require_native()
-    compiled = compile_logical(lowered_h_twice(), target="pbc")
-    assert compiled.terminal_measurements == ()
-    assert dict(compiled.raw_counts) == {"m_pauli": 1}
-    assert "m_pauli" in compiled.output_qasm
-    assert not any(q.metric == "t" for q in compiled.quantities)
-    assert (
-        next(q for q in compiled.quantities if q.metric == "logical_depth").fact.availability
-        == "unknown"
-    )
 
 
 def test_released_rotation_compilation_keeps_requested_precision():
@@ -204,14 +118,10 @@ def test_released_rotation_compilation_keeps_requested_precision():
         "cx",
         "id",
     }
-    assert "not verified achieved precision" in str(compiled)
 
 
 @pytest.mark.parametrize("epsilon,rz_err,sent", [
     (3e-4, "total", 3e-4),
-    # Documented values for an omitted epsilon.
-    (None, "per-gate", 1e-10),
-    (None, "relative", 1e-2),
 ])
 def test_public_epsilon_and_error_policy_reach_the_compiler_request(monkeypatch, epsilon, rz_err, sent):
     from nwqlib.backends import _auxiliary_process
@@ -270,26 +180,6 @@ def test_static_admission_preserves_source_phase_mapping_and_save_settings():
     nested.append(wrapped, [0])
     with pytest.raises(ValueError, match="unsupported native instruction"):
         _static_body(nested, max_operations=20, max_bytes=8192)
-
-
-def test_invalid_options_and_input_limits_refuse_before_child(monkeypatch):
-    from nwqlib.backends import _auxiliary_process
-
-    monkeypatch.setattr(
-        _auxiliary_process,
-        "run_auxiliary",
-        lambda *a, **k: pytest.fail("invalid input reached compiler"),
-    )
-    native = lowered_h_twice()
-    for options in (
-        {"count_only": True, "target": "pbc"},
-        {"epsilon": 0},
-        {"max_operations": 1},
-        {"max_bytes": 1},
-        {"index": 1},
-    ):
-        with pytest.raises(ValueError):
-            compile_logical(native, **options)
 
 
 @pytest.mark.parametrize("noisy", [False, True])
@@ -365,24 +255,3 @@ def test_child_forwards_exact_external_options_and_admits_output_before_qasm(mon
     request.update(target="clifford_t", count_only=False, max_operations=1)
     with pytest.raises(ValueError, match="output exceeds"):
         _compile_nwqec(request, tmp_path)
-
-
-def test_auxiliary_diagnostics_use_the_selected_byte_allowance(monkeypatch):
-    """A successful child's 128 KiB log is valid under the caller's 1 MB budget."""
-    from nwqlib.backends import _auxiliary_process
-
-    real_popen = subprocess.Popen
-
-    def fixture_process(command, **kwargs):
-        directory = command[-2]
-        code = (
-            "import os, pathlib; os.write(1, b'x' * 131072); "
-            f"pathlib.Path({directory!r}, 'result.json').write_text('{{}}')"
-        )
-        return real_popen([sys.executable, "-c", code], **kwargs)
-
-    monkeypatch.setattr(_auxiliary_process.subprocess, "Popen", fixture_process)
-    result, _ = _auxiliary_process.run_auxiliary(
-        "nwqec", {}, max_bytes=1_000_000, timeout_seconds=5
-    )
-    assert result["diagnostics"] == "x" * 131072

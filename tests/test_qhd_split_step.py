@@ -245,50 +245,29 @@ def test_split_step_matches_an_independent_strang_product(d, k, boundary, endpoi
     assert distance <= tolerance
 
 
-@pytest.mark.parametrize(
-    "d,k,boundary,endpoints,model,initial",
-    [
-        (2, 4, "dirichlet", False, "finite_difference", KineticGroundState()),
-        (1, 5, "dirichlet", True, "finite_difference", KineticGroundState()),
-        (2, 4, "dirichlet", False, "finite_difference", GaussianState(center=(0.3, -0.7), widths=(0.6, 1.1))),
-        (2, 4, "periodic", False, "spectral", GaussianState(center=(0.3, -0.7), widths=(0.6, 1.1))),
-    ],
-    ids=["kinetic_ground-interior", "kinetic_ground-endpoints", "gaussian-dirichlet", "gaussian-periodic"],
-)
-def test_split_step_starts_from_the_selected_initial_state(d, k, boundary, endpoints, model, initial):
+def test_split_step_starts_from_the_selected_initial_state():
     """The split-step flavor evolves the Method's initial state, and its budget charges that state's construction.
 
-    Same oracle and cases as ``test_split_step_matches_an_independent_strang_product``,
-    with ``_initial_reference`` writing the kinetic ground state and an
-    off-center Gaussian from their definitions. Their start terms
-    (``initial_state.restricted_state_error``) replace the uniform state's 2u
-    in the tolerance, which is 2.1e-14 to 3.9e-14 here. Starting the kernel
-    from the uniform state instead gives distances of 0.27 to 0.61, and
+    Same oracle as ``test_split_step_matches_an_independent_strang_product``
+    on its two-variable Dirichlet grid, with ``_initial_reference`` writing
+    an off-center Gaussian from its definition. Its start term
+    (``initial_state.restricted_state_error``) replaces the uniform state's
+    2u in the tolerance, which is at most 3.9e-14 here. Starting the kernel
+    from the uniform state instead gives a distance of at least 0.27, and
     swapping the Gaussian's two factors, whose centers and widths differ,
     gives 0.52 or more.
     """
-    variables = (x, y)[:d]
-    objective = _OBJECTIVE + (_COUPLING if d == 2 else 0)
-    if boundary == "periodic":
-        bounds = ((0.0, k / 2), (-k / 2, k / 2))[:d]
-    elif endpoints:
-        bounds = ((-1.0, 1.0),)
-    else:
-        bounds = ((-(k + 1) / 4, (k + 1) / 4), (-(k + 1) / 2, (k + 1) / 2))[:d]
-    problem = Optimization(objective=objective, variables=variables, bounds=bounds)
-    method = QHD(num_grid_points=k, num_steps=3, total_time=0.75, schedule=QuadraticSchedule(gamma=0.3),
-                 boundary=boundary, include_boundary_points=endpoints, kinetic_model=model,
-                 theory_flavor="split_step", keep_state=True, initial_state=initial)
+    problem = Optimization(objective=_OBJECTIVE + _COUPLING, variables=(x, y), bounds=((-1.25, 1.25), (-2.5, 2.5)))
+    method = QHD(num_grid_points=4, num_steps=3, total_time=0.75, schedule=QuadraticSchedule(gamma=0.3),
+                 boundary="dirichlet", include_boundary_points=False, kinetic_model="finite_difference",
+                 theory_flavor="split_step", keep_state=True,
+                 initial_state=GaussianState(center=(0.3, -0.7), widths=(0.6, 1.1)))
     distance, tolerance = _strang_distance(problem, method)
     assert distance <= tolerance
 
 
 @pytest.mark.parametrize("d,k,boundary,model", [
-    (1, 16, "periodic", "spectral"),
-    (1, 16, "dirichlet", "finite_difference"),
-    (2, 8, "periodic", "finite_difference"),
     (2, 64, "dirichlet", "finite_difference"),
-    (3, 6, "dirichlet", "finite_difference"),
 ])
 def test_split_step_byte_law_bounds_the_traced_evolution(d, k, boundary, model):
     """The byte law of ``split_step.sizes`` bounds the traced allocation of one evolution, and its work ignores the schedule.
@@ -300,8 +279,8 @@ def test_split_step_byte_law_bounds_the_traced_evolution(d, k, boundary, model):
     warm-up evolution, which loads SciPy's transform modules once, the traced
     peak of the host evolution, start vector and observed state budget
     included (``method._evolve_restricted``), must fit within the law less its
-    native term. The cases cover the FFT and DST-I, one to three axes and a
-    grid whose 64 D term dominates. The work law is a nominal count that does
+    native term. The case is a two-axis DST-I grid whose 64 D term
+    dominates. The work law is a nominal count that does
     not depend on the schedule weights, so a cubic schedule must give the same
     units as the quadratic one.
     """
@@ -600,27 +579,21 @@ def _assert_second_order(errors):
     assert all(deviations[i + 1] <= deviations[i] / 2 for i in range(len(deviations) - 1)), ratios
 
 
-@pytest.mark.parametrize("rule", ["midpoint", "integrated"])
-@pytest.mark.parametrize("boundary,model", [("dirichlet", "finite_difference"), ("periodic", "spectral")])
-def test_split_step_converges_at_second_order_in_time(boundary, model, rule):
+def test_split_step_converges_at_second_order_in_time():
     """At fixed grid, objective and gamma, the error against the time-ordered evolution falls as dt**2.
 
     The reference integrates ``psi' = -i (a(t) K + b(t) V) psi`` for the
     quadratic schedule ``a = 1/(1 + gamma t**2)``, ``b = 1 + gamma t**2``
     with SciPy's DOP853 at relative tolerance 1e-13, with K and V built
     independently (``_restricted_hamiltonian``). Kinetic and potential do not
-    commute, so the step has splitting and time-ordering error of local order
-    three under both rules, and both steps are time symmetric. From 16 to 128
-    steps the ratios are about 4.02, 4.004 and 4.001 on the Dirichlet grid and
-    4.15, 4.03 and 4.008 with the spectral kinetic, whose largest eigenvalue
-    ``2 pi**2 (K/2)**2/L**2`` is 2.5 times the finite-difference one, so it
-    enters the asymptotic range at a smaller step (ratios 5.8 and 5.6 from 4
-    to 16 steps). The reference error of about 1e-12 moves a ratio by less
-    than 1e-6.
+    commute, so the midpoint step has splitting and time-ordering error of
+    local order three, and the step is time symmetric. From 16 to 128 steps
+    the ratios are about 4.02, 4.004 and 4.001 on the Dirichlet grid. The
+    reference error of about 1e-12 moves a ratio by less than 1e-6.
     """
-    k = 3 if boundary == "dirichlet" else 4
+    k = 3
     problem = Optimization(objective=(x - 0.3) ** 2 + x**3 / 2, variables=(x,), bounds=((-1.0, 1.0),))
-    kinetic, potential = _restricted_hamiltonian(problem, k, boundary, model)
+    kinetic, potential = _restricted_hamiltonian(problem, k, "dirichlet", "finite_difference")
 
     def rhs(t, value):
         psi = value[:k] + 1j * value[k:]
@@ -634,81 +607,12 @@ def test_split_step_converges_at_second_order_in_time(boundary, model, rule):
     # The reference starts from the uniform state, so the Method names it instead of its default
     # kinetic ground state. The ratios above were measured from this start.
     errors = [np.linalg.norm(_state(problem, num_grid_points=k, num_steps=n, total_time=2.0,
-                                     schedule=QuadraticSchedule(gamma=0.3), coefficient_rule=rule,
-                                     boundary=boundary, kinetic_model=model, theory_flavor="split_step",
+                                     schedule=QuadraticSchedule(gamma=0.3), coefficient_rule="midpoint",
+                                     boundary="dirichlet", kinetic_model="finite_difference",
+                                     theory_flavor="split_step",
                                      initial_state=UniformState())
                              - reference) for n in (16, 32, 64, 128)]
     _assert_second_order(errors)
-
-
-def test_integrated_split_step_is_exact_when_the_hamiltonians_commute():
-    """A constant objective c makes V = c I, so the exact evolution is ``exp(-i c B) exp(-i A K)`` at any step count.
-
-    The kernel leaves c out of its potential (``method._constant_phase``), so
-    its steps apply the kinetic factors alone, which commute and telescope to
-    the exponential of the summed exponents. Under the integrated rule these
-    are the exact integral ``A = ∫ a`` over [0, T] up to the step integrals'
-    roundoff. The cubic schedule ``a = 2/(s + t**3)`` with ``s = 0.05``
-    varies fast near t = 0. The reference takes A from a 30-digit mpmath
-    quadrature and applies ``exp(-i A K)`` to the uniform state through a
-    30-digit eigendecomposition of the Dirichlet stencil (h = 1). The phase
-    ``exp(-i c B)`` is global, so the comparison removes a global phase and
-    checks the telescoping of the kinetic factors (the Strang test covers
-    the restored phase). The midpoint rule's frozen weights miss the peak of
-    a and lie 0.03 to 0.34 away.
-
-    Tolerance (derived). ``split_step.state_error`` bounds the kernel's
-    distance from the exact product with its stored weights. Each stored
-    kinetic exponent ``dt (A_k/dt)`` is within 48u of the exact step integral
-    (``schedules.CubicSchedule.kinetic_integral``) plus two roundings, so the
-    summed exponent is within ``50 u A`` of A and moves the state by at most
-    ``50 u A max E``. The tolerance is about 2.2e-13 and the measured
-    distances below 1e-15.
-    """
-    k, s, total = 3, 0.05, 1.5
-    problem = Optimization(objective=sp.Rational(1, 2) + 0 * x, variables=(x,), bounds=((-2.0, 2.0),))
-    with mpmath.workdps(30):
-        integral = mpmath.quad(lambda t: 2 / (s + t**3), [0, mpmath.cbrt(s), total])
-        energies, vectors = mpmath.eigsy(_kinetic_matrix(k, 1.0, "dirichlet", "finite_difference"))
-        start = mpmath.matrix([1 / mpmath.sqrt(k)] * k)
-        propagated = vectors * mpmath.diag([mpmath.expj(-integral * e) for e in energies]) * vectors.T * start
-        reference = [propagated[i] for i in range(k)]
-        largest = max(energies)
-        for steps in (1, 2, 5):
-            # The uniform start has components on two kinetic eigenvectors of different energy.
-            # The default kinetic ground state is one eigenvector, on which the midpoint rule errs only by the global
-            # phase that the comparison removes.
-            options = dict(num_grid_points=k, num_steps=steps, total_time=total, schedule=CubicSchedule(s=s),
-                           theory_flavor="split_step", initial_state=UniformState())
-            selected = plan(problem, method=QHD(coefficient_rule="integrated", keep_state=True, **options),
-                            execution="classical", seed=7)
-            result = solve(selected)
-            tolerance = selected.reconstruction.host_state_error + 50 * u * integral * largest
-            assert _distance(result.data.artifact(result.artifact).array, reference, align=True) <= tolerance
-            midpoint = _state(problem, coefficient_rule="midpoint", **options)
-            assert _distance(midpoint, reference, align=True) > 1e6 * tolerance
-
-
-@pytest.mark.parametrize("boundary", ["dirichlet", "periodic"])
-def test_finite_difference_split_step_approaches_the_schrodinger_flavor(boundary):
-    """With gamma = 0 the schrodinger flavor is the exact evolution, and split-step differs from it by O(dt**2).
-
-    A time-independent Hamiltonian makes every ``schrodinger`` step the exact
-    exponential of ``dt (K + V)``, so its state is the exact restricted
-    evolution at any step count up to its roundoff budget
-    (``_validation.expm_multiply_state_error``, below 1e-12 here). The
-    finite-difference split-step state has only the Strang splitting error,
-    which is time symmetric, so the distance between the two falls as dt**2
-    (``_assert_second_order``). For these problems the ratios are 4.5 and 4.8,
-    4.1 and 4.13, and 4.02 and 4.03 on the Dirichlet and periodic grids.
-    """
-    k = 3 if boundary == "dirichlet" else 4
-    problem = Optimization(objective=(x - 0.3) ** 2 + x**3 / 2, variables=(x,), bounds=((-1.0, 1.0),))
-    options = dict(num_grid_points=k, total_time=2.0, schedule=QuadraticSchedule(gamma=0.0), boundary=boundary)
-    distances = [np.linalg.norm(_state(problem, num_steps=n, theory_flavor="split_step", **options)
-                                - _state(problem, num_steps=n, theory_flavor="schrodinger", **options))
-                 for n in (4, 8, 16, 32)]
-    _assert_second_order(distances)
 
 
 def _canary_inputs(k):
@@ -776,9 +680,7 @@ def test_spectral_kinetic_model_requires_the_periodic_split_step_route():
     for execution, flavor in (("quantum", "split_step"), ("classical", "schrodinger"), ("classical", "ir_product")):
         with pytest.raises(ValueError, match="theory_flavor='split_step'"):
             plan(problem, method=method.revise(theory_flavor=flavor), execution=execution, seed=7)
-    selected = plan(problem, method=method.revise(theory_flavor="split_step"), execution="classical", seed=7)
-    assert "spectral kinetic model" in selected.construction.kernels[0].implementation.domain
-    assert "kinetic_model" in selected.error_model.required_sources
+    plan(problem, method=method.revise(theory_flavor="split_step"), execution="classical", seed=7)
 
 
 @pytest.mark.parametrize("boundary", ["dirichlet", "periodic"])

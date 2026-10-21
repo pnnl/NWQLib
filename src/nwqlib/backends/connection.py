@@ -60,18 +60,6 @@ these relations, which the common owner relies on:
   Transfers inside a provider SDK are outside that admission.
 - ``qualification_notice`` states the evidence scope once per Run. Offline SDK
   and transport checks do not qualify a live account, queue, device or site.
-
-An adapter that sets ``prepares_from_templates`` true receives three more
-keyword arguments at ``prepare`` (or ``prepare_local``), so that it can cache a
-parameterized native template per construction and assign each point's
-parameters to it (``_prepared_execution.prepare_experiment``):
-``construction_id`` (the selected construction's content identity, the same for
-every point of that construction), ``backend_context`` (the Run's per-Run
-backend dictionary) and ``template_seed`` (a seed for building that template,
-derived from the Plan's randomness and the construction identity, see
-``_prepared_execution._template_seed``). An adapter that used a template
-returns that seed in ``NativePreparation.template_seed`` and the receipt
-records it. Other adapters receive none of the three.
 """
 
 from dataclasses import dataclass
@@ -114,8 +102,6 @@ class NativePreparation:
             simulator version or non-default compiler optimization level outside the
             exact-probability roundoff derivation, an empty
             tuple when nothing is, or None when not assessed.
-        template_seed: The ``template_seed`` that the preparation hook supplied,
-            when this preparation used a per-construction template. None otherwise.
         statevector_roundoff: The ``(t, e)`` envelope of the host phase
             correction of the saved statevectors, the componentwise maxima
             over the save keys (``PreparedArtifact.statevector_roundoff``).
@@ -142,7 +128,6 @@ class NativePreparation:
     counts_sampling: CountsSampling | None = None
     provider_options_json: str | None = None
     probability_window_exclusions: tuple[str, ...] | None = None
-    template_seed: int | None = None
     statevector_roundoff: tuple[float, float] | None = None
 
 

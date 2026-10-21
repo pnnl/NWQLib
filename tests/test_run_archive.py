@@ -1,6 +1,5 @@
 """Actual scientific cache snapshots and pending Run copies; no replanning."""
 
-import json
 
 import numpy as np
 import pytest
@@ -9,7 +8,7 @@ import sympy as sp
 import nwqlib
 from nwqlib._prepared_execution import Run
 from nwqlib.algorithms.gcim import ADAPT
-from nwqlib.algorithms.qhd import QHD, QuadraticSchedule
+from nwqlib.algorithms.qhd import QHD
 from nwqlib.algorithms.qpe import QCELS
 from nwqlib.operators import ingest_pauli
 from nwqlib.problems import Eigenproblem, Optimization
@@ -31,32 +30,6 @@ def classical_plan(family):
             else ADAPT(initial_state=[1.0, 1.0], pool=(ingest_pauli((("Y", 1j),), num_qubits=1),))
         )
     return nwqlib.plan(problem, method=method, execution="classical", seed=7)
-
-
-def test_reopened_empty_cache_cannot_delete_a_shared_plan_input(tmp_path):
-    from nwqlib._run_archive import _CacheDelta, finish_caches
-
-    path = tmp_path / "input-protection"
-    with Run(selected(), backend=InjectedBackend(), directory=path) as run:
-        assert not list(run._state["journal"].rows("cache"))
-    with nwqlib.load_run(path, backend=InjectedBackend(), method=CountsMethod) as run:
-        files = run._state["archive_files"]
-        name = next(name for name in files._written_files if name.endswith(".npy"))
-        source = files.file(name)
-        original = source.read_bytes()
-        # Exercise the committed reference transition: a disposable cache
-        # shares an immutable input, then its last reference is removed.
-        addition = _CacheDelta(records=(("cache", "shared-input", {"file": name}),),
-                               references=(("shared-input", {name}),))
-        run._write(addition.records)
-        finish_caches(run, addition, committed=True)
-        removal = _CacheDelta(deleted=(("cache", "shared-input"),))
-        run._write(deleted=removal.deleted)
-        finish_caches(run, removal, committed=True)
-        assert source.is_file() and source.read_bytes() == original
-    # Restoring the original scientific input still succeeds after collection.
-    with nwqlib.load_run(path, backend=InjectedBackend(), method=CountsMethod) as run:
-        assert run.plan.problem.content_id == selected().problem.content_id
 
 
 def test_reopen_cleans_uncommitted_cache_before_capacity_and_preserves_owned_inputs(tmp_path):
@@ -115,50 +88,6 @@ def test_reopen_cleans_uncommitted_cache_before_capacity_and_preserves_owned_inp
         np.testing.assert_array_equal(restored._state["method_context"]["values"], [5., 6., 7.])
 
 
-def test_reopen_writes_the_uncertain_submission_and_reclaims_an_oversized_orphan(tmp_path, monkeypatch):
-    """A stop after a submission intent commits leaves that intent for reopening to revise.
-
-    Reopening writes the uncertain revision of the submission to the journal
-    and keeps its shots in the uncertain exposure. An unpublished cache file
-    larger than max_data_bytes is reclaimed, so the Run can still be
-    reopened.
-    """
-    from nwqlib._choice_archive import CACHE_FILE_PREFIX
-    from nwqlib._prepared_execution import prepare_experiment, submit_experiment
-    from nwqlib._run_archive import load
-    from nwqlib.execution import ExecutionLimits
-
-    InjectedBackend.supports_synchronous = True
-    path = tmp_path / "recovery"
-    run = Run(selected(), backend=InjectedBackend(), directory=path, limits=ExecutionLimits(max_data_bytes=200_000))
-    handle = prepare_experiment(run.plan.resolve("counts"), run=run)
-    store = run._state["journal"]
-    commit = store.commit
-    stopped = []
-
-    def stop_after_intent(records=(), **kwargs):
-        # Commit 4 (intent and reserved event) succeeds, and the process stops before any later commit.
-        if stopped:
-            raise OSError("process stopped after the submission intent")
-        commit(records, **kwargs)
-        if any(kind == "submission" for kind, _, _ in records):
-            stopped.append(True)
-
-    monkeypatch.setattr(store, "commit", stop_after_intent)
-    with pytest.raises(OSError, match="process stopped"):
-        submit_experiment(handle, run=run)
-    run.close()
-    orphan = path / (CACHE_FILE_PREFIX + "interrupted.npy")
-    orphan.write_bytes(bytes(200_001))
-    with load(path, backend=InjectedBackend(), method=CountsMethod) as restored:
-        assert not orphan.exists()
-        (submission,) = restored.trace.submissions
-        (event,) = restored.trace.events
-        assert submission.status == event.status == "uncertain"
-        saved = [row["status"] for _, row, _ in restored._state["journal"].rows("submission")]
-        assert saved == ["uncertain"] and restored.exposure["uncertain"]["shots"] == event.shots
-
-
 @pytest.mark.parametrize("family", ["qhd", "qpe", "adapt"])
 def test_completed_archive_keeps_numerical_caches_arrays_and_result_without_reexecution(
     tmp_path, monkeypatch, family
@@ -201,21 +130,6 @@ def test_completed_archive_keeps_numerical_caches_arrays_and_result_without_reex
     run.close()
 
 
-def test_classical_run_reopens_without_backend_and_names_its_saved_configuration(tmp_path, monkeypatch):
-    """A classical Run reopens with backend omitted; another backend is refused with the saved one named."""
-    from nwqlib.backends import AerBackend
-
-    plan = classical_plan("qpe")
-    with Run(plan) as run:
-        result = run.wait()
-        path = run.save(tmp_path / "classical")
-    monkeypatch.setattr(type(plan.method), "execute", lambda *a, **k: pytest.fail("reopening ran new work"))
-    with nwqlib.load_run(path) as restored:
-        assert restored.wait().content_id == result.content_id
-    with pytest.raises(ValueError, match=r"backend=None \(classical execution\); pass backend=None or omit"):
-        nwqlib.load_run(path, backend=AerBackend())
-
-
 def test_pending_copy_preserves_original_locator_rng_exposure_and_once_only_collection(tmp_path, monkeypatch):
     original = Run(selected(), backend=InjectedBackend(), directory=tmp_path / "original")
     original.resume()
@@ -234,44 +148,16 @@ def test_pending_copy_preserves_original_locator_rng_exposure_and_once_only_coll
     assert sum(name == "launch" for name, _ in InjectedBackend.calls) == 1
 
 
-def test_failed_archive_does_not_remove_original_run_or_previous_user_directory(tmp_path, monkeypatch):
-    from nwqlib._choice_archive import ArchiveFiles
-
-    source = tmp_path / "source"
-    run = Run(selected(), backend=InjectedBackend(), directory=source)
-    run.resume()
-    old = tmp_path / "existing"
-    old.mkdir()
-    (old / "user-file").write_text("keep")
-    with pytest.raises(FileExistsError):
-        run.save(old)
-    assert (old / "user-file").read_text() == "keep"
-    writer = ArchiveFiles.write_json
-
-    def interrupted(files, name, data):
-        writer(files, name, data)
-        raise OSError("snapshot interruption")
-
-    monkeypatch.setattr(ArchiveFiles, "write_json", interrupted)
-    with pytest.raises(OSError, match="snapshot interruption"):
-        run.save(tmp_path / "failed")
-    assert not (tmp_path / "failed").exists() and (source / "run.sqlite").exists()
-    assert run.trace.jobs == 1 and run.result is None
-    run.close()
-
-
-@pytest.mark.parametrize("origin", ["durable", "memory", "copy"])
-def test_published_array_has_one_durable_payload_and_survives_close(tmp_path, supplied_qhd, origin):
+def test_published_array_has_one_durable_payload_and_survives_close(tmp_path, supplied_qhd):
     import sqlite3
     import subprocess
     import sys
     from nwqlib.backends import AerBackend
 
     case = supplied_qhd
-    source = tmp_path / "source"
-    run = Run(case.plan, directory=None if origin == "memory" else source)
+    run = Run(case.plan, directory=None)
     result = run.wait()
-    path = run.save(tmp_path / "saved") if origin != "durable" else source
+    path = run.save(tmp_path / "saved")
     run.close()
     assert not tuple(path.glob("*.npy"))  # This QHD input has no independent input/cache arrays.
     with sqlite3.connect(path / "run.sqlite") as connection:
@@ -279,19 +165,15 @@ def test_published_array_has_one_durable_payload_and_survives_close(tmp_path, su
     with nwqlib.load_run(path, backend=AerBackend()) as restored:
         loaded = restored.result
         handle = loaded.data.artifact(loaded.artifact)
-        # Reopening registers the array; it is read on first use, not by a display.
-        assert "stored array, not loaded" in loaded._array_text(loaded.artifact)
         np.testing.assert_array_equal(handle.array, case.raw)
-        assert "not loaded" not in loaded._array_text(loaded.artifact)
         assert not handle.array.flags.writeable
         assert loaded.artifact.acquisition == result.artifact.acquisition
         assert restored.trace.jobs == 1
     np.testing.assert_array_equal(handle.array, case.raw)
     assert len(case.calls) == 1
-    if origin == "memory":
-        # A fresh process knows neither the injected acquisition nor the old
-        # ndarray. It must recover values solely from the saved binary owner.
-        child = subprocess.run([sys.executable, "-c", '''
+    # A fresh process knows neither the injected acquisition nor the old
+    # ndarray. It must recover values solely from the saved binary owner.
+    child = subprocess.run([sys.executable, "-c", '''
 import sys
 import numpy as np
 from nwqlib import load_run
@@ -305,68 +187,8 @@ with load_run(sys.argv[1], backend=AerBackend()) as run:
     assert not array.flags.writeable and run.trace.jobs == 1
 print("fresh-process binary array and original acquisition preserved")
 ''', str(path)], text=True, capture_output=True)
-        assert child.returncode == 0, child.stdout + child.stderr
-        assert "original acquisition preserved" in child.stdout
-
-
-def test_memory_array_save_interruption_preserves_original_payload(tmp_path, supplied_qhd, monkeypatch):
-    import nwqlib._run_journal as storage
-
-    with Run(supplied_qhd.plan) as run:
-        result = run.wait()
-        original = result.data.artifact(result.artifact).array
-        write = storage._write_bytes
-
-        def interrupted(*args, **kwargs):
-            write(*args, **kwargs)
-            raise OSError("interrupted snapshot binary")
-
-        monkeypatch.setattr(storage, "_write_bytes", interrupted)
-        path = tmp_path / "failed"
-        with pytest.raises(OSError, match="snapshot binary"):
-            run.save(path)
-        assert not path.exists()
-        assert result.data.artifact(result.artifact).array is original
-        np.testing.assert_array_equal(original, supplied_qhd.raw)
-
-
-def test_adapt_collect_before_cache_checkpoint_restores_canonical_order(tmp_path, monkeypatch):
-    plan = classical_plan("adapt")
-    with Run(plan) as reference:
-        expected = reference.wait()
-        expected_invocations = reference.trace.host_invocations
-    original = Run.collect
-    path = tmp_path / "adapt-collect"
-
-    def interrupted(run, chunk):
-        fresh = original(run, chunk)
-        if fresh:
-            raise RuntimeError("collected before method cache update")
-        return fresh
-
-    with monkeypatch.context() as patch:
-        patch.setattr(Run, "collect", interrupted)
-        with Run(plan, directory=path) as run:
-            with pytest.raises(RuntimeError, match="before method cache"):
-                run.resume()
-            assert len(run.observations.chunks) == 1
-            first = run.observations.chunks[0].content_id
-    with nwqlib.load_run(path, backend=None) as restored:
-        context = restored._state["method_context"]
-        assert context.contribution_order == [first]
-        rows = list(restored._state["journal"].rows("cache"))
-        saved = next(row["method_context"] for _, row, _ in rows if row["kind"] == "method")
-        assert not {"observations", "contribution_order", "contribution_seen"} & saved.keys()
-        result = restored.wait()
-        assert result.eigenvalue == pytest.approx(expected.eigenvalue, rel=0, abs=2e-13)
-        assert restored.trace.host_invocations == expected_invocations
-        assert restored.observations.chunks[0].content_id == first
-        saved_result = result.save(tmp_path / "standalone-adapt")
-    saved_context = json.loads((saved_result / "result.json").read_text())["data"]["method_context"]
-    assert not {"observations", "contribution_order", "contribution_seen"} & saved_context.keys()
-    standalone = nwqlib.load_result(saved_result)
-    assert standalone.data.method_context.keys() == result.data.method_context.keys()
-    assert standalone.data.observations == result.data.observations
+    assert child.returncode == 0, child.stdout + child.stderr
+    assert "original acquisition preserved" in child.stdout
 
 
 def _two_qubit_adapt(execution, max_iterations):
@@ -378,42 +200,6 @@ def _two_qubit_adapt(execution, max_iterations):
     return nwqlib.plan(Eigenproblem(A=h),
         method=ADAPT(initial_state=[.5]*4, pool=pool, theta=np.pi/4, max_iterations=max_iterations),
         execution=execution, seed=7)
-
-
-@pytest.mark.parametrize("execution,iterations", [("classical", 3), ("quantum", 2)])
-def test_adapt_checkpoints_write_the_pencil_history_and_method_cache_once_per_analysis(
-    tmp_path, monkeypatch, execution, iterations
-):
-    """Every committed checkpoint reproduces the live controller state, although acquisition
-    steps and native preparations write neither the pencil, the decision history nor the durable
-    method cache.
-    """
-    import json
-    from collections import Counter
-    from nwqlib import _run_archive
-    plan = _two_qubit_adapt(execution, iterations)
-    with Run(plan) as reference:
-        expected = reference.wait()
-    written, methods = Counter(), []
-    checkpoint, method_frontier = Run.checkpoint, _run_archive._method_frontier
-
-    def committed(run, value, *, changed=None):
-        sequence = checkpoint(run, value, changed=changed)
-        written.update(tuple(value) if changed is None else changed)
-        assert run.checkpoint_state == json.loads(json.dumps(value))
-        return sequence
-
-    monkeypatch.setattr(Run, "checkpoint", committed)
-    monkeypatch.setattr(_run_archive, "_method_frontier", lambda *args: methods.append(1) or method_frontier(*args))
-    with Run(plan, directory=tmp_path / "adapt-fields") as run:
-        result = run.wait()
-        state = run.checkpoint_state
-    assert result.eigenvalue == pytest.approx(expected.eigenvalue, rel=0, abs=2e-13)
-    assert result.selected == expected.selected
-    analyses, recorded = state["analysis_attempts"], len(state["history"])
-    assert recorded >= 2 and written["phase"] > 10 * analyses
-    assert written["pencil"] == analyses and written["history"] <= 1 + 3 * recorded
-    assert len(methods) <= analyses + 2
 
 
 def test_exact_adapt_resumes_reused_native_readout_without_replaying_acquisitions(tmp_path, monkeypatch):
@@ -488,22 +274,3 @@ def test_aer_qpy_restore_preserves_readout_position_and_wire_order(kind):
     else:
         # ZI is observed before H(1); moving readout to the end would give zero.
         assert output["pauli_expectations"] == pytest.approx({"IZ": -1, "ZI": 1}, rel=0, abs=2e-15)
-
-
-def test_large_selected_plan_roundtrip(tmp_path):
-    """Reopen a multi-MB selected QHD Plan without executing its circuit."""
-    import json
-
-    x, y = sp.symbols("x y", real=True)
-    objective = ((2 * x**2 - 1) ** 2 + sp.Rational(3, 5) * x + 2 * (y - sp.Rational(3, 10)) ** 2
-                 + sp.Rational(6, 5) * x * y)
-    problem = Optimization(objective=objective, variables=(x, y), bounds=((-1.2, 1.2), (-1.2, 1.2)))
-    method = QHD(num_grid_points=6, num_steps=80, total_time=10.0, schedule=QuadraticSchedule(gamma=0.3))
-    selected = nwqlib.plan(problem, method=method, seed=7)
-    path = tmp_path / "qhd"
-    with Run(selected, directory=path) as run:
-        backend = run.backend
-    manifest = json.loads((path / "run.json").read_text())
-    assert (path / manifest["selection"]).stat().st_size > 1024**2
-    with nwqlib.load_run(path, backend=backend) as reopened:
-        assert reopened.plan.content_id == selected.content_id

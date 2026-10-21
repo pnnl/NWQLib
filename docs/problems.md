@@ -60,9 +60,9 @@ Declaring an output computes nothing. It creates no measured data and no live qu
 
 A unit is a label, such as `Eigenproblem(A=H, unit="Hartree")`. NWQLib converts no units, and an explicit output unit records your convention without proving it.
 
-- For LinearDynamics and LinearSystem, `problem.unit` labels the physical solution amplitude. Solution and a physical StateVector carry that unit, and NormSquared carries its square. Errors of a unit-normalized StateVector are dimensionless.
-- For an Expectation, `problem.unit` labels the normalized expectation. It supplies no unit for the state amplitudes, so a QuadraticForm, a norm or a vector of that Problem has an unspecified unit unless the output declares one, as in `QuadraticForm(observable=O, unit="...")`.
-- Eigenphase is in turns, and Samples is dimensionless.
+- For LinearDynamics and LinearSystem, `problem.unit` labels the physical solution amplitude. Solution and a physical StateVector carry that unit, and NormSquared carries its square.
+- For an Expectation, `problem.unit` labels the normalized expectation. It supplies no unit for the state amplitudes, so a QuadraticForm, a norm or a physical StateVector of that Problem has an unspecified unit unless the output declares one, as in `QuadraticForm(observable=O, unit="...")`.
+- A unit-normalized StateVector and its errors are dimensionless for every Problem. Eigenphase is in turns, and Samples is dimensionless.
 
 An output unit whose symbol differs from the unit that the Problem defines, or that the output kind fixes, raises `ValueError` at planning, because the value would carry the wrong label without conversion.
 

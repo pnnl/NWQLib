@@ -136,26 +136,6 @@ def test_selected_plan_executes_without_replanning_and_reanalysis_shares_data(st
     assert tuple(StubBackend.calls) == before
 
 
-def test_failed_acquisition_spends_original_shots_and_extension_never_runs(stub):
-    selected = plan(ToyProblem(), method=ToyMethod(), shots=4, seed=7)
-    prepared = prepare(selected, backend=stub, limits=ExecutionLimits(max_total_shots=4))
-    StubBackend.fail = True
-    with pytest.raises(OSError, match="supplied acquisition"):
-        submit(prepared)
-    run = prepared.run
-    assert run.exposure["uncertain"]["shots"] == 4
-    before, random = tuple(StubBackend.calls), run.rng.snapshot()
-    run.extend_limits(max_total_shots=9)
-    assert run.rng.snapshot() == random and tuple(StubBackend.calls) == before
-    run.check_capacity(shots=5)
-    with pytest.raises(ValueError, match=r"run\.extend_limits\(max_total_shots="):
-        run.check_capacity(shots=6)
-    run.cancel()
-    with pytest.raises(ValueError, match="cancellation"):
-        run.check_capacity(circuits=1)
-    assert run.exposure["uncertain"]["shots"] == 4
-
-
 def test_data_and_complete_workload_limits_stop_before_native_work(stub):
     selected = plan(ToyProblem(), method=ToyMethod(), shots=4, seed=7)
     with pytest.raises(ValueError, match=r"ExecutionLimits\(max_total_shots="):

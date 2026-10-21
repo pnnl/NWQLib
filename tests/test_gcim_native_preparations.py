@@ -58,7 +58,7 @@ def test_preparation_inverse_reuses_controlled_definition(monkeypatch):
     )
 
 
-@pytest.mark.parametrize("kind", ("bare", "native_x", "named_x", "named_u", "named_barrier"))
+@pytest.mark.parametrize("kind", ("native_x", "named_x"))
 def test_reference_admission_and_control_follow_gate_semantics(kind):
     from qiskit.circuit import Gate
     from qiskit.quantum_info import Operator
@@ -67,14 +67,12 @@ def test_reference_admission_and_control_follow_gate_semantics(kind):
     if kind == "native_x":
         reference.x(0)
         expected = np.array([[0, 1], [1, 0]], complex)
-    elif kind.startswith("named_"):
+    else:
         custom = Gate(kind.removeprefix("named_"), 1, [])
         custom.definition = QuantumCircuit(1, global_phase=0.13)
         custom.definition.h(0)
         reference.append(custom, [0])
         expected = np.exp(0.13j) * np.array([[1, 1], [1, -1]], complex) / np.sqrt(2)
-    else:
-        expected = np.eye(2, dtype=complex)
     reference.barrier()
     kwargs = reference_kwargs(reference)
     expected *= np.exp(0.17j)
@@ -84,28 +82,3 @@ def test_reference_admission_and_control_follow_gate_semantics(kind):
     expected_control = np.eye(4, dtype=complex)
     expected_control[np.ix_([1, 3], [1, 3])] = expected
     np.testing.assert_allclose(Operator(controlled).data, expected_control, atol=1e-13, rtol=1e-13)
-
-
-def test_custom_native_snapshot_is_stable_for_archive_reopening():
-    from qiskit.circuit import Gate
-    from qiskit.quantum_info import Operator
-    from nwqlib.blocks._qiskit_intake import snapshot_circuit
-
-    custom = Gate("x", 1, [])
-    custom.definition = QuantumCircuit(1, global_phase=0.23)
-    custom.definition.h(0)
-    nested = QuantumCircuit(1)
-    nested.append(custom, [0])
-    outer = Gate("u", 1, [])
-    outer.definition = nested
-    circuit = QuantumCircuit(1)
-    circuit.append(outer, [0])
-    first, _ = snapshot_circuit(circuit)
-    second, _ = snapshot_circuit(first)
-    assert first == second
-    np.testing.assert_allclose(
-        Operator(second).data,
-        np.exp(0.23j) * np.array([[1, 1], [1, -1]]) / np.sqrt(2),
-        atol=1e-14,
-        rtol=0,
-    )

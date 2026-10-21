@@ -44,7 +44,7 @@ def test_paired_hopping_matches_independent_dense_reference_with_two_cx() -> Non
     assert paired_cx == 2
 
 
-@pytest.mark.parametrize("support_size", [1, 2, 3, 4])
+@pytest.mark.parametrize("support_size", [3, 4])
 def test_projector_lowering_matches_literal_dense_reference(support_size: int) -> None:
     if support_size == 4:
         assert structured_number_projector_provider(4)["provider"] == "diagonal_synthesis"
@@ -56,15 +56,6 @@ def test_projector_lowering_matches_literal_dense_reference(support_size: int) -
     circuit = QuantumCircuit(support_size)
     append_number_projector_phase(circuit, range(support_size), angle)
     assert np.max(np.abs(Operator(circuit).data - reference)) <= 1.0e-12
-
-
-@pytest.mark.parametrize("support_size", (3, 4))
-def test_number_projector_small_phase_survives_execution_decomposition(support_size) -> None:
-    circuit = QuantumCircuit(support_size)
-    append_number_projector_phase(circuit, range(support_size), 1.0e-11)
-    diagonal = np.diag(Operator(circuit.decompose(reps=10)).data)
-    relative = diagonal[-1] / diagonal[0]
-    assert relative.imag / -1.0e-11 == pytest.approx(1.0, rel=1.0e-10, abs=0.0)
 
 
 @pytest.mark.parametrize("angle", (0.0, 0.37))

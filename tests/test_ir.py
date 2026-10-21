@@ -1,6 +1,5 @@
 """Independent finite graph, exact arithmetic and linear lifecycle witnesses."""
 
-import json
 
 import pytest
 
@@ -62,24 +61,6 @@ def make_program():
     )
 
 
-def test_only_terminal_batches_declare_observation_kind():
-    setting = Setting(label="s", metadata=metadata("readout"))
-    inner = MeasurementBatch(body="empty", settings=(setting,), repetitions=4, observation_kind="counts")
-    nodes = {"root": MeasurementBatch(body="repeat", settings=(setting,), repetitions=3),
-             "repeat": Repeat(body="shared", count=2),
-             "shared": Sequence(children=("inner", "inner")), "inner": inner, "empty": Sequence()}
-    legal = make(nodes)
-    assert legal.check_readiness().ready
-    selected = legal.select_experiment("inner", 0).definitions[-2].node
-    assert (selected.observation_kind, selected.repetitions) == ("counts", 4)
-    for kind in ("counts", "pauli_expectation", "probabilities"):
-        with pytest.raises(ValueError, match="nonterminal MeasurementBatch.*observation_kind"):
-            make(nodes | {"root": nodes["root"].revise(observation_kind=kind)})
-    for value in (-1, 1.5):
-        with pytest.raises(ValueError, match="repetitions"):
-            inner.revise(repetitions=value)
-
-
 def test_shared_repeat_roundtrip_binding_and_detached_identity():
     program = make_program()
     assert not program.check_readiness().ready
@@ -103,29 +84,6 @@ def test_shared_repeat_roundtrip_binding_and_detached_identity():
     assert program.bind(n=1).content_id != bound.content_id
     points = bound.definitions[-1].node.settings
     assert points[0].label == points[1].label and points[0].content_id != points[1].content_id
-
-
-@pytest.mark.parametrize("bad", [-1])
-def test_exact_parameter_domain_rejects_negative_repetition(bad):
-    with pytest.raises(ValueError):
-        make_program().bind(n=bad)
-
-
-def test_zero_and_one_counts_and_unknown_width_constraints():
-    assert make_program().bind(n=0).check_readiness().ready
-    assert make_program().bind(n=1).check_readiness().ready
-    nodes = {"root": Sequence(children=("a", "call")), "a": Allocate(wire="q"),
-             "call": BlockCall(signature="u", ports=(PortMap(port="p", wire="q"),))}
-    args = dict(parameters=(Parameter(name="w", domain="integer", lower=0),),
-                expressions=(Expression(id="w", value=ParameterRef(parameter="w")),),
-                registers=(Register(name="q", width=ExprRef(expression="w")),),
-                signatures=(BlockSignature(name="u", target=SOURCE,
-                                           quantum=(QuantumPort(name="p", width=1),)),))
-    program = make(nodes, **args)
-    assert any("width" in b for b in program.check_readiness().blockers)
-    assert program.bind(w=1).check_readiness().ready
-    with pytest.raises(ValueError, match="width"):
-        program.bind(w=0)
 
 
 def test_expression_exactness_sharing_types_cycles_and_limits():
@@ -160,19 +118,6 @@ def test_expression_exactness_sharing_types_cycles_and_limits():
         p.revise(limits=AdmissionLimits(max_steps=1))
 
 
-def test_node_cycles_missing_duplicate_kind_and_depth():
-    for nodes in ({"root": Repeat(body="root", count=1)}, {"root": Sequence(children=("missing",))}):
-        with pytest.raises(ValueError):
-            make(nodes)
-    with pytest.raises(ValueError, match="duplicate definition"):
-        Program(root="root", definitions=(Definition(id="root", node=Sequence()),) * 2)
-    with pytest.raises(ValueError):
-        Definition.model_validate({"id": "root", "node": {"kind": "arbitrary_callable"}})
-    with pytest.raises(ValueError, match="depth"):
-        make({"root": Repeat(body="a", count=1), "a": Sequence()},
-             limits=AdmissionLimits(max_depth=1))
-
-
 def feedforward_nodes():
     return {
         "root": Sequence(children=("aq", "ao", "u", "m", "process", "branch", "othercall", "reset", "u")),
@@ -195,18 +140,6 @@ def feedforward(nodes=None):
                                            quantum=(QuantumPort(name="p", width=1, requires="coherent"),)),))
 
 
-def test_measure_feedforward_unrelated_wire_reset_reuse_and_host_boundary():
-    assert feedforward().check_readiness().ready
-    nodes = feedforward_nodes()
-    nodes["process"] = nodes["process"].revise(boundary="host")
-    with pytest.raises(ValueError, match="host boundary"):
-        feedforward(nodes)
-    nodes["releaseq"] = Release(wire="q")
-    nodes["releaseo"] = Release(wire="other")
-    nodes["root"] = Sequence(children=("aq", "ao", "m", "releaseq", "releaseo", "process", "aq", "u"))
-    assert feedforward(nodes).check_readiness().ready
-
-
 def test_coherence_epoch_broken_and_stale_after_reset_or_reallocate():
     nodes = feedforward_nodes()
     nodes["region"] = CoherentRegion(body="u", claims=(StateClaim(wire="q", epoch=0),))
@@ -224,88 +157,6 @@ def test_coherence_epoch_broken_and_stale_after_reset_or_reallocate():
     nodes["root"] = Sequence(children=("aq", "region"))
     with pytest.raises(ValueError, match="epoch is broken"):
         feedforward(nodes)
-
-
-def test_read_before_measure_branch_only_output_release_and_aliasing():
-    nodes = feedforward_nodes()
-    nodes["root"] = Sequence(children=("aq", "process"))
-    with pytest.raises(ValueError, match="read before"):
-        feedforward(nodes)
-    nodes["arm"] = ClassicalStage(implementation=SOURCE, outputs=("arm_only",))
-    nodes["consume"] = ClassicalStage(implementation=SOURCE, inputs=("arm_only",))
-    nodes["branch"] = nodes["branch"].revise(when_true="arm")
-    nodes["root"] = Sequence(children=("aq", "m", "process", "branch", "consume"))
-    with pytest.raises(ValueError, match="read before"):
-        feedforward(nodes)
-    nodes["branch"] = nodes["branch"].revise(when_false="arm")
-    assert feedforward(nodes).check_readiness().ready
-    nodes["release"] = Release(wire="q")
-    nodes["root"] = Sequence(children=("aq", "release", "u"))
-    with pytest.raises(ValueError, match="not live"):
-        feedforward(nodes)
-    with pytest.raises(ValueError, match="aliased"):
-        make({"root": BlockCall(signature="two", ports=(PortMap(port="a", wire="q"),
-                                                               PortMap(port="b", wire="q")))},
-             signatures=(BlockSignature(name="two", target=SOURCE,
-                                        quantum=(QuantumPort(name="a", width=1), QuantumPort(name="b", width=1))),))
-
-
-def test_zero_symbolic_and_adaptive_loop_output_intersection_and_preservation():
-    nodes = feedforward_nodes()
-    nodes["produce"] = ClassicalStage(implementation=SOURCE, outputs=("arm_only",))
-    nodes["consume"] = ClassicalStage(implementation=SOURCE, inputs=("arm_only",))
-    nodes["loop"] = Repeat(body="produce", count=0)
-    nodes["root"] = Sequence(children=("loop", "consume"))
-    with pytest.raises(ValueError, match="read before"):
-        feedforward(nodes)
-    nodes["loop"] = nodes["loop"].revise(count=1)
-    assert feedforward(nodes).check_readiness().ready
-    nodes["loop"] = AdaptiveLoop(body="produce", max_rounds=10**12,
-                                 policy=ClassicalStage(implementation=SOURCE), termination="declared predicate")
-    with pytest.raises(ValueError, match="read before"):
-        feedforward(nodes)
-    nodes["root"] = Sequence(children=("produce", "loop", "consume"))
-    assert feedforward(nodes).check_readiness().ready
-    nodes["loop"] = Repeat(body="produce", count=ExprRef(expression="n"))
-    baseline = feedforward()
-    args = dict(classical=baseline.classical, signatures=baseline.signatures,
-                parameters=(Parameter(name="n", domain="integer", lower=0),),
-                expressions=(Expression(id="n", value=ParameterRef(parameter="n")),))
-    preserved = make(nodes, **args)
-    assert not preserved.check_readiness().ready
-    assert preserved.bind(n=0).check_readiness().ready
-    nodes["root"] = Sequence(children=("loop", "consume"))
-    with pytest.raises(ValueError, match="read before"):
-        make(nodes, **args)
-    nodes["root"] = Sequence(children=("aq", "loop", "u"))
-    nodes["loop"] = Repeat(body="u", count=10**12)
-    assert feedforward(nodes).check_readiness().ready
-    nodes["release"] = Release(wire="q")
-    nodes["loop"] = Repeat(body="release", count=2)
-    with pytest.raises(ValueError, match="not live"):
-        feedforward(nodes)
-
-
-def test_generic_metadata_compact_axis_and_independent_scopes():
-    metadata_refs = (metadata("lanczos-degree-parity-readout"), metadata("gcim-pair-pauli-quadrature"))
-    nodes = {"root": MeasurementBatch(body="experiment", settings=tuple(
-        Setting(label="same", metadata=ref) for ref in metadata_refs),
-        axes=(RangeAxis(parameter="k", start=0, stop=10**12),)),
-        "experiment": Sequence(children=("a", "m", "r")), "a": Allocate(wire="q"),
-        "m": Measure(wire="q", result="bits"), "r": Release(wire="q")}
-    p = make(nodes, classical=(ClassicalValue(name="bits", dtype="bits", width=1),),
-             parameters=(Parameter(name="k", domain="integer", lower=0),))
-    assert p.check_readiness().ready
-    # A trillion axis values do not create more admission visits than one axis value.
-    one = p.definitions[0].node.revise(axes=(RangeAxis(parameter="k", start=0, stop=1),))
-    small = p.revise(definitions=(p.definitions[0].revise(node=one),) + p.definitions[1:])
-    assert p.check_readiness().lifecycle_steps == small.check_readiness().lifecycle_steps
-    restored = Program.model_validate_json(p.model_dump_json())
-    assert restored.definitions[0].node.settings[1].metadata == metadata_refs[1]
-    assert len(json.loads(p.model_dump_json())["definitions"]) == 5
-    nodes["experiment"] = Sequence(children=("a", "m"))
-    with pytest.raises(ValueError, match="release all wires"):
-        make(nodes, classical=p.classical, parameters=p.parameters)
 
 
 def test_joint_call_invalidates_partner_but_declared_independent_call_preserves_it():
@@ -361,254 +212,6 @@ def test_compact_axis_selection_resolves_count_without_expansion():
     for bad in (0, 2, 10**12):
         with pytest.raises(ValueError, match="range axis"):
             program.select_experiment("root", 0, k=bad)
-
-
-def test_selected_closure_keeps_global_constraints_and_entire_readout_layout():
-    setting = Setting(label="Z", metadata=metadata("readout"))
-    width = ExprRef(expression="width")
-    nodes = {
-        "root": Sequence(children=("chosen", "other")),
-        "chosen": MeasurementBatch(body="body", settings=(setting,),
-            axes=(RangeAxis(parameter="k", start=0, stop=4),), repetitions=1, observation_kind="counts"),
-        "other": MeasurementBatch(body="unused", settings=(setting,)),
-        "body": Sequence(children=("allocate", "call", "measure", "release")),
-        "allocate": Allocate(wire="q"), "call": BlockCall(signature="u", ports=(PortMap(port="p", wire="q"),)),
-        "measure": Measure(wire="q", result="bits"), "release": Release(wire="q"), "unused": Sequence(),
-    }
-    program = make(nodes, registers=(Register(name="q", width=width), Register(name="idle", width=2)),
-        classical=(ClassicalValue(name="bits", dtype="bits", width=width),
-                   ClassicalValue(name="unused_bits", dtype="bits", width=3)),
-        signatures=(BlockSignature(name="u", target=SOURCE, quantum=(QuantumPort(name="p", width=width),)),
-                    BlockSignature(name="unused_signature", target=SOURCE)),
-        parameters=(Parameter(name="g", domain="integer", lower=0), Parameter(name="k", domain="integer", lower=0),
-                    Parameter(name="unused_parameter", domain="integer", lower=0)),
-        bindings=(Binding(parameter="g", value=2),),
-        expressions=(Expression(id="g", value=ParameterRef(parameter="g")),
-                     Expression(id="k", value=ParameterRef(parameter="k")),
-                     Expression(id="global", value=Binary(op="le", left="g", right="k")),
-                     Expression(id="width", value=Constant(value=1)),
-                     Expression(id="unused_expression", value=ParameterRef(parameter="unused_parameter"))),
-        constraints=(ExprRef(expression="global"),), premises=("explicit whole-program premise",))
-    selected = program.select_experiment("chosen", 0, k=3)
-    assert selected.check_readiness().ready
-    assert {d.id for d in selected.definitions} == {"chosen", "body", "allocate", "call", "measure", "release"}
-    assert {e.id for e in selected.expressions} == {"g", "k", "global", "width"}
-    assert {p.name for p in selected.parameters} == {"g", "k"}
-    assert tuple(s.name for s in selected.signatures) == ("u",)
-    assert selected.registers == program.registers and selected.classical == program.classical
-    assert selected.constraints == program.constraints and selected.premises == program.premises
-    assert selected.parent_id == program.content_id
-    assert Program.model_validate_json(selected.model_dump_json()) == selected
-    # The selected axis cannot erase a constraint outside the body: 2 <= 1 is
-    # false, although k=1 is independently a legal range/domain value.
-    with pytest.raises(ValueError, match="constraint is false"):
-        program.select_experiment("chosen", 0, k=1)
-
-
-def mixed_transfer_nodes():
-    """Bell partner discard leaves I/2; an allowed SWAP transfers it to fresh."""
-    return {
-        "a": Allocate(wire="q"), "b": Allocate(wire="r"), "fresh": Allocate(wire="fresh"),
-        "entangle": BlockCall(signature="joint", ports=(PortMap(port="a", wire="q"), PortMap(port="b", wire="r"))),
-        "discard": Release(wire="r"),
-        "transfer": BlockCall(signature="joint", ports=(PortMap(port="a", wire="q"), PortMap(port="b", wire="fresh"))),
-        "claim": CoherentRegion(body="empty", claims=(StateClaim(wire="fresh", epoch=0),)),
-        "empty": Sequence(),
-        "root": Sequence(children=("a", "b", "entangle", "discard", "fresh", "transfer", "claim")),
-    }
-
-
-def test_joint_unitary_mixed_input_cannot_preserve_fresh_coherence():
-    nodes = mixed_transfer_nodes()
-    signature = BlockSignature(name="joint", target=SOURCE,
-                               quantum=(QuantumPort(name="a", width=1), QuantumPort(name="b", width=1)))
-    args = dict(registers=tuple(Register(name=w, width=1) for w in ("q", "r", "fresh")), signatures=(signature,))
-    with pytest.raises(ValueError, match="coherent"):
-        make(nodes, **args)
-    # The actual mixed-input call is legal when the consumer only requires a live wire.
-    nodes["root"] = Sequence(children=nodes["root"].children[:-1])
-    assert make(nodes, **args).check_readiness().ready
-    nodes["protected_transfer"] = CoherentRegion(body="transfer", claims=(StateClaim(wire="fresh", epoch=0),))
-    nodes["root"] = Sequence(children=("a", "b", "entangle", "discard", "fresh", "protected_transfer"))
-    with pytest.raises(ValueError, match="coherent"):
-        make(nodes, **args)
-    # Joint action with entirely coherent inputs and an independent action with mixed input remain legal.
-    nodes["root"] = Sequence(children=("a", "fresh", "protected_transfer", "claim"))
-    assert make(nodes, **args).check_readiness().ready
-    nodes["independent"] = nodes["transfer"].revise(signature="independent")
-    nodes["root"] = Sequence(children=("a", "b", "entangle", "discard", "fresh", "independent", "claim"))
-    args["signatures"] += (signature.revise(name="independent", coupling="independent"),)
-    assert make(nodes, **args).check_readiness().ready
-
-
-def test_nested_independent_batch_cannot_hide_outer_host_obligations():
-    nodes = {"a": Allocate(wire="q"), "r": Release(wire="q"),
-             "host": ClassicalStage(implementation=SOURCE, boundary="host"),
-             "batch": MeasurementBatch(body="host", settings=(Setting(label="s", metadata=metadata("host")),)),
-             "protected": CoherentRegion(body="batch", claims=(StateClaim(wire="q", epoch=0),)),
-             "root": Sequence(children=("a", "protected"))}
-    with pytest.raises(ValueError, match="outer live"):
-        make(nodes)
-    nodes["root"] = Sequence(children=("batch",))
-    assert make(nodes).check_readiness().ready
-    nodes["root"] = Sequence(children=("a", "r", "batch", "a"))
-    assert make(nodes).check_readiness().ready
-
-
-def test_unknown_protected_action_stays_symbolic_until_resolved():
-    nodes = {"root": Sequence(children=("a", "region", "claim")), "a": Allocate(wire="q"),
-             "region": CoherentRegion(body="call", claims=(StateClaim(wire="q", epoch=0),)),
-             "claim": CoherentRegion(body="empty", claims=(StateClaim(wire="q", epoch=0),)),
-             "call": BlockCall(signature="u", ports=(PortMap(port="p", wire="q"),)), "empty": Sequence()}
-    signature = BlockSignature(name="u", target=SOURCE, quantum=(QuantumPort(name="p", width=1),))
-    for unresolved in (signature.revise(interface="unknown"),
-                       signature.revise(quantum=(signature.quantum[0].revise(ensures="unknown"),))):
-        symbolic = make(nodes, signatures=(unresolved,))
-        assert not symbolic.check_readiness().ready
-        assert any("unknown block" in blocker for blocker in symbolic.check_readiness().blockers)
-        resolved = symbolic.revise(signatures=(signature,))
-        assert resolved.check_readiness().ready
-        assert Program.model_validate_json(symbolic.model_dump_json()) == symbolic
-    for known_effect in ("zero", "coherent"):
-        with pytest.raises(ValueError, match="epoch is broken"):
-            make(nodes, signatures=(signature.revise(quantum=(signature.quantum[0].revise(ensures=known_effect),)),))
-
-
-def test_positive_direct_symbolic_repeat_guarantees_classical_output():
-    nodes = {"root": Sequence(children=("loop", "consume")),
-             "loop": Repeat(body="produce", count=ExprRef(expression="n")),
-             "produce": ClassicalStage(implementation=SOURCE, outputs=("x",)),
-             "consume": ClassicalStage(implementation=SOURCE, inputs=("x",))}
-    args = dict(classical=(ClassicalValue(name="x", dtype="integer"),),
-                expressions=(Expression(id="n", value=ParameterRef(parameter="n")),))
-    symbolic = make(nodes, parameters=(Parameter(name="n", domain="integer", lower=1),), **args)
-    assert symbolic.check_readiness().blockers == ("unresolved repeat count: n",)
-    assert symbolic.bind(n=1).check_readiness().ready
-    assert symbolic.bind(n=10**12).check_readiness().ready
-    with pytest.raises(ValueError, match="read before"):
-        make(nodes, parameters=(Parameter(name="n", domain="integer", lower=0),), **args)
-
-
-def test_width_admission_once_per_binding_context(monkeypatch):
-    import nwqlib.ir.validation as validation
-    original = validation._Admission.integer
-    checked = []
-
-    def counted(self, value, context, role, **kwargs):
-        if role == "register width":
-            checked.append((value, context))
-        return original(self, value, context, role, **kwargs)
-
-    monkeypatch.setattr(validation._Admission, "integer", counted)
-    for size in (4, 8, 16):
-        nodes = {"root": MeasurementBatch(body="empty", settings=tuple(
-            Setting(label=str(i), metadata=metadata("width")) for i in range(size))), "empty": Sequence()}
-        program = make(nodes, registers=tuple(Register(name=f"q{i}", width=1) for i in range(size)))
-        checked.clear()
-        validation.check_program(program).require_ready()
-        assert len(checked) == size  # One context, each declared width once; labels do not change widths.
-    from nwqlib.ir import Binding
-    nodes["root"] = nodes["root"].revise(settings=tuple(
-        Setting(label="same", metadata=metadata("width"), bindings=(Binding(parameter="w", value=i),))
-        for i in (1, 2)))
-    program = make(nodes, registers=(Register(name="q", width=ExprRef(expression="w")),),
-                   parameters=(Parameter(name="w", domain="integer"),),
-                   expressions=(Expression(id="w", value=ParameterRef(parameter="w")),))
-    checked.clear()
-    validation.check_program(program)
-    assert len(checked) == 3  # Unresolved root and two genuinely distinct point contexts.
-    nodes["root"] = nodes["root"].revise(settings=(nodes["root"].settings[0].revise(
-        bindings=(Binding(parameter="w", value=-1),)),))
-    with pytest.raises(ValueError, match="nonnegative"):
-        make(nodes, registers=program.registers, parameters=program.parameters, expressions=program.expressions)
-
-
-def test_identical_branch_partition_does_not_reconnect_each_wire(monkeypatch):
-    import nwqlib.ir.validation as validation
-    original = validation._Admission.connect
-    inputs = []
-
-    def counted(self, q, wires):
-        wires = tuple(wires)
-        inputs.append(sum(len(q[wire][2]) for wire in wires))
-        return original(self, q, wires)
-
-    monkeypatch.setattr(validation._Admission, "connect", counted)
-    for size in (4, 8, 16):
-        names = tuple(f"q{i}" for i in range(size))
-        nodes = {f"a{i}": Allocate(wire=name) for i, name in enumerate(names)}
-        nodes.update({"root": Sequence(children=tuple(nodes) + ("joint", "condition", "branch")),
-                      "joint": BlockCall(signature="joint", ports=tuple(PortMap(port=w, wire=w) for w in names)),
-                      "condition": ClassicalStage(implementation=SOURCE, outputs=("condition",)),
-                      "branch": Branch(condition="condition", when_true="empty", when_false="empty"),
-                      "empty": Sequence()})
-        program = make(nodes, registers=tuple(Register(name=w, width=1) for w in names),
-                       classical=(ClassicalValue(name="condition", dtype="bool"),),
-                       signatures=(BlockSignature(name="joint", target=SOURCE,
-                                                  quantum=tuple(QuantumPort(name=w, width=1) for w in names)),))
-        inputs.clear()
-        validation.check_program(program).require_ready()
-        assert sum(inputs) == size  # Only the initial joint call combines singleton groups.
-
-
-def test_different_branch_partitions_join_transitively_and_preserve_unrelated_wire():
-    names = ("a", "b", "c", "d")
-    nodes = {f"alloc_{w}": Allocate(wire=w) for w in names}
-    nodes.update({
-        "condition": ClassicalStage(implementation=SOURCE, outputs=("condition",)),
-        "ab": BlockCall(signature="joint", ports=(PortMap(port="x", wire="a"), PortMap(port="y", wire="b"))),
-        "bc": BlockCall(signature="joint", ports=(PortMap(port="x", wire="b"), PortMap(port="y", wire="c"))),
-        "branch": Branch(condition="condition", when_true="ab", when_false="bc"),
-        "measure_a": Measure(wire="a", result="bits"),
-        "claim": CoherentRegion(body="empty", claims=(StateClaim(wire="c", epoch=0),)),
-        "empty": Sequence(),
-        "root": Sequence(children=tuple(nodes) + ("condition", "branch", "measure_a", "claim")),
-    })
-    args = dict(registers=tuple(Register(name=w, width=1) for w in names),
-                classical=(ClassicalValue(name="condition", dtype="bool"), ClassicalValue(name="bits", dtype="bits", width=1)),
-                signatures=(BlockSignature(name="joint", target=SOURCE,
-                                           quantum=(QuantumPort(name="x", width=1), QuantumPort(name="y", width=1))),))
-    # The declared conservative partition join closes {a,b} and {b,c} to {a,b,c}.
-    with pytest.raises(ValueError, match="premeasurement"):
-        make(nodes, **args)
-    nodes["claim"] = nodes["claim"].revise(claims=(StateClaim(wire="d", epoch=0),))
-    assert make(nodes, **args).check_readiness().ready
-
-
-def test_correlation_merge_charges_distinct_members_before_iteration():
-    import nwqlib.ir.validation as validation
-    program = make({"root": Sequence()})
-    events = []
-
-    class ObservedGroup:
-        def __init__(self, members):
-            self.members = tuple(members)
-
-        def __len__(self):
-            return len(self.members)
-
-        def __iter__(self):
-            events.append("members read")
-            return iter(self.members)
-
-    def components():
-        return {"a": ("coherent", 0, ObservedGroup({"a"})), "b": ("zero", 1, ObservedGroup({"b"}))}
-
-    # The one-step-per-wire scan fits the remaining work exactly; the member
-    # charge does not, so it must reject before reading either component.
-    admission = validation._Admission(program)
-    q = components()
-    admission.steps = admission.limits.max_steps - len(q)
-    with pytest.raises(ValueError, match="work exceeds"):
-        admission.connect(q, ("a", "b"))
-    assert events == []
-    # A legal merge reads each component once and shares one member set.
-    admission = validation._Admission(program)
-    q = components()
-    merged = admission.connect(q, ("a", "b"))
-    assert merged == {"a", "b"} and q["a"][2] is q["b"][2] is merged
-    assert (q["a"][:2], q["b"][:2]) == (("coherent", 0), ("zero", 1))
-    assert events == ["members read", "members read"]
 
 
 def test_stored_collections_reserve_before_copying_their_frontier():

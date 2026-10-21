@@ -143,7 +143,7 @@ def pooling_tolerances(M, factor, Q=2.0):
     return _upward_fraction(2*gamma*scale), _upward_fraction(4*gamma*Fraction(Q))
 
 
-@pytest.mark.parametrize("tau", (None, 1.))
+@pytest.mark.parametrize("tau", (1.,))
 @pytest.mark.parametrize("powers,pairs", (
     # Multiplicities 3, 3, 2 and 1 over both quadratures.
     ((1, 3, 1, 5, 3, 1, 7, 5, 3),

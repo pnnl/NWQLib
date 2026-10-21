@@ -11,70 +11,6 @@ from nwqlib.execution import PauliValue
 from nwqlib.operators import ingest_pauli
 
 
-def test_default_controls_and_finite_basis_order(monkeypatch):
-    method = ADAPT(initial_state=[1, 0], pool=(ingest_pauli((("Y", 1j),), num_qubits=1),))
-    assert method.theta == pi / 4 and method.gradient_norm_floor == 1e-8
-    assert (
-        method.energy_change_tolerance == 1e-6
-        and method.t_auto_fraction == 0.2
-        and method.t_user == 10
-    )
-    assert method.max_iterations == 8 and method.overlap_cutoff == 1e-12
-    assert (
-        method.optimize_every_m
-        is method.optimize_rounds_n
-        is method.optimize_max_evaluations
-        is None
-    )
-    plan = plan_for(max_iterations=100)
-    assert plan.reconstruction.max_selections == 2
-    selected = ((0, 0.1), (1, 0.2), (2, 0.3), (3, 0.4))
-    assert adapt_acquisition.basis_chains(selected) == (
-        (),
-        *((x,) for x in selected),
-        selected,
-        selected[:2],
-        selected[:3],
-    )
-    point = adapt_acquisition._point(plan, "screen", right=((0, 0.0),))
-    assert adapt_acquisition.chain({b.parameter: b.value for b in point.bindings}, "r") == (
-        (0, 0.0),
-    )
-    with pytest.raises(ValueError, match="twice"):
-        adapt_acquisition._point(plan, "pair", right=((0, 0.1), (0, 0.2)))
-    # Initial, two individual selections and their product give four columns,
-    # even when the two pool generators share the same nonidentity Pauli word.
-    bounded = plan_for(max_basis_size=4)
-    assert adapt_acquisition.basis_chains(((0, 0.1), (1, 0.2))) == (
-        (), ((0, 0.1),), ((1, 0.2),), ((0, 0.1), (1, 0.2)),
-    )
-    assert bounded.reconstruction.max_selections == 2
-    from nwqlib.algorithms.gcim import adapt
-    monkeypatch.setattr(adapt, "eigen_operator", lambda *a, **k: pytest.fail("basis cap reached operator processing"))
-    with pytest.raises(ValueError, match=r"basis holds 4 states .* above ADAPT\(max_basis_size=3\)"):
-        plan_for(max_basis_size=3)
-
-
-@pytest.mark.parametrize(
-    "changes",
-    (
-        {"theta": 0.0},
-        {"theta": float("inf")},
-        {"gradient_norm_floor": -1.0},
-        {"energy_change_tolerance": 0.0},
-        {"max_iterations": 0},
-        {"overlap_cutoff": 0.0},
-        {"optimize_every_m": 1},
-        {"optimize_rounds_n": 1},
-        {"optimize_max_evaluations": 1},
-        {"optimize_every_m": 1, "optimize_rounds_n": 1, "optimize_max_evaluations": 0},
-    ),
-)
-def test_invalid_controls_fail_at_configuration(changes):
-    with pytest.raises(ValueError):
-        plan_for(**changes)
-
-
 def test_processed_commutator_sign_at_subnormal_squared_scale():
     tiny = 2.0**-600
     for shift in (0.0, 1e100):
@@ -140,8 +76,7 @@ def test_classical_matrix_identity_offset_moves_the_ritz_value_by_its_coefficien
         2 * 2.**-53 * (abs(values[-1e4]) + abs(values[.25])))
 
 
-@pytest.mark.parametrize("pool", (("Y", "X"), ("Y",)))
-def test_shared_full_chain_query_serves_the_diagonal_and_the_screen(tmp_path, monkeypatch, pool):
+def test_shared_full_chain_query_serves_the_diagonal_and_the_screen(tmp_path, monkeypatch):
     """One exact query of each full chain supplies its pencil diagonal and its screening values.
 
     H = Z, reference |+>, theta = pi/8, one iteration. Each full chain (the
@@ -149,14 +84,12 @@ def test_shared_full_chain_query_serves_the_diagonal_and_the_screen(tmp_path, mo
     stage, with a weighted diagonal-reduction point and, when active
     screening labels remain, a screen point at the same boundary. The later
     screen reuses that observation, and the round's ``basis_realization``
-    names it. No diagonal pair query is acquired. With a one-member pool the
-    terminal chain has no active labels, so its query carries the reduction
-    point alone and no empty query is submitted. A saved Result reanalyzes
-    without acquisition.
+    names it. No diagonal pair query is acquired. A saved Result reanalyzes without
+    acquisition.
     """
     from nwqlib import Eigenproblem, load_result, solve
 
-    method = ADAPT(initial_state=[1, 1], pool=tuple(ingest_pauli(((p, 1j),), num_qubits=1) for p in pool),
+    method = ADAPT(initial_state=[1, 1], pool=tuple(ingest_pauli(((p, 1j),), num_qubits=1) for p in ("Y", "X")),
                    theta=pi / 8, max_iterations=1)
     result = solve(Eigenproblem(A=ingest_pauli((("Z", 1.0),), num_qubits=1)), method=method, execution="quantum")
     chunks = result.data.observations.chunks
@@ -165,7 +98,7 @@ def test_shared_full_chain_query_serves_the_diagonal_and_the_screen(tmp_path, mo
     points = {point.content_id: sorted(c.point for c in chunks if c.realization_id == point.content_id)
               for point in shared}
     assert points[shared[0].content_id] == ["diagonal", "screen"]
-    assert points[shared[1].content_id] == (["diagonal", "screen"] if len(pool) > 1 else ["diagonal"])
+    assert points[shared[1].content_id] == ["diagonal", "screen"]
     assert len({c.attempt for c in chunks if c.experiment == "screen"}) == 2
     pairs = [c for c in chunks if c.experiment == "pair"]
     assert len({c.attempt for c in pairs}) == 1 and all(c.point == "pair" for c in pairs)

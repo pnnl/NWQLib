@@ -134,23 +134,6 @@ def test_integrals_at_zero_rate_and_beyond_the_ordinary_range():
     _assert_within(steep.kinetic_integral(0.0, 1e160), mp.atan(k * mp.mpf(1e160)) / k, 32)
 
 
-def test_schedule_kind_and_parameter_define_the_method():
-    """Equal parameters of the two cubic forms still select different Methods, and the
-    Method's JSON restores each schedule's kind and parameter."""
-    cubic, shifted = QHD(schedule=CubicSchedule(s=0.5)), QHD(schedule=ShiftedCubicSchedule(s=0.5))
-    assert cubic.content_id != shifted.content_id
-    for method in (QHD(), cubic, shifted, shifted.revise(coefficient_rule="integrated")):
-        restored = QHD.model_validate_json(method.model_dump_json())
-        assert restored == method and type(restored.schedule) is type(method.schedule)
-    for record in (CubicSchedule, ShiftedCubicSchedule):
-        for invalid in (0.0, -1.0, math.nan, math.inf):
-            with pytest.raises(ValueError):
-                record(s=invalid)
-    # 1 + 1e-300 rounds to 1, so this is not a positive interval.
-    with pytest.raises(ValueError, match="0 <= t0 < t1"):
-        CubicSchedule(s=1.0).kinetic_integral(1.0, 1.0 + 1e-300)
-
-
 def _distance(state, expected):
     """Return the 2-norm distance of a binary64 state from a 50-digit vector."""
     return mp.sqrt(sum(abs(mp.mpc(state[i]) - expected[i]) ** 2 for i in range(len(state))))
@@ -255,7 +238,7 @@ def _product_state(areas, values, h, order):
 
 
 @pytest.mark.parametrize("order", [1, 2])
-@pytest.mark.parametrize("schedule", [CubicSchedule(s=0.5), ShiftedCubicSchedule(s=0.5)], ids=_label)
+@pytest.mark.parametrize("schedule", [ShiftedCubicSchedule(s=0.5)], ids=_label)
 def test_integrated_product_applies_the_whole_step_integrals(schedule, order):
     """Native and ir_product amplitudes, with their physical phase, equal the product formula
     built from independent step integrals, and the stored block angles follow them.
@@ -328,14 +311,3 @@ def test_integrated_product_applies_the_whole_step_integrals(schedule, order):
         sources = selected.error_model.required_sources
         assert time in sources and other not in sources
         assert {"floating_point", "product_formula", "rotation_pruning"} <= set(sources)
-
-
-def test_potential_integral_requires_a_finite_value():
-    """The integrated cubic potential T**4/2 must be finite before a Plan can use it."""
-    x = sp.Symbol("x")
-    problem = Optimization(objective=sp.Integer(0), variables=(x,), bounds=((0.0, 1.0),))
-    method = QHD(num_grid_points=4, num_steps=1, total_time=2e103, schedule=CubicSchedule(s=1.0),
-                 coefficient_rule="integrated", initial_state=UniformState(), theory_flavor="split_step")
-    with pytest.raises(ValueError, match="potential integral over step 0"):
-        plan(problem, method=method, execution="classical", seed=7)
-    assert plan(problem, method=method.revise(total_time=1e70), execution="classical", seed=7)

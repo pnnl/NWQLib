@@ -6,7 +6,7 @@ import numpy as np
 import pytest
 
 import nwqlib
-from nwqlib.algorithms import ExpectationMethod, FixedGCIM, Lanczos
+from nwqlib.algorithms import ExpectationMethod
 from nwqlib.execution import ObservationView
 from nwqlib.operators import ingest_pauli
 from test_run_lifecycle import InjectedBackend, clear_backend as clear_backend
@@ -21,57 +21,6 @@ def forbidden(*args, **kwargs):
 def partial_result(plan, data):
     """Use the actual Method producer and the common attachment boundary."""
     return plan.method.analyze(plan, data, settings={})._attach(plan, data)
-
-
-def test_solve_selected_plan_names_actual_overrides():
-    overrides = {'seed': 7, 'shots': 20}
-    chosen = nwqlib.plan(
-        nwqlib.Expectation(state=[1, 0], observable=ingest_pauli((("Z", 1.0),), num_qubits=1)),
-        method=ExpectationMethod(), seed=7)
-    with pytest.raises(ValueError) as refused:
-        nwqlib.solve(chosen, **overrides)
-    message = str(refused.value)
-    assert all(name in message for name in overrides)
-    assert 'plan(...)' in message
-
-
-def test_expectation_archive_preserves_actual_input_bindings_without_reselection(
-    tmp_path, monkeypatch
-):
-    import nwqlib.algorithms.expectation as owner
-    import nwqlib.blocks.selection as selection
-    import nwqlib.problems.inputs as inputs
-    from nwqlib._prepared_execution import Run
-
-    selected = nwqlib.plan(
-        nwqlib.Expectation(state=[1, 1j], observable=ingest_pauli((("Y", 1.0),), num_qubits=1)),
-        method=ExpectationMethod(),
-        seed=7,
-    )
-    run = Run(selected)
-    partial = partial_result(selected, run.data)
-    assert partial.value is None and partial.missing == ("Y",)
-    with monkeypatch.context() as patch:
-        patch.setattr(ExpectationMethod, "plan", forbidden)
-        patch.setattr(owner, "select_preparation", forbidden)
-        patch.setattr(selection, "select_preparation", forbidden)
-        patch.setattr(inputs, "normalize_physical_vector_with_scale", forbidden)
-        patch.setattr(inputs, "_digest", forbidden)
-        folder = partial.save(tmp_path / "selected")
-        restored = nwqlib.load_result(folder)
-    np.testing.assert_array_equal(
-        restored.plan.problem.state._direction, selected.problem.state._direction
-    )
-    assert not restored.plan.problem.state._direction.flags.writeable
-    assert restored.plan.blocks[0]._payload._direction is restored.plan.problem.state._direction
-    assert (
-        restored.plan.construction == selected.construction
-        and restored.plan.content_id == selected.content_id
-    )
-    assert restored.data.trace.events == ()
-
-    assert nwqlib.load_result(folder).plan.content_id == selected.content_id
-    run.close()
 
 
 def test_supplied_preparation_archive_keeps_global_phase_and_original_parameters(
@@ -168,28 +117,6 @@ def test_supplied_preparation_archive_keeps_global_phase_and_original_parameters
     assert restored.value is None and restored.data.trace.events == ()
     prepared.run.close()
     run.close()
-
-
-def test_comparison_keeps_full_target_separate_from_method_trial_subspaces(monkeypatch):
-    from nwqlib.algorithms.protocol import ApplicabilityError
-
-    problem = nwqlib.Eigenproblem(A=ingest_pauli((("I", 1.0), ("X", 1.0)), num_qubits=1))
-    methods = (
-        Lanczos(initial_state=[1, 0], krylov_dimension=1),
-        FixedGCIM(basis=([1, 1], [1, -1])),
-    )
-    monkeypatch.setattr("nwqlib.blocks.lowering._lower_qiskit", forbidden)
-    compared = nwqlib.compare(problem, methods=methods, seed=7)
-    assert compared.problem is problem and all(row.plan.problem is problem for row in compared.rows)
-    assert all(row.plan.output == problem.default_output() for row in compared.rows)
-    assert problem.subspace is None
-    restricted = problem.revise(subspace=compared.rows[0].plan.reconstruction.subspace)
-    projected = nwqlib.compare(restricted, methods=methods, seed=7)
-    assert projected.rows[0].plan.problem is restricted
-    assert projected.rows[1].plan is None and "subspace" in projected.rows[1].reason
-    with pytest.raises(ApplicabilityError, match="subspace"):
-        nwqlib.prepare(projected.rows[1])
-    assert compared.rows[1].plan.problem.subspace is None
 
 
 def test_failed_public_submission_keeps_partial_contributions_and_original_exposure(

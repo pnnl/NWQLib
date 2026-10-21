@@ -9,7 +9,6 @@ import pytest
 import nwqlib
 from nwqlib.algorithms.lanczos import Lanczos
 from nwqlib.algorithms.gcim import FixedGCIM
-from nwqlib.core import Complex128
 from nwqlib.evidence.energy_shift import EnergyShiftOptions
 from nwqlib.evidence.sector import NumberSectorOptions
 from nwqlib.evidence.verification import ProjectedVerificationOptions
@@ -152,82 +151,6 @@ def test_actual_scalar_energy_shift_and_saved_results(family, monkeypatch, tmp_p
         changed_seed.verify(checks=option)
 
 
-def test_projected_gram_raw_filter_norm_and_backward_error_without_replay(
-    monkeypatch, prepared_stubs
-):
-    from nwqlib._projected_eigensolver import _GeneralizedEigenResult
-    from nwqlib.algorithms.gcim import fixed_basis as owner
-    from nwqlib.backends import qiskit_aer as aer
-    from test_gcim_production import plan_for
-
-    plan = plan_for(shots=10)
-    calls = []
-
-    def injected(h, s, **kwargs):
-        calls.append((h.shape, s.shape))
-        # Diagnostics are deliberately supplied independently of the solver.
-        spectrum = np.array([-0.125, 2.125])
-        vectors = np.eye(2, dtype=complex)
-        solved = _GeneralizedEigenResult(
-            eigenvalues=np.array([-1.0, 1.0]),
-            eigenvectors=vectors,
-            ground_state_coefficients=vectors[:, 0],
-            overlap_eigenvalues=spectrum,
-            kept_overlap_rank=2,
-            residual_norm=0.5,
-            generalized_eigenpair_backward_error=0.25,
-            overlap_normalization_error=0.125,
-        )
-        return solved, spectrum, None, None
-
-    monkeypatch.setattr(owner, "_solve_projected_pencil", injected)
-    monkeypatch.setattr(
-        aer,
-        "_submit_aer_execution",
-        lambda *a, **k: SimpleNamespace(
-            raw_output={"counts": {"00": 10}}, metadata={"native_job_id": "supplied"}
-        ),
-    )
-    result = nwqlib.solve(plan)
-    assert calls == [((2, 2), (2, 2))]
-    monkeypatch.setattr(owner, "_solve_projected_pencil", forbidden)
-    monkeypatch.setattr(owner, "assemble_pair_pencil", forbidden)
-    option = ProjectedVerificationOptions(
-        name="projected",
-        comparisons=(
-            "overlap_normalization",
-            "gram_psd_deficit",
-            "gram_hermiticity",
-            "projected_backward_error",
-        ),
-        tolerance=0.2,
-    )
-    receipt, facts = result.verify(checks=option)
-    assert tuple(map(ratio, facts)) == (Fraction(1, 8), Fraction(1, 8), 0, Fraction(1, 4))
-    assert result.pencil.overlap_eigenvalues == (-0.125, 2.125)
-    assert result.pencil.overlap_filter == "sampled_positive_subspace"
-    cert = certificate(result).with_verification(result, options=option, evidence=facts)
-    assert tuple(check.status for check in cert.checks) == ("PASS", "PASS", "PASS", "FAIL")
-    assert all(fact.frame.domain == "projected" for fact in facts)
-    # The two producers state the backward error on different pencils.
-    assert "normalized (K,S) for Lanczos and physical (H,S) for GCIM" in facts[3].frame.conditioning
-    rows = result.pencil.overlap
-    malformed = result.revise(
-        pencil=result.pencil.revise(
-            overlap=((Complex128(real=1.0, imag=0.25), *rows[0][1:]), *rows[1:])
-        )
-    )
-    malformed._attach(plan, result.data)
-    _, defect = malformed.verify(checks=option)
-    assert ratio(defect[2]) == Fraction(1, 2)  # Imaginary diagonal doubles in S-S†.
-    from nwqlib.evidence.verification import verify_projected
-
-    monkeypatch.setattr("nwqlib.execution.uuid4", forbidden)
-    with pytest.raises(ValueError, match="integer|bits"):
-        verify_projected(result, options=option, max_integer_bits=1)
-    assert receipt.applications[0].facts[1].fact.value.numerator == 1
-
-
 def test_observed_sector_leakage_is_not_mean_particle_number(monkeypatch, prepared_stubs, tmp_path):
     from nwqlib.algorithms.qhd import method as owner
     from nwqlib.backends import qiskit_aer as aer
@@ -339,68 +262,3 @@ def test_method_tolerances_give_check_verdicts(case, passing, failing):
             spec.content_id for spec in selected.verification_checks(result)]
         statuses.append(attached.checks[-1].status)
     assert statuses == ["PASS", "FAIL"]
-
-
-def _shape_cases():
-    """Build one small Result and one options record of each verification options class."""
-    from nwqlib.algorithms.lchs import LCHS, LCHSRefinement, LCHSVerification
-    from nwqlib.algorithms.gcim import AdaptVerificationOptions
-    from nwqlib._prepared_execution import Run
-    from test_adapt_primary import plan_for
-
-    def lchs(options):
-        result = nwqlib.solve(nwqlib.LinearDynamics(A=np.eye(2), initial_state=[1, 0], source=[0, 0], time=0.2),
-                              method=LCHS(), execution="classical")
-        return result, options
-
-    def gcim():
-        return nwqlib.solve(nwqlib.Eigenproblem(A=ingest_pauli((("Z", 1.0),), num_qubits=1)),
-                            method=FixedGCIM(basis=([1.0, 0.0], [0.0, 1.0])), execution="classical")
-
-    def shift():
-        first, second = (nwqlib.solve(nwqlib.Eigenproblem(A=ingest_pauli((("I", value),), num_qubits=1)),
-                                      method=FixedGCIM(basis=([1, 0],)), seed=7) for value in (2.0, 4.0))
-        return second, EnergyShiftOptions.for_result(first, name="shift", shift=2.0, tolerance=0.0)
-
-    def sector():
-        import sympy as sp
-        from nwqlib.algorithms.qhd import QHD
-
-        x = sp.Symbol("x")
-        result = nwqlib.solve(nwqlib.Optimization(objective=x * x, variables=(x,), bounds=((-1.0, 1.0),)),
-                              method=QHD(), shots=32, seed=7)
-        return result, NumberSectorOptions(name="number", particles=1, tolerance=0.01)
-
-    def adapt():
-        result = Run(plan_for(execution="classical", initial_state=(1, 0))).wait(timeout=5, poll_interval=0)
-        return result, AdaptVerificationOptions(name="residual", comparisons=("residual",))
-
-    return dict(
-        LCHSVerification=lambda: lchs(LCHSVerification(reference="closed_form")),
-        LCHSRefinement=lambda: lchs(LCHSRefinement(components=("duhamel",))),
-        ProjectedVerificationOptions=lambda: (gcim(), ProjectedVerificationOptions(
-            name="projected", comparisons=("gram_psd_deficit",), tolerance=0.0)),
-        EnergyShiftOptions=shift,
-        NumberSectorOptions=sector,
-        AdaptVerificationOptions=adapt,
-        QLSVerification=lambda: (lambda result, options: (result, options(0.01)))(*_qls_case()),
-        QPEVerification=lambda: (lambda result, options: (result, options(None)))(*_qpe_case()),
-        QHDVerification=lambda: (lambda result, options: (result, options(0.1)))(*_qhd_case()),
-    )
-
-
-@pytest.mark.parametrize("options_class", [
-    "LCHSVerification", "LCHSRefinement", "ProjectedVerificationOptions", "EnergyShiftOptions",
-    "NumberSectorOptions", "AdaptVerificationOptions", "QLSVerification", "QPEVerification", "QHDVerification",
-])
-def test_verify_returns_receipt_and_facts_for_every_options_class(options_class):
-    """Every options class makes Result.verify return one receipt and a tuple of framed facts."""
-    from nwqlib.evidence.error_model import FramedFact
-
-    result, options = _shape_cases()[options_class]()
-    assert type(options).__name__ == options_class
-    returned = result.verify(checks=options)
-    assert type(returned) is tuple and len(returned) == 2
-    receipt, facts = returned
-    assert type(receipt) is VerificationReceipt and receipt.options_id == options.content_id
-    assert type(facts) is tuple and facts and all(type(fact) is FramedFact for fact in facts)

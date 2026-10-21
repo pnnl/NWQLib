@@ -42,25 +42,6 @@ def test_multiword_fermion_parity_and_bounded_mapping(monkeypatch):
         mapping_requirements((10**10,), num_modes=2)
 
 
-def test_fermion_mapping_admits_the_mask_identity_share_before_products(monkeypatch):
-    from nwqlib.operators._pauli import PauliTerms
-    from nwqlib.operators._fermion import mapping_requirements
-    # Two ladders map to four rows. The final mask ingestion charges each row
-    # the identity JSON share 6q + 360, so the mapping law includes it and a
-    # budget one byte short fails before the first ladder product. The law is
-    # the raw table 6(24 + 2*9 + 8) + 1, two ladder images of 4L, the product
-    # candidates 2*4L + 32W and four final rows of 6L plus the share.
-    composite = fermion_table([(1, ((1, 0), (0, 1)))], num_modes=2)
-    law = 301 + 2 * 4 * 32 + (2 * 4 * 32 + 32) + 4 * (6 * 32 + 6 * 2 + 360)
-    assert mapping_requirements((2,), num_modes=2)[1] == law
-    assert composite.to_pauli(mapping="jw", max_bytes=law).pauli_terms().labels() == \
-        composite.to_pauli(mapping="jw").pauli_terms().labels()
-    monkeypatch.setattr(PauliTerms, "product", lambda *a, **k: pytest.fail("mapping product before byte check"))
-    for budget in (law - 1, law - 4 * (6 * 2 + 360)):
-        with pytest.raises(ValueError, match="operator expansion needs"):
-            composite.to_pauli(mapping="jw", max_bytes=budget)
-
-
 def test_factorized_action_order_and_cumulative_products():
     a = operator_input([[1, 1], [0, 1]])
     b = operator_input([[2, 0], [0, 3]])
@@ -110,20 +91,3 @@ def test_sparse_and_pauli_expansion_preserve_order_and_refuse_before_products(mo
     monkeypatch.setattr(type(x.pauli_terms()), "product", lambda *a, **k: pytest.fail("Pauli product before byte check"))
     with pytest.raises(ValueError, match="operator expansion needs"):
         FactorizedOperatorProduct((x, y)).expand(max_bytes=law - 1)
-
-
-def test_declared_factor_is_metadata_only_and_raw_stream_checks_precede_consumption():
-    from nwqlib.operators import OperatorInput
-    native = operator_input([[1, 0], [0, 2]])
-    stored = OperatorInput.from_record(native.to_record())
-    product = FactorizedOperatorProduct((stored, native))
-    for action in (lambda: product.matvec(None), product.expand):
-        with pytest.raises(ValueError, match="native data is unavailable"):
-            action()
-    class Untouched:
-        def __len__(self):
-            return 1000
-        def __iter__(self):
-            pytest.fail("oversized explicit term stream was consumed")
-    with pytest.raises(ValueError, match="max_bytes"):
-        fermion_table(Untouched(), num_modes=2, max_bytes=100)

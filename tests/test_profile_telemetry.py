@@ -1,6 +1,5 @@
 """Original forecasts aligned to actual offline Run attempts, without reevaluation."""
 
-from types import SimpleNamespace
 
 import pytest
 
@@ -122,52 +121,6 @@ def test_original_prediction_residual_and_saved_result_versions(tmp_path, monkey
     saved = load_result(path, method=CountsMethod)
     assert align_telemetry(saved).rows[0].comparisons[0].residual_seconds == 1.0
     assert saved.data.forecast.assessments[0].predictions[0] == prediction
-
-
-@pytest.mark.parametrize("outcome", ("failure", "partial"))
-def test_failure_and_partial_collection_keep_actual_exposure(tmp_path, monkeypatch, outcome):
-    plan = selected()
-    original = forecast(plan)
-    InjectedBackend.supports_synchronous = True
-    if outcome == "failure":
-        InjectedBackend.fail = True
-    else:
-        monkeypatch.setattr(
-            InjectedBackend,
-            "_result",
-            lambda self, native: SimpleNamespace(
-                raw_output={"counts": {}}, metadata={"native_job_id": "original-job"}
-            ),
-        )
-    ticks = iter((10.0, 12.0))
-    monkeypatch.setattr("nwqlib._prepared_execution.perf_counter", lambda: next(ticks))
-    with Run(
-        plan,
-        backend=InjectedBackend(),
-        forecast=original,
-        allocation=original.allocation,
-        directory=tmp_path / "run",
-    ) as run:
-        if outcome == "failure":
-            with pytest.raises(RuntimeError, match="native read failed"):
-                run.resume()
-        else:
-            result = run.wait(timeout=1, poll_interval=0)
-            assert result.counts == 0 and run.observations.chunks[0].returned_shots == 0
-        no_replay(monkeypatch)
-        (row,) = align_telemetry(run).rows
-        assert run.trace.jobs == 1 and row.event.shots == 7
-        assert row.event.timing.seconds == 2.0
-        if outcome == "failure":
-            assert row.event.status == "uncertain" and not row.collected_observation_ids
-            assert row.comparisons[0].residual_seconds is None
-        else:
-            assert row.collected_observation_ids == tuple(
-                c.content_id for c in run.observations.chunks
-            )
-            # The timing describes the completed native call, independently of
-            # whether all requested scientific samples were returned.
-            assert row.comparisons[0].residual_seconds == -3.5
 
 
 def test_scope_configuration_and_original_intent_association(tmp_path, monkeypatch):

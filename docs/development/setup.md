@@ -35,10 +35,10 @@ These steps give you a development checkout of NWQLib in which the tests, lint a
     python -c "import nwqlib; print(nwqlib.__file__)"
     ```
 
-5. Run the tests. `-n auto` runs them in parallel workers, and `OMP_NUM_THREADS=1` stops each worker from starting its own BLAS thread pool. The full suite also executes the example notebooks.
+5. Run the tests. `-n auto` runs them in parallel workers, `--dist worksteal` lets an idle worker take tests queued on a busy one, and `OMP_NUM_THREADS=1` stops each worker from starting its own BLAS thread pool. The full suite also executes the example notebooks.
 
     ```bash
-    OMP_NUM_THREADS=1 python -m pytest -n auto
+    OMP_NUM_THREADS=1 python -m pytest -n auto --dist worksteal
     python -m pytest tests/test_shared_contracts.py   # one file
     ```
 

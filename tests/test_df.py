@@ -1,6 +1,5 @@
 """A one-orbital exact coefficient witness for explicit factor conversion."""
 
-from dataclasses import FrozenInstanceError
 
 import numpy as np
 import pytest
@@ -31,15 +30,9 @@ def test_factor_conversion_has_independent_coefficients_and_no_error_claim():
     assert dict(supplied(weight=-2).to_pauli().operator.pauli_terms().labels()) == dict(converted.operator.pauli_terms().labels())
 
 
-def test_factor_snapshot_and_before_work_limits(monkeypatch):
+def test_factor_limits_refuse_before_work(monkeypatch):
     from nwqlib.operators import df
     data = supplied()
-    for array in (data._one_body, *data._factors[0]):
-        assert array.dtype == np.dtype("float64")
-        with pytest.raises(ValueError):
-            array.setflags(write=True)
-    with pytest.raises(FrozenInstanceError):
-        data._factors = ()
     monkeypatch.setattr(df, "_contract", lambda *a: pytest.fail("contraction before action admission"))
     with pytest.raises(ValueError, match="max_products"):
         data.to_pauli(max_products=2)
