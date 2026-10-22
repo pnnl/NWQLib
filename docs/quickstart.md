@@ -14,8 +14,8 @@ Add an extra for each further capability you need, for example `python -m pip in
 
 | Extra | Use it for | Packages it adds |
 | --- | --- | --- |
-| `aer` | Running circuits on the local Aer simulator | Qiskit ≥ 2.5.2, Qiskit Aer ≥ 0.17.2 |
-| `qiskit` | Building Qiskit circuits, passing Qiskit objects as input, exporting circuits, and the Qiskit-based classical evaluations that some methods choose | Qiskit ≥ 2.5.2 |
+| `aer` | Running circuits on the local Aer simulator | Qiskit ≥ 2.6.0, Qiskit Aer ≥ 0.18.0 |
+| `qiskit` | Building Qiskit circuits, passing Qiskit objects as input, exporting circuits, and the Qiskit-based classical evaluations that some methods choose | Qiskit ≥ 2.6.0 |
 | `notebook` | Running the [example notebooks](examples.md) | Jupyter, ipykernel, nbclient, Matplotlib |
 | `chemistry` | Building molecular Hamiltonians | Qiskit, PySCF, OpenFermion |
 | `tensor` | Matrix-product-state (MPS) circuit state preparation | Qiskit, plus `scikit_tt` installed as shown below |

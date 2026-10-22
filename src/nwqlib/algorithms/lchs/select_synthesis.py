@@ -213,7 +213,7 @@ def _branch_controlled_product_formula_resource_law(
     native.construct_select builds each physical branch with
     ``_build_product_formula_branch`` and controls it on the c address bits
     with ``qiskit_compat.controlled``, so Qiskit's add_control
-    unrolls the branch and controls each of its gates at once. Qiskit 2.5.2
+    unrolls the branch and controls each of its gates at once. Qiskit 2.6.0
     synthesizes an occurrence of a one-qubit Pauli label as one RZ, RX or RY.
     A longer label becomes an H pair for each X factor, an SX and SXdg pair
     for each Y factor, ``2*(support - 1)`` parity CX and one RZ. Each gate
@@ -266,7 +266,7 @@ def _branch_controlled_product_formula_resource_law(
         "select_control_diagonal_basis_cx_count": phase_cx,
         "select_basis_cx_count": total,
         "select_serial_depth_model": total + basis + rotations,
-        "resource_gate_model_scope": "Elementary branch-controlled Pauli gates with the selected per-branch repetitions. CX uses Qiskit 2.5.2's multi-controlled gate constructions without ancillas. The serial depth model adds one layer per basis-change and rotation gate to that CX count. Neither has a cross-gate cancellation model or a certified uncertainty interval.",
+        "resource_gate_model_scope": "Elementary branch-controlled Pauli gates with the selected per-branch repetitions. CX uses Qiskit 2.6.0's multi-controlled gate constructions without ancillas. The serial depth model adds one layer per basis-change and rotation gate to that CX count. Neither has a cross-gate cancellation model or a certified uncertainty interval.",
     }
 
 

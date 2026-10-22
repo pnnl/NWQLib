@@ -26,18 +26,18 @@ Within the packages checked, ADAPT-GCIM, QCELS, and the augmented-Lagrangian QHD
 
 ### Resource estimates of the construction chosen for your input
 
-`estimate` adds up the resource formulas of the construction that `plan` chose, each block's formula for its gate count, before any circuit is built, and labels each count as exact, an upper bound, an estimate or unavailable. The example notebooks compare this prediction with the compiled circuit, using Qiskit 2.5.2 at optimization level 1 unless the row states otherwise. All rows come from the stored outputs of the example notebooks in this repository.
+`estimate` adds up the resource formulas of the construction that `plan` chose, each block's formula for its gate count, before any circuit is built, and labels each count as exact, an upper bound, an estimate or unavailable. The example notebooks compare this prediction with the compiled circuit, using Qiskit 2.6.0 at optimization level 1 unless the row states otherwise. All rows come from the stored outputs of the example notebooks in this repository.
 
 | Notebook | CX gates, predicted | CX gates, compiled |
 | --- | --- | --- |
-| `qls_linear_system_intro` | 7,846, an estimate | 7,710 |
+| `qls_linear_system_intro` | 7,846, an estimate | 7,704 |
 | `qhd_optimization_intro` | 13,790, an upper bound | 13,790 |
-| `lchs_linear_dynamics_intro` | 79,712, an estimate | 79,680 |
-| `lchs_scientific` | 1,322,108, an upper bound | 622,076 |
-| `qls_scientific` | not predicted, because three blocks have no CX formula | 68,276 |
+| `lchs_linear_dynamics_intro` | 79,712, an estimate | 79,648 |
+| `lchs_scientific` | 1,122,428, an upper bound | 554,288 |
+| `qls_scientific` | not predicted, because three blocks have no CX formula | 67,670 |
 | `qhd_scientific`, its 4-qubit binary circuit at optimization level 0 | 320, an upper bound | 320 |
 | `resource_estimation_at_scale`, QLS on 12 and 16 system qubits at optimization level 0 | 4,062 and 6,746, estimates | 4,062 and 6,746 |
-| `resource_estimation_at_scale`, LCHS on 12 and 16 system qubits at optimization level 0 | 114,738 and 138,906, upper bounds | 114,738 and 138,906 |
+| `resource_estimation_at_scale`, LCHS on 12 and 16 system qubits at optimization level 0 | 50,658 and 61,146, upper bounds | 50,658 and 61,146 |
 | `resource_estimation_at_scale`, QCELS on the Ising chain of 4 and 8 spins, over all shots, at optimization level 0 | 15,040,512 and 41,680,896, exact counts | 15,040,512 and 41,680,896 |
 | `resource_estimation_at_scale`, QCELS on the Heisenberg chain of 4 and 8 spins, over all shots, at optimization level 0 | 38,535,168 and 103,415,808, exact counts | 38,535,168 and 103,415,808 |
 
@@ -86,7 +86,7 @@ The packages below were checked, at the versions and commits listed, in their of
 
 | Package | Version checked |
 | --- | --- |
-| Qiskit, with qiskit-algorithms and quantum_linear_solvers | 2.5.2, 0.4.0, main branch |
+| Qiskit, with qiskit-algorithms and quantum_linear_solvers | 2.6.0, 0.4.0, main branch |
 | IBM Krylov quantum diagonalization tutorial | Qiskit/documentation commit cda70fa |
 | PennyLane | 0.45.1 |
 | Classiq | 1.29.1, notebooks at classiq-library commit 3c609cd |

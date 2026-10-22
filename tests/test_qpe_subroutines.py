@@ -59,7 +59,7 @@ def _controlled(unitary):
 
 
 def test_coherent_qpe_controls_near_identity_powers_exactly() -> None:
-    # Qiskit 2.5.2's UnitaryGate.control kept a synthesis of the first
+    # Qiskit 2.6.0's UnitaryGate.control kept a synthesis of the first
     # controlled power with entry errors of 3.3e-7 for t = 1e-6. Each appended
     # power must equal the controlled matrix of exp(-i 2**q t G) to rounding.
     from scipy.linalg import expm
@@ -78,7 +78,7 @@ def test_coherent_qpe_controls_near_identity_powers_exactly() -> None:
 
 def test_coherent_qpe_accepts_powers_of_an_admitted_near_unitary_input() -> None:
     # The input passes the 1e-8 admission window with defect 8e-9. Repeated
-    # squaring doubles the defect, and with Qiskit 2.5.2 the UnitaryGate
+    # squaring doubles the defect, and with Qiskit 2.6.0 the UnitaryGate
     # constructor rejected the higher powers with
     # ValueError("Input matrix is not unitary.").
     from scipy.linalg import expm

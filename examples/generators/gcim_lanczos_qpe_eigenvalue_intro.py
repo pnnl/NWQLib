@@ -3,7 +3,7 @@
 #
 # Four hydrogen atoms in a row, 2 Å apart, form a strongly correlated molecule, whose ground-state energy is the smallest eigenvalue of an 8-qubit Pauli-sum Hamiltonian. ADAPT-GCIM computes it in a small basis of many-electron states, optimizing no angle, and the notebook compares it with the exact energy.
 #
-# Install with `python -m pip install "nwqlib[aer,notebook,chemistry]"`. To work on NWQLib itself, run `python -m pip install -e ".[aer,notebook,chemistry]"` in a clone of the repository instead. The notebook simulates circuits of at most 8 qubits and runs in about 19 s on an Apple M3 Max with 36 GiB of memory (Python 3.12.14, Qiskit 2.5.2, Aer 0.17.2).
+# Install with `python -m pip install "nwqlib[aer,notebook,chemistry]"`. To work on NWQLib itself, run `python -m pip install -e ".[aer,notebook,chemistry]"` in a clone of the repository instead. The notebook simulates circuits of at most 8 qubits and runs in about 7 s on an Apple M3 Max with 36 GiB of memory (Python 3.12.14, Qiskit 2.6.0, Aer 0.18.0).
 #
 # > **How to read this notebook.** The next cells compute the energy and show it with its cost.
 # >

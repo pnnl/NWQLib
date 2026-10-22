@@ -472,7 +472,7 @@ class AerBackend(Record):
     def native_job_id_length(self):
         """Encoded length of Aer's job identifier, 36 characters.
 
-        qiskit-aer 0.17.2 generates it with ``str(uuid.uuid4())`` in its own
+        qiskit-aer 0.18.0 generates it with ``str(uuid.uuid4())`` in its own
         ``AerBackend.run``.
         """
         return 36

@@ -123,7 +123,7 @@ def test_dense_select_branches_match_exact_controlled_exponentials(num_qubits, t
     from nwqlib import plan
     from nwqlib.algorithms import LCHS
     from nwqlib.blocks.lowering import _local_method_context
-    # Qiskit 2.5.2 synthesized a near-identity branch with entry errors of
+    # Qiskit 2.6.0 synthesized a near-identity branch with entry errors of
     # about 1e-6 on two system qubits at time 1e-6 and 2e-10 to 1e-9 on three
     # at time 1e-8. Time 1 gives generic branches. The expected branch is
     # SciPy's expm of the saved Cartesian parts, independent of the branch

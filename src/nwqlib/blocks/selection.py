@@ -39,7 +39,7 @@ def signed_pauli_cx_bound(index_qubits: int, system_qubits: int, *, controlled=F
       decomposition of Bergholm, Vartiainen, Mottonen and Salomaa,
       arXiv:quant-ph/0410066v2, Sec. III, pp. 3-4, drawn in Fig. 6(a), p. 5,
       which implements a UCG with k controls by `2**k` one-qubit gates and
-      `2**k - 1` CNOTs up to one diagonal `(k+1)`-qubit gate. In Qiskit 2.5.2,
+      `2**k - 1` CNOTs up to one diagonal `(k+1)`-qubit gate. In Qiskit 2.6.0,
       the lower bound of the declared dependency, a random UCGate with
       `a = 1, ..., 4` transpiles to exactly `3(L-1)` CX at optimization level 0,
       matching the per-UCG total below.

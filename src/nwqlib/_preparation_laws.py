@@ -45,7 +45,7 @@ def _uniform_superposition_gate_slots(num_qubits: int) -> dict[str, int]:
     non-power-of-two M has k >= 1, so these counts are at most n-1, n-2, 1,
     n-1 and n-2. Their Fig. 6 (pp. 15-16) builds a controlled H from one CX
     and a controlled RY from two, the same CX counts as Qiskit's definitions.
-    In Qiskit 2.5.2, the lower bound of the declared dependency, the sampled
+    In Qiskit 2.6.0, the lower bound of the declared dependency, the sampled
     support sizes 2**(n-1)+1, 3*2**(n-2)+1 and 2**n-1 for n = 2, ..., 6 stay
     within these top-level counts, and support 2**n-1 reaches the 3n-5 CX
     envelope after lowering. A different Qiskit construction needs a new

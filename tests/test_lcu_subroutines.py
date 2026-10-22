@@ -113,7 +113,7 @@ def test_dense_select_admission_counts_branch_synthesis_before_it_starts(monkeyp
 def test_dense_select_is_exact_for_small_angle_branches():
     """Near-identity branches keep their small rotations exactly.
 
-    Qiskit 2.5.2's ``UnitaryGate.control`` kept a one-control synthesis of
+    Qiskit 2.6.0's ``UnitaryGate.control`` kept a one-control synthesis of
     this ``expm(-i 1e-6 G)`` with entry errors of 6.4e-11, and for
     ``RX(1e-7)`` with three controls its ``Isometry`` fallback raised
     ``ValueError("Input matrix is not unitary.")``.

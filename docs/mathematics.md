@@ -231,7 +231,7 @@ N_{\rm CX}=4\sum_{j=1}^Lw_j.
 
 If a discarded set has coefficient absolute sum $m$, its contribution to a power at signed physical time $t$ is at most $|t|m$ in operator norm. The identity coefficient must appear as a phase on the control.
 
-**Proof.** A Pauli rotation needs a parity ladder and its inverse, with $2(w_j-1)$ CX gates. Controlling only its central $R_z$ adds two CX gates, for $2w_j$ per occurrence. The Suzuki step has two occurrences per term. Basis changes are one-qubit gates. This is the controlled Pauli-evolution decomposition used by Qiskit 2.5.2, before routing and optimization. For pruning, $\|H-H'\|\le\sum_{j\in D}|c_j|=m$. Duhamel's identity for Hermitian generators gives $\|e^{-itH}-e^{-itH'}\|\le|t|m$. The controlled version has the same difference norm because its other block is zero. Finally, $\operatorname{ctrl}(e^{-itc_I}U)$ has the phase $e^{-itc_I}$ on its control-one branch. Removing it changes the measured interference signal. This connects the Pauli coefficient budget, the actual controlled construction, and its circuit count.
+**Proof.** A Pauli rotation needs a parity ladder and its inverse, with $2(w_j-1)$ CX gates. Controlling only its central $R_z$ adds two CX gates, for $2w_j$ per occurrence. The Suzuki step has two occurrences per term. Basis changes are one-qubit gates. This is the controlled Pauli-evolution decomposition used by Qiskit 2.6.0, before routing and optimization. For pruning, $\|H-H'\|\le\sum_{j\in D}|c_j|=m$. Duhamel's identity for Hermitian generators gives $\|e^{-itH}-e^{-itH'}\|\le|t|m$. The controlled version has the same difference norm because its other block is zero. Finally, $\operatorname{ctrl}(e^{-itc_I}U)$ has the phase $e^{-itc_I}$ on its control-one branch. Removing it changes the measured interference signal. This connects the Pauli coefficient budget, the actual controlled construction, and its circuit count.
 
 ## 4. Chebyshev Lanczos
 
@@ -1200,7 +1200,7 @@ The terms respectively account for increment error, addition, use of the approxi
 E_{\rm native}=E_{\rm ledger}+2u(Y+|\widehat\Phi|)+20u(B+1).
 ```
 
-This last form uses the specified Qiskit 2.5.2 phase setter and gradual underflow. In binary encoding the scalar running phase total contains only the objective constant. Walsh blocks need a separate formation allowance even when that total is empty.
+This last form uses the specified Qiskit 2.6.0 phase setter and gradual underflow. In binary encoding the scalar running phase total contains only the objective constant. Walsh blocks need a separate formation allowance even when that total is empty.
 
 The objective constant enters the running phase total as a global phase, so a large phase-sensitive bound can include error that leaves the ideal readout probabilities unchanged and does not by itself establish poor readout accuracy.
 

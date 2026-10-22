@@ -225,12 +225,12 @@ def phase_allowance(reconstruction, method, grid, counts):
     ``method._native_phase_allowance`` adds the top-level native assignments,
     one per kept projector block and one for Phi^,
     ``E_top = 2u (Y + |Phi^|) + 20u (B + 1)`` with u = 2**-53, B kept
-    projectors and ``Y = sum_b |zeta^_b| 2**-s_b``, under Qiskit 2.5.2's
+    projectors and ``Y = sum_b |zeta^_b| 2**-s_b``, under Qiskit 2.6.0's
     rounded ``rem_euclid`` phase setter. Both evaluate every operation upward.
 
     The top-level allowance leaves out the internal assignment of each
     phase-diagonal child, which assigns its wrapped angle divided by 2**s,
-    4 <= s <= 7, of magnitude below 1/4. With lambda = 2**-1074 and tau the
+    4 <= s <= 6, of magnitude below 1/4. With lambda = 2**-1074 and tau the
     binary64 2 pi (``math.tau``), as in ``_native_phase_allowance``, an
     increment of magnitude v formed within lambda has
     ``h = tau + v + lambda``, addition error at most ``a = u h + lambda``, a

@@ -381,8 +381,8 @@ def reduce_moments(values, weights, *, counts):
     count does not provide the missing execution error, and the `1e-12`
     probability-window floor does not replace it.
 
-    Sources: Aer 0.17.2, `QubitVector::probability` and `probabilities`
-    (https://github.com/Qiskit/qiskit-aer/blob/0.17.2/src/simulators/statevector/qubitvector.hpp#L2090-L2148),
+    Sources: Aer 0.18.0, `QubitVector::probability` and `probabilities`
+    (https://github.com/Qiskit/qiskit-aer/blob/0.18.0/src/simulators/statevector/qubitvector.hpp#L2089-L2143),
     CPython 3.12.14, `math.fsum`
     (https://github.com/python/cpython/blob/v3.12.14/Modules/mathmodule.c#L1249-L1465),
     and the gamma propagation model in Higham, *Accuracy and Stability of

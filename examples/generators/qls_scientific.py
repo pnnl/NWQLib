@@ -7,7 +7,7 @@
 #
 # NWQLib's quantum linear solver (QLS) solves it in Dalzell's shortcut form (arXiv:2406.12086v2), which returns the unit direction $x/\|x\|$ of the history. The question is whether this direction resolves the small relaxation of the populations better than a history in which nothing evolves.
 #
-# Install with `python -m pip install "nwqlib[aer,notebook]"`. To work on NWQLib itself, run `python -m pip install -e ".[aer,notebook]"` in a clone of the repository instead. The notebook simulates one 10-qubit circuit and runs in about 7 s on an Apple M3 Max with 36 GiB of memory (Python 3.12.14, Qiskit 2.5.2, Aer 0.17.2).
+# Install with `python -m pip install "nwqlib[aer,notebook]"`. To work on NWQLib itself, run `python -m pip install -e ".[aer,notebook]"` in a clone of the repository instead. The notebook simulates one 10-qubit circuit and runs in about 7 s on an Apple M3 Max with 36 GiB of memory (Python 3.12.14, Qiskit 2.6.0, Aer 0.18.0).
 #
 # > **How to read this notebook.** The next cells solve the history and show the answer with its cost.
 # >

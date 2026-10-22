@@ -64,7 +64,7 @@ _CX_SOURCES = {
         version="1",
         domain="controlled second-order Suzuki step",
         reference="4*sum_j w_j CX with 2*w per controlled Pauli leaf and two leaves per term, "
-        "for Qiskit 2.5.2 PauliEvolutionGate.control at optimization level 0 without routing",
+        "for Qiskit 2.6.0 PauliEvolutionGate.control at optimization level 0 without routing",
     ),
     "phase": Source(
         name="qpe.phase_cx",
@@ -76,7 +76,7 @@ _CX_SOURCES = {
 _CX_ASSUMPTIONS = {
     # Stored text, part of Plan content identity.
     "suzuki_step": (
-        "Qiskit 2.5.2 lowering to cx and one-qubit gates at optimization level 0, "
+        "Qiskit 2.6.0 lowering to cx and one-qubit gates at optimization level 0, "
         "before cancellation, rotation merging and routing, and another Qiskit version can differ",
     ),
     "phase": (),
@@ -1279,7 +1279,7 @@ def suzuki_step_cx(terms):
     2*w_j, and the controlled second-order step 4*W_support.
 
     construct_suzuki_step uses qiskit_compat.controlled on a one-term
-    PauliEvolutionGate. Qiskit 2.5.2 controls its central rotation through
+    PauliEvolutionGate. Qiskit 2.6.0 controls its central rotation through
     the projector representation (``PauliEvolutionGate.control`` in
     qiskit/circuit/library/pauli_evolution.py, lowered by
     crates/synthesis/src/pauli_evolution.rs), leaving the parity and basis
@@ -1287,7 +1287,7 @@ def suzuki_step_cx(terms):
     2*(w_j - 1), and the uncontrolled schedule 4*(W_support - L).
 
     These are exact decomposition counts for CX plus arbitrary single-qubit
-    gates, qualified with Qiskit 2.5.2 and optimization level 0 without a
+    gates, qualified with Qiskit 2.6.0 and optimization level 0 without a
     coupling map or backend target. They exclude cancellation, rotation
     merging, alternative synthesis and routing. Angles and power signs do
     not change the emitted count. Identity evolution is a separate ancilla

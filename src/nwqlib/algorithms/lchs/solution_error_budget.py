@@ -31,7 +31,7 @@ synthesis, transpiler approximations, hardware noise or shot noise. The
 controlled dense branches of dense_exact carry only rounding, because
 qiskit_compat.controlled synthesizes each branch unitary with
 subroutines/_dense_synthesis.py before adding the address controls.
-Unrolling the branch through Qiskit 2.5.2's own synthesis instead would
+Unrolling the branch through Qiskit 2.6.0's own synthesis instead would
 snap a two-qubit unitary close to the identity to a local gate, with entry
 errors measured up to 4.2e-5 for a branch on two system qubits.
 Layered MPS preparation has no bound until an explicit circuit validation,

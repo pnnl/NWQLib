@@ -355,9 +355,12 @@ _ONE_CONTROL_UNROLLED_CENSUS = {
 # not through the synthesis that MCX_CX_BY_CONTROLS records, and
 # control each gate once more. Each CX of the definition then costs a
 # Toffoli of 6 CX, each X or H 1 CX and each other one-qubit gate 2 CX.
-# From k = 5 the definition is Qiskit 2.5.2's synth_mcx_noaux_v24, with
-# _mcphase_cx(k + 1) CX and P, H and RZ counts without a published closed
-# form, so the table stores the values. It covers 32 block ancillas. A
+# For k <= 4 the definitions are those of Qiskit's dedicated CX, CCX, C3X
+# and C4X gates. From k = 5 the definition is Qiskit 2.6.0's
+# synth_mcx_noaux_sp22: two H around 2k - 1 CP and 2 (k - 1)**2 CRX gates.
+# Unrolled, these give 4k**2 - 4k + 2 CX, 4 (k - 1)**2 U and
+# 2k**2 + 2k - 1 P, and with the 2k X gates of the open controls the flip
+# costs 36k**2 - 34k + 20 CX. The table stores the values. It covers 32 block ancillas. A
 # Pauli child on q system qubits has at most 2q address qubits, so a
 # generator exceeds the table only from 16 system qubits, where the outer
 # classification gate of _compiled_qsp_part_plans already refuses at the
@@ -367,10 +370,10 @@ _ONE_CONTROL_UNROLLED_CENSUS = {
 # entry. Revisit when that test fails after a Qiskit upgrade or when the
 # projector phase changes its construction.
 LCHS_QSP_PROJECTOR_FLIP_CX = (
-    8, 56, 122, 336, 746, 1220, 1918, 2840,
-    3898, 5092, 6422, 7888, 9490, 11228, 13102, 15112,
-    17258, 19540, 21958, 24512, 27202, 30028, 32990, 36088,
-    39322, 42692, 46198, 49840, 53618, 57532, 61582, 65768,
+    8, 56, 122, 336, 750, 1112, 1546, 2052,
+    2630, 3280, 4002, 4796, 5662, 6600, 7610, 8692,
+    9846, 11072, 12370, 13740, 15182, 16696, 18282, 19940,
+    21670, 23472, 25346, 27292, 29310, 31400, 33562, 35796,
 )
 
 
@@ -678,7 +681,7 @@ def _twice_controlled_dense_counts(num_qubits: int) -> tuple[int, int, int]:
 
 
 def compiled_select_cx_projection(qsp_plan, *, route: str = "gatewise"):
-    """Upper bound on the CX of the compiled QSP SELECT leaf, as Qiskit 2.5.2 builds it.
+    """Upper bound on the CX of the compiled QSP SELECT leaf, as Qiskit 2.6.0 builds it.
 
     The leaf (native.construct_select) is the coefficient phase diagonal on
     the k address qubits, ``2**k - 2`` CX, followed by the QSP evolution of

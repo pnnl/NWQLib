@@ -187,7 +187,7 @@ def qft_gates(bits, *, cutoff=None, swaps):
     circuit applies H to qubit j and then ``CP(pi/2**r)`` between qubits j and
     ``j - r`` for ``r = 1..min(j, m)``, and with ``swaps`` it ends with the
     swaps ``(i, b-1-i)``, i < floor(b/2). This is the gate sequence of
-    Qiskit 2.5.2 ``synth_qft_full(b, do_swaps, approximation_degree)`` with
+    Qiskit 2.6.0 ``synth_qft_full(b, do_swaps, approximation_degree)`` with
     ``approximation_degree = max(0, b - 1 - m)``: its loop keeps
     ``min(j, b - 1 - approximation_degree)`` controlled phases on qubit j.
 

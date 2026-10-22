@@ -1,6 +1,6 @@
 """Exact dense-unitary synthesis and its use for controlled gates.
 
-Qiskit 2.5.2 snaps the Weyl coordinates of a two-qubit unitary to a special
+Qiskit 2.6.0 snaps the Weyl coordinates of a two-qubit unitary to a special
 class within average gate fidelity 1e-9, which gives entry errors of the
 order of t for exp(-i t G) at small t, and its quantum Shannon decomposition
 drops rotations of at most 1e-10 rad. Its ``UnitaryGate.control`` keeps a
@@ -198,7 +198,7 @@ def test_exact_dense_unitaries_make_basis_lowering_exact():
 
 @pytest.mark.parametrize("controls", [2])
 def test_directly_controlled_unitary_is_exact_to_rounding(controls):
-    # Qiskit 2.5.2's UnitaryGate.control keeps its synthesis of the
+    # Qiskit 2.6.0's UnitaryGate.control keeps its synthesis of the
     # controlled matrix within numpy.allclose(atol=1e-7, rtol=1e-5). Here it
     # erred by 2.5e-11 to 9.0e-11 per entry already at t = 1e-10, and by up
     # to 1.4e-7 at t = 1e-6 for other random generators.

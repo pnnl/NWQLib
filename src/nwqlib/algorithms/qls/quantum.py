@@ -283,7 +283,7 @@ def _primitive_cx_law(kind, control_count):
     the leaf's exact inventory or an estimate. An uncontrolled primitive is
     a one-qubit gate or a global phase and uses no CX. A singly controlled
     X is exactly one CX. A multi-controlled X with ``2 <= k <= 64`` controls
-    takes the CX count of Qiskit 2.5.2's synthesis of that gate from
+    takes the CX count of Qiskit 2.6.0's synthesis of that gate from
     ``MCX_CX_BY_CONTROLS``, recorded as an estimate because another
     Qiskit version can synthesize it differently. A larger k, and controlled
     H, Z, RY, RZ and global phase, have no CX law here, so a CX fold that
@@ -802,7 +802,7 @@ def _program(method, problem, output, shots, rec, base, preparation, terms=None)
                         if exact
                         else (
                             # Stored text, part of Plan content identity.
-                            "Qiskit 2.5.2 multi-controlled X synthesis without ancillas, "
+                            "Qiskit 2.6.0 multi-controlled X synthesis without ancillas, "
                             "lowered to cx,u at optimization level 0 before routing; "
                             "another Qiskit version can differ",
                         ),

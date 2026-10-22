@@ -101,21 +101,24 @@ def _plan(problem, method, **options):
 @pytest.mark.parametrize("support", range(1, 10))
 @pytest.mark.parametrize("angle", [0.371, 8 * math.pi])
 def test_projector_rotations_match_the_qiskit_definitions(support, angle):
-    # 8 pi puts the MCPhase slots at 2 pi, pi and pi/2 (Clifford), pi/4 (T), pi/8 and pi/16, while the
-    # multiplexor (4 <= s <= 7) wraps the phase first. s = 8 and 9 include the MCX T gates and the
-    # C3X pi/8 phases (147 arbitrary rotations and 116 T at s = 8 for a generic angle, against 255 rotations
-    # from a 2**s - 1 law).
+    # 8 pi puts the MCPhase slots at 2 pi, pi and pi/2 (Clifford), pi/4 (T), pi/8 and below, while the
+    # multiplexor (4 <= s <= 6) wraps the phase first. From s = 7 the MCPhase is Qiskit's da Silva-Park
+    # construction, whose CRX gates add fixed T gates and rotations at pi/8 and below (135 arbitrary
+    # rotations and 44 T at s = 8 for a generic angle, against 255 rotations from a 2**s - 1 law).
     provider = structured_number_projector_provider(support)["provider"]
     block = QHDBlock(kind="number_projector", time_step=1.0, time=0.5, support=tuple(range(support)),
                      coefficient=angle, angle=angle, provider=provider)
     circuit = QuantumCircuit(support)
     append_number_projector_phase(circuit, range(support), angle)
     population = rotation_population(SimpleNamespace(steps=((block,),), initial_amplitudes=()), "none")
-    assert (population.arbitrary_rotations, population.exact_t) == _census(circuit)
+    magnitudes = Counter()
+    assert (population.arbitrary_rotations, population.exact_t) == _census(circuit, magnitudes)
+    assert population.magnitudes == tuple(sorted(magnitudes.items()))
     if angle == 0.371:
-        assert population.arbitrary_rotations + population.exact_t == (1, 3, 7, 15, 31, 63, 127, 263, 387)[support - 1]
+        assert population.arbitrary_rotations + population.exact_t == (1, 3, 7, 15, 31, 63, 129, 179, 237)[support - 1]
     slots, _, _ = _projector_slots(block, {})
-    assert sum(slots.values()) == (2**support - 1 if provider == "diagonal_synthesis" else max(1, 4 * support - 5))
+    mcphase_slots = max(1, 4 * support - 5) if support <= 5 else 4 * support**2 - 10 * support + 3
+    assert sum(slots.values()) == (2**support - 1 if provider == "diagonal_synthesis" else mcphase_slots)
 
 
 def test_rotation_law_counts_the_emitted_circuit_after_pruning():

@@ -313,7 +313,7 @@ The new directory contains `result.json` plus its supporting payload files. The 
 
 Ordinary native entries use QPY, and entries containing UCGate use the versioned NWQLIB-QPY-UC1 envelope around a QPY storage representation.
 
-In Qiskit 2.5.2, a native `UCGate` can be written by QPY but cannot be loaded: QPY passes the gate's matrix table as separate positional constructor arguments, whereas `UCGate` expects one list. This is a constructor reconstruction defect and not evidence of a reversed qubit order.
+In Qiskit 2.6.0, a native `UCGate` can be written by QPY but cannot be loaded: QPY passes the gate's matrix table as separate positional constructor arguments, whereas `UCGate` expects one list. This is a constructor reconstruction defect and not evidence of a reversed qubit order.
 
 NWQLib stores an encountered UCGate as a compact QPY instruction carrying its matrix table and explicit reconstruction fields. A file prefix `NWQLIB-QPY-UC1` identifies this versioned container. The reader restores the nominal number of qubits, existing simplified table, active controls, `up_to_diagonal`, label and any already materialized definition. Circuit phase and wire associations remain attached to their original circuit. Under this SDK's convention, the target is wire 0 and simplified control indices are one-based within the gate, from 1 through `num_qubits - 1`. Loading does not rerun multiplexor simplification or expand the table to all nominal controls. Saving does not synthesize a UCGate or construct its full matrix.
 

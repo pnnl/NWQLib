@@ -387,7 +387,7 @@ def dense_branch_select_cx(num_system_qubits: int, address_bits: int, route: str
     lowering to CX and U gates:
 
     - CX becomes an X with a + 1 controls, and H becomes an X with a
-      controls between one-qubit gates. Their counts are Qiskit 2.5.2's
+      controls between one-qubit gates. Their counts are Qiskit 2.6.0's
       synthesis without ancillas, the table MCX_CX_BY_CONTROLS.
     - RZ becomes MCRZ: a CRZ of two CX for a = 1, and for a >= 2 two
       dirty-ancilla X gates on ceil(a/2) and two on floor(a/2) controls

@@ -221,7 +221,7 @@ def selected_pf_vector_requirements(circuit, dimension):
     D*2**k_j complex multiply-add units (D*(2*2**k_j - 1) literal scalar
     operations), and forming its matrix costs M_j = 4**k_j + s_j visits,
     with s_j the scalar visits of the gate class's matrix expression in
-    Qiskit 2.5.2 (H, SX, SXdg 0; CX 0; RX 6; RY 5; RZ 5; RXX 9; RYY 8;
+    Qiskit 2.6.0 (H, SX, SXdg 0; CX 0; RX 6; RY 5; RZ 5; RXX 9; RYY 8;
     RZZ 9; RZX 7). One global-phase test per visited definition and, for a
     nonzero phase, D + 3 visits: W_phase = H + (D+3)*H_nz, here
     1 + [phase != 0]*(D+3). The weighted accumulation

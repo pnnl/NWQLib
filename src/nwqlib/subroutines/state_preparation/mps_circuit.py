@@ -153,7 +153,7 @@ def mps_to_circuit(mps: Any, *, num_layers: int = 1) -> QuantumCircuit:
     whenever the average gate fidelity between them is at least
     ``1 - 1e-9``. For states within about 1e-5 of a product state it saved
     one or two CX per unitary and erred by about the distance from the
-    product state (observed for distances 1e-9 to 1e-5 with Qiskit 2.5.2 in
+    product state (observed for distances 1e-9 to 1e-5 with Qiskit 2.6.0 in
     NWQLib's test ``test_mps_two_qubit_gates_are_exact_near_a_product_state``),
     and the exact synthesis keeps those CX.
 

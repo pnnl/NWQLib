@@ -60,7 +60,7 @@ def test_projector_lowering_matches_literal_dense_reference(support_size: int) -
 
 @pytest.mark.parametrize("angle", (0.0, 0.37))
 def test_projector_routing_prices_the_realized_provider(angle) -> None:
-    expected_costs = [0, 2, 6, 14, 30, 62, 126, 220]
+    expected_costs = [0, 2, 6, 14, 30, 62, 122, 170]
     for support_size, expected_cost in enumerate(expected_costs, start=1):
         provider = structured_number_projector_provider(support_size)
         support = tuple(range(support_size))

@@ -137,8 +137,8 @@ python-json-logger==4.2.0
 PyYAML==6.0.3
 pyyaml_env_tag==1.1
 pyzmq==27.2.0
-qiskit==2.5.2
-qiskit-aer==0.17.2
+qiskit==2.6.0
+qiskit-aer==0.18.0
 qiskit-ibm-runtime==0.49.0
 qiskit-ionq==1.1.1
 qiskit-qasm3-import==0.6.0

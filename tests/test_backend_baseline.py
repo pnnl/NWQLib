@@ -50,7 +50,7 @@ def test_aer_small_readouts_have_no_configured_zero_cutoff(monkeypatch):
     circuit = QuantumCircuit(1)
     circuit.ry(angle, 0)
     result = _execute(AER_STATEVECTOR_TARGET, circuit, probability_qubits=(0,))
-    # With Aer 0.17.2 the default zero_threshold of 1e-10 removed a
+    # With Aer 0.18.0 the default zero_threshold of 1e-10 removed a
     # probability of 1e-26 from save_probabilities_dict, so the configured
     # value detects a deleted setting.
     assert configurations[0].get("zero_threshold") == 0.0

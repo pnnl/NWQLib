@@ -3,7 +3,7 @@
 #
 # A function of two variables has two valleys, and gradient descent from a random start often ends in the shallower one. This notebook minimizes it with NWQLib's quantum Hamiltonian descent (QHD), which moves probability across the barrier, and checks the answer against every grid point and against gradient descent.
 #
-# Install with `python -m pip install "nwqlib[aer,notebook]"`. To work on NWQLib itself, run `python -m pip install -e ".[aer,notebook]"` in a clone of the repository instead. The notebook simulates at most 12 qubits and runs in about 30 s on an Apple M3 Max with 36 GiB of memory (Python 3.12.14, Qiskit 2.5.2, Aer 0.17.2).
+# Install with `python -m pip install "nwqlib[aer,notebook]"`. To work on NWQLib itself, run `python -m pip install -e ".[aer,notebook]"` in a clone of the repository instead. The notebook simulates at most 12 qubits and runs in about 26 s on an Apple M3 Max with 36 GiB of memory (Python 3.12.14, Qiskit 2.6.0, Aer 0.18.0).
 #
 # > **How to read this notebook.** The next cells minimize the function and show the answer with its cost.
 # >

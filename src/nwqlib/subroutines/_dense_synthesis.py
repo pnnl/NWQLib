@@ -4,7 +4,7 @@ NWQLib's error models treat a dense unitary that a construction appends, such
 as an LCHS ``dense_exact`` branch or a dense block-encoding dilation, as the
 exact matrix. When a construction adds controls, or a backend lowers the
 circuit to a gate basis, the circuit that replaces the unitary must
-therefore equal it to binary64 rounding. Qiskit 2.5.2 does
+therefore equal it to binary64 rounding. Qiskit 2.6.0 does
 not guarantee this. Its ``TwoQubitBasisDecomposer`` always decomposes the
 target with ``TwoQubitWeylDecomposition`` at fidelity ``1 - 1e-9``, which
 replaces the Weyl coordinates by those of a special class whenever the
@@ -51,7 +51,7 @@ The construction:
   Bullock, quant-ph/0308033v3, Proposition V.2). A generic n-qubit unitary
   takes ``(22/48) 4**n - (3/2) 2**n + 5/3`` CX (Krol and Al-Ars,
   arXiv:2403.13692v2, abstract and Sec. 5.3), the same count as Qiskit
-  2.5.2's ``qs_decomposition``. A
+  2.6.0's ``qs_decomposition``. A
   two-qubit block with a small second Weyl coordinate, near the
   controlled-rotation class or a local gate, can keep three CX, because the
   trace condition of A.2 then fixes the diagonal too poorly to remove the
@@ -145,7 +145,7 @@ _WEYL_MAP = np.array([[1, -1, 1], [-1, 1, 1], [1, 1, -1], [-1, -1, -1]], dtype=f
 def _euler_u(matrices: np.ndarray):
     """Return (theta, phi, lam, phase) with ``matrices[k] = exp(i phase) U(theta, phi, lam)`` for a (K, 2, 2) stack.
 
-    The formulas are those of Qiskit 2.5.2's ``OneQubitEulerDecomposer("U")``
+    The formulas are those of Qiskit 2.6.0's ``OneQubitEulerDecomposer("U")``
     (``params_zyz_inner`` and ``params_u3_inner`` in
     ``crates/synthesis/src/euler_one_qubit_decomposer.rs``). With
     ``det = m00 m11 - m01 m10``, ``theta = 2 atan2(|m10|, |m00|)``,
@@ -824,7 +824,7 @@ def _standard_gate_appender(circuit: Any):
     building the instructions directly for the gates of a 512-square
     controlled matrix. These functions build each instruction with Qiskit's
     ``CircuitInstruction.from_standard`` and ``StandardGate``, as
-    ``QuantumCircuit._append_standard_gate`` does in Qiskit 2.5.2, and add
+    ``QuantumCircuit._append_standard_gate`` does in Qiskit 2.6.0, and add
     it with ``QuantumCircuit._append``, which Qiskit
     documents as a fast path for callers that have checked their
     arguments. ``CircuitInstruction.from_standard`` is undocumented and
@@ -1188,7 +1188,7 @@ def dense_synthesis_gate_census(num_qubits: int) -> dict[str, int]:
             "rz": (3*4**m - 12*2**m)//8, "h": (4**m - 16)//24}
 
 
-# Top-level instructions that Qiskit 2.5.2's add_control emits for one U gate
+# Top-level instructions that Qiskit 2.6.0's add_control emits for one U gate
 # and for one RZ gate with k controls, stored at index k - 1 for k = 1 to 64
 # (qiskit/circuit/_add_control.py, apply_basic_controlled_gate). With one
 # control a U becomes one CU and an RZ one CRZ. With k >= 2 an RZ becomes

@@ -2268,16 +2268,16 @@ PROBES = (
     ),
     # The one-hot rotation law, the budgeted T estimate and the splitting
     # bounds. The first three count the emitted circuit wrongly: the often
-    # used 2**s - 1 projector law, which misses the MCX rotations of Qiskit's
-    # MCPhase from s = 8, the rotations that rotation_threshold removed, and
+    # used 2**s - 1 projector law, which misses the fixed CRX rotations of Qiskit's
+    # MCPhase from s = 7, the rotations that rotation_threshold removed, and
     # K - 1 chain links for a vector with a zero tail. The last two drop the
     # link split, which a constant potential isolates.
     single_replacement_probe(
         name="qhd_rotation_law_projector_power_of_two",
         module="nwqlib.algorithms.qhd.resources",
         qualname="_projector_slots",
-        old="    return slots, fixed_arbitrary, fixed_t\n",
-        new="    return {a / 2 ** (s - 1): 2**s - 1}, 0, 0\n",
+        old="        return slots, 0, 0\n",
+        new="        return {a / 2 ** (s - 1): 2**s - 1}, 0, 0\n",
         pytest_args=("tests/test_qhd_resources.py::test_projector_rotations_match_the_qiskit_definitions",),
     ),
     single_replacement_probe(

@@ -62,4 +62,4 @@ Each refresh reads the known parent job once and, when the parent is no longer p
 
 ## What has been checked
 
-Offline checks used Qiskit 2.5.2 and qiskit-ionq 1.1.1 with injected HTTP responses, including the common finite-Pauli analysis and reopening a saved run. No live QPU, account, queue, result availability or hardware accuracy was qualified. Preparation warns about that limitation once per run. Submission and retrieval go only through the common run interface described above.
+Offline checks used Qiskit 2.6.0 and qiskit-ionq 1.1.1 with injected HTTP responses, including the common finite-Pauli analysis and reopening a saved run. No live QPU, account, queue, result availability or hardware accuracy was qualified. Preparation warns about that limitation once per run. Submission and retrieval go only through the common run interface described above.

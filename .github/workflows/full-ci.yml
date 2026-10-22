@@ -58,6 +58,14 @@ jobs:
         run: |
           python -m pip install --upgrade pip
           python -m pip install --upgrade --upgrade-strategy eager --only-final=:all: -e ".[dev,aer,qasm,docs,notebook,chemistry,ibm,ionq,tensor]" pytest-cov "scikit_tt @ git+https://github.com/PGelss/scikit_tt.git"
+      # On the newest Python, loading the OpenMP library that pyscf bundles fails with
+      # "cannot allocate memory in static TLS block", so the later steps preload it. Remove
+      # this step once pyscf imports on the Python that this job selects without it.
+      - name: Preload the OpenMP library of pyscf
+        if: matrix.environment == 'latest'
+        run: |
+          library=$(python -c 'from importlib.util import find_spec; from pathlib import Path; (path,) = Path(find_spec("pyscf").submodule_search_locations[0], "lib").glob("libgomp*.so*"); print(path)')
+          echo "LD_PRELOAD=$library" >> "$GITHUB_ENV"
       - name: Check dependency consistency
         run: python -m pip check
       - name: Verify latest direct dependencies
@@ -106,13 +114,13 @@ jobs:
       - run: ruff check .
       - run: python -m mkdocs build --strict
       - run: python docs/scripts/policy_lint.py --site-dir site
-      # Only the stable job executes the example notebooks, the slowest tests, and
-      # measures report-only coverage. The latest job runs the rest of the suite against
-      # the newest releases. --dist worksteal lets an idle worker take tests queued on
-      # another, so the long tests do not wait in one worker's queue.
-      - name: Run full test suite with coverage
+      # The notebooks job below executes the example notebooks, the slowest tests, so both
+      # environments run the rest of the suite. Only the stable job measures report-only
+      # coverage. --dist worksteal lets an idle worker take tests queued on another, so the
+      # long tests do not wait in one worker's queue.
+      - name: Run test suite with coverage, without notebook execution
         if: matrix.environment == 'stable'
-        run: OMP_NUM_THREADS=1 python -m pytest -n auto --dist worksteal --durations=25 --cov=nwqlib --cov-report=xml --cov-report=term
+        run: OMP_NUM_THREADS=1 python -m pytest -n auto --dist worksteal --durations=25 --deselect tests/test_examples.py::test_notebook_runs_and_matches_its_references --cov=nwqlib --cov-report=xml --cov-report=term
       - name: Run test suite without notebook execution
         if: matrix.environment == 'latest'
         run: OMP_NUM_THREADS=1 python -m pytest -n auto --dist worksteal --durations=25 --deselect tests/test_examples.py::test_notebook_runs_and_matches_its_references
@@ -137,3 +145,26 @@ jobs:
           path: |
             environment.txt
             coverage.xml
+
+  notebooks:
+    name: Notebooks (stable)
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+      - name: Set up validated Python
+        uses: actions/setup-python@v5
+        with:
+          python-version-file: .python-version
+          cache: pip
+          cache-dependency-path: |
+            pyproject.toml
+            docs/ENVIRONMENT_LOCK.txt
+      # The extras and the scikit_tt revision that the notebooks' install lines name, and
+      # dev for pytest, at the versions of the stable lock.
+      - name: Install validated dependencies
+        run: |
+          python -m pip install --upgrade -c docs/ENVIRONMENT_LOCK.txt pip
+          python -m pip install -c docs/ENVIRONMENT_LOCK.txt --build-constraint docs/ENVIRONMENT_LOCK.txt -e ".[dev,aer,notebook,chemistry,tensor]" "$(sed -n '/^scikit_tt @ /p' docs/ENVIRONMENT_LOCK.txt)"
+      - name: Execute the example notebooks
+        run: OMP_NUM_THREADS=1 python -m pytest -n auto --dist worksteal --durations=10 tests/test_examples.py::test_notebook_runs_and_matches_its_references

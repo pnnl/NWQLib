@@ -78,7 +78,7 @@ def materialize_qasm3_file(construction, path, receipt: QasmWriteReceipt, *,
     rejected before import, because the installed importer can synthesize such
     gates eagerly. It needs the `qasm` extra
     (`pip install "nwqlib[qasm]"`). The checked combination is OpenQASM parser
-    1.0.1, qiskit-qasm3-import 0.6.0 and Qiskit 2.5.2.
+    1.0.1, qiskit-qasm3-import 0.6.0 and Qiskit 2.6.0.
 
     Args:
         construction (SelectedConstruction): The construction the file was

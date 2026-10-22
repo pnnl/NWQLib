@@ -196,6 +196,8 @@ def test_auxiliary_timeout_or_capture_limit_reaps_child(noisy, monkeypatch):
         return child
 
     monkeypatch.setattr(_auxiliary_process.subprocess, "Popen", fixture_process)
+    # The fixture child stands in for NWQEC, so the parent's package check passes without it.
+    monkeypatch.setattr(_auxiliary_process, "find_spec", lambda package: object())
     with pytest.raises(ValueError if noisy else TimeoutError):
         _auxiliary_process.run_auxiliary("nwqec", {}, max_bytes=1024, timeout_seconds=0.5)
     assert len(children) == 1 and children[0].poll() is not None

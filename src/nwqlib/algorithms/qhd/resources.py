@@ -19,7 +19,7 @@ paper-scale circuit:
   box refinement over its circuits and shots (``run_resources``).
 
 The laws count a stated decomposition, not a compiler output. Each emitted
-gate is expanded by its Qiskit 2.5.2 definition, or by NWQLib's own
+gate is expanded by its Qiskit 2.6.0 definition, or by NWQLib's own
 phase-diagonal multiplexor, into Clifford gates and single-axis rotations
 (``Rz``, ``Ry``, the phase gate ``P(phi) = exp(i phi/2) Rz(phi)``), before any
 cross-gate simplification or routing. A single-axis rotation whose binary64
@@ -81,10 +81,11 @@ T_PER_PRECISION_BIT = 3
 
 ROTATION_LAW_SOURCE = Source(
     name="qhd.rotation_law",
-    version="1",
+    version="2",
     domain="one-hot Clifford plus single-axis rotation inventory of the selected construction",
-    reference="Qiskit 2.5.2 definitions of XXPlusYYGate, CRYGate, PhaseGate, CPhaseGate and MCPhaseGate "
-    "(MCRZ with synth_mcx_n_dirty_i15); nwqlib._multiplexors.append_control_diagonal_phases",
+    reference="Qiskit 2.6.0 definitions of XXPlusYYGate, CRYGate, PhaseGate, CPhaseGate and MCPhaseGate "
+    "(MCRZ with synth_mcx_n_dirty_i15 up to four controls, synth_mcp_noaux_sp22 from five); "
+    "nwqlib._multiplexors.append_control_diagonal_phases",
 )
 T_ESTIMATE_SOURCE = Source(
     name="qhd.t_estimate",
@@ -102,7 +103,7 @@ def _mcx_rotations(controls):
     this classification. From k >= 4 controls each of two passes holds one
     seven-T Toffoli, one four-T relative-phase Toffoli and ``k - 3``
     action/reset pairs of four T each, ``2 (7 + 4 + 4 (k - 3)) = 8 k - 2`` T
-    (qiskit/qiskit 2.5.2, ``crates/synthesis/src/multi_controlled/mcx.rs``).
+    (qiskit/qiskit 2.6.0, ``crates/synthesis/src/multi_controlled/mcx.rs``).
     """
     if controls == 1:
         return 0, 0
@@ -131,20 +132,34 @@ def _projector_slots(block, wraps):
 
     The block applies ``exp(-i a (prod n - I/2**s))`` on s qubits as the
     phase ``P(-a)`` on the all-ones state (``pauli_evolution.append_number_projector_phase``).
-    ``slots`` maps the magnitude of each parameter-dependent rotation angle,
-    an exact power-of-two scaling of the stored angle a, to its multiplicity.
+    ``slots`` maps rotation magnitudes to their multiplicities: each
+    parameter-dependent angle, an exact power-of-two scaling of the stored
+    angle a, and from s = 6 the fixed angles of the CRX gates.
 
     - s = 1: ``P(-a)``, one slot at ``|a|``.
     - s = 2: ``CP(-a)`` lowers to two CX and three phases at ``+-a/2``.
-    - s >= 3 with ``MCPhaseGate``: Qiskit emits MCRZ gates with
-      ``k = s - 1, ..., 1`` controls and one final phase. With
-      ``lambda_k = -a/2**(s - 1 - k)``, an MCRZ with ``k >= 2`` controls has
-      four rotations at ``+-lambda_k/4``, magnitude ``|a|/2**(s + 1 - k)``,
-      and two MCX gates on each of ``ceil(k/2)`` and ``floor(k/2)`` controls
-      (``_mcx_rotations``). The CRZ (k = 1) has two rotations and the final
-      phase one, all three at ``|a|/2**(s - 1)``. The parameter slots number
-      ``4 s - 5``.
-    - 4 <= s <= 7 with the phase-diagonal multiplexor: the phase is first
+    - 3 <= s <= 5 with ``MCPhaseGate``: Qiskit's ``synth_mcp_noaux_v24``
+      emits MCRZ gates with ``k = s - 1, ..., 1`` controls and one final
+      phase. With ``lambda_k = -a/2**(s - 1 - k)``, an MCRZ with ``k >= 2``
+      controls has four rotations at ``+-lambda_k/4``, magnitude
+      ``|a|/2**(s + 1 - k)``, and two MCX gates on each of ``ceil(k/2)`` and
+      ``floor(k/2)`` controls (``_mcx_rotations``). The CRZ (k = 1) has two
+      rotations and the final phase one, all three at ``|a|/2**(s - 1)``.
+      The parameter slots number ``4 s - 5``.
+    - s >= 6 with ``MCPhaseGate``: Qiskit's ``synth_mcp_noaux_sp22`` with
+      ``n = s - 1`` controls applies ``2 n - 1`` CP and ``2 (n - 1)**2`` CRX
+      gates. The CP angles are ``+-a/2**k`` for ``k = 1, ..., n - 1``, once
+      per sign, and ``a/2**(n - 1)`` once more. A CP lowers to three phases
+      at half its angle, so the CP slots are six at ``|a|/2**m`` for
+      ``m = 2, ..., s - 2`` and nine at ``|a|/2**(s - 1)``, ``6 s - 9`` in
+      total. The CRX angles are fixed: ``+-pi`` once per sign and
+      ``+-pi/2**j``, ``2 (n - j) - 1`` times per sign, for
+      ``j = 1, ..., n - 2``. A CRX lowers to two RY at half its angle
+      between Clifford gates, so the CRX at ``+-pi/2**j`` add
+      ``4 (2 (n - j) - 1)`` slots at ``pi/2**(j + 1)``, in total
+      ``8 s - 20`` exact T gates (j = 1) and ``4 ((s - 3)**2 - 1)``
+      arbitrary rotations. The CRX at ``+-pi`` add only Clifford gates.
+    - 4 <= s <= 6 with the phase-diagonal multiplexor: the phase is first
       wrapped, ``lambda = angle(exp(-i a))``, and the table
       ``(0, ..., 0, lambda)`` has one nonzero pair difference at every
       recursion level. The level with k controls holds the difference
@@ -154,8 +169,9 @@ def _projector_slots(block, wraps):
       that magnitude. The wrap is computed as the multiplexor computes it. A
       zero wrap leaves an exactly zero table and no rotation.
 
-    ``fixed_arbitrary`` and ``fixed_t`` count the fixed rotations of the
-    multi-controlled X gates, the ``+-pi/8`` phases and the T gates.
+    For 3 <= s <= 5, ``fixed_arbitrary`` and ``fixed_t`` count the fixed
+    rotations of the multi-controlled X gates, the ``+-pi/8`` phases and
+    the T gates. Otherwise both are zero.
 
     Range admission (``validation._normal_range``). The nonzero angle a
     needs ``|a| 2**-s >= 2**-1022``, which also covers the smallest
@@ -182,6 +198,13 @@ def _projector_slots(block, wraps):
         return {a: 1}, 0, 0
     if s == 2:
         return {a / 2: 3}, 0, 0
+    if s >= 6:
+        n = s - 1
+        slots = Counter({a / 2**m: 6 for m in range(2, s - 1)})
+        slots[a / 2 ** (s - 1)] += 9
+        for j in range(1, n - 1):
+            slots[pi / 2 ** (j + 1)] += 4 * (2 * (n - j) - 1)
+        return slots, 0, 0
     slots = Counter({a / 2 ** (s - 1): 3})
     fixed_arbitrary = fixed_t = 0
     for controls in range(2, s):
@@ -684,15 +707,18 @@ def _onehot_wrap_census_bytes(method, reconstruction):
     occurrences, before the census allocates. Each kinetic block adds at most
     one magnitude and two rotations. A diagonal projector on s qubits adds at
     most one magnitude and ``2**s - 1`` rotations. An MCPhase projector adds
-    at most ``max(1, s-1)`` parameter-dependent magnitudes, its fixed
-    arbitrary rotations share the magnitude pi/8, for which one key is
-    reserved globally, and ``16 s**2`` bounds its rotation and T population:
-    ``_projector_slots`` has at most ``4s - 5`` parameter rotations at s >= 3,
-    and for each ``controls`` value the two copies on each half contribute
-    at most ``16 controls`` fixed rotations or T gates, since
+    at most ``max(1, s-1, 2s-5)`` magnitudes, and ``16 s**2`` bounds its
+    rotation and T population. Up to s = 5 it has at most ``max(1, s-1)``
+    parameter-dependent magnitudes, and its fixed arbitrary rotations share
+    the magnitude pi/8, for which one key is reserved globally.
+    ``_projector_slots`` has at most ``4s - 5`` parameter rotations at
+    3 <= s <= 5, and for each ``controls`` value the two copies on each half
+    contribute at most ``16 controls`` fixed rotations or T gates, since
     ``_mcx_rotations(h)`` totals at most ``8h``. Summing controls from 2 to
     s-1 gives less than ``8 s**2`` with the parameter rotations, and
-    ``16 s**2`` also covers s = 1 and 2. Structured preparation adds at most
+    ``16 s**2`` also covers s = 1 and 2. From s = 6 it has ``s - 2``
+    parameter magnitudes and ``s - 3`` fixed ones, and its slots total
+    ``4 s**2 - 10 s + 3``. Structured preparation adds at most
     ``d(K-1)`` magnitudes and ``2d(K-1)`` rotations. The ``"none"``
     preparation adds none. ``L(b) = 32 + 4 ceil(max(1,b)/30)`` is
     ``binary._integer_storage``. The source inventory charges the table
@@ -728,7 +754,7 @@ def _onehot_wrap_census_bytes(method, reconstruction):
                     wrap_entries = max(wrap_entries, entries)
                     count += entries - 1
                 else:
-                    unique += max(1, s - 1)
+                    unique += max(1, s - 1, 2 * s - 5)
                     count += 16 * s * s
     if not wrap_entries:
         return 0, 0
@@ -1298,7 +1324,7 @@ def circuit_resources(plan, *, synthesis_epsilon=None):
       angles, which planning checks to lie in the normal binary64 range. Binary, zero,
       since every angle reaches its gate unchanged or halved exactly.
     - `diagonal_wrap`: the phase wrap `angle(exp(-i a))` of a phase diagonal, the
-      one-hot projectors on 4 to 7 qubits or the binary dense diagonals, whose circuit
+      one-hot projectors on 4 to 6 qubits or the binary dense diagonals, whose circuit
       construction then forms recursive means and Gray-code angles. NumPy documents no
       uniform error constant for its complex exponential and argument, so it is
       unavailable when the circuit has such a block and not applicable otherwise.

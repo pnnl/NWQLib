@@ -1,6 +1,6 @@
 """Compact UCGate storage around QPY's builtin-constructor limitation.
 
-With Qiskit 2.5.2, QPY writes a ``UCGate`` but cannot load it. Its loader passes
+With Qiskit 2.6.0, QPY writes a ``UCGate`` but cannot load it. Its loader passes
 the gate's 2x2 matrices to the constructor as separate positional arguments,
 while ``UCGate`` expects one list. The defect is in constructor reconstruction,
 not in qubit order. This module stores each UCGate as a plain instruction of

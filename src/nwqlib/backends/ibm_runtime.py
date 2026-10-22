@@ -36,7 +36,7 @@ def sampler_decode_bytes(widths, shots):
         shots: Nonnegative common returned-shot population S.
 
     Let Q=sum(ceil(w_r/8)) and B=ceil(w/8). Include the selected packed
-    input arrays, counting shared element buffers once. Qiskit 2.5.2
+    input arrays, counting shared element buffers once. Qiskit 2.6.0
     concatenation holds the inputs, their padded unpacked bases and the
     concatenated bits, using S*(9*Q+w) bytes. Repacking holds the inputs,
     concatenated bits, padding when needed and the packed output, using
@@ -330,7 +330,7 @@ class IBMRuntimeBackend(Record):
         run.check_data(16 * terms * (logical_width + width) + 128 * terms)
         operator = SparsePauliOp.from_list(list(zip(estimate.labels, estimate.coefficients, strict=True)))
         native = operator.apply_layout(list(layout), num_qubits=width)
-        # Qiskit 2.5's default ObservablesArray coercion simplifies at 1e-8,
+        # Qiskit 2.6's default ObservablesArray coercion simplifies at 1e-8,
         # silently deleting smaller nonzero coefficients. The common declaration
         # already validates finite real unique Pauli terms. Use the public
         # prevalidated-input API with exact-zero simplification. PUB validation

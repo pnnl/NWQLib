@@ -38,7 +38,7 @@ PauliEvolutionSynthesis = Literal["lie_trotter", "suzuki_trotter"]
 
 
 def _dirty_mcx_cx(num_controls: int) -> int:
-    """Return the exact CX count of the specified Qiskit 2.5.2 decomposition.
+    """Return the exact CX count of the specified Qiskit 2.6.0 decomposition.
 
     With ``k = num_controls >= 1``, MCRZ uses
     ``synth_mcx_n_dirty_i15`` with ``relative_phase=False`` and
@@ -60,16 +60,23 @@ def _dirty_mcx_cx(num_controls: int) -> int:
 def _mcphase_cx(support_size: int) -> int:
     """Return the CX count of Qiskit's MCPhase gate on ``support_size`` qubits.
 
-    With ``c = support_size - 1 >= 2`` controls, Qiskit's ``MCPhaseGate``
-    definition emits MCRZ gates with ``c, c - 1, ..., 1`` controls and one
-    final phase gate. The one-control MCRZ is a CRZ with two CX, and a
-    one-control MCPhase is a CPhase, also with two CX. An MCRZ with
-    ``k >= 2`` controls uses ``_mcsu2_real_diagonal``, which applies two
+    Qiskit 2.6.0 defines an MCPhase with ``c = support_size - 1`` controls
+    by ``synth_mcp_noaux_default``. A one-control MCPhase is a CPhase with
+    two CX. For ``2 <= c <= 4``, ``synth_mcp_noaux_v24`` emits MCRZ gates
+    with ``c, c - 1, ..., 1`` controls and one final phase gate. The
+    one-control MCRZ is a CRZ with two CX. An MCRZ with ``k >= 2``
+    controls uses ``_mcsu2_real_diagonal``, which applies two
     multi-controlled X gates on ``ceil(k/2)`` controls and two on
-    ``floor(k/2)`` controls. The QHD routing tests compare these counts with
-    transpiled circuits of the pinned Qiskit version.
+    ``floor(k/2)`` controls. From ``c = 5``, ``synth_mcp_noaux_sp22`` (da
+    Silva and Park, Phys. Rev. A 106, 042602) applies ``2 c - 1``
+    controlled phase gates and ``2 (c - 1)**2`` controlled RX gates of two
+    CX each, ``4 c**2 - 4 c + 2`` CX. The QHD routing tests compare these
+    counts with transpiled circuits of the pinned Qiskit version.
     """
 
+    controls = support_size - 1
+    if controls >= 5:
+        return 4 * controls * controls - 4 * controls + 2
     total = 0
     for num_controls in range(1, support_size):
         if num_controls == 1:
@@ -91,8 +98,8 @@ def structured_number_projector_provider(support_size: int) -> dict[str, Any]:
     CX count follows the gate's definition in the pinned Qiskit version.
     The cheaper one is selected. For support size s = 1, 2 or 3, the
     counts tie and the tie selects MCPhase. The diagonal is cheaper for
-    s = 4 to 7 (14 against 20 CX at s = 4), and MCPhase is cheaper from
-    s = 8 (220 against 254 CX), because its count grows quadratically in s
+    s = 4 to 6 (14 against 20 CX at s = 4), and MCPhase is cheaper from
+    s = 7 (122 against 126 CX), because its count grows quadratically in s
     while the diagonal's grows as ``2**s``. QHD omits exact-zero projector
     blocks before routing and resource pricing. The diagonal provider emits
     no gate when its angle is exactly zero.

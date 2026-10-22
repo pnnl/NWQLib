@@ -57,9 +57,9 @@ def _binary_native_bytes(reconstruction, method, d):
     on CPython 3.12.14 and Qiskit 2.5.2. Two graph allowances permit source
     and appended-copy coexistence. These rates price named objects and
     storage, not process RSS or arbitrary SDK synthesis. Revisit when the
-    builder, the copying of gate definitions, the parameter representation
-    or the SDK version changes, or a measured workload falls outside the
-    checked range (docs/ENGINEERING_CONSTANTS.md).
+    builder, the copying of gate definitions or the parameter representation
+    changes, or a measured workload falls outside the checked range
+    (docs/ENGINEERING_CONSTANTS.md).
 
     A nonzero dense n-qubit diagonal has E=2**n entries. It adds n+1
     circuits of total width q=n+n*(n+1)//2, 2*E+n-2 gate positions,
@@ -231,7 +231,7 @@ def append_binary_steps(circuit, reconstruction, method, grid, *, held_bytes):
     bits = model.bits
     # CX and rotations of the emitted QFT pair, which the recorded counts of a
     # kinetic block include and model.construction, the phase diagonal alone,
-    # does not. Qiskit 2.5.2 defines a controlled phase by two CX and three
+    # does not. Qiskit 2.6.0 defines a controlled phase by two CX and three
     # phase gates and a swap by three CX.
     pair = (2 * sum(3 if g[0] == "swap" else 2 if g[0] == "cp" else 0 for g in model.forward),
             2 * 3 * sum(g[0] == "cp" for g in model.forward))

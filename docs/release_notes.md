@@ -2,7 +2,7 @@
 
 ## v1.0.3.post1 (2026-10-21)
 
-Relative to v1.0.3, this maintenance release changes the test suite, the documentation, two extension interfaces, the shared Run and Result archive formats and the error for a missing compiler extra. It cannot load Run or Result archives written by v1.0.3. Defaults are unchanged.
+Relative to v1.0.3, this maintenance release changes the test suite, the documentation, two extension interfaces, the shared Run and Result archive formats, the error for a missing compiler extra, the CX and rotation counts that follow Qiskit's gate definitions, QHD's projector choice at 7 qubits and the minimum Qiskit and qiskit-aer versions. It cannot load Run or Result archives written by v1.0.3. Default option values are unchanged.
 
 The test suite holds 1,501 tests, against 3,259 in v1.0.3. It keeps the checks of computed quantities against independent references, the resource limits that refuse work before it starts, the normal save, load and resume paths, the checks against installed SDKs, the example notebooks and every test that the mutation probes or the documentation name. Tests were removed when they were judged to check only message wording, printed text, internal records and helper calls, the rejection of misuse such as unknown options or edited saved files, or a case that another current test covers.
 
@@ -24,6 +24,18 @@ Two extension interfaces and the shared archive formats change:
 - Because preparation records change, the shared archive formats are `nwqlib.run/21` and `nwqlib.result/14`. This release cannot load earlier shared formats, including those written by v1.0.3. Keep the writer's NWQLib version available to read old results or finish pending runs, or replan and rerun with this release to create new archives. This also applies to Result and Run subfolders of QHD refinement and augmented-Lagrangian archives.
 
 Without the `nwqec` extra, `compile_logical` raises `ModuleNotFoundError` with the install command before it starts its child process, and so does `estimate_physical` without the `qre` extra. In v1.0.3, the child process failed instead, and the error arrived as a `RuntimeError` that contained the child's traceback.
+
+Every extra that installs Qiskit now requires Qiskit 2.6.0 or later, and the `aer` extra also requires qiskit-aer 0.18.0 or later. Upgrade with the extras you use, for example `python -m pip install -U "nwqlib[aer]"`, so that pip also upgrades Qiskit and qiskit-aer. With older Qiskit or qiskit-aer releases installed, the counts described below do not match the installed synthesis, and exact Aer readouts list "unchecked qiskit-aer version". The validated environment in `docs/ENVIRONMENT_LOCK.txt` changes only these two packages.
+
+Without ancillas, Qiskit 2.6.0 synthesizes a multi-controlled X gate with 5 to 32 controls, and a multi-controlled phase gate with 5 or more controls, by the construction of da Silva and Park ([Phys. Rev. A 106, 042602](https://doi.org/10.1103/PhysRevA.106.042602)), with `4k**2 - 4k + 2` CX for k controls. Qiskit 2.5.2 used more CX for these gates, for example 2,328 instead of 1,522 for an X gate with 20 controls. NWQLib's resource counts of the circuits that Qiskit builds follow the new definitions:
+
+- The CX table of multi-controlled X gates, `MCX_CX_BY_CONTROLS`, has the new counts for 5 to 32 controls. The QLS CX estimates of projector flips and of the `Q_b'` and `A_t` predicates read it, and so do the LCHS SELECT bounds.
+- The LCHS CX bounds price controlled phases and controlled U gates by the new definitions. The projector flip of a QSP pass with k block ancillas, controlled on its parity qubit, costs `36k**2 - 34k + 20` CX from k = 5, for example 750 at k = 5 against 746 with Qiskit 2.5.2, and 35,796 against 65,768 at k = 32.
+- QHD's structured number projector uses Qiskit's multi-controlled phase from 7 qubits, where it costs 122 CX against 126 for the phase diagonal, instead of from 8 qubits. Its CX and rotation counts follow the new construction. At 8 qubits it costs 170 CX against 220 with Qiskit 2.5.2, and for a generic angle it has 135 arbitrary rotations and 44 exact T gates, against 147 and 116.
+
+Qiskit 2.6.0 also corrects the global phase that the two-qubit peephole optimization of optimization levels 2 and 3 changed by pi for some CX patterns. The example notebooks were executed again with Qiskit 2.6.0 and qiskit-aer 0.18.0.
+
+The probability windows of exact Aer readouts name qiskit-aer 0.18.0 as the checked release. Its statevector, fusion and gate-matrix sources are those of 0.17.2, so the windows themselves are unchanged.
 
 Package and citation source versions are `1.0.3.post1`, with the project concept DOI.
 

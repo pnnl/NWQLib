@@ -445,7 +445,7 @@ def _admit_aer_saved_buffers(observation, *, width, memory_mb, state_threads):
     the kept numerical payload is ``B_prob = 8 * sum_i 2**k_i``. Let
     ``S`` count distinct saved statevectors of amplitude and reduction
     points, ``E`` the distinct saved expectations and ``w`` the complete
-    native width. The general marginal kernel of the Aer 0.17.2 CPU
+    native width. The general marginal kernel of the Aer 0.18.0 CPU
     statevector implementation additionally allocates, per participating
     worker, a private probability vector and a uint64 index array of
     ``2**k_i`` entries each, a transient bounded by
@@ -726,7 +726,7 @@ _WINDOW_EXCLUDED_OPERATIONS = frozenset({
 _PHASE_SUM_OPERATIONS = frozenset({"u", "u2", "u3", "cu", "cu2", "cu3", "mcu", "mcu2", "mcu3"})
 # The Aer release whose fusion pass, kernels and gate matrices the derivation
 # was read against. Another installed release is listed as an exclusion.
-_ROUNDOFF_CHECKED_AER_VERSION = "0.17.2"
+_ROUNDOFF_CHECKED_AER_VERSION = "0.18.0"
 
 
 def _phase_sum(params):

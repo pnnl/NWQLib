@@ -80,7 +80,7 @@ In the cases that the table under [Optimization level](#optimization-level) list
 
 | Backend | Default level | Exact synthesis of dense matrices | Roundoff constant and `state_error()` |
 | --- | --- | --- | --- |
-| Aer | No transpiler level | Only with a noise model whose gate basis omits `UnitaryGate`, outside control-flow blocks. Otherwise Aer applies the matrix directly | Derived for qiskit-aer 0.17.2, see [Aer](aer.md#readout-and-population) |
+| Aer | No transpiler level | Only with a noise model whose gate basis omits `UnitaryGate`, outside control-flow blocks. Otherwise Aer applies the matrix directly | Derived for qiskit-aer 0.18.0, see [Aer](aer.md#readout-and-population) |
 | NWQ-Sim and Slurm | 0 | At levels 0 and 1 | Derived for CPU/SV. At a level other than 0, `state_error()` gives no bound, see [NWQ-Sim](nwqsim.md#optimization-level) |
 | IBM Runtime | 1 | At levels 0 and 1, outside control-flow blocks | None, so `state_error()` gives no bound at any level |
 | IonQ, QIS gates | 0 | At levels 0 and 1 | None, so `state_error()` gives no bound at any level |

@@ -416,7 +416,7 @@ class NWQSimBackend(Record):
         single-endpoint circuits have terminal measurements only and reject
         reset and dynamic control. Qiskit's RemoveDiagonalGatesBeforeMeasure
         pass removes diagonal one- and two-qubit gates (checked with Qiskit
-        2.5.2). Counts use the actual post-lowering measurement map, and Pauli
+        2.6.0). Counts use the actual post-lowering measurement map, and Pauli
         readouts refuse a measured circuit at every level.
         """
         from qiskit import transpile

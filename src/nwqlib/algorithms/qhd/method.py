@@ -1076,9 +1076,9 @@ def _native_phase_allowance(reconstruction, ledger, walsh=None):
     intended scalar compensation is ``sum_b theta_b 2**-s_b``, and scaling an
     angle can incur at most lambda/2 of underflow error.
 
-    Qiskit 2.5.2 stores each assigned phase with Rust's
+    Qiskit 2.6.0 stores each assigned phase with Rust's
     ``f64::rem_euclid(tau)`` (``crates/circuit/src/circuit_data.rs``,
-    ``set_global_phase_f64``, at tag 2.5.2), whose rounded exact remainder
+    ``set_global_phase_f64``, at tag 2.6.0), whose rounded exact remainder
     can equal tau, so a stored phase g satisfies ``0 <= g <= tau``. For an
     intended increment y with ``v = |y|`` and increment error e, put
     ``H = tau + v + e``, ``A = u H + lambda`` and ``K = (H + A)/tau + 1``.
@@ -1098,7 +1098,7 @@ def _native_phase_allowance(reconstruction, ledger, walsh=None):
     at every assignment. Reducing by the binary64 tau instead of 2 pi errs
     by the quotient times ``|tau - 2 pi|``, which grows with the unreduced
     angle, so a large intermediate phase costs accuracy even when the final
-    phase is small. With Qiskit 2.5.2 (Python 3.12.14, macOS arm64,
+    phase is small. With Qiskit 2.6.0 (Python 3.12.14, macOS arm64,
     2026-09-26),
     assigning -2e17 to an empty circuit stored a phase 1.51 rad from the
     exact reduction, and two cancelling increments of 1e16 and -1e16
@@ -2648,7 +2648,7 @@ def _block_records(raw_steps):
     """Convert compiled evolution blocks into the ``QHDBlock`` records a Plan stores.
 
     A kinetic block keeps its two linked qubits, the common XX and YY
-    coefficient and the two CX of one ``XXPlusYYGate`` (Qiskit 2.5.2's
+    coefficient and the two CX of one ``XXPlusYYGate`` (Qiskit 2.6.0's
     definition). A projector block
     keeps its qubits, its weighted objective value and the CX count of the
     provider that ``structured_number_projector_provider`` chose for its support

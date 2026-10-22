@@ -251,7 +251,7 @@ def test_fidelity_kernel_accepts_extreme_but_finite_entry_magnitudes():
 @pytest.mark.parametrize("distance", [1e-9])
 def test_mps_two_qubit_gates_are_exact_near_a_product_state(distance) -> None:
     # A two-qubit state has bond dimension two, so one layer prepares it
-    # exactly apart from the synthesis of its local unitaries. Qiskit 2.5.2's
+    # exactly apart from the synthesis of its local unitaries. Qiskit 2.6.0's
     # TwoQubitBasisDecomposer replaced the nearly local unitary of this state
     # by a local one and prepared |00> alone, an error equal to the distance.
     pytest.importorskip("scikit_tt")

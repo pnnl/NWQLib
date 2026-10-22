@@ -5,7 +5,7 @@
 #
 # As in the paper, the optimization runs are classical evolutions of the grid model with exact probabilities, and Section 6 runs one 4-qubit circuit of the same construction.
 #
-# Install with `python -m pip install "nwqlib[aer,notebook]"`. To work on NWQLib itself, run `python -m pip install -e ".[aer,notebook]"` in a clone of the repository instead. The notebook evolves 8- and 10-qubit models classically, simulates one 4-qubit circuit and runs in about 54 s on an Apple M3 Max with 36 GiB of memory (Python 3.12.14, Qiskit 2.5.2, Aer 0.17.2).
+# Install with `python -m pip install "nwqlib[aer,notebook]"`. To work on NWQLib itself, run `python -m pip install -e ".[aer,notebook]"` in a clone of the repository instead. The notebook evolves 8- and 10-qubit models classically, simulates one 4-qubit circuit and runs in about 51 s on an Apple M3 Max with 36 GiB of memory (Python 3.12.14, Qiskit 2.6.0, Aer 0.18.0).
 #
 # > **How to read this notebook.** The next cells solve Ackley and show the answer with its cost.
 # >

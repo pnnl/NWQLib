@@ -3,7 +3,7 @@
 Every controlled-gate construction in the library calls :func:`controlled`,
 so the next Qiskit signature change is a one-line fix here instead of a
 per-site sweep. :func:`controlled` also makes the gates it controls exact
-to rounding, because Qiskit 2.5.2 approximates dense unitaries in both of
+to rounding, because Qiskit 2.6.0 approximates dense unitaries in both of
 its routes. It controls a composite gate by unrolling its definition,
 which synthesizes the dense ``UnitaryGate`` blocks it meets there
 inexactly (``subroutines/_dense_synthesis.py``), and it controls a
@@ -34,7 +34,7 @@ def controlled(gate: Any, num_ctrl_qubits: int, *, ctrl_state: int | str | None 
     whose definition is ``_dense_synthesis.controlled_unitary_circuit``,
     the exact synthesis of the whole controlled matrix. A base matrix that
     is not unitary to rounding is realized as its unitary polar factor
-    (``controlled_unitary_circuit``). Qiskit 2.5.2's own
+    (``controlled_unitary_circuit``). Qiskit 2.6.0's own
     ``UnitaryGate.control`` synthesizes the same matrix by quantum Shannon
     decomposition, keeps the result when ``numpy.allclose`` with
     ``atol=1e-7`` and ``rtol=1e-5`` accepts it, and otherwise falls back to
@@ -543,9 +543,9 @@ def inverse_realized_gate(gate: Gate, *, native_ucg: bool = True) -> Gate:
     This is an inverse identity only for unitary table blocks. Aer executes
     it as a native multiplexer only if later transformations leave the
     complete table intact and the target accepts that instruction.
-    Aer 0.17.2 applies each control address's block of the supplied table
+    Aer 0.18.0 applies each control address's block of the supplied table
     directly (``QubitVector::apply_multiplexer``,
-    https://github.com/Qiskit/qiskit-aer/blob/0.17.2/src/simulators/statevector/qubitvector.hpp#L1306-L1342),
+    https://github.com/Qiskit/qiskit-aer/blob/0.18.0/src/simulators/statevector/qubitvector.hpp#L1305-L1340),
     so the table reaches Aer as its native ``multiplexer``. A backend that
     decomposes the gate needs a check of its actual realization. This
     costs one two-by-two conjugate transpose and copy per table entry,

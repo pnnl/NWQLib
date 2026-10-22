@@ -59,7 +59,7 @@ MAX_COUNT = 2**63 - 1
 # sqrt(c) times the per-column error.
 #
 # Gate entries. Assume cos, sin and the exponential of an imaginary argument are
-# accurate to one ulp. Aer 0.17.2 then computes every parameterized gate entry
+# accurate to one ulp. Aer 0.18.0 then computes every parameterized gate entry
 # with relative error at most 5u (at most one cos or sin, one complex
 # exponential and one product), and NWQ-Sim's U gate, which forms
 # exp(i*phi)*exp(i*lambda) with one more complex product, with at most 9.83u.
@@ -70,7 +70,7 @@ MAX_COUNT = 2**63 - 1
 # (GATE_ENTRY_ERROR + 2*A)*u, and a gate with || |G| ||_2 <= 2 then moves
 # ||G x||_2 by at most twice that.
 #
-# Aer (qiskit-aer 0.17.2 statevector method, src/transpile/fusion.hpp). Aer fuses
+# Aer (qiskit-aer 0.18.0 statevector method, src/transpile/fusion.hpp). Aer fuses
 # only circuits wider than fusion_threshold, 14 qubits by default, so a circuit
 # of at most 14 qubits applies every instruction as its own block. In a wider
 # circuit four passes (diagonal, one-qubit, two-qubit and cost-based) fold
