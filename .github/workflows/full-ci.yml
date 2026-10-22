@@ -58,11 +58,12 @@ jobs:
         run: |
           python -m pip install --upgrade pip
           python -m pip install --upgrade --upgrade-strategy eager --only-final=:all: -e ".[dev,aer,qasm,docs,notebook,chemistry,ibm,ionq,tensor]" pytest-cov "scikit_tt @ git+https://github.com/PGelss/scikit_tt.git"
-      # On the newest Python, loading the OpenMP library that pyscf bundles fails with
-      # "cannot allocate memory in static TLS block", so the later steps preload it. Remove
-      # this step once pyscf imports on the Python that this job selects without it.
+      # The Linux wheels of qiskit-aer 0.18.0 and pyscf bundle different builds of libgomp,
+      # and the build that a process loads second fails with "cannot allocate memory in
+      # static TLS block" (docs/dependency_issues.md), so the later steps preload the one of
+      # pyscf. Remove this step and its copies in the notebooks job and in
+      # mutation-probes.yml once both load in one process without it.
       - name: Preload the OpenMP library of pyscf
-        if: matrix.environment == 'latest'
         run: |
           library=$(python -c 'from importlib.util import find_spec; from pathlib import Path; (path,) = Path(find_spec("pyscf").submodule_search_locations[0], "lib").glob("libgomp*.so*"); print(path)')
           echo "LD_PRELOAD=$library" >> "$GITHUB_ENV"
@@ -166,5 +167,10 @@ jobs:
         run: |
           python -m pip install --upgrade -c docs/ENVIRONMENT_LOCK.txt pip
           python -m pip install -c docs/ENVIRONMENT_LOCK.txt --build-constraint docs/ENVIRONMENT_LOCK.txt -e ".[dev,aer,notebook,chemistry,tensor]" "$(sed -n '/^scikit_tt @ /p' docs/ENVIRONMENT_LOCK.txt)"
+      # The GCIM notebook loads pyscf and qiskit-aer in one kernel, see the checks job.
+      - name: Preload the OpenMP library of pyscf
+        run: |
+          library=$(python -c 'from importlib.util import find_spec; from pathlib import Path; (path,) = Path(find_spec("pyscf").submodule_search_locations[0], "lib").glob("libgomp*.so*"); print(path)')
+          echo "LD_PRELOAD=$library" >> "$GITHUB_ENV"
       - name: Execute the example notebooks
         run: OMP_NUM_THREADS=1 python -m pytest -n auto --dist worksteal --durations=10 tests/test_examples.py::test_notebook_runs_and_matches_its_references

@@ -36,6 +36,8 @@ python -m pip install "scikit_tt @ git+https://github.com/PGelss/scikit_tt.git"
 
 The stable test environment pins its `scikit_tt` commit in `docs/ENVIRONMENT_LOCK.txt`. To work on NWQLib itself, install an editable checkout as described in [Set up, test and build](development/setup.md).
 
+On Linux, Qiskit Aer 0.18.0 and PySCF 2.14.0 bundle different builds of the OpenMP runtime, and a Python process that uses the `aer` and `chemistry` extras together can fail when it loads the second. Starting the process with the OpenMP runtime of PySCF preloaded avoids this, and [Dependency issues](dependency_issues.md#openmp-runtime-with-pyscf-on-linux) gives the command.
+
 ## Solve linear dynamics
 
 This solves `du/dt = -A u`, starting from `u(0) = (1, 0)`, at time `0.1`:

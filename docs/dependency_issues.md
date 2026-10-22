@@ -1,6 +1,6 @@
 # Dependency issues
 
-This page lists defects and version-specific behavior of NWQLib's dependencies that change results or constrain installation, and what NWQLib does about each. The Python package versions are those of the validated environment in [`docs/ENVIRONMENT_LOCK.txt`](https://github.com/pnnl/NWQLib/blob/main/docs/ENVIRONMENT_LOCK.txt) of the repository: Qiskit 2.6.0, qiskit-aer 0.18.0, SciPy 1.18.1 and urllib3 2.8.0. The NWQ-Sim revision is `efd0226` or a descendant with the same roundoff source files, such as `202f5ca` ([NWQ-Sim](nwqsim.md)). Where a test or review detects a change in the dependency, the entry names it.
+This page lists defects and version-specific behavior of NWQLib's dependencies that change results or constrain installation, and what NWQLib does about each. The Python package versions are those of the validated environment in [`docs/ENVIRONMENT_LOCK.txt`](https://github.com/pnnl/NWQLib/blob/main/docs/ENVIRONMENT_LOCK.txt) of the repository: Qiskit 2.6.0, qiskit-aer 0.18.0, PySCF 2.14.0, SciPy 1.18.1 and urllib3 2.8.0. The NWQ-Sim revision is `efd0226` or a descendant with the same roundoff source files, such as `202f5ca` ([NWQ-Sim](nwqsim.md)). Where a test or review detects a change in the dependency, the entry names it.
 
 | Dependency | Issue | Effect | NWQLib's handling |
 | --- | --- | --- | --- |
@@ -19,6 +19,7 @@ This page lists defects and version-specific behavior of NWQLib's dependencies t
 | SciPy 1.18.1 | `onenormest` draws from NumPy's global random generator | `scipy.sparse.linalg.expm` and `expm_multiply` advance the caller's random stream, and their chosen parameters depend on it | These calls run inside `_linalg_laws.seeded_norm_estimates` |
 | SciPy 1.18.1 | `scipy.linalg.expm` derives its squaring count from an overflowed norm | A 3 x 3 input of 1-norm `2**39` did not return within 20 s | The LCHS references refuse a 1-norm above `2**37` |
 | qiskit-aer 0.18.0 | Fusion and kernels set the roundoff of exact readouts | Probability windows depend on the version | Constant derived from the 0.17.2 sources, which 0.18.0 shares, other versions listed as an exclusion |
+| qiskit-aer 0.18.0 and PySCF 2.14.0 on Linux | The wheels bundle different builds of the OpenMP runtime `libgomp` | A process that loads both can fail at the second with "cannot allocate memory in static TLS block" | Not worked around in code. Preload the OpenMP runtime of PySCF with `LD_PRELOAD`, as the Full CI and Mutation Probes workflows do |
 | NWQ-Sim `b35763d` | Uninitialized memory counters and U phase overflow | Undefined behavior | Revision rejected, roundoff constant derived for `efd0226` |
 | urllib3 before 2.8.0 | Streaming-reader defects | Unbounded buffering and known security issues | The `ionq` extra requires urllib3 2.8.0 or later |
 | qnexus 0.49.0 | Declares pandas `>=2,<3` | `pip check` reports a conflict with pandas 3 | Not worked around, the qualified installation is documented |
@@ -94,7 +95,21 @@ Both kernels choose the Padé degree and the squaring count from 1-norms of `M**
 
 ## qiskit-aer 0.18.0
 
+### Roundoff of exact readouts
+
 The roundoff window of an exact Aer readout uses a per-instruction constant derived from the fusion pass, kernels and gate matrices of qiskit-aer (the comment above the constants in `_validation.py`). The derivation was read against 0.17.2, and the statevector, fusion and gate-matrix sources of 0.18.0 are identical to those of 0.17.2. Aer's statevector method fuses only circuits wider than its default `fusion_threshold` of 14 qubits. A 14-qubit circuit reported no fusion, and a 15-qubit circuit did. Another installed Aer version adds "unchecked qiskit-aer version" to the preparation record's `probability_window_exclusions` (`_ROUNDOFF_CHECKED_AER_VERSION` in `backends/qiskit_aer.py`, [Aer](aer.md)).
+
+### OpenMP runtime with PySCF on Linux
+
+On Linux x86-64, the wheels of qiskit-aer 0.18.0 and PySCF 2.14.0 each bundle their own build of the GNU OpenMP runtime, `qiskit_aer.libs/libgomp-6a29c32d.so.1.0.0` and `pyscf/lib/libgomp-a34b3233.so.1.0.0`. Both builds use static thread-local storage. A library loaded after the process starts takes that storage from a reserve that the C library sets at startup, and on the Ubuntu 24.04 hosts of NWQLib's CI the reserve did not hold both builds. A Python process there that used both packages failed when it loaded the second build, with "cannot allocate memory in static TLS block", and a process on another Linux system can fail the same way. If qiskit-aer comes second, importing `qiskit_aer` raises `ImportError`. If PySCF comes second, importing `pyscf` raises `AttributeError` naming `pyscf/lib/libnp_helper.so`, after an `OSError` with that message. The eigenvalue notebook (`examples/gcim_lanczos_qpe_eigenvalue_intro.ipynb`) loads both packages in one kernel, and so does a test process that runs Aer and chemistry tests. The CI failed this way with Python 3.12.14 and 3.15.1. With qiskit-aer 0.17.2, PySCF 2.14.0 and Python 3.12.14, the CI ran the Aer and chemistry tests and the eigenvalue notebook without this error.
+
+A library named in `LD_PRELOAD` is loaded when the process starts and does not draw on that reserve, so the variable has to be set before Python starts. Activate the environment that has NWQLib and PySCF installed, so that `python` below is its interpreter, and set the variable to the OpenMP runtime of PySCF in the shell that then starts Python or Jupyter:
+
+```bash
+export LD_PRELOAD="$(python -c 'from importlib.util import find_spec; from pathlib import Path; (path,) = Path(find_spec("pyscf").submodule_search_locations[0], "lib").glob("libgomp*.so*"); print(path)')"
+```
+
+A Jupyter kernel inherits the variable from the Jupyter server, so start or restart Jupyter from that shell. The Full CI and Mutation Probes workflows set the same variable. On macOS arm64, in the validated environment with Python 3.12.14, the full test suite, which executes the example notebooks, passes without it.
 
 ## NWQEC 0.1.2
 

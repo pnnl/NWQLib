@@ -37,6 +37,8 @@ Qiskit 2.6.0 also corrects the global phase that the two-qubit peephole optimiza
 
 The probability windows of exact Aer readouts name qiskit-aer 0.18.0 as the checked release. Its statevector, fusion and gate-matrix sources are those of 0.17.2, so the windows themselves are unchanged.
 
+On Linux, qiskit-aer 0.18.0 and PySCF bundle different builds of the OpenMP runtime, and a Python process that loads both can fail when it loads the second, with "cannot allocate memory in static TLS block". On the Ubuntu 24.04 hosts of NWQLib's CI, such a process failed with qiskit-aer 0.18.0 and ran with qiskit-aer 0.17.2. A process that uses the `aer` and `chemistry` extras together on Linux, such as the eigenvalue notebook, should therefore start with the OpenMP runtime of PySCF preloaded, as [Dependency issues](dependency_issues.md#openmp-runtime-with-pyscf-on-linux) describes.
+
 Package and citation source versions are `1.0.3.post1`, with the project concept DOI.
 
 ## v1.0.3 (2026-10-19)

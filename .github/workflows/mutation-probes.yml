@@ -27,6 +27,12 @@ jobs:
             docs/ENVIRONMENT_LOCK.txt
       - run: python -m pip install --upgrade -c docs/ENVIRONMENT_LOCK.txt pip
       - run: python -m pip install -c docs/ENVIRONMENT_LOCK.txt --build-constraint docs/ENVIRONMENT_LOCK.txt -e ".[dev,aer,qasm,chemistry]" "$(sed -n '/^scikit_tt @ /p' docs/ENVIRONMENT_LOCK.txt)"
+      # The baseline runs Aer and chemistry tests in one process, see the checks job of
+      # full-ci.yml.
+      - name: Preload the OpenMP library of pyscf
+        run: |
+          library=$(python -c 'from importlib.util import find_spec; from pathlib import Path; (path,) = Path(find_spec("pyscf").submodule_search_locations[0], "lib").glob("libgomp*.so*"); print(path)')
+          echo "LD_PRELOAD=$library" >> "$GITHUB_ENV"
       - run: python -m pip check
       - run: python docs/scripts/mutation_probes.py
       - name: Report resolved environment
