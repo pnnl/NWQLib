@@ -1,4 +1,4 @@
-"""Method discovery, explicit author checks and read-only saved reports."""
+"""List and describe the Methods, check a Method you wrote, and read the report of a saved Result."""
 
 import argparse
 from importlib import import_module
@@ -33,7 +33,7 @@ def _selected(args):
 
 
 def _trusted_factory(reference):
-    """Import only the author factory explicitly selected by the CLI user."""
+    """Import only the factory, in a Method author's module, that the command-line user names."""
     module, separator, name = reference.partition(":")
     if (
         not separator
@@ -54,7 +54,11 @@ def _trusted_factory(reference):
 
 
 def main(argv=None):
-    """Dispatch declaration/report reads or one explicitly selected trusted author check."""
+    """Run one `nwqlib` command.
+
+    The commands list or describe the Methods, read a saved report, or run
+    the check of a trusted Method that the user names.
+    """
     parser = argparse.ArgumentParser(
         prog="nwqlib",
         allow_abbrev=False,

@@ -29,14 +29,14 @@ class ProviderConfig(FieldSerializedRecord):
     `LCHS(lchs_kernel=ProviderConfig(implementation="near_optimal_eq7", parameters={"beta": 0.7}))`.
     `implementation` is the only required argument. `LCHS` also accepts the
     name alone or a dict with these two keys. The `lchs_kernel` and
-    `k_quadrature` rows of `LCHS` list the names and their parameters.
+    `k_quadrature` entries of `LCHS` list the names and their parameters.
 
     Attributes:
         implementation: Required. Kernel or quadrature name. Building this
             record does not check the name, and `LCHS` refuses an unknown
             one.
         parameters: Default empty. Parameter names mapped to JSON scalars
-            or `None`, stored sorted and read-only. The named rule supplies
+            or `None`, kept sorted by name and read-only. The named rule supplies
             the defaults and range checks when `LCHS` resolves it.
     """
 
@@ -66,7 +66,7 @@ class ResolvedProviderConfig(FieldSerializedRecord):
         implementation: Name of the rule used. For an exactly zero L the
             algebraic reduction `"unitary_reduction"` replaces the requested
             quadrature name.
-        parameters: Every parameter after defaults, stored sorted and
+        parameters: Every parameter after defaults, kept sorted by name and
             read-only. Together with `implementation`, they identify the
             configuration.
     """

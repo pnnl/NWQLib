@@ -1,12 +1,12 @@
 """Certified ``1/x`` polynomial construction for QSVT matrix inversion.
 
-QLS polynomial selection builds an
-odd polynomial ``P`` approximating ``1/(kappa x)`` on the domain
-``D(a) = {x : a <= |x| <= 1}`` with ``a = 1/kappa``: odd-Chebyshev least
-squares on domain-restricted Chebyshev nodes, degree found by
-double-then-bisect against an affine Chebyshev-grid norming bound on
-``max_D |kappa * x * P(x) - 1| <= epsilon_inv``. The fit procedure is
-NWQLib's own construction.
+When QLS chooses its polynomial, it fits an odd polynomial ``P``
+approximating ``1/(kappa x)`` on the domain ``D(a) = {x : a <= |x| <= 1}``
+with ``a = 1/kappa``. The fit is an odd-Chebyshev least-squares fit on
+Chebyshev nodes restricted to the domain, and its degree is found by
+doubling and then bisection until an affine Chebyshev-grid norming bound
+establishes ``max_D |kappa * x * P(x) - 1| <= epsilon_inv``. The fit
+procedure is NWQLib's own construction.
 
 The domain parameter ``kappa`` must exceed 1. QLS passes its
 ``polynomial_kappa``, the encoding's ``kappa_be`` raised to at least
@@ -84,7 +84,7 @@ _DOUBLING_FACTOR_OVER_TRIPWIRE = 8
 
 
 class _FitCost(NamedTuple):
-    """Admission cost of one least-squares Chebyshev fit, computed from its degree before it runs.
+    """Cost of one least-squares Chebyshev fit, computed from its degree and checked against the limits before the fit runs.
 
     ``inverse_candidate_cost`` and ``shortcut.kernel_reflection_cost``
     return this record. Their docstrings map each term to its arrays.
@@ -95,7 +95,7 @@ class _FitCost(NamedTuple):
             peak, summed from per-array terms. LAPACK workspace and Python
             object overhead are excluded.
         work: Scalar operation count compared with ``max_work``. It is a
-            size law, not measured time.
+            size formula, not measured time.
     """
 
     coefficients: int
@@ -114,7 +114,7 @@ class InverseChebyshevFit:
     Attributes:
         coefficients: Full Chebyshev coefficient vector ``(c_0..c_d)`` of the
             fitted ``P``. Even entries are exactly zero.
-        degree: Selected odd degree ``d`` from the bounded search.
+        degree: Odd degree ``d`` chosen by the bounded search.
         kappa: Domain parameter, greater than 1, defining the domain
             ``D = {1/kappa <= |x| <= 1}``. QLS passes its ``polynomial_kappa``.
         epsilon_inv: Requested certificate tolerance.
@@ -135,9 +135,13 @@ class InverseChebyshevFit:
 
 
 def inverse_degree_law_bound(kappa: float, epsilon_inv: float) -> int:
-    """Return the quick upper bound `ceil(C_law * kappa * log(kappa/eps))` on the inverse-fit degree, in the form of [CKS] arXiv:1511.02306v2.
+    """Return the engineering degree estimate `ceil(C_law * kappa * log(kappa/eps))` that limits the inverse-fit search.
 
-    `C_law` is 1.25.
+    `C_law` is 1.25. The doubling search of the inverse fit stops at eight
+    times this estimate, or at `max_degree` if that is smaller. The
+    asymptotic scaling `O(kappa log(kappa/eps))` of [CKS]
+    arXiv:1511.02306v2 motivates the expression, which is not a proven upper
+    bound on the degree of this fit.
     """
 
     return int(ceil(QLS_INVERSE_DEGREE_LAW_FACTOR * kappa * log(kappa / epsilon_inv)))
@@ -193,12 +197,12 @@ def inverse_candidate_cost(degree) -> _FitCost:
     """Return the bytes and work counted for one inverse-fit candidate of odd degree `d` before it is computed.
 
     With ``u = (d + 1)/2`` odd unknowns, ``n = 4u`` least-squares nodes and
-    ``q = 25 d`` certificate nodes, ``peak_bytes`` counts 8-byte slots:
+    ``q = 25 d`` certificate nodes, ``peak_bytes`` counts 8-byte entries:
 
     - ``n (d + 1)``: the Chebyshev-Vandermonde matrix from ``chebvander``.
       Its odd columns are a view, which the scaling turns into the design
       matrix.
-    - ``3 n u``: three ``n x u`` slots, two for the design matrix and the
+    - ``3 n u``: three ``n x u`` arrays, two for the design matrix and the
       copy that ``lstsq`` factorizes and one to spare.
     - ``10 n``: length-``n`` vectors (reference and affine nodes, their
       temporaries, the right-hand side and its copy inside ``lstsq``).
@@ -243,18 +247,18 @@ def _fit_inverse_chebyshev(
     bound ``max_D |kappa * x * P(x) - 1| <= epsilon_inv`` holds, then
     bisected within that bracket. This search does not establish global
     degree optimality or monotonicity of floating-point least-squares fits.
-    The reference degree law is
+    The reference degree formula is
     ``d = O(kappa log(kappa/eps))`` [CKS arXiv:1511.02306v2, Lemmas 17-19].
     The doubling search stops at the smaller of `max_degree` and ``8x`` the
-    registered quick upper bound (``inverse_degree_law_bound``), rounded down
-    to an odd degree, and raises if no tested degree passes.
+    registered engineering degree estimate (``inverse_degree_law_bound``),
+    rounded down to an odd degree, and raises if no tested degree passes.
 
     Args:
         kappa: Domain parameter, greater than 1. QLS passes its
             ``polynomial_kappa``, described in the module docstring.
         epsilon_inv: Certificate tolerance in ``(0, 1)`` on the relative
             residual ``|kappa * x * P(x) - 1|``.
-        max_degree: Largest admitted odd degree, checked before every fit.
+        max_degree: Largest allowed odd degree, checked before every fit.
         max_work: Limit on the summed work of all fitted candidates
             (``inverse_candidate_cost``).
         max_bytes: Limit on the NumPy arrays alive at once in one candidate
@@ -268,7 +272,7 @@ def _fit_inverse_chebyshev(
 
     Raises:
         ValueError: For out-of-range arguments, or when no degree below the
-            runaway stop passes the certificate.
+            upper stop of the doubling search passes the certificate.
     """
 
     kappa = finite_real(kappa, "kappa")
@@ -283,7 +287,7 @@ def _fit_inverse_chebyshev(
     used_work = 0
 
     def _certificate_grid(degree: int) -> np.ndarray:
-        """Admit one candidate, record its degree and return its certificate nodes.
+        """Check one candidate degree against the limits, record it and return its certificate nodes.
 
         The ``25 d`` nodes are the Chebyshev zeros of ``[-1, 1]`` mapped
         affinely onto ``[1/kappa, 1]``.

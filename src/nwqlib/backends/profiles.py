@@ -1,4 +1,4 @@
-"""Stored machine, allocation and finite time-model data. Nothing discovers a machine.
+"""Supplied descriptions of a machine, an allocation and finite time models. Nothing discovers a machine.
 
 JSON encoding, schemas and content hashes come from ``Record``. Sources and
 coefficients are supplied declarations. Loading any reference never opens it
@@ -58,8 +58,8 @@ class DeviceConfiguration(Record):
     in an assessment.
 
     Attributes:
-        name: Required. Name of the stored specification.
-        version: Required. Version of the stored specification.
+        name: Required. Name of the machine specification.
+        version: Required. Version of the machine specification.
         target: Required. The backend target the machine supports, the same
             target record that backend adapters declare.
         hardware: Required. Source describing the hardware.
@@ -197,7 +197,8 @@ class ModelDomain(Record):
             `RuntimeOptions(seed=...)`, or `"seed_independent"`. A whole-Plan
             forecast does not guess future seeds, so only a seed-independent model
             applies there.
-        population: Required. `"unconditional"` or `"native_conditioned"`,
+        population: Required. Whether a measurement or reset before the readout
+            conditions the read state, `"unconditional"` or `"native_conditioned"`,
             which must equal the `population` of the assessed point's readout.
         readouts: Required. Distinct supported readouts: `"pauli_expectation"`,
             `"counts"`, `"probabilities"`, `"host_scalars"`, `"amplitudes"` or
@@ -413,13 +414,14 @@ class TimeModel(Record):
         kind: Required. `"engineering"` for assumed coefficients or
             `"calibrated"` for coefficients from a supplied calibration.
         scope: Required. What the seconds cover: `"selected_acquisition"`
-            (the seconds of the selected acquisition), `"acquisition_overhead"`
-            (the seconds of its overhead beyond that acquisition) or
-            `"native_call_wall"`. The library's own timings carry only
-            `"native_call_wall"`. The first two are scopes that a supplied
+            (the seconds of the measurement that the Plan chose),
+            `"acquisition_overhead"` (the seconds of overhead beyond that
+            measurement) or `"native_call_wall"`. The library's own timings carry
+            only `"native_call_wall"`. The first two are scopes that a supplied
             profile declares for its coefficients, and they exclude planning,
-            compilation, queue delay, analysis and whole-run cost. `"native_call_wall"` covers the synchronous backend call,
-            including waiting and result extraction, and excludes preparation and
+            compilation, queue delay, analysis and whole-run cost.
+            `"native_call_wall"` covers the synchronous backend call, including
+            waiting and result extraction, and excludes preparation and
             saving. The scopes overlap, so their predictions must not be added,
             and none covers a whole run.
         coefficients: Required. One to four
@@ -463,9 +465,9 @@ class TimeModel(Record):
     def _model(self):
         """Keep engineering and calibrated models distinct.
 
-        A calibrated model needs its calibration provenance, empirical-prediction
+        A calibrated model needs its calibration sources, empirical-prediction
         evidence and a stated uncertainty. An engineering model has no
-        calibration provenance and carries numerical-estimate evidence. Features
+        calibration sources and carries numerical-estimate evidence. Features
         are distinct.
         """
         _dates(self.recorded_at, self.valid_until)
@@ -482,7 +484,7 @@ class TimeModel(Record):
 
 
 class DeviceProfile(Record):
-    """A stored description of one machine: its configuration, advertised limits and named time models.
+    """A supplied description of one machine: its configuration, advertised limits and named time models.
 
     Build it with keyword arguments, for example
     `DeviceProfile(configuration=..., recorded_at=..., valid_until=..., evidence=..., models=(model,))`,

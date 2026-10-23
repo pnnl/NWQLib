@@ -8,9 +8,9 @@
 
 | Method | Options type | Returned `facts` |
 | --- | --- | --- |
-| LCHS | `LCHSVerification` | The discrepancy from the selected reference solution, and for `ivp_closed_form` the reference consistency |
-| LCHS | `LCHSRefinement` | Refined output-error components for `result.assess`, which answer no check |
-| QLS | `QLSVerification` | The top-level fact of each selected comparison |
+| LCHS | `LCHSVerification` | The discrepancy from the reference solution named in the options, and for `ivp_closed_form` the consistency of its two references |
+| LCHS | `LCHSRefinement` | Refined output-error components for `result.assess`. They answer no check |
+| QLS | `QLSVerification` | The principal fact of each selected comparison. Its companion values stay in the verification record |
 | QPE | `QPEVerification` | `component_error` and `overlap_deficit` |
 | Lanczos, FixedGCIM, ADAPT | `ProjectedVerificationOptions` | One fact per selected criterion ([projected quantities](#projected-quantities)) |
 | Lanczos, FixedGCIM | `EnergyShiftOptions` | The energy-shift discrepancy between two Results ([energy shift](#two-result-energy-shift)) |
@@ -60,7 +60,7 @@ When a Lanczos energy differs from its reference, the checks in [If the energy l
 
 ## Check against a tolerance {#check-against-a-tolerance}
 
-`result.assess` asks whether the error bounds attached to the result prove a tolerance. Continue the cell above:
+`result.assess` asks whether the error bounds attached to the result prove that its error is within a tolerance you choose. Continue the cell above:
 
 ```python
 assessment = result.assess(absolute_tolerance=0.01)
@@ -81,11 +81,11 @@ required failure probability is unsupported
 PASS
 ```
 
-The reference comparison measured a discrepancy of about .000821, but the bounds do not prove a total error of at most .01. No bound is available for the `native_floating_point` error source, and the method's algorithmic approximation bound, about .00931, is a numerical estimate rather than a proof, so it is listed in `unverified`. The sampling component passes because this run used exact readout ([sampling error by method](#sampling-error-by-method)).
+The reference comparison measured a discrepancy of about .000821, but the bounds do not prove a total error of at most .01. No bound is available for the `native_floating_point` error source, and the method's algorithmic approximation bound, about .00931, is a numerical estimate rather than a proof, so it is listed in `unverified`. The sampling component passes because this run used exact readout (`shots=None`), in which observations are obtained without shot sampling, although numerical errors can remain ([sampling error by method](#sampling-error-by-method)).
 
-`assess` works on the saved experiment and data. It does not measure data, change shots or rerun the method. A Result does not store an accuracy assessment. Each `ClaimAssessment` stores its own `accuracy`, the experiment and data it assessed and the evidence it used, and a later stricter criterion is a new assessment of the same experiment. The default confidence is .95.
+`assess` works on the saved experiment and data. It takes no new measurements, changes no shot count and does not rerun the method. A Result holds no accuracy assessment. Each `ClaimAssessment` records its own `accuracy`, the experiment and data it assessed and the evidence it used, and a later stricter criterion is a new assessment of the same experiment. The default confidence is .95.
 
-`Result.facts` holds the method's error evidence even when no criterion was selected, and an assessment reads those facts without changing the Result. A replacement `FramedFact` passed as `assess(facts=...)` carries its own `failure_probability`. Omitting it leaves the confidence unknown, even if the original model term had a known probability. Saved assessment facts keep the probability actually used, so changing the requested confidence cannot relabel older evidence.
+`Result.facts` holds the method's error evidence, the error bounds and reference values attached to the result, even when no accuracy criterion was requested, and an assessment reads those facts without changing the Result. A replacement `FramedFact` passed as `assess(facts=...)` carries its own `failure_probability`. Omitting it leaves the confidence unknown, even if the original model term had a known probability. Saved assessment facts keep the probability actually used, so changing the requested confidence cannot relabel older evidence.
 
 ### Read the assessment
 
@@ -112,7 +112,7 @@ The method's error model lists the error sources of its output, each already pro
 
 - **Bounds add by the triangle inequality.** This rests on an assumption that NWQLib does not check, namely that the Method has propagated every source into the output frame, so that the output error is the sum of the propagated source errors. Where each source bound then holds, the absolute output error is at most the sum of the bounds.
 - **Failure probabilities combine by the union bound**, which needs no independence. If bound k fails with probability at most `delta_k`, all bounds hold together with probability at least `1 - sum_k delta_k`, so PASS at a required confidence `c` needs `sum_k delta_k <= 1 - c`.
-- **The source list must be complete.** The Method that builds the model must list every error source its output needs, and NWQLib does not check that list for completeness. For example, a zero residual for the excited eigenpair of `diag(0,1)` does not establish ground identification. A missing required source stays unknown.
+- **The source list must be complete.** The Method that builds the model must list every error source its output needs, and NWQLib does not check that list for completeness. For example, a zero residual for the excited eigenpair of `diag(0,1)` does not establish that the eigenpair is the ground state. A missing required source stays unknown.
 - **A component is not the total.** `component="sampling"` assesses only the sampling contribution and does not establish total physical accuracy.
 
 ## Relative criteria {#relative-criteria}
@@ -172,19 +172,19 @@ If the relative scale is unavailable or zero, the threshold stays unavailable. P
 | SPE, RFE, and RWPE with at least one update | Unknown, because no fact bounds the draws the Method makes itself |
 | QLS, QHD | No sampling source, because these Methods list one only when shots are drawn. `component="sampling"` gives `NOT_APPLICABLE` rather than missing |
 
-Counts and provider estimates draw outcomes and never receive this zero.
+Counts and provider estimates come from random draws of outcomes, so their sampling error is never recorded as zero.
 
 The `sampling` source is the statistical error of an estimate that averages or emulates the outcomes of random draws. Measurement outcomes drawn by a backend are such draws, and so are the draws a Method makes itself. Classical RWPE emulates one measurement bit from each exact signal. RFE and SPE draw their powers or frequencies at random, and their finite average over the draws estimates a sum over the draw distribution. A draw that only selects an input, such as the reference state that Lanczos draws when `initial_state` is omitted, fixes the state that the Plan records. The estimate averages nothing over it, so its effect belongs to `ground_identification` and `projected_solve`.
 
-Exact readout means that every observation is an exact probability, Pauli value, amplitude or host scalar, as with `shots=None`, or that the Result needed no observation. With exact readout and an estimate that averages or emulates no random draw, sampling contributes zero. A Method whose error model lists a sampling source records that zero in `Result.facts` as a proved relation, with the saved observations as its evidence (`evidence.error_model.exact_readout_sampling`). The observations cannot show the draws a Method makes, so the Method states them when it requests the fact. Exact readouts are themselves checked against a binary64 roundoff window recorded in each preparation record. That window bounds roundoff in the saved values and is not a tolerance for scientific accuracy ([readout tolerance branches](error_evidence.md#readout-tolerance-branches)).
+Exact readout denotes probabilities, Pauli values, amplitudes or classically computed scalars obtained without shot sampling, as with `shots=None`, or a Result that needed no observation. Numerical errors can remain. With exact readout and an estimate that averages or emulates no random draw, sampling contributes zero. A Method whose error model lists a sampling source records that zero in `Result.facts` as a proved relation, with the saved observations as its evidence (`evidence.error_model.exact_readout_sampling`). The observations cannot show the draws a Method makes, so the Method states them when it requests the fact. Exact probabilities and Pauli expectations of a simulated circuit are checked against the binary64 roundoff window (probability window) recorded in their preparation record, and masses derived from saved amplitudes against that record's saved-state window when it was assessed. These windows bound roundoff only under their stated model and its exclusions. Classically computed scalars and reductions of saved states have no universal check of this kind and need numerical-error analysis specific to the routine or reduction. No window is a tolerance for scientific accuracy ([readout tolerance branches](error_evidence.md#readout-tolerance-branches)).
 
-A sampling bound that meets the threshold does not always PASS. The conditional Hoeffding radius of `ExpectationMethod` (doi:10.1080/01621459.1963.10500830) can meet the numerical threshold while `component="sampling"` remains INCONCLUSIVE, because its sampling-model assumption and its binary64 evaluation are not certified support, as the [saved-results example](saved_evidence.md#save-load-and-reanalyze) shows. The interval remains useful under its stated assumptions. A replacement bound you supply needs genuine evidence for the same frame, subject, parameter point and failure probability. Changing a record's kind or status, or deleting assumptions, does not establish those facts.
+A sampling bound that meets the threshold does not always PASS. The conditional Hoeffding radius of `ExpectationMethod` (doi:10.1080/01621459.1963.10500830) can meet the numerical threshold while `component="sampling"` remains INCONCLUSIVE, because neither its sampling-model assumption nor its binary64 evaluation is proved, as the [saved-results example](saved_evidence.md#save-load-and-reanalyze) shows. The interval remains useful under its stated assumptions. A replacement bound you supply needs genuine evidence for the same frame, subject, parameter point and failure probability. Changing a record's kind or status, or deleting assumptions, does not establish those facts.
 
 ## Record check verdicts {#evidence-and-receipts}
 
-Each call to `verify` produces one verification record (`VerificationReceipt`). It names its `Plan`, Result and construction, the options, an invocation ID, the reference and the numerical calls, and it holds every raw fact of the computation. The returned facts cite it as their source. Loading a saved record creates no new invocation and repeats no computation. `verify_projected`, `verify_energy_shift` and `verify_number_sector` return the same `(receipt, facts)` pair as `result.verify`.
+Each call to `verify` produces one verification record (`VerificationReceipt`). It names its `Plan`, Result and construction, the options, an identifier of this call, the reference and the numerical calls, and it holds every raw fact of the computation. The returned facts cite it as their source. Loading a saved record creates no new call identifier and repeats no computation. `verify_projected`, `verify_energy_shift` and `verify_number_sector` return the same `(receipt, facts)` pair as `result.verify`.
 
-Each check is a `CheckSpec`, which names the quantity, its mathematical domain, threshold, required data access, computation and stored output. A `Certificate` joins an accuracy assessment (`ClaimAssessment`) with the facts of completed checks and gives each check a status. Continue the cell of [the first section](#compare-with-a-classical-reference):
+Each check is a `CheckSpec`, which names the quantity, its mathematical domain and threshold, the data the check reads, its computation and what it saves. A `Certificate` joins an accuracy assessment (`ClaimAssessment`) with the facts of completed checks and gives each check a status. Continue the cell of [the first section](#compare-with-a-classical-reference):
 
 ```python
 from nwqlib.evidence import Certificate
@@ -209,7 +209,7 @@ INCONCLUSIVE
 | `NOT_RUN` | No fact was supplied |
 | `NOT_APPLICABLE` | The fact states that the check does not apply |
 
-A check PASS concerns only its own scalar threshold. The aggregate accuracy assessment can independently remain INCONCLUSIVE, as it does here. Attaching facts does not rerun verification, change the experiment or turn numerical evidence into a theorem. A negative value of an error or norm quantity is rejected by its domain. A roundoff adjustment of a value is made only with an explicit, scale-aware tolerance, keeps the raw value and is disclosed. See the [Accuracy and verification API](api/evidence.md).
+A check PASS concerns only its own scalar threshold. The aggregate accuracy assessment can independently remain INCONCLUSIVE, as it does here. Attaching facts does not rerun verification, change the experiment or turn numerical evidence into a theorem. A negative value of an error or norm quantity lies outside the quantity's domain and is rejected. A roundoff adjustment of a value is made only with an explicit, scale-aware tolerance, keeps the raw value and is reported. See the [Accuracy and verification API](api/evidence.md).
 
 ### Facts belong to the options that produced them
 
@@ -243,7 +243,7 @@ The certificate now holds both checks, and the discrepancy of about .000821 is a
 
 ## Projected quantities
 
-These checks apply to Lanczos, FixedGCIM and ADAPT and read values the Result already stores:
+These checks apply to Lanczos, FixedGCIM and ADAPT and read values the Result already holds:
 
 ```python
 from nwqlib import Eigenproblem, solve
@@ -277,16 +277,16 @@ projected.overlap_normalization 0 1
 
 For this diagonal one-qubit example every value is exactly zero.
 
-The Method's `projected_diagnostics()` supplies the stored Gram coordinates, their raw spectrum before filtering, the normalization defect and the projected backward error. The check keeps their original basis convention, including raw Chebyshev columns in Lanczos and normalized preparation columns in GCIM. A matrix or spectrum that the Result does not store is not reconstructed.
+The Method's `projected_diagnostics()` supplies the saved Gram coordinates, their raw spectrum before filtering, the normalization defect and the projected backward error. The check keeps their original basis convention, including raw Chebyshev columns in Lanczos and normalized preparation columns in GCiM. A matrix or spectrum that the Result does not hold is not reconstructed.
 
 | Criterion | Value |
 | --- | --- |
-| `gram_hermiticity` | The maximum absolute real or imaginary component of `S-S†` over the stored square coordinates. This does not establish agreement between independently measured opposite entries |
-| `gram_psd_deficit` | `max(0,-min(spectrum))` over the stored raw spectrum |
+| `gram_hermiticity` | The maximum absolute real or imaginary component of `S-S†` over the saved square coordinates. This does not establish agreement between independently measured opposite entries |
+| `gram_psd_deficit` | `max(0,-min(spectrum))` over the saved raw spectrum |
 | `projected_backward_error` | `||H c - E S c|| / ((||H||_F + |E| ||S||_F) ||c||)` for the lowest Ritz pair, with c its coefficient vector, on the pencil described below |
-| `overlap_normalization` | The stored coefficient normalization defect. The basis is not normalized again |
+| `overlap_normalization` | The saved coefficient normalization defect. The basis is not normalized again |
 
-The two families evaluate `projected_backward_error` on different pencils. Lanczos uses the normalized pencil (K, S) of its solve, with `K = (H - center S) / alpha` and the Ritz value `(E - center) / alpha`, where `center` and `alpha` are the midpoint and half-width of its spectral enclosure. Adding an identity term `c_I I` to a Pauli input leaves the value unchanged in exact arithmetic. For a matrix input it changes the value only through the roundoff budget of the Gershgorin frame, which grows with `|c_I|`. FixedGCIM and ADAPT use the physical pencil (H, S) in the Problem's energy unit, so adding `c_I I` changes `||H||_F` and `|E|` and therefore the value. Compare values of this criterion only within one family.
+The two families evaluate `projected_backward_error` on different pencils. Lanczos uses the normalized pencil (K, S) of its solve, with `K = (H - center S) / alpha` and the Ritz value `(E - center) / alpha`, where `center` and `alpha` are the midpoint and half-width of its spectral enclosure. Adding an identity term `c_I I` to a Pauli input leaves the value unchanged in exact arithmetic. For a matrix input it changes the value only through the roundoff budget of its Gershgorin enclosure, which grows with `|c_I|`. FixedGCIM and ADAPT use the physical pencil (H, S) in the Problem's energy unit, so adding `c_I I` changes `||H||_F` and `|E|` and therefore the value. Compare values of this criterion only within one family.
 
 These criteria concern the projected problem. They do not provide a full-state residual, ground-state identity or total physical-error guarantee.
 
@@ -313,7 +313,7 @@ print(value.numerator, value.denominator)
 0 1
 ```
 
-The check reads from the two Results their operator tables, basis, the content hashes of their preparations, subspace rule and order, sector, error frame and scalar values. It first establishes `H_shifted - H_baseline = cI` exactly for the recorded binary64 entries of the stored tables, where absent entries denote exact zeros, and compares the operators in the same basis and trial-space construction. Only then does it report the energy discrepancy `abs(E_shifted-E_baseline-c)`. Neither workload is executed again. An explicitly asserted relation remains an unresolved assumption, and numerical agreement does not prove that assertion. A valid operator relation does not imply zero discrepancy between independently rounded or sampled Ritz estimates.
+The check reads from the two Results their operator tables, basis, the content hashes of their preparations, subspace rule and order, sector, error frame and scalar values. It first establishes `H_shifted - H_baseline = cI` exactly for the recorded binary64 entries of the saved tables, where absent entries denote exact zeros, and compares the operators in the same basis and trial-space construction. Only then does it report the energy discrepancy `abs(E_shifted-E_baseline-c)`. Neither workload is executed again. An explicitly asserted relation remains an unresolved assumption, and numerical agreement does not prove that assertion. A valid operator relation does not imply zero discrepancy between independently rounded or sampled Ritz estimates.
 
 With the trial space held fixed, adding `cI` leaves the Gram matrix `S` unchanged and adds `cS` to the projected Hamiltonian, so every Ritz value shifts by exactly `c` in exact arithmetic. A Chebyshev trial space equals the power Krylov space of the operator (Kirby, Motta and Mezzacapo, arXiv 2208.00567v4, Eq. (14)), which the shift does not change. The table check requires matched preparations and subspace rule and order so that the two trial spaces are the same. The discrepancy is then zero in exact arithmetic. For exact or classical moments it measures floating-point departure, and for sampled moments it also contains the sampling difference between the two runs.
 
@@ -344,15 +344,15 @@ print(value.numerator, value.denominator)
 
 No measured shot of this run left the one-particle sector.
 
-The check supports QHD with the one-hot encoding and complete-register counts, which the solve above supplies. A binary-encoded QHD Result is refused, because every binary outcome encodes a grid point. Exact probabilities, Expectation parity bits and GCIM or Lanczos interferometer ancillas do not supply the data, and the check refuses them with a `ValueError`. Counts whose width differs from the complete register, or whose total differs from the returned shots, are rejected.
+The check supports QHD with the one-hot encoding and complete-register counts, which the solve above supplies. A binary-encoded QHD Result is refused, because every binary outcome encodes a grid point. Exact probabilities, Expectation parity bits and GCiM or Lanczos interferometer ancillas do not supply the data, and the check refuses them with a `ValueError`. Counts whose width differs from the complete register, or whose total differs from the returned shots, are rejected.
 
 The check reports observed Hamming-weight leakage, not a chemistry interpretation independent of encoding. A correct mean particle number is insufficient. Equal weight on `N=0` and `N=2` has mean one and complete leakage outside `N=1`. Zero observed leakage does not prove pure-state membership or zero underlying leakage.
 
 ## QHD grid minimum {#qhd-grid-minimum}
 
-`result.verify(checks=QHDVerification(comparisons=("grid_minimum",)))` evaluates the objective on the finite grid, including its constant term. The returned gap is the candidate's gap to the least of these freshly evaluated binary64 values. It is a diagnostic of that evaluated grid and does not by itself bound the gap for the exact mathematical objective. The verification record also reports `most_probable_gap`, the same gap for the most probable point, which the augmented-Lagrangian and refinement layers read by default ([QHD guide](algorithms/qhd.md#explicit-verification)).
+`result.verify(checks=QHDVerification(comparisons=("grid_minimum",)))` evaluates the objective on the finite grid, including its constant term. The returned gap is the gap of the QHD candidate, the observed valid grid point with positive weight and the least evaluated objective, to the least of these freshly evaluated binary64 values. It is a diagnostic of that evaluated grid and does not by itself bound the gap for the exact mathematical objective. The verification record also reports `most_probable_gap`, the same gap for the most probable point, which the augmented-Lagrangian layer and box refinement use by default ([QHD guide](algorithms/qhd.md#explicit-verification)).
 
-The comparison can also report `minimum_success_mass`, the observed weight of grid points whose evaluated objective differs from the evaluated minimum by at most `minimum_tolerance`. With zero tolerance, this counts ties in the evaluated values. The mass is computed from a kept state (`keep_state=True`), exact probabilities from the backend or counts. A classical Result without a kept state reports it as unavailable.
+The comparison can also report `minimum_success_mass`, the observed weight of grid points whose evaluated objective differs from the evaluated minimum by at most `minimum_tolerance`. With zero tolerance, this counts ties in the evaluated values. The mass is computed from a saved state (`keep_state=True`), exact probabilities from the backend or counts. A classical Result without a saved state reports it as unavailable.
 
 ## Cost of each check {#cost-of-each-check}
 
@@ -360,10 +360,10 @@ Checks run only when you call `result.verify` or one of the `verify_*` functions
 
 | Check | What each call computes |
 | --- | --- |
-| Projected, energy shift, number sector | Reads values the Results already store, so repeating it only scans those records. These checks do not measure data or run an eigensolver |
+| Projected, energy shift, number sector | Reads values the Results already hold, so repeating it only scans those records. These checks do not measure data or run an eigensolver |
 | ADAPT state checks | Rebuild the processed Ritz state, from saved vectors for a classical Result or by simulating the reference preparation and selected generators for a quantum-execution Result, then apply the residual or sector operators |
-| LCHS `expm`, `ivp`, `closed_form`, `ivp_closed_form` | A new classical reference solution, using a matrix exponential, an IVP integration or both, within the size and RHS limits in their options |
-| LCHS `selected_grid` | Evaluates the saved finite recipe again, except in the initial and zero reconstruction modes, where its reference is the initial vector |
+| LCHS `expm`, `ivp`, `closed_form`, `ivp_closed_form` | A new classical reference solution, using a matrix exponential, an IVP integration or both, within the size limits in their options and, for an IVP integration, the right-hand-side call limit `max_rhs_calls` |
+| LCHS `selected_grid` | Evaluates the saved finite sum again, with its nodes and product-formula steps, except in the initial and zero reconstruction modes, where its reference is the initial vector |
 | QLS | Solves the normalized original system once unless `spectral_domain` is its only comparison, and computes a missing spectrum only for `spectral_domain` |
 | QPE | Diagonalizes the dense target unless the Run already holds its eigensystem |
 | QHD `grid_minimum` | Evaluates the objective at every grid point |
@@ -371,4 +371,4 @@ Checks run only when you call `result.verify` or one of the `verify_*` functions
 
 Method-specific state, circuit, spectrum and reference checks have their own size limits in their options. Missing required data produces a limitation that names it, and no measurement is repeated to supply it.
 
-All exact scalar comparisons use the finite `ExactArithmetic.max_integer_bits` guard. It limits the size of integers in exact arithmetic, not process memory. Extra simulation, reference decompositions and large state operations run only for a check you select.
+All exact scalar comparisons use the finite limit `ExactArithmetic.max_integer_bits`. It limits the size of integers in exact arithmetic, not process memory. Extra simulation, reference decompositions and large state operations run only for a check you select.

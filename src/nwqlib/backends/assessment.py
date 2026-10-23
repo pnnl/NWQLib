@@ -1,18 +1,21 @@
-"""Read-only assessment of one selected point against supplied device facts.
+"""Read-only assessment of one planned point against a supplied device profile and allocation.
 
-The shared resource fold owns inventories. This module compares those facts to
-allocation stocks and evaluates only the finite models in profiles.py. It never
-selects a recipe, prepares a circuit, reads a payload or refreshes a profile.
+The shared resource estimate (``nwqlib.resources.estimate``) computes the
+counts. This module compares them with the memory granted by the allocation
+and evaluates only the finite models in profiles.py. It never chooses a
+recipe, prepares a circuit, reads saved circuit data or refreshes a profile.
 
-One assessment resolves the Plan's selected construction for one Realization,
-folds it once (``_select_workload``) and reports five independent axes.
-Applicability reads the planner's own recorded premise. Capability compares
-the selected artifact, readout, Program nodes and exact instructions with the
-stored target. Capacity compares folded byte peaks and lower requirements with
-each granted location's stock. Time evaluates the supplied linear time models
-on counted acquisition features. Accuracy is the Plan's ErrorModel assessment
-of the selected criterion. Capability, capacity and time all read the same
-fold. Each conclusion keeps its scope and assumptions, and an axis status
+One assessment takes the construction that the Plan chose for one
+Realization, estimates its resources once (``_select_workload``) and reports
+five independent axes. Applicability reads the applicability statement that
+the method recorded at planning. Capability compares the construction's
+artifact kind, readout, Program nodes and exact instructions with the target
+of the profile. Capacity compares the estimated byte peaks and lower
+requirements with the memory granted at each location. Time evaluates the
+supplied linear time models on the counted features of the measurement.
+Accuracy is the Plan's ErrorModel assessment of the chosen criterion.
+Capability, capacity and time all read the same resource estimate. Each
+conclusion keeps its scope and assumptions, and an axis status
 summarizes only its own details (``_outcome``), so a memory failure cannot
 hide a supported error bound. Time predictions stay conditional because they
 rest on supplied coefficients, so none becomes an execution guarantee.
@@ -118,7 +121,7 @@ class AssessmentDetail(Record):
 
     @model_validator(mode="after")
     def _fact_owner(self):
-        """Allow a planner statement or a resource fact, never both, since they are different quantities."""
+        """Allow a method statement or a resource fact, never both, since they are different quantities."""
         if self.statement is not None and self.fact is not None:
             raise ValueError("a detail keeps one scientific statement or one resource fact")
         return self
@@ -241,12 +244,12 @@ class AssessmentPoint(Record):
 
 
 class _Workload(NamedTuple):
-    """The single selected fold and features that every axis of one assessment reads.
+    """The resource estimate of the chosen construction and the features that every axis reads.
 
     readout_items is the output cardinality, or None when a register width is
     unresolved (shape_known is then False). features holds the counted time
     model inputs as Facts: invocations, sampled_shots, exact_evaluations,
-    logical_operations and, for amplitudes, return and publication sizes.
+    logical_operations and, for amplitudes, the returned and saved sizes.
     """
 
     construction: SelectedConstruction
@@ -337,31 +340,33 @@ def _count_fact(name, value, scope, subject, *, reason=None):
 
 
 def _select_workload(plan, realization, context, memo=None):
-    """Fold the Realization's selected construction once and derive its acquisition features.
+    """Estimate the resources of the Realization's chosen construction once and derive its features.
 
-    ``memo`` is the caller's fold memo (``resources.estimate``): points of one
-    ``estimate_plan`` call that select an equal construction under the same
-    context share one fold, including the base fold when a point selects the
-    Plan's own construction.
+    ``memo`` is the caller's cache of resource estimates
+    (``resources.estimate``). Points of one ``estimate_plan`` call that choose
+    an equal construction under the same context share one estimate,
+    including the estimate of the Plan's own construction when a point
+    chooses it.
 
-    The construction is the one native preparation would use for this
-    Realization, so the forecast and a later receipt describe the same
-    circuit. Features depend on the Experiment's shape.
+    The construction is the one that circuit preparation would use for this
+    Realization, so the forecast and a later preparation record describe the
+    same circuit. Features depend on the Experiment's shape.
 
     - A direct observation is one invocation. Its sampled shots are the
       requested shots, unknown for a provider-managed estimate, and it has one
-      exact evaluation for an exact readout. The raw Program fold carries no
-      acquisition population for a direct observation, so these counts come
-      from the observation itself.
-    - A measurement batch takes shots and exact evaluations from the fold,
-      with the fold's own interpretation and assumptions. It counts as one
+      exact evaluation for an exact readout. The resource total of the
+      Program carries no measurement counts for a direct observation, so these
+      counts come from the observation itself.
+    - A measurement batch takes shots and exact evaluations from the resource
+      estimate, with its interpretation and assumptions. It counts as one
       invocation only when no other measurement batch is reachable from it
-      and its population resolves to one request (positive counts, one
+      and its counts resolve to one request (positive counts, one
       grouped exact evaluation or one estimate repetition). Otherwise the
       invocation count stays unknown rather than a guessed job count.
 
-    logical_operations always comes from the fold. Amplitude readouts add the
-    native return size and the stored vector size. Readout cardinality is
+    logical_operations always comes from the resource estimate. Amplitude
+    readouts add the size of the vector the backend returns and of the saved
+    vector. Readout cardinality is
     checked against the Program's integer-size limit by bit length before
     ``readout_shape`` forms it. Unresolved register widths leave the readout
     shape unknown instead of guessing.
@@ -561,18 +566,18 @@ def _select_workload(plan, realization, context, memo=None):
 
 
 def _assess_applicability(plan, context):
-    """Evaluate associated planner premises separately from unresolved assumptions and descriptor
-    matching.
+    """Evaluate the method's recorded applicability statement separately from unresolved assumptions
+    and descriptor matching.
 
     Exactly one framed ``scientific_applicability`` statement must be present,
     and its evidence must name this Method's source, this Problem and this
     construction. A Method descriptor that merely matches the Problem type
-    supplies no mathematical premise, so without such a receipt the premise
-    detail is unknown. Plan assumptions and requirements add a separate
+    supplies no mathematical assumption, so without such a statement the
+    applicability detail is unknown. Plan assumptions and requirements add a separate
     conditional detail. The builtin Methods record no such statement, so their
     axis is unknown, or conditional when the Plan lists assumptions or
     requirements. A feasible axis needs a proved-relation statement without
-    assumptions, an admitted Program, a True predicate value and no Plan
+    assumptions, a Program that passed validation, a True predicate value and no Plan
     assumptions or requirements. Such a statement with a False value makes
     the axis infeasible.
     """
@@ -665,13 +670,13 @@ def _assess_applicability(plan, context):
 
 def _assess_capability(workload, profile, at):
 
-    """Compare the selected workload with the fresh supplied target subset and transform-aware
-    instruction widths.
+    """Compare the chosen workload with the subsets that the supplied target declares while it is
+    valid, and with instruction widths that include added controls.
 
     A coarse capability such as STATEVECTOR does not certify a readout,
     Program node or instruction that the target does not list, and an
-    undeclared subset is unknown rather than supported. Each selected
-    implementation must be covered exactly, or through every primitive of its
+    undeclared subset is unknown rather than supported. Each implementation
+    that the construction uses must be covered exactly, or through every primitive of its
     decomposition at the added control width. An expired target
     specification makes these comparisons unknown, except that an unsupported
     instruction on a potential control-flow path is reported as conditional.
@@ -822,14 +827,15 @@ def _assess_capability(workload, profile, at):
 
 
 def _capacity_detail(quantity: ResourceQuantity, limit, allocation, context, at, *, complete):
-    """Compare a scoped peak/subtotal, not an upper envelope to a lower bound.
+    """Compare a scoped peak or subtotal with a granted capacity, never an upper bound as a lower one.
 
-    An exact byte requirement above the stock proves infeasibility even when
-    other workspace is unknown. Feasibility needs a complete peak (``complete``)
-    that is exact or an upper bound, fits the stock and, for per-acquisition
-    reuse, has the serial schedule it requires. An upper envelope above the
-    stock only makes the comparison conditional, because an envelope is not a
-    lower requirement.
+    An exact byte requirement above the granted capacity proves infeasibility
+    even when other workspace is unknown. Feasibility needs a complete peak
+    (``complete``) that is exact or an upper bound, fits the granted capacity
+    and, for workspace reused across measurements, has the serial schedule it
+    requires. An upper bound above the granted capacity only makes the
+    comparison conditional, because an upper bound is not a lower
+    requirement.
     """
     value = _integer(quantity)
     status, reason = (
@@ -907,12 +913,12 @@ def _capacity_detail(quantity: ResourceQuantity, limit, allocation, context, at,
 
 
 def _state_body_detail(workload, profile, allocation, stocks, at):
-    """Compare the state-body lower memory requirement with its location's memory stock.
+    """Compare the lower memory requirement of the state alone with the memory granted at its location.
 
     Powers are compared by bit length before any is formed. An unpartitioned
-    statevector body on q qubits needs ``b * 2**q`` bytes,
+    statevector on q qubits needs ``b * 2**q`` bytes,
     and a density matrix ``b * 4**q``, with b = 16 for complex128 and 8 for
-    complex64. This is a necessary lower requirement for the body alone, not
+    complex64. This is a necessary lower requirement for the state alone, not
     a sufficient memory estimate for the simulator. It applies only to one
     exact simultaneous width on a single-device allocation. When the total
     width is not exact, the exact system-register width still gives a valid
@@ -1038,32 +1044,33 @@ def _state_body_detail(workload, profile, allocation, stocks, at):
 
 
 def _assess_capacity(workload, profile, allocation, at):
-    """Compare folded byte requirements with granted per-location stocks.
+    """Compare the estimated byte requirements with the memory granted at each location.
 
-    Stocks are never pooled across locations. A 10-GiB peak at one location
-    is compared with that location's 8-GiB stock, never with the 16-GiB total
-    of two devices. The comparisons, each kept as its own detail:
+    Granted memory is never pooled across locations. A 10-GiB peak at one
+    location is compared with the 8 GiB granted there, never with the 16-GiB
+    total of two devices. The comparisons, each kept as its own detail:
 
     - The allocation must belong to the profile's configuration, and any
-      capacity declared in the fold context must be one of the granted Limit
-      records. Otherwise the axis reports that mismatch and leaves every
-      stock unknown.
-    - Each execution stock is compared with the matching folded peak. When
-      the total memory peak is unknown, the known subtotal is compared too,
-      because it can still prove a failure.
-    - A memory population without a matching stock is reported as unknown.
+      capacity declared in the context of the resource estimate must be one of
+      the granted Limit records. Otherwise the axis reports that mismatch and
+      leaves every granted capacity unknown.
+    - Each granted execution capacity is compared with the matching estimated
+      peak. When the total memory peak is unknown, the known subtotal is
+      compared too, because it can still prove a failure.
+    - A memory quantity without a matching granted capacity is reported as
+      unknown.
     - Exact resident input, analysis, I/O, materialization and stored bytes
-      are simultaneous for the whole workload, so each alone can refute a
-      stock regardless of the batch schedule. Declared resident bytes are
-      subtracted from the remaining stock without forming a possibly oversized
-      sum.
-    - A grant larger than the profile's matching hard stock is infeasible.
-    - A width above the target's qubit ceiling is infeasible when exact.
+      are simultaneous for the whole workload, so each alone can show that a
+      granted capacity is too small, regardless of the batch schedule. Declared
+      resident bytes are subtracted from the remaining granted capacity
+      without forming a possibly oversized sum.
+    - A grant larger than the profile's matching hard limit is infeasible.
+    - A width above the target's maximum qubit count is infeasible when exact.
     - For any representation other than "classical", the state-body lower
       requirement of ``_state_body_detail`` is added.
 
-    Every supplied stock that no comparison covers is listed as unknown, so a
-    missing comparison is visible rather than read as a fit.
+    Every granted capacity that no comparison covers is listed as unknown, so
+    a missing comparison is visible rather than read as a fit.
     """
 
     resources = workload.estimate
@@ -1262,12 +1269,13 @@ def _model_reasons(model, workload, profile, allocation, at, runtime):
 
     A time model is evaluated only inside the configuration, allocation,
     runtime, acquisition kind, resource basis, readout, population, parameter
-    point, width, operation count, non-gate populations, shot and evaluation
-    counts and operation mix it was supplied for. An unavailable feature is
-    outside the domain, never zero. An upper-bound estimate of a non-gate
-    population, and any concrete shot or evaluation count, is admitted when it
-    lies inside the maximum. ``_predict_time`` separately refuses a batch
-    envelope that a nonzero coefficient would multiply. All reasons are kept so the
+    point, width, operation count, counts of non-gate operations, shot and
+    evaluation counts and operation mix it was supplied for. An unavailable
+    feature is outside the domain, never zero. An upper-bound estimate of a
+    non-gate count, and any concrete shot or evaluation count, is accepted
+    when it lies inside the maximum. ``_predict_time`` separately refuses a
+    batch count known only as an upper bound that a nonzero coefficient would
+    multiply. All reasons are kept so the
     unavailable prediction explains itself. An empty list permits evaluation.
     """
 
@@ -1379,14 +1387,14 @@ def _model_reasons(model, workload, profile, allocation, at, runtime):
 
 def _predict_time(model: TimeModel, workload, profile, allocation, at, runtime, point_id):
 
-    """Evaluate an applicable supplied time model on exact selected workload features.
+    """Evaluate an applicable supplied time model on the exact features of the chosen workload.
 
     The prediction is ``sum(c_f * x_f)`` seconds over
     the model's nonzero coefficients c_f and the exact features x_f. A supplied
     residual interval gives ``[max(0, s + lower), s + upper]`` around the
     central value s, keeping the interval's kind and coverage unchanged. An
     unmet domain condition, a missing required feature, a batch feature that
-    is only an envelope, or binary64 overflow leaves the prediction
+    is only an upper bound, or binary64 overflow leaves the prediction
     unavailable with its reasons instead of a clipped number.
     """
     reasons = _model_reasons(model, workload, profile, allocation, at, runtime)
@@ -1458,7 +1466,7 @@ def _predict_time(model: TimeModel, workload, profile, allocation, at, runtime, 
 
 def _assess_time(workload, profile, allocation, at, *, runtime, point_id):
 
-    """Compare scoped model predictions and actual acquisition counts with matching supplied
+    """Compare scoped model predictions and the counts of the measurement with matching supplied
     limits.
 
     Every model prediction appears as a conditional or unknown detail, never
@@ -1564,7 +1572,7 @@ def _assess_time(workload, profile, allocation, at, *, runtime, point_id):
 
 
 def _assessment_time(value):
-    """Read the clock once for a new assessment. Stored views never call this."""
+    """Read the clock once for a new assessment. Reading a saved assessment never calls this."""
     value = datetime.now(timezone.utc) if value is None else value
     if not isinstance(value, datetime) or value.tzinfo is None or value.utcoffset() is None:
         raise ValueError("assessment time must be timezone-aware")
@@ -1572,7 +1580,7 @@ def _assessment_time(value):
 
 
 def _assessment_inputs(plan, realization, profile, allocation, context, runtime, assessed_at, memo=None):
-    """Resolve one real selected point and use the existing contextual fold (``memo``: ``_select_workload``)."""
+    """Resolve one point and reuse the cached resource estimate for its context (``memo``, see ``_select_workload``)."""
     if not isinstance(plan, Plan) or not isinstance(realization, Realization):
         raise TypeError("assessment requires the actual Plan and its Realization")
     if not isinstance(profile, DeviceProfile) or not isinstance(allocation, Allocation):
@@ -1652,8 +1660,8 @@ class ProfileAssessment(Record):
     summarizes its own details only, so a memory failure cannot hide a supported
     error bound. No conclusion grants permission to run, configures a backend or
     changes the computation. A sum of error bounds above the threshold
-    leaves `error`
-    `INCONCLUSIVE` and is not evidence that the error exceeds the tolerance.
+    leaves `error` `INCONCLUSIVE` and is not evidence that the error exceeds
+    the tolerance.
 
     Attributes:
         point: Content hashes of the inputs: problem, Plan, point, base and
@@ -1669,7 +1677,7 @@ class ProfileAssessment(Record):
             requirements.
         capability: Whether the target supports the point's circuit form,
             [Program](../glossary.md#program) nodes, readout, instructions,
-            [host kernel](../glossary.md#host-kernel) and control or adjoint use.
+            [classical routine](../glossary.md#host-kernel) and control or adjoint use.
         capacity: Whether each granted location holds the point's simultaneous
             memory and storage peaks and its known lower requirements.
         time: The time-model predictions and the matching time limits.
@@ -1700,8 +1708,7 @@ class ProfileAssessment(Record):
 
     @model_validator(mode="after")
     def _identities(self):
-        """Require all five axes, predictions and error summaries to refer to the same selected
-        point.
+        """Require all five axes, predictions and error summaries to refer to the same point.
         """
         if (
             self.resources.content_id != self.point.resource_estimate_id
@@ -1755,7 +1762,7 @@ class ProfileAssessment(Record):
         return self
 
     def validate_context(self, plan, profile, allocation, runtime=None, *, frame=None):
-        """Match stored identities and source declarations without re-evaluation.
+        """Check the recorded content hashes and source declarations without evaluating anything again.
 
         ``frame`` is ``ErrorFrame.from_output(plan.problem, plan.output)`` when
         the caller already formed it for several assessments of one Plan.
@@ -1792,9 +1799,10 @@ class ProfileAssessment(Record):
         return self
 
     def validate_prepared(self, plan, realization, receipt, *, observation=None):
-        """Associate a saved forecast with its actual acquisition, never reassess.
+        """Associate a saved forecast with the measurement it forecast, never assess again.
 
-        Only identities and receipt-specific fields are compared. The
+        Only content hashes and the fields specific to the preparation record are
+        compared. The
         Plan-level checks, the error claim and its frame included, are
         ``validate_context``'s. ``PlanEstimate.validate_plan`` runs them once
         per assessment, and ``PlanEstimate.assessment_for`` runs that once per
@@ -1869,7 +1877,7 @@ def assess(
         accuracy (Accuracy | None): Accuracy criterion to assess. `None` uses the
             Plan's `selection_accuracy`, and with neither the accuracy axis is
             unknown. Another criterion changes only this assessment, never the
-            Plan's shots or selection.
+            Plan's shots or choices.
         facts (tuple[FramedFact, ...]): Supplied error facts, passed unchanged to
             the Plan's error model. A fact for one point cannot cover another.
         reference (TargetReference | None): Supplied reference value, passed
@@ -1901,7 +1909,7 @@ def _assess(plan, realization, *, profile, allocation, context, runtime, assesse
 
     ``assess`` validates the result, and ``estimate_plan`` validates each
     assessment once through ``PlanEstimate.validate_plan``. ``memo`` is the
-    caller's fold memo (``resources.estimate``).
+    caller's cache of resource estimates (``resources.estimate``).
     """
     if not isinstance(profile, DeviceProfile):
         raise TypeError("assessment requires a supplied DeviceProfile")
@@ -2001,10 +2009,11 @@ class PlanEstimate(Record):
     def _sources(self):
         """Tie every assessment to this estimate and index it by Realization.
 
-        Each assessment must name this Plan, its base construction, the stored
-        profile and allocation, the one assessment time and the same resource
-        context. At most one assessment exists per Realization, so
-        ``assessment_for`` finds a receipt's forecast by a dictionary lookup.
+        Each assessment must name this Plan, its base construction, the profile
+        and allocation of this estimate, the one assessment time and the same
+        resource context. At most one assessment exists per Realization, so
+        ``assessment_for`` finds the forecast of a preparation record by a
+        dictionary lookup.
         """
         if self.assessments and (self.profile is None or self.allocation is None):
             raise ValueError("device assessments require their actual profile and Allocation")
@@ -2027,7 +2036,7 @@ class PlanEstimate(Record):
         return self
 
     def validate_plan(self, plan):
-        """Check that every stored assessment belongs to this Plan and carries no invented runtime seed."""
+        """Check that every assessment of this estimate belongs to this Plan and carries no invented runtime seed."""
         if (
             self.plan_id != plan.content_id
             or self.resources.construction_id != plan.construction.content_id
@@ -2042,7 +2051,7 @@ class PlanEstimate(Record):
         return self
 
     def assessment_for(self, plan, receipt):
-        """Return the stored forecast of a prepared circuit's point, or None, without evaluating anything.
+        """Return this estimate's forecast for a prepared circuit's point, or None, without evaluating anything.
 
         The forecast is checked against the Plan once per estimate, and against the
         preparation record each time.
@@ -2077,7 +2086,7 @@ class PlanEstimate(Record):
 
 
 def _forecast_rows(points, profile, max_assessments):
-    """Bound the actual assessment and prediction records before model evaluation."""
+    """Count the assessment and prediction records against the limit before any model is evaluated."""
     if type(max_assessments) is not int or max_assessments < 1:
         raise ValueError("max_assessments must be a positive integer")
     required = points * (1 + len(profile.models))
@@ -2091,10 +2100,10 @@ def _forecast_rows(points, profile, max_assessments):
 def _profile_points(plan):
     """Resolve the Plan's Experiments whose next parameter point is already fixed.
 
-    A controller's future point or an unexpanded range axis is listed as
-    unpredicted instead of being guessed. A point with remaining symbolic
-    parameters is assessed but also listed, because its forecast does not
-    cover a later bound acquisition.
+    A future point of an adaptive method or an unexpanded range axis is
+    listed as unpredicted instead of being guessed. A point with remaining
+    symbolic parameters is assessed but also listed, because its forecast does
+    not cover a later measurement with bound parameters.
     """
     points = []
     unpredicted = []
@@ -2141,20 +2150,21 @@ def estimate_plan(
     max_assessments=4096,
     profile_points=None,
 ):
-    """Read the whole selected body plus supplied device models, never execute.
+    """Assess the chosen constructions of the whole Plan with the supplied device models, never execute.
 
-    max_assessments counts actual point-assessment and model-prediction rows.
+    max_assessments counts the point-assessment and model-prediction rows.
     The entire requested expansion is checked before the first model evaluation.
-    Profile-free logical folding is independent of this forecast-output cap.
+    The logical resource estimate without a profile is independent of this cap.
     Its default of 4096 rows is an output-size control registered in
     docs/ENGINEERING_CONSTANTS.md ("Resource forecast and explicit inspection
     bounds").
 
-    One fold memo (``resources.estimate``) lives for this call: the base
-    construction folds first, and every point whose selected construction and
-    context equal an already folded pair reuses that fold, so each distinct
-    pair folds once. ``profile_points`` is the ``(points, unpredicted)`` pair
-    that ``_profile_points(plan)`` returned to a caller that already needed it
+    One cache of resource estimates (``resources.estimate``) lives for this
+    call. The Plan's own construction is estimated first, and every point
+    whose chosen construction and context equal an already estimated pair
+    reuses that estimate, so each distinct pair is estimated once.
+    ``profile_points`` is the ``(points, unpredicted)`` pair that
+    ``_profile_points(plan)`` returned to a caller that already needed it
     (``scientist.compare``). None evaluates it here.
     """
     if not isinstance(plan, Plan):

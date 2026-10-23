@@ -1,4 +1,4 @@
-"""Explicit bounded QASM export of a supplied native circuit."""
+"""Export of a supplied Qiskit circuit to OpenQASM, with limits on its size."""
 
 from __future__ import annotations
 

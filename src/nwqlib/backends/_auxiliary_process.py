@@ -1,7 +1,8 @@
-"""Bounded local process transport for explicit compiler/estimator operations.
+"""Run the NWQEC compiler or the QDK resource estimator in a local child process with limits.
 
-The file and capture limits bound transport/publication, not a native library's
-internal allocations. Each operation owns its finite scientific workload.
+The file and capture limits bound the data passed between the processes and the
+returned result, not the internal allocations of a compiled library. The
+parameters of each operation bound its finite scientific workload.
 """
 
 from __future__ import annotations
@@ -27,7 +28,7 @@ def run_auxiliary(operation, request, *, max_bytes, timeout_seconds, files=()):
     """Run one explicit operation, without retries or unbounded pipe capture.
 
     ``files`` holds ``(name, bytes)`` inputs that the parent writes into the
-    child's directory beside ``request.json`` (NWQEC's ``body.qasm``), charged
+    child's directory beside ``request.json`` (NWQEC's ``body.qasm``), counted
     with the request against one ``max_bytes`` allowance, so a large text
     input is written once as it is and is not escaped into the JSON request.
 
@@ -36,7 +37,7 @@ def run_auxiliary(operation, request, *, max_bytes, timeout_seconds, files=()):
     a wall-clock deadline, cap the captured diagnostics and kill the child,
     none of which is possible for an in-process native call. The child writes
     its result file only after the operation succeeds, and the parent reads it
-    only after a zero exit status, so a partial result is never published.
+    only after a zero exit status, so a partial result is never returned.
     QDK telemetry is switched off in the child environment.
 
     The parent first checks that the operation's package is installed, so a
@@ -112,9 +113,9 @@ def run_auxiliary(operation, request, *, max_bytes, timeout_seconds, files=()):
 def _compile_nwqec(request, directory):
     """Use the released compiler once at the requested output stage.
 
-    The version is pinned because the stored record describes stage semantics
-    (count-only synthesis counts before fusion, final artifact after fusion)
-    and effective options that were checked for NWQEC 0.1.2 only.
+    The version is pinned because the saved record describes what each stage
+    returns (count-only synthesis counts before fusion, the final circuit after
+    fusion) and effective options that were checked for NWQEC 0.1.2 only.
     """
     from nwqlib._optional import optional_import
 

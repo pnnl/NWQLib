@@ -1,4 +1,4 @@
-"""Small text/data sections kept by scientific diagnostic formatters."""
+"""Short sections of text and data that diagnostic formatting functions return."""
 
 from dataclasses import dataclass, field
 from typing import Any, Mapping
@@ -13,9 +13,9 @@ class ReportSection(FieldSerializedRecord):
     Build it with keyword arguments, for example
     `ReportSection(title="Reference", lines=("E_ref = -1.0",), data={"E_ref": -1.0})`.
     `title` is required. In the [GCiM guide](../algorithms/gcim.md),
-    `chemistry_reference_report_section` returns one to show a stored
-    reference panel next to an obtained energy. `Result.report()` does not
-    include such a section, so print or store it beside the report.
+    `chemistry_reference_report_section` returns one to show the saved panel
+    of chemistry reference energies next to a computed energy. `Result.report()`
+    does not include such a section, so print or save it beside the report.
 
     Args:
         title: Section title.

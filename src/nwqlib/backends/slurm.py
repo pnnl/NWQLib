@@ -1,7 +1,9 @@
-"""Selected native NWQ-Sim target and bounded Slurm scheduler control.
+"""NWQ-Sim runs as Slurm batch jobs, with scheduler commands under byte and time limits.
 
-The backend reuses native preparation/decoding and common journal publication.
-The launcher owns only scheduler/file control, with injectable bounded transport.
+The backend uses the NWQ-Sim adapter's preparation and result decoding, and the
+shared execution code saves the results in the run log. The launcher handles
+only scheduler commands and files, through a replaceable command transport with
+limits.
 """
 
 from dataclasses import dataclass
@@ -101,21 +103,21 @@ class SlurmTransport:
 
 
 def _token(value):
-    """Admit one literal option token, so a profile value cannot inject another directive."""
+    """Accept only one literal option token, so a profile value cannot inject another directive."""
     if not re.fullmatch(r"[A-Za-z0-9_./,:+=@%-]+", value):
         raise ValueError("Slurm option must be one literal token without control characters")
     return value
 
 
 def _submission(value):
-    """Admit only a canonical UUID, since it names the spool directory and the job."""
+    """Accept only a canonical UUID, since it names the spool directory and the job."""
     if str(UUID(value)) != value:
         raise ValueError("Slurm submission requires its original canonical UUID")
     return value
 
 
 class SlurmProfile(Record):
-    """Slurm site settings for an NWQ-Sim runner: allocation, runner, binding and shared pending-job directory.
+    """Slurm site settings for an NWQ-Sim runner: allocation, runner, binding and shared result directory.
 
     Build it with keyword arguments, for example
     `SlurmProfile(cluster=..., account=..., walltime="00:05:00", nodes=1, ranks_per_node=1, threads=1, executable=..., build_identity=..., spool=...)`,
@@ -185,11 +187,11 @@ class SlurmProfile(Record):
 
     @model_validator(mode="after")
     def _validate(self):
-        """Admit only values that render into unambiguous batch directives.
+        """Accept only values that render into unambiguous batch directives.
 
-        - The backend/method pair must be a route that ``nwqsim._route``
-          admits. ``admit_execution`` checks the rank count separately.
-        - The cluster is one explicit name, because the locator and every
+        - The backend/method pair must be a combination that ``nwqsim._route``
+          accepts. ``admit_execution`` checks the rank count separately.
+        - The cluster is one explicit name, because the job locator and every
           ``--clusters`` query name exactly one cluster. Slurm reads ``all``
           or a comma list as several clusters.
         - Every option value is one literal token (``_token``), so it cannot
@@ -221,7 +223,7 @@ class SlurmProfile(Record):
         return self
 
     def admit_execution(self):
-        """Check the total rank count and GPU request against the selected native route.
+        """Check the total rank count and GPU request against the configured NWQ-Sim backend/method pair.
 
         GPU routes are single-process with exactly one GPU per task. CPU and MPI
         routes must not hold a GPU allocation they cannot use.
@@ -306,9 +308,9 @@ class SlurmLauncher:
     ``locator.instance`` holds the NWQLib submission UUID, and
     ``locator.cluster`` and ``locator.account`` route scheduler commands. The
     serialized profile names the original spool. Each script and input write
-    and each scheduler response is admitted through ``run``.
+    and each scheduler response is checked through ``run``.
     ``max_response_bytes`` caps the combined stdout and stderr of each command.
-    An injected transport must enforce that cap during capture, must not retry,
+    A replacement transport must enforce that cap during capture, must not retry,
     and must remove inherited ``SBATCH_*`` variables, which otherwise override
     the script's directives, including allocation and array options. The
     default ``SlurmTransport`` does all three and also removes ``SRUN_*``
@@ -316,7 +318,7 @@ class SlurmLauncher:
     """
 
     def __init__(self, profile, *, max_response_bytes, timeout_seconds=None, transport=None):
-        """Bind one profile and a response cap. ``transport`` replaces the CLI, for example in tests."""
+        """Hold one profile and a response cap. ``transport`` replaces the CLI, for example in tests."""
         if not isinstance(profile, SlurmProfile):
             raise TypeError("profile must be a SlurmProfile")
         if type(max_response_bytes) is not int or max_response_bytes <= 0:
@@ -326,7 +328,7 @@ class SlurmLauncher:
         self.max_response_bytes = max_response_bytes
 
     def _command(self, argv, run):
-        """Admit the response allowance through the Run, then run one CLI command."""
+        """Check the response allowance through the Run, then run one CLI command."""
         run.check_data(self.max_response_bytes)
         output = self.transport(tuple(argv), max_output_bytes=self.max_response_bytes)
         if not isinstance(output, str) or len(output.encode()) > self.max_response_bytes:
@@ -334,7 +336,7 @@ class SlurmLauncher:
         return output
 
     def _locator(self, job_id, submission_id):
-        """Build the locator of one plain Slurm job with a positive uint32 ID.
+        """Build the job locator of one plain Slurm job with a positive uint32 ID.
 
         The canonical decimal ID has at most 10 ASCII digits and is at most
         4294967295. Array tasks and heterogeneous components identify parts of
@@ -346,12 +348,12 @@ class SlurmLauncher:
                           account=self.profile.account, instance=_submission(submission_id))
 
     def _directory(self, locator):
-        """Spool directory of the original job, after checking that the locator belongs to this profile.
+        """Spool directory of the original job, after checking that the job locator belongs to this profile.
 
-        The directory is named by the submission UUID that the locator keeps in
-        ``instance``. The provider, cluster, account, job id and UUID form are
-        checked before that path is built, so a foreign locator reaches no file
-        or scheduler command.
+        The directory is named by the submission UUID that the job locator keeps
+        in ``instance``. The provider, cluster, account, job id and UUID form are
+        checked before that path is built, so a job locator of another profile
+        reaches no file or scheduler command.
         """
         if (locator.provider != "slurm" or locator.cluster != self.profile.cluster
                 or locator.account != self.profile.account):
@@ -362,24 +364,24 @@ class SlurmLauncher:
     def admit(self, payload, *, max_input_bytes):
         """Run every launch check that depends only on this profile and the payload.
 
-        These checks read no Run and write nothing, so the common owner runs
-        them before it commits the submission intent (through
+        These checks read no Run and write nothing, so the shared execution code
+        runs them before it saves the submission intent (through
         ``NWQSimSlurmBackend.admit_batch``), and a refusal leaves no submission,
-        event, exposure or output reservation. ``launch`` repeats them for a
+        log entry, exposure or output bytes set aside. ``launch`` repeats them for a
         direct caller.
 
         The response floor requires max_response_bytes to cover ten job-ID
         digits, a separator, the profile's ASCII cluster name and one trailing
-        newline. This floor admits the canonical acknowledgement
+        newline. This floor covers the canonical acknowledgement
         of any supported job ID. It does not bound later status or accounting rows.
 
-        ``_locator`` admits one positive uint32 job ID, with at most ten decimal
-        digits, and ``SlurmProfile`` admits a single ASCII cluster name. Slurm's
+        ``_locator`` accepts one positive uint32 job ID, with at most ten decimal
+        digits, and ``SlurmProfile`` accepts a single ASCII cluster name. Slurm's
         parsable output (https://slurm.schedmd.com/sbatch.html#OPT_parsable) is
         the job ID and, when present, the cluster separated by ``;``. For the
         canonical Unix acknowledgement with at most one trailing LF, the maximum
         encoded length is B_ack = 10 + 1 + |cluster|_ASCII + 1 = 12 + |cluster|_ASCII.
-        This is the smallest uniform allowance for every admitted ID and the
+        This is the smallest uniform allowance for every accepted ID and the
         known cluster in that reply form, not the actual length of every
         acknowledgement. The cap applies before ``.strip()``, so the newline
         counts. The floor assumes the canonical sbatch line with no other
@@ -413,7 +415,7 @@ class SlurmLauncher:
     def launch(self, payload, *, submission_id, max_input_bytes, run):
         """Run ``admit``, then write the spool files once and call ``sbatch --parsable`` once.
 
-        The caller has already persisted the intent. If the acknowledgement is
+        The caller has already saved the intent. If the acknowledgement is
         lost, the files stay in place and ``reconcile`` searches for the job
         name. A repeated launch with the same UUID fails at directory creation,
         before any scheduler call.
@@ -441,11 +443,11 @@ class SlurmLauncher:
         return self._locator(parts[0], submission_id)
 
     def refresh(self, locator, *, run):
-        """Observe the original job with one ``squeue`` call, and ``sacct`` only when it left the queue.
+        """Query the original job with one ``squeue`` call, and ``sacct`` only when it left the queue.
 
         Scheduler state, exit code and result-file visibility are reported
         separately. None of them alone establishes scientific completion,
-        which the native result decoder decides.
+        which the NWQ-Sim result decoder decides.
         """
         directory = self._directory(locator)
         route = [f"--clusters={locator.cluster}", f"--jobs={locator.job_id}"]
@@ -504,7 +506,7 @@ class NWQSimSlurmBackend(Record):
     `NWQSimSlurmBackend(profile=..., accounting_since=..., accounting_until=..., max_input_bytes=..., max_output_bytes=..., max_buffer_bytes=..., max_response_bytes=..., timeout_seconds=...)`,
     and pass it as `backend=` to [`prepare`][nwqlib.scientist.prepare]. Every
     argument except `optimization_level` is required. The profile holds the
-    runner, its build and the pending-job directory (`spool`). Submission calls `sbatch` once,
+    runner, its build and the shared result directory (`spool`). Submission calls `sbatch` once,
     and a job whose acknowledgement was lost is found again by its job name in
     Slurm accounting within the configured time window. NWQLib has tested this
     backend only offline, with scheduler and protocol checks, and has not tested
@@ -524,8 +526,8 @@ class NWQSimSlurmBackend(Record):
         max_input_bytes: Required. Positive. Limit in bytes on each request file,
             as in [`NWQSimBackend`][nwqlib.backends.nwqsim.NWQSimBackend].
         max_output_bytes: Required. Positive. Limit in bytes on each result file.
-        max_buffer_bytes: Required. Positive. Limit in bytes on the runner's known
-            arrays per process, as in `NWQSimBackend`.
+        max_buffer_bytes: Required. Positive. Limit in bytes on the runner's arrays
+            of known size per process, as in `NWQSimBackend`.
         max_response_bytes: Required. Positive. Limit in bytes on the output of
             each scheduler command. It must cover the `sbatch --parsable` reply,
             12 bytes plus the cluster name's length (22 bytes for `perlmutter`).
@@ -584,7 +586,7 @@ class NWQSimSlurmBackend(Record):
         return 10
 
     def _runner(self):
-        """The NWQ-Sim adapter for this profile, which owns preparation and result decoding."""
+        """The NWQ-Sim adapter for this profile, which performs preparation and result decoding."""
         from nwqlib.backends.nwqsim import NWQSimBackend
         return NWQSimBackend(executable=self.profile.executable, spool=self.profile.spool,
             backend=self.profile.backend, method=self.profile.method,
@@ -603,8 +605,8 @@ class NWQSimSlurmBackend(Record):
         """Prepare with the NWQ-Sim adapter after checking the runner's revision against build_identity.
 
         The target is the runner's (``target_for``), so a trajectory is
-        admitted and refused exactly as the NWQ-Sim adapter admits it for the
-        selected backend/method, and its views reach that adapter unchanged.
+        accepted and refused exactly as the NWQ-Sim adapter accepts it for the
+        configured backend/method pair, and its views reach that adapter unchanged.
         """
         if observation.kind == "trajectory" and "trajectory" not in self.target_for(observation).readouts:
             observation.reject_unsupported_schedule("Slurm NWQ-Sim")
@@ -620,23 +622,23 @@ class NWQSimSlurmBackend(Record):
         return self._runner().restore_native(record, payload, run=run)
 
     def admit_batch(self, natives):
-        """Admit one runner request and run the launcher's configuration and payload checks.
+        """Accept one runner request and run the launcher's configuration and payload checks.
 
-        ``submit_detached`` calls this before it commits the submission intent,
+        ``submit_detached`` calls this before it saves the submission intent,
         so the response floor, the rank and GPU request, a non-CPU build
         identity, the script rendering and the input byte allowance
-        (``SlurmLauncher.admit``) refuse with no submission, event, exposure or
-        output reservation left in the Run.
+        (``SlurmLauncher.admit``) refuse with no submission, log entry, exposure
+        or output bytes set aside left in the Run.
         """
         self._runner().admit_batch(natives)
         native, = natives
         self._launcher().admit(native.payload, max_input_bytes=self.max_input_bytes)
 
     def launch(self, natives, *, submission_id, run):
-        """Submit the request that ``admit_batch`` accepted and return its locator.
+        """Submit the request that ``admit_batch`` accepted and return its job locator.
 
-        After the intent only the Run's data headroom checks, the spool writes and the one
-        sbatch call remain.
+        After the intent is saved, only the Run's checks of its remaining data
+        allowance, the spool writes and the one sbatch call remain.
         """
         self._runner().admit_batch(natives)
         native, = natives
@@ -653,13 +655,13 @@ class NWQSimSlurmBackend(Record):
             since=self.accounting_since, until=self.accounting_until, run=run)
 
     def refresh(self, locator, natives, *, run):
-        """Combine one scheduler observation with the native result decoder.
+        """Combine one scheduler query with the NWQ-Sim result decoder.
 
         A missing result file keeps the job refreshable, pending while the
         scheduler reports an active state and uncertain otherwise. An ambiguous
         scheduler response stays uncertain. Otherwise a visible
-        packet is decoded by the NWQ-Sim owner, and a nonzero Slurm exit code
-        or signal is passed to it as a failure. A valid packet can publish
+        packet is decoded by the NWQ-Sim adapter, and a nonzero Slurm exit code
+        or signal is passed to it as a failure. A valid packet can be saved
         while accounting is still delayed.
         """
         from nwqlib.backends.connection import BackendRefresh

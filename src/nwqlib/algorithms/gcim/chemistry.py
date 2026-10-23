@@ -34,7 +34,7 @@ class GCIMChemistryProblemData:
     and interleaved alpha/beta spin modes. Each orbital's sign is fixed so
     that its first significant AO coefficient is positive. This removes the
     dependence on the eigensolver's sign choice, which could flip the
-    generators that contain the orbital and change a fixed-angle ADAPT-GCIM
+    generators that contain the orbital and change a fixed-angle ADAPT-GCiM
     trajectory. It fixes signs only. Degenerate orbitals can still be
     returned in another rotation of their subspace, and binary64 rounding
     can still decide between generators whose gradients tie in exact
@@ -65,8 +65,9 @@ class GCIMChemistryProblemData:
         two_body_integrals: Spatial-orbital tensor of shape (n,n,n,n), obtained by
             transposing the chemist-ordered integrals with axes (0,2,3,1). After spin
             expansion, entries multiply a_p^dagger a_q^dagger a_r a_s with factor 1/2.
-        reference_panel: RHF and explicitly requested MP2/CCSD/CASCI values/statuses.
-            Unrequested or failed reference energies stay None with their status/reason.
+        reference_panel: RHF energy and the energies or statuses of the explicitly
+            requested MP2, CCSD and CASCI references. Unrequested or failed
+            reference energies stay None with their status and reason.
         metadata: Geometry and basis, charge, ordering, cutoff, active space
             and dependency versions of this construction, and the reference
             panel under `"chemistry_reference_panel"`, which
@@ -399,7 +400,7 @@ def chemistry_reference_diagnostic(
     `"undefined: E_CCSD == E_HF"` or `"undefined: E_CASCI == E_HF"`. It runs
     no calculation. The values give application context, not a bound on the
     error of E or an identification of the ground state. The
-    [GCiM guide](../../algorithms/gcim.md#adaptive-generator-coordinates)
+    [GCiM guide](../../algorithms/gcim.md#chemistry-inputs-and-reference-energies)
     prints the report section of such a diagnostic.
 
     Args:

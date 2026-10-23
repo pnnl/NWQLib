@@ -1,4 +1,11 @@
-"""Explicit SDK-free selection work, with immutable native input binding."""
+"""Selection of circuit blocks without a quantum SDK.
+
+Each selected block binds its circuit construction to the chosen input. The
+built-in `select_*` functions bind input objects from ingestion, whose data are
+immutable copies, or data derived from them. `SelectedBlock.bind` keeps a
+custom payload as supplied, without copying it, so the author of a custom block
+must keep that payload unchanged.
+"""
 
 from dataclasses import dataclass, field
 from math import fsum, isfinite
@@ -18,9 +25,10 @@ from .records import BlockSemantics, Primitive, SelectedDefinition
 def _source(name):
     """Versioned Source of a builtin block implementation or law.
 
-    Every field, including the fixed domain text, is part of each selected
-    identity and of the registered law identities that ``resources.fold``
-    recognizes, so changing it would change every saved selection.
+    Every field, including the fixed domain text, is part of the content
+    hash of each selection and of the registered cost functions that
+    ``resources.fold`` recognizes, so changing it would change every saved
+    selection.
     """
     return Source(name=name, version="1", domain="M1 logical blocks", reference="nwqlib.blocks versioned selected kernels")
 
@@ -133,15 +141,15 @@ def direct_preparation_amplitudes(block) -> int:
     block. A ``qiskit.direct`` specification means that the constructor
     synthesizes that state with the direct magnitude/phase tree of
     ``subroutines/state_preparation/direct.py``, whose classical work grows
-    as q*2**q in the 2**q amplitudes. That holds for the native PREP leaf
+    as q*2**q in the 2**q amplitudes. That holds for the library's PREP leaf
     (through ``prepare_qiskit``), the ADAPT query reference and the LCHS
-    vector PREP. Lowering and the Run compare this count with their
-    ``max_direct_amplitudes`` before any native constructor runs. A tree
+    vector PREP. Circuit construction and the Run compare this count with
+    their ``max_direct_amplitudes`` before any gate constructor runs. A tree
     built inside another constructor without a declaration is bounded by
-    that constructor's own admission. The LCU coefficient PREP is bounded
+    that constructor's own size check. The LCU coefficient PREP is bounded
     by ``_admit_lcu``, the band-address PREP of the banded block encoding by
     ``block_encoding.core._banded_plan`` and the LCHS source-branch
-    preparations by the dense LCHS input admission.
+    preparations by the size check of the dense LCHS input.
     """
     semantics = block.record.semantics
     for declared in (semantics, semantics.base_semantics):
@@ -165,7 +173,7 @@ def _preparation_circuit(block, arguments, method_context):
 
 
 def _primitive_circuit(block, arguments, method_context):
-    """Apply the stored recipe gate by gate through the QuantumCircuit method of each name.
+    """Apply the saved gate decomposition gate by gate through the QuantumCircuit method of each name.
 
     The HZH occupation preparation, the Pauli parity network and the Pauli
     group readout basis bind this constructor. Their recipes use only h, z,
@@ -205,7 +213,7 @@ def _readout_circuit(block, arguments, method_context):
 
 @dataclass(frozen=True, eq=False, init=False, slots=True)
 class SelectedBlock:
-    """A selected block: its portable record and the trusted code that builds its circuit.
+    """A selected block: its saved record and the trusted code that builds its circuit.
 
     The `select_*` functions and `transform_block` return it, and
     [`SelectedBlock.bind`][nwqlib.blocks.selection.SelectedBlock.bind] builds one
@@ -393,24 +401,24 @@ def select_preparation(name: str, state: StateInput, *,
 
 
 def _signed_pauli_requirements(m, q):
-    """Index width and byte and work laws of a signed Pauli SELECT with m terms on q qubits.
+    """Index width and byte and work formulas of a signed Pauli SELECT with m terms on q qubits.
 
     Returns ``(a, padded, requirements)`` with ``a = ceil(log2 m)`` index
-    qubits and ``padded = 2**a`` label slots. The requirement terms are:
+    qubits and ``padded = 2**a`` labels. The requirement terms are:
 
     - ``payload_bytes = m*(q + 16) + 32*padded``. The first term is the
-      per-term label law of ``PauliTerms.labels``: a q-character label and a
-      16-byte complex coefficient. The native constructor ``_select_circuit``
-      materializes these labels during lowering, and charging them here
-      admits them under the caller's ``max_bytes``. The 32 bytes per slot
+      per-term label formula of ``PauliTerms.labels``, a q-character label
+      and a 16-byte complex coefficient. The constructor ``_select_circuit``
+      materializes these labels while the circuit is built, and counting
+      them here checks them against the caller's ``max_bytes``. The 32 bytes per label
       bound the peak of the selection itself, which holds m binary64
       coefficients and the float64 amplitude array together with either at
       most two float64 temporaries of length m while forming
       ``sqrt(|c_j| / alpha)`` or the bytes copy made by ``tobytes``, since
       m <= padded.
-    - ``work = m*(q + 1) + (q + 1)*(a + 1)*padded``, the size law reported
-      as ``construction_work`` of the native constructor, which lowering
-      sums but does not check against a limit. Its unit is one read or
+    - ``work = m*(q + 1) + (q + 1)*(a + 1)*padded``, the size formula
+      reported as ``construction_work`` of the constructor, which circuit
+      construction sums but does not check against a limit. Its unit is one read or
       write of a table entry. The first term reads m labels of q characters
       and their coefficients. The second term covers the q per-qubit UCG
       tables and the sign diagonal. Each is visited in one pass that builds
@@ -423,11 +431,12 @@ def _signed_pauli_requirements(m, q):
       makes one pass per remaining control. The projected copy, the
       ``UCGate`` padding and checks, the diagonal's phase wrapping and the
       butterflies add a bounded number of passes of at most ``padded``
-      entries per table and per address bit, so the law counts these
+      entries per table and per address bit, so the formula counts these
       visits up to a small constant factor, not exactly.
     - ``items = max(m, padded)``.
 
-    These are logical size laws, not allocator or RSS measurements.
+    These are logical size formulas, not measurements of allocated or
+    resident memory.
     """
     a = (max(1, m) - 1).bit_length()
     padded = 1 << a
@@ -696,8 +705,9 @@ def transform_block(name: str, block: SelectedBlock, *, control=False, adjoint=F
     declares its own error unknown, because a state or projected-block error of
     the base does not bound the transformed operator. A transformed block cannot
     be transformed again, so every transform refers to one concrete base. Adding
-    a control increases the construction work by the controlled cost rule of the
-    base, and a direct preparation's CX count switches to its controlled form.
+    a control adds the construction work of the controlled base, counted by a
+    fixed formula for each kind of base, and a direct preparation's CX count
+    switches to its controlled form.
     The Pauli SELECT and readout counts read the `controlled` flag instead. A
     dense-dilation encoding adds the work of the exact synthesis of its unitary
     and of Qiskit's control of the synthesized gates, and a supplied preparation
@@ -850,13 +860,13 @@ def select_pauli_group_basis(name: str, label: str, *, basis: Basis) -> Selected
     qubit zero at its right end. The block applies H on each X site and S†
     then H on each Y site, and acts as the identity on I and Z sites,
     through one whole-register port ``system`` of width q. It has no CX
-    parity network: measuring the whole register afterwards gives the joint
+    parity network. Measuring the whole register afterwards gives the joint
     outcome z, from which a caller decodes each member label j as
     ``(-1)**popcount(z & M_j)`` with M_j the label's support mask. Measuring
     sites outside the group's support leaves the required marginal
-    distribution unchanged: summing the outcomes on the additional sites
-    gives the original projective measurement probabilities. Its identity
-    is its own ``pauli.group_basis`` Source,
+    distribution unchanged, because summing the outcomes on the additional
+    sites gives the original projective measurement probabilities. It is
+    identified by its own ``pauli.group_basis`` Source,
     distinct from ``pauli.parity``, whose relation promises a pivot parity
     rather than a local basis change. construction_work counts the
     primitives, x + 2y for x X sites and y Y sites.

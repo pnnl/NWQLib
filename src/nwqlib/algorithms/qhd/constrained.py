@@ -17,13 +17,13 @@ refinement (``refinement.refine_box``) on its inner objective instead of one sol
 and takes the projection of the point of the level with the least recorded
 relative value of that objective (``_refined_choice``). ``_outer.refinement_stop`` states
 how the refinement's stop ends a round and the run. With ``directory`` every
-inner Run is durable, and ``resume_augmented_lagrangian`` continues an
+inner Run is saved to disk, and ``resume_augmented_lagrangian`` continues an
 interrupted run (``_durable``).
 
 The equality terms are Wu et al. arXiv:2605.12066v1, Eqs. (6)-(8). The
 inequality terms are the Powell-Hestenes-Rockafellar (PHR) form of
 Rockafellar, doi:10.1007/BF01580138. The multiplier, penalty and stopping
-rules follow Birgin and Martinez, *Practical Augmented Lagrangian Methods for
+rules follow Birgin and Martínez, *Practical Augmented Lagrangian Methods for
 Constrained Optimization*, SIAM 2014, doi:10.1137/1.9781611973365 (below "the
 book"): Algorithm 4.1 (Sec. 4.1, pp. 33-34, Eqs. (4.6)-(4.9)) and the stopping
 test of Algencan (Sec. 10.2.2, Eqs. (10.6)-(10.8), pp. 116-117). Term by
@@ -348,7 +348,7 @@ def _original_multiplier(value, objective_scale, scale, name):
     result, which a product above the largest float does not have, and
     because this message reports the product's binary exponent.
     ``ConstrainedQHDResult.multipliers`` converts every multiplier it
-    publishes this way. The rounds use only normalized multipliers, so no
+    returns this way. The rounds use only normalized multipliers, so no
     decision needs this conversion, and a multiplier without a normal
     original-unit value, an initial one included, stops no run.
     """
@@ -375,7 +375,7 @@ def _value(term, point):
 def _setup(problem, qhd, options, refinement=None, stored=None):
     """Check the problem, preprocess its constraints and check f, h and g on the grid, before any round.
 
-    ``ConstrainedOptimization`` admits constant residuals such as ``nan`` or
+    ``ConstrainedOptimization`` accepts constant residuals such as ``nan`` or
     ``zoo`` and complex expressions such as ``I*x``. The layer checks every
     term on the grid of the preprocessed box by its support decomposition,
     the decomposition that QHD planning tabulates for an objective
@@ -386,13 +386,13 @@ def _setup(problem, qhd, options, refinement=None, stored=None):
     The range check of their represented sum (``_range_certificate``)
     requests an original-evaluation check when inconclusive. That check
     scans the supplied additive summands and bounds their additions, with
-    an admitted whole-term scan when the bound is inconclusive. The layer
-    raises with the term's position on a failed numerical evaluation.
-    A one-variable support table or original summand costs K evaluations.
-    An irreducible summand on r variables requires K**r evaluations and can
-    be refused by work admission.
+    a whole-term scan, counted against the work limit, when the bound is
+    inconclusive. The layer raises with the term's position on a failed
+    numerical evaluation. A one-variable support table or original summand
+    costs K evaluations. An irreducible summand on r variables requires
+    K**r evaluations and can be rejected by the work limit.
 
-    The initial-grid check inventories possible restrictions in the
+    The initial-grid check lists the possible restrictions in the
     supplied expression before centering, separately for its top-level
     additive summands. An identical restriction is covered only by an
     unconditional occurrence in the represented expression written in
@@ -400,11 +400,12 @@ def _setup(problem, qhd, options, refinement=None, stored=None):
     distinct supplied summands of that term, each on its own support grid
     at the original binary64 coordinates. Piecewise, Mul, Pow and function
     applications stay intact. A failed call or a nonfinite or nonreal
-    selected value refuses before planning. Completed scans bound each
+    selected value is rejected before planning. Completed scans bound each
     summand's magnitude, and ``_addition_certificate`` includes rounding
     in its bound on the additions. An inconclusive represented range uses
-    the same scans without charging or running one twice. An inconclusive
-    addition certificate requests an admitted whole-term scan.
+    the same scans without counting or running one twice. An inconclusive
+    addition certificate requests a whole-term scan, counted against the
+    work limit.
 
     Finite rounded values do not certify the exact real domain. Terms
     checked only by their represented tables can still fail in their
@@ -423,16 +424,17 @@ def _setup(problem, qhd, options, refinement=None, stored=None):
     ``ConstraintPreprocessing`` records and the slack representation reads
     (``_round_problem``).
 
-    The nominal term charge of each expansion (``objective.expansion_term_charge``), the
+    The nominal term count of each expansion (``objective.expansion_term_charge``), the
     table work ``K**|A| (N_A + |A|)`` of each support with N_A tree nodes, as
     QHD planning counts it (``QHD._admit_symbolic_work``), the
     work ``K**|S_j| (N_j + |S_j|)`` for each distinct supplied summand
     scanned on its support S_j, any additional whole-term fallback work
-    ``K**|S| (N + |S|)``, and every later evaluation by the layer are admitted
+    ``K**|S| (N + |S|)``, and every later evaluation by the layer are counted
     against ``qhd.max_work`` before their respective stages
-    (``_admit_layer_work``). The expansion charge bounds term count only for
-    numeric constants, symbols, Add, Mul and nonnegative integer Pow; general
-    SymPy rewriting work and storage are outside it. Write C for the work of
+    (``_admit_layer_work``). The nominal term count bounds the number of
+    terms only for numeric constants, symbols, Add, Mul and nonnegative
+    integer Pow. General SymPy rewriting work and storage are outside it.
+    Write C for the work of
     evaluating f and every kept constraint at one point,
     ``C = sum_t (N_t + d)`` over those terms t
     with ``N_t`` tree nodes, and ``a = 2`` for ``mode_or_mean`` and 1
@@ -452,21 +454,22 @@ def _setup(problem, qhd, options, refinement=None, stored=None):
     derivative evaluations. The check covers the grid of the preprocessed
     box, the first level's grid, and not the grids of later levels.
 
-    ``stored``, for a resumed durable run, holds the preprocessing and the
-    check counts that the first call saved in the controller's settings
+    ``stored``, for a resumed run saved in a directory, holds the
+    preprocessing and the check counts that the first call saved in the
+    settings of the outer record ``controller.json``
     (``ConstraintPreprocessing`` JSON, ``check_work`` and
     ``check_evaluations``). The support tables, summand scans and range
     checks are then not evaluated again. Only the parts that need no
     function evaluation are rebuilt: the checks of the arguments, the bound
     absorption, whose box, absorbed bounds and kept inequalities must equal
     the saved ones, the lambdified terms and derivatives, the grid and the
-    admission of the reserved round work with the saved check work. The
-    saved preprocessing and check counts are read as the layer wrote them,
-    as resume reads the directory's other files, and are not recomputed to
-    detect an edit.
+    check of the reserved round work, with the saved check work, against
+    ``qhd.max_work``. The saved preprocessing and check counts are read as
+    the layer wrote them, as resume reads the directory's other files, and
+    are not recomputed to detect an edit.
 
     Before any evaluation the initial multipliers are checked as the rounds
-    will use them. Algorithm 4.1 of Birgin and Martinez starts from
+    will use them. Algorithm 4.1 of Birgin and Martínez starts from
     multipliers inside the safeguard box. ``AugmentedLagrangian._domains``
     checks the given values, and omitted equality multipliers start at 0,
     which ``multiplier_bounds`` can exclude, so a problem with equalities
@@ -684,34 +687,35 @@ def _support_tables(term, decomposer, grid, qhd):
     variables and evaluated on arrays at the centered coordinates ``x - m``
     of its support grid (``compiler.evaluate_support``), the evaluator of an
     objective table in ``compiler.QHDCompiler``, whose outputs must be
-    finite and real, so the table is the selected data of this check. A
-    warning or nonfinite intermediate from an inactive Piecewise branch
-    does not invalidate a finite real selected table value. Nonfinite or
-    nonreal selected outputs are refused. Original-expression scans and
-    checks at reported points use their own evaluation and may still fail.
-    Array evaluations may differ from scalar evaluations by an ulp or more, and no
-    universal evaluation-error bound exists for arbitrary lambdified
-    expressions. The extrema are selected from each table
-    (``records.table_extrema``), and the range of their sums is checked
-    separately (``_range_certificate``, ``_inequality_range``). The constant
-    c0 is converted to binary64 as ``QHD.plan`` converts an objective's
-    constant.
+    finite and real, so the check judges the table values that this
+    evaluator returns. A warning or nonfinite intermediate from an inactive
+    Piecewise branch does not invalidate a finite real selected table
+    value. Nonfinite or nonreal selected outputs are rejected.
+    Original-expression scans and checks at reported points use their own
+    evaluation and may still fail. Array evaluations may differ from scalar
+    evaluations by an ulp or more, and no universal evaluation-error bound
+    exists for arbitrary lambdified expressions. The extrema are taken from
+    each table (``records.table_extrema``), and the range of their sums is
+    checked separately (``_range_certificate``, ``_inequality_range``). The
+    constant c0 is converted to binary64 as ``QHD.plan`` converts an
+    objective's constant.
 
-    ``_admit_layer_work`` admits the support-table payloads of every term
-    against the QHD byte allowance before any table is evaluated, and this
-    function evaluates in the chunks of that admission
+    ``_admit_layer_work`` counts the support tables of every term against
+    the QHD byte limit before any table is evaluated, and this function
+    evaluates them in the chunk sizes fixed by that check
     (``_evaluation_chunks``). For a support of s variables,
     ``E = K**s`` entries and N expression nodes, the evaluation of a chunk of
-    b entries is charged ``B_scan(b) = W_eval(b) + (8s + 64) b + H`` bytes
+    b entries counts ``B_scan(b) = W_eval(b) + (8s + 64) b + H`` bytes
     (``compiler.support_chunk_size``), with the engineering allowance
     ``W_eval(b) = 8 b (N + 2)`` (``compiler.support_workspace``), not a
-    derived bound, whose premise is that the printer's evaluation holds at
+    derived bound, whose assumption is that the printer's evaluation holds at
     most one slab-sized temporary per expression node, plus the output and
-    one broadcast input. Beside it the admission reserves the term's tables
-    ``8 sum E``, the centered coordinates ``8 d K``, their metadata ``H0``
-    and the largest current table copy ``8 max E``, and b is the largest
-    chunk that ``QHD.max_bytes`` then admits. Only one table and the
-    extrema are kept at a time, so the reserved tables are conservative.
+    one broadcast input. Beside it the check sets aside bytes for the term's
+    tables ``8 sum E``, the centered coordinates ``8 d K``, their metadata
+    ``H0`` and the largest current table copy ``8 max E``, and b is the
+    largest chunk that then fits within ``QHD.max_bytes``. Only one table
+    and the extrema are kept at a time, so the bytes set aside for the
+    tables are an overestimate.
     """
     from .compiler import evaluate_support, user_point
     from .records import table_extrema
@@ -743,8 +747,8 @@ def _range_certificate(constant, tables):
 
     The sum of absolute support magnitudes is a sufficient range
     certificate. When it exceeds binary64, the layer requires a further
-    admitted range or original-expression check before deciding whether the
-    input is numerically valid.
+    range or original-expression check, counted against the work limit,
+    before deciding whether the input is numerically valid.
 
     The first certificate is ``B = |c0| + sum_A max |T_A|``: by the triangle
     inequality ``|c0 + sum_A T_A(x_A)| <= B`` at every grid point, and B also
@@ -756,10 +760,11 @@ def _range_certificate(constant, tables):
     ``[-1, 1]``, c0 = 1e308 and the one table is ``(-1e308, -1e308)``, so B
     exceeds binary64 while the interval is ``[0, 0]``. Both sums are formed
     exactly from the stored binary64 values. When neither certifies the
-    range, ``_setup`` completes the admitted scans of the supplied
-    summands, sharing scans with the structural trigger. Their maxima enter
-    ``_addition_certificate``. An inconclusive addition bound requests an
-    admitted whole-term scan, and a failed scalar evaluation raises.
+    range, ``_setup`` completes the scans of the supplied summands, sharing
+    scans with the structural trigger. Their maxima enter
+    ``_addition_certificate``. An inconclusive addition bound requests a
+    whole-term scan, counted against the work limit, and a failed scalar
+    evaluation raises.
     """
     # abs, min and max of binary64 values are exact, so only their results become exact rationals.
     largest, c0 = Fraction(sys.float_info.max), Fraction(constant)
@@ -787,10 +792,10 @@ def _restrictions(expression):
     nonnegative integer power, is defined wherever its arguments are.
 
     Each outermost Piecewise is one structural unit, and its branch
-    descendants are not inventoried separately. When the unit triggers a
+    descendants are not listed separately. When the unit triggers a
     scan, its containing supplied summand is evaluated as a unit,
     including its branches and conditions before NumPy's ``select``,
-    so an inactive branch or condition that raises still refuses. A kept
+    so an inactive branch or condition that raises still causes rejection. A kept
     occurrence covers an original restriction only when the kept occurrence
     contributes its value wherever the original restriction does. The
     structural coverage check therefore excludes occurrences below a
@@ -861,38 +866,39 @@ def _domain_check(term, variables, grid, qhd):
 
     The scan evaluates the expression at the original coordinates of its
     support grid in C-order chunks (``compiler.chunk_coordinates``) with the
-    finite-real rule of ``coerce_real_scalar`` and streams the maximum
-    absolute value, and no table is kept. A failed call or a nonfinite or
-    nonreal value raises ValueError naming the first failing grid point.
-    None means that the values are finite and real but the raw result type does not support the
-    binary64 addition certificate: raw float64 and complex128 outputs with
-    zero imaginary part have the addition semantics used in the certificate,
-    and a Python integer is composable only when exactly representable by
-    the coerced float. Other raw types, including object arrays, and a
-    callable that cannot be evaluated or converted on arrays are evaluated
-    entry by entry as scalars with that same rule, and so is a chunk whose
-    array evaluation signals a division by zero, an overflow or an invalid
-    operation, where scalar Python arithmetic can raise, so an admitted
-    scalar expression keeps its behavior. A nonfinite or nonreal array value
-    that signals nothing is refused even when a scalar evaluation of that
-    point succeeds: scalar re-evaluation may explain a failure, but it does
-    not turn a nonfinite array result into an accepted finite entry. Array evaluations may differ from scalar
-    evaluations by an ulp or more, and the scanned maximum is that of the
-    selected evaluation. Empty support is one evaluation.
+    finite-real rule of ``coerce_real_scalar`` and updates the maximum
+    absolute value chunk by chunk, without keeping a table. A failed call
+    or a nonfinite or nonreal value raises ValueError naming the first
+    failing grid point. None means that the values are finite and real but
+    the raw result type does not support the binary64 addition certificate.
+    Raw float64 and complex128 outputs with zero imaginary part have the
+    addition semantics used in the certificate, and a Python integer is
+    composable only when exactly representable by the coerced float. Other
+    raw types, including object arrays, and a callable that cannot be
+    evaluated or converted on arrays are evaluated entry by entry as scalars
+    with that same rule, and so is a chunk whose array evaluation signals a
+    division by zero, an overflow or an invalid operation, where scalar
+    Python arithmetic can raise, so an accepted scalar expression keeps its
+    behavior. A nonfinite or nonreal array value that signals nothing is
+    rejected even when a scalar evaluation of that point succeeds. Scalar
+    re-evaluation may explain a failure, but it does not turn a nonfinite
+    array result into an accepted finite entry. Array evaluations may differ
+    from scalar evaluations by an ulp or more, and the scanned maximum is
+    that of the evaluation used. Empty support is one evaluation.
 
-    The caller admits ``K**len(term.support) * (term.nodes + len(term.support))``
-    units before scanning. The AL layer admits each original-expression
-    scan's slab and evaluator workspace against the QHD byte allowance before
-    the scan's batch runs (``_admit_layer_work``, ``_evaluation_chunks``): a
-    chunk of b entries on s support variables is charged
-    ``B_scan(b) = W_eval(b) + (8s + 64) b + H`` bytes
-    (``compiler.support_chunk_size``) with the engineering allowance
+    The caller counts ``K**len(term.support) * (term.nodes + len(term.support))``
+    units against the work limit before scanning. The layer counts each
+    original-expression scan's coordinate block and evaluator workspace
+    against the QHD byte limit before the scan's batch runs
+    (``_admit_layer_work``, ``_evaluation_chunks``). A chunk of b entries on
+    s support variables counts ``B_scan(b) = W_eval(b) + (8s + 64) b + H``
+    bytes (``compiler.support_chunk_size``) with the engineering allowance
     ``W_eval(b) = 8 b (N + 2)`` for N expression nodes
-    (``compiler.support_workspace``), not a derived bound, whose premise is
-    that the printer's evaluation holds at most one slab-sized temporary per
-    expression node, plus the output and one broadcast input. The grid's
-    coordinate vectors ``8 d K`` and their metadata H0 are held, and b is
-    the largest chunk that ``QHD.max_bytes`` then admits.
+    (``compiler.support_workspace``), not a derived bound, whose assumption
+    is that the printer's evaluation holds at most one slab-sized temporary
+    per expression node, plus the output and one broadcast input. The
+    grid's coordinate vectors ``8 d K`` and their metadata H0 are held, and
+    b is the largest chunk that then fits within ``QHD.max_bytes``.
     """
     import numpy as np
 
@@ -962,19 +968,19 @@ def _evaluation_chunks(term, grid, qhd, decomposer=None):
     With ``decomposer`` there is one chunk per support table of the term's
     expansion (``_support_tables``), and without it, one chunk for the scan of
     ``term``'s supplied expression on its support (``_domain_check``). Each
-    chunk of b entries on s support variables is charged
+    chunk of b entries on s support variables counts
     ``B_scan(b) = W_eval(b) + (8s + 64) b + H`` bytes
     (``compiler.support_chunk_size``) with the engineering allowance
     ``W_eval(b) = 8 b (N + 2)`` for N expression nodes
-    (``compiler.support_workspace``), beside the held bytes: for the tables
-    the term's tables ``8 sum E``, the centered coordinates ``8 d K``, their
-    metadata H0 and the largest table copy ``8 max E``, and for a scan the
-    grid's coordinate vectors ``8 d K`` and H0. b is the largest chunk that
-    ``QHD.max_bytes`` then admits.
+    (``compiler.support_workspace``), beside the bytes held throughout. For
+    the tables these are the term's tables ``8 sum E``, the centered
+    coordinates ``8 d K``, their metadata H0 and the largest table copy
+    ``8 max E``, and for a scan the grid's coordinate vectors ``8 d K`` and
+    H0. b is the largest chunk that then fits within ``QHD.max_bytes``.
 
     Raises:
         ValueError: one entry does not fit ``QHD.max_bytes``, naming the
-            smallest admitting limit.
+            smallest sufficient limit.
     """
     from .compiler import H0, support_chunk_size, support_workspace
 
@@ -1004,7 +1010,7 @@ def _evaluation_chunks(term, grid, qhd, decomposer=None):
 
 
 def _addition_certificate(maxima):
-    """Certify any association/order of binary64 additions of the bounded leaves.
+    """Return whether a sufficient bound shows that every association and order of binary64 additions of the bounded leaves stays finite.
 
     For m finite real leaf values bounded by M_j, put n = max(m - 1, 0)
     and u = 2**-53. Their rounded additive tree has magnitude at most
@@ -1068,41 +1074,42 @@ def _inequality_range(constant, tables, scale):
 
 
 def _admit_layer_work(qhd, options, check_work, round_work, *, lower_bound=False, grid=None, scans=()):
-    """Admit the layer's nominal work total and each requested evaluation's bytes.
+    """Check the layer's nominal work total and each requested evaluation's bytes against the QHD limits.
 
-    The check of _setup uses the nominal expansion term charge
+    The check of _setup uses the nominal expansion term count
     (objective.expansion_term_charge) and K**|A| (N_A + |A|) for each
     support table with N_A tree nodes (objective.node_count), as QHD
-    planning counts its tables (QHD._admit_symbolic_work). Each
-    expansion charge bounds formal term count for the helper's polynomial
-    grammar, not general SymPy preprocessing work or storage. Each
-    original-summand scan costs K**|S_j| (N_j + |S_j|), using its supplied
-    tree and support. A scan shared by structural coverage and the range
-    check runs and is counted once. All scans in each requested batch are
-    admitted before any of that batch runs. An inconclusive addition bound
-    can request a further whole-term scan, charged K**|S| (N + |S|) before
-    it starts. A one-summand term has already received that scan.
+    planning counts its tables (QHD._admit_symbolic_work). Each nominal
+    term count bounds the formal number of terms for the polynomial
+    expressions that helper handles, not general SymPy preprocessing work
+    or storage. Each original-summand scan costs K**|S_j| (N_j + |S_j|),
+    using its supplied tree and support. A scan shared by structural
+    coverage and the range check runs and is counted once. All scans in
+    each requested batch are checked against the limits before any of that
+    batch runs. An inconclusive addition bound can request a further
+    whole-term scan, counted as K**|S| (N + |S|) before it starts. A
+    one-summand term has already received that scan.
 
     Round work is ``a C`` without refinement and ``(a L + 2 B + 1) C``
     with refinement, using the counts a, C, L and B defined and derived in
     ``_setup``. For the stationarity diagnostic every nonzero partial
-    derivative is evaluated once per round. The admitted total is the check plus
-    ``max_iterations`` rounds, the layer's work over the whole run, charged
-    as one operation as QHD charges its table and compilation work
-    (``QHD._admit_symbolic_work``). QHD planning of each inner Plan and the
-    trials of automatic representation selection (``_round_problem``) admit
-    their own work separately. With ``lower_bound`` a count may have stopped
-    early, so the reported work is a lower bound.
+    derivative is evaluated once per round. The checked total is the grid
+    check plus ``max_iterations`` rounds, the layer's work over the whole
+    run, counted as one operation, as QHD counts its table and compilation
+    work (``QHD._admit_symbolic_work``). QHD planning of each inner Plan and
+    the trials of automatic representation selection (``_round_problem``)
+    check their own work separately. With ``lower_bound`` a count may have
+    stopped early, so the reported work is a lower bound.
 
     ``scans`` holds ``(term, decomposer)`` pairs on ``grid``: the support
     tables of a term's expansion about the box centers with its decomposer,
     or with None the scan of a supplied expression. Each one's chunked array
-    evaluation must admit at least one entry within ``qhd.max_bytes``
+    evaluation must fit at least one entry within ``qhd.max_bytes``
     (``_evaluation_chunks``). ``_setup`` passes the support tables of every
     term and the scans that the structure requests before any term is
-    evaluated, and each later scan with the work admission of its batch.
-    The tables of one term are held one term at a time, so each term is
-    admitted against the whole allowance.
+    evaluated, and each later scan with the work check of its batch.
+    The tables are held one term at a time, so each term is checked
+    against the whole byte limit.
     """
     total = check_work + options.max_iterations * round_work
     if total > qhd.max_work:
@@ -1116,25 +1123,25 @@ def _admit_layer_work(qhd, options, check_work, round_work, *, lower_bound=False
 
 
 def _admitted_bounds(qhd, options, refinement, execution, kept):
-    """Return ``(work, bytes)``, the nominal category allowances fixed before the first round.
+    """Return ``(work, bytes)``, the sums of the nominal category limits fixed before the first round.
 
-    QHD planning admits its work in categories, each at most W =
+    QHD planning checks its work in categories, each at most W =
     ``qhd.max_work`` units and B = ``qhd.max_bytes`` bytes. An ordinary Plan
-    has at most four category envelopes: the nominal symbolic term charge,
-    admitted with 16 nominal bytes per term
-    (``QHD._admit_symbolic_work``), one running total of the initial
-    state's evaluation and the table, compiled-block and schedule-integral
-    work with its byte allowance (the same owner and ``QHD.plan``), the
-    optional kept state with 16 bytes per amplitude (``QHD.plan``), and the
-    classical evolution or the native construction
-    (``QHD._host_construction``, ``QHD._select_native``). "Four" counts
-    category envelopes, not calls of ``QHD._admit``: the recursive term
-    checks and the checks of successive running totals call it many times,
-    and their intermediate arguments are not separate work populations. The
-    initial-state check that ``QHD.plan`` makes before evaluating the state
-    admits ``d K`` units and ``_INITIAL_STATE_BYTES d K`` bytes, and the later
-    running-total admission includes exactly these, so it is a preliminary
-    check of the running-total category.
+    has at most four categories: the nominal symbolic term count, checked
+    with 16 nominal bytes per term (``QHD._admit_symbolic_work``), one
+    running total of the initial state's evaluation and the table,
+    compiled-block and schedule-integral work with its byte allowance (the
+    same function and ``QHD.plan``), the optional kept state with 16 bytes
+    per amplitude (``QHD.plan``), and the classical evolution or the Qiskit
+    circuit construction (``QHD._host_construction``,
+    ``QHD._select_native``). "Four" counts categories, not calls of
+    ``QHD._admit``. The recursive term checks and the checks of successive
+    running totals call it many times, and their intermediate arguments are
+    not separate work categories. The initial-state check that ``QHD.plan``
+    makes before evaluating the state counts ``d K`` units and
+    ``_INITIAL_STATE_BYTES d K`` bytes, and the later running-total check
+    includes exactly these, so it is a preliminary check of the
+    running-total category.
 
     Without refinement a round plans once, so a = 4 and L = 1. With
     refinement a round attempts at most L = ``refinement.max_levels``
@@ -1142,40 +1149,41 @@ def _admitted_bounds(qhd, options, refinement, execution, kept):
     level plans once, a = 4. A search-model level first runs the table stage
     of its unscaled objective (``refinement._support_tables``), which calls
     ``QHD._admit_symbolic_work`` without compiled blocks and so adds the
-    symbolic and running-total envelopes, the latter still with the ``d K``
-    initial-state reservation and, under the integrated coefficient rule,
-    the schedule integrals, and then plans the solved objective, a = 6. The
-    layer's own work, the support-table check of ``_setup``, which also
-    gives the inequality ranges, and the evaluations of every round, share
-    one work admission for the whole run (``_admit_layer_work``), which has
-    no byte part.
+    symbolic and running-total categories, the latter still with the ``d K``
+    units set aside for the initial state and, under the integrated
+    coefficient rule, the schedule integrals, and then plans the solved
+    objective, a = 6. The layer's own work, the support-table check of
+    ``_setup``, which also gives the inequality ranges, and the evaluations
+    of every round, share one work check for the whole run
+    (``_admit_layer_work``), which has no byte part.
 
     Automatic selection (``inequality_form="auto"``) on the quantum route
     without a ``GaussianState`` plans, in each round, the current
     representation and at most one trial per kept inequality
-    (``_round_problem``). Each of these at most ``m + 1`` candidates, with m
-    kept inequalities, calls ``QHD._admit_symbolic_work`` once for its
-    ledger, two envelopes, and plans once, four envelopes
-    (``_planned_costs``). Without refinement the round's Plan is the kept
-    candidate's Plan, or its refusal, so its four envelopes are among
-    these, and the trials add ``t = 6 (m + 1) - 4`` envelopes per round.
-    With refinement the levels plan separately and ``t = 6 (m + 1)``. The
-    other policies make no trial, t = 0. With M = ``options.max_iterations``
-    rounds,
+    (``_round_problem``). Each of these at most ``m + 1`` representations,
+    with m kept inequalities, calls ``QHD._admit_symbolic_work`` once for
+    its symbolic and table work, two categories, and plans once, four
+    categories (``_planned_costs``). Without refinement the round's Plan is
+    the Plan of the representation kept, or its rejection, so its four
+    categories are among these, and the trials add ``t = 6 (m + 1) - 4``
+    categories per round. With refinement the levels plan separately and
+    ``t = 6 (m + 1)``. The other policies make no trial, t = 0. With
+    M = ``options.max_iterations`` rounds,
 
         work <= (a M L + t M + 1) W,    bytes <= (a M L + t M) B,
 
-    sums of the selected nominal category allowances over attempts, not a
-    general preprocessing-work or peak-memory bound. The symbolic category
-    has the polynomial term-count scope of ``objective.expansion_term_charge``.
-    Nothing else in a level admits against W or B. Refinement
-    geometry, the marginals, interval and next box, and the joint-mass scan
-    of the observations or kept state, with its decoding of a native state,
-    lie outside the bounds, as do ``refinement._tabulated_objective``'s
-    repeated objective decomposition and its point evaluations, the
-    symbolic construction of the inner objectives, the identity JSON of the
-    records and library internals. Acquisition and synthesis have their own
-    limits (``_outer.round_limits``).
+    sums of the nominal category limits over attempts, not a general
+    preprocessing-work or peak-memory bound. The symbolic category has the
+    polynomial term-count scope of ``objective.expansion_term_charge``.
+    Nothing else in a level is counted against W or B. Refinement geometry,
+    the marginals, interval and next box, and the joint-mass scan of the
+    observations or kept state, with its decoding of a register
+    statevector, lie outside the bounds, as do
+    ``refinement._tabulated_objective``'s repeated objective decomposition
+    and its point evaluations, the symbolic construction of the inner
+    objectives, the JSON from which the records' content hashes are
+    computed, and library internals. Measurement and synthesis have their
+    own limits (``_outer.round_limits``).
     """
     from .initial_state import GaussianState
 
@@ -1363,7 +1371,7 @@ def _inner_value(forms, slacks, equality_multipliers, inequality_multipliers, pe
 
 
 def _slack_axis(setup, qhd, t, multiplier, penalty):
-    """Return ``(SlackAxis, None)`` for kept inequality t, or ``(None, reason)`` when it has no admissible slack box.
+    """Return ``(SlackAxis, None)`` for kept inequality t, or ``(None, reason)`` when it has no valid slack box.
 
     Proposition 54 of docs/mathematics.md. The cap is
     ``U_0 = [-ell_t]_+`` with the recorded lower bound ell_t of the
@@ -1373,7 +1381,7 @@ def _slack_axis(setup, qhd, t, multiplier, penalty):
     nonnegative multiplier and positive penalty. A zero cap adds no axis, and
     the caller keeps the inequality's other form. The slack grid has the
     Method's K points and grid convention on ``[0, U]``, the grid that
-    ``grid.OneHotGrid`` admits, with ``U = U_0`` on a Dirichlet grid. A
+    ``grid.OneHotGrid`` accepts, with ``U = U_0`` on a Dirichlet grid. A
     periodic grid ``0, h, ..., U - h`` omits U, and the margin
     ``U >= K/(K-1) U_0`` gives ``U - h = U (1 - 1/K) >= U_0``, so zero and
     every required slack in ``[0, U_0]`` lie within ``h/2`` of a node.
@@ -1384,16 +1392,16 @@ def _slack_axis(setup, qhd, t, multiplier, penalty):
 
     - Dirichlet interior, nodes ``h, ..., K h`` with ``h = U/(K+1)``:
       ``e <= r h + rho h**2/2``, where ``r >= [mu + rho G(x)]_+`` at every
-      grid point x;
-    - Dirichlet with boundary points, ``h = U/(K-1)``: ``e <= rho h**2/8``;
+      grid point x.
+    - Dirichlet with boundary points, ``h = U/(K-1)``: ``e <= rho h**2/8``.
     - periodic with the margin, ``h = U/K``: ``e <= rho h**2/8``, since zero
       is a node and ``[0, U_0]`` has covering radius ``h/2``.
 
     The bound is formed exactly from the binary64 h, mu, rho and M_t and
     rounded upward once. It assumes the exact mesh of spacing h, the
-    premises of the cap and the tabulated representation of G on the grid of
-    the preprocessed box. Interpreting the formula as a slack-grid excess
-    bound requires the cap and table-arithmetic premises and the node
+    assumptions of the cap and the tabulated representation of G on the grid
+    of the preprocessed box. Interpreting the formula as a slack-grid excess
+    bound requires the cap and table-arithmetic assumptions and the node
     coverage used in Proposition 54. The interior formula requires a first
     node no larger than h and distance at most h from every required slack
     to the grid. The endpoint and covered periodic formulas require zero and
@@ -1452,14 +1460,15 @@ def _branch(setup, t, multiplier, penalty):
 
 
 def _inner_problem(setup, problem, forms, slacks, lambda_bar, mu_bar, penalty):
-    """Return ``(Optimization, identity)``: a round's inner problem and the identity of its objective.
+    """Return ``(Optimization, identity)``: a round's inner problem and the content hash of its objective.
 
     The inner variables are the problem's variables followed by the slack
     variables of the ``slack`` forms, in constraint order, and the inner box
     is the preprocessed box followed by each slack box ``[0, U]``
-    (``SlackAxis.upper``). The identity is ``records.objective_reference`` of
-    the objective's ``srepr``, the inner variables' ``srepr`` and the inner
-    box, the identity of ``ALIteration.effective_objective`` for PHR forms.
+    (``SlackAxis.upper``). The content hash is ``records.objective_reference``
+    of the objective's ``srepr``, the inner variables' ``srepr`` and the inner
+    box, the content hash of ``ALIteration.effective_objective`` for PHR
+    forms.
     """
     from nwqlib.problems.records import Optimization
     from .records import objective_reference
@@ -1475,27 +1484,28 @@ def _inner_problem(setup, problem, forms, slacks, lambda_bar, mu_bar, penalty):
 def _planned_costs(problem, qhd, shots, child):
     """Return ``(work, cx, planned, evaluated)``: the costs of a quantum inner Plan and its evaluated tables.
 
-    The host work is the admitted work of QHD's symbolic and table stage
-    (``QHD._admit_symbolic_work``: the nominal term charge, the initial state,
-    the step rows, the support tables and the compilation) plus the selected
-    native construction's work (``SelectedDefinition.construction_work``),
-    and the CX count is the selected construction's CX law
-    (``_outer.law_count``), None without one. The table stage is admitted
-    before any table is evaluated, so a refused inequality table, such as a
-    PHR term on many variables, ranks the candidate as refused without
-    being formed. ``planned`` is the Plan or the exception that refused or
-    ended its planning, and ``work`` is None after one. The round treats that
+    The classical work is the work that QHD's symbolic and table stage
+    counts (``QHD._admit_symbolic_work``: the nominal term count, the initial
+    state, the step rows, the support tables and the compilation) plus the
+    work of the Qiskit circuit construction that planning chose
+    (``SelectedDefinition.construction_work``), and the CX count is that
+    construction's recorded CX count (``_outer.law_count``), None without
+    one. The table stage is checked against the limits before any table is
+    evaluated, so a rejected inequality table, such as a PHR term on many
+    variables, marks the representation as rejected before the table is
+    formed. ``planned`` is the Plan or the exception that rejected or ended
+    its planning, and ``work`` is None after one. The round treats that
     exception as the failure of its own planning (``_outer.inner_failure``),
     as it treats any exception of ``_outer.plan_round``. The Plan is planned
-    from a copy of the round's random-stream child, so it is the Plan that
+    from a copy of the round's child random stream, so it is the Plan that
     ``_outer.plan_round`` gives the round.
-    The Plan's own planning reuses that admission, its decomposer and
+    The Plan's own planning reuses that check, its decomposer and
     chunks through a private context (``method._ADMITTED_SYMBOLIC``), so
-    each candidate's objective is expanded and admitted once.
+    each representation's objective is expanded and checked once.
 
     ``evaluated`` counts the objective-table grid tuples that the attempt
     evaluated: the Plan's ``support_evaluations``, zero when the table
-    admission refused, since that admission precedes every table
+    check rejected the Plan, since that check precedes every table
     evaluation, and None when the planning raised after it, since the
     tables that it evaluated before raising are unknown.
     """
@@ -1525,15 +1535,16 @@ def _planned_costs(problem, qhd, shots, child):
 def _accepts(current, trial):
     """Return ``(accepted, reason)``: whether automatic selection keeps a trial conversion (``FormTrial``).
 
-    The rule of the quantum route: when both candidates are admitted, the
-    trial is kept when its planned host work and its CX count are both no
-    larger than the current representation's and one is strictly smaller. A
-    tie, or one larger and one smaller, keeps the current representation. A
-    trial whose planning is admitted and whose construction has a CX law
-    replaces a current one whose planning was refused, which enables an
-    otherwise refused inner Plan. A missing CX law of either admitted
-    candidate supplies no value for the CX comparison and keeps the current
-    representation, also when the current planning was refused.
+    On the quantum route, when the planning of both representations passes
+    its limit checks, the trial is kept when its planned classical work and
+    its CX count are both no larger than the current representation's and
+    one is strictly smaller. A tie, or one larger and one smaller, keeps the
+    current representation. A trial whose planning passes and whose
+    construction has a recorded CX count replaces a current one whose
+    planning was rejected, which enables an otherwise rejected inner Plan. A
+    missing CX count of either planned representation supplies no value for
+    the CX comparison and keeps the current representation, also when the
+    current planning was rejected.
     """
     (work, cx), (new_work, new_cx) = current, trial
     if new_work is None:
@@ -1564,7 +1575,7 @@ def _round_problem(setup, problem, qhd, execution, shots, child, lambda_bar, mu_
        domain, so such a round keeps the PHR term there.
     2. ``slack`` gives every remaining kept inequality a slack variable
        (``_slack_axis``). A zero cap adds none, and the inequality keeps its
-       form, and a cap without an admissible slack grid raises ValueError.
+       form, and a cap without a valid slack grid raises ValueError.
     3. ``auto`` converts on the quantum route only. Under
        ``execution="classical"`` it keeps the PHR form of every inequality,
        since each slack multiplies the restricted state by K, and so it does
@@ -1573,18 +1584,19 @@ def _round_problem(setup, problem, qhd, execution, shots, child, lambda_bar, mu_
        in constraint order, a trial with one more slack
        (``_planned_costs``), keeps each trial that ``_accepts`` and compares
        the next trial with the representation kept so far, one pass without
-       a search over subsets. A refused PHR table ranks the current
-       representation as refused before any of its tables is formed.
+       a search over subsets. A rejected PHR table marks the current
+       representation as rejected before any of its tables is formed.
 
     The representation is fixed for the whole round, its refinement levels
-    included, and the caller commits it before the first inner Run. A
-    resumed round passes its committed representation as ``saved``, which
-    is reused after checking that it rebuilds the saved inner objective.
+    included, and the caller saves it in the outer record before the first
+    inner Run. A resumed round passes its saved representation as
+    ``saved``, which is reused after checking that it rebuilds the saved
+    inner objective.
 
     Returns:
         ``(representation, problem, planned)``: the ``InnerRepresentation``
         or None, the inner Optimization, and the Plan of the kept
-        representation or the ValueError that refused its planning when
+        representation or the ValueError that rejected its planning when
         automatic selection planned it without refinement, else None, so
         the round plans it once.
     """
@@ -1885,9 +1897,10 @@ def _level_check(setup, attempts):
     makes an original function nonfinite or undefined, the level records
     mean_unavailable and uses its valid grid point. A failure at the grid
     point or at a scored point ends the refinement. Each call appends to
-    ``attempts``, whether it succeeds or not, and the round charges every
-    attempt as ``_point_cost`` counts one evaluation of f, h and g, within the reservation ``(a L + 2 B + 1) C``
-    of ``_setup`` (``_admit_layer_work``).
+    ``attempts``, whether it succeeds or not, and the round counts every
+    attempt as one evaluation of f, h and g, as ``_point_cost`` counts it,
+    within the work ``(a L + 2 B + 1) C`` that ``_setup`` sets aside
+    (``_admit_layer_work``).
     """
     d = setup.grid.num_variables
 
@@ -1903,7 +1916,7 @@ class _PointFailure(Exception):
 
     ``__cause__`` is the ValueError of ``_evaluate``. ``evaluations`` and
     ``work`` count every evaluation that the round attempted, as
-    ``_admit_layer_work`` counts them, so the round charges them.
+    ``_admit_layer_work`` counts them, so the round counts them in its work.
     """
 
     def __init__(self, evaluations, work):
@@ -2044,7 +2057,7 @@ def _refined_choice(refined, best, rule, setup, representation=None):
     inner objective, L_k without a representation and L(x, s) with one. It
     compares each completed level's reported point using its recorded
     evaluation of L minus one common constant, with ties to the earlier
-    level. A search-model level selects its grid candidate using the
+    level. A search-model level selects its grid point using the
     binary64 table of V_k = kappa*(L-c)/E. A physical level selects using L.
     The point, grid indices and probability belong to that selected level.
     For a most-probable grid point, its tie deficit, window and mode status
@@ -2067,7 +2080,8 @@ def _refined_choice(refined, best, rule, setup, representation=None):
     Also L(p) <= L(z)+2*eta for every completed level z. With only
     one level p=x1 and the eta term is unnecessary. Exact probability
     readout alone does not make either evaluation error vanish. These
-    error bounds are premises, not quantities certified by this function.
+    error bounds are assumptions, not quantities that this function
+    establishes.
     With slack variables, ``L_k(x) <= L(x, s)`` for every slack value, and
     Proposition 54 of docs/mathematics.md relates the first level's grid
     minimum of L(x, s) to that of L_k by the slack-grid error.
@@ -2093,8 +2107,8 @@ def _refined_resources(refined, evaluations, work, form=None):
     counts, the unscaled table stage of each search-model level
     (``RefinementResources.table_evaluations``) and the solved Plans
     (``support_evaluations``), all of them grid tuples that QHD planning
-    evaluated, and every candidate that automatic selection planned for the
-    round's representation ``form`` (``InnerRepresentation.table_evaluations``),
+    evaluated, and every representation that automatic selection planned for
+    the round's representation ``form`` (``InnerRepresentation.table_evaluations``),
     since the levels plan their own problems and reuse none of them. Width
     and restricted dimension are those of the completed levels, which share
     the round's grid, encoding and variables.
@@ -2136,25 +2150,26 @@ def _round_resources(plan, trace, evaluations, work, *, planning_reason=None, ru
     """Read one round's resources from its Plan and Run trace (``_outer.run_counts``, ``_outer.law_count``).
 
     Without a Plan (planning raised, ``planning_reason``) there was no Run,
-    so acquisition and host execution are zero while the planning work
+    so measurement and classical execution are zero while the planning work
     spent before the error is unknown. A preparation that raised closed its
     Run before the layer could read it, and ``_durable.closed_trace`` gives
-    ``run_reason`` and, for a durable Run, the trace read from its folder,
-    or an ``_outer.HeaderlessRun`` when the Run's creation raised before its
-    journal header, while without a durable Run, or when its journal cannot
-    be read, the counts stay unknown.
+    ``run_reason`` and, for a Run saved to disk, the trace read from its
+    folder, or an ``_outer.HeaderlessRun`` when the Run's creation raised
+    before its run-log header was written. Without a saved Run, or when its
+    run log cannot be read, the counts stay unknown.
     The CX bound and the rotation count are those of the circuits the Run
     prepared (``_outer.law_count``), unknown after a preparation that raised
-    once the header was committed, and zero before it.
+    once the header was written, and zero before it.
 
     The table evaluations are the Plan's, and with a representation ``form``
-    whose automatic selection planned candidates, the grid tuples of every
-    candidate once (``InnerRepresentation.table_evaluations``), which
-    include those of the round's Plan, the kept candidate's Plan that the
-    round reuses: ``sum_c E_c = E_kept + sum_(c != kept) E_c``. When the
-    kept candidate's planning raised during the selection (``selected``),
-    the round planned nothing more, and its table evaluations are the
-    candidates' count, known or unknown with its reason.
+    for which automatic selection planned one or more representations, the grid
+    tuples of every planned representation once
+    (``InnerRepresentation.table_evaluations``), which include those of the
+    round's Plan, the Plan of the kept representation that the round
+    reuses: ``sum_c E_c = E_kept + sum_(c != kept) E_c``. When the planning
+    of the kept representation raised during the selection (``selected``),
+    the round planned nothing more, and its table evaluations are the count
+    of the selection, known or unknown with its reason.
     """
     counts = dict(layer_evaluations=evaluations, layer_work=work)
     reasons = []
@@ -2251,7 +2266,7 @@ def solve_augmented_lagrangian(problem, *, qhd, options=AugmentedLagrangian(), r
     `options.inner_point`, evaluates f, h and g there with numerical functions formed
     once for the run (SymPy `lambdify`), and updates the multipliers to
     `lambda+ = lambda + rho h` and `mu+ = max(0, mu + rho g)` and the penalty (Birgin
-    and Martinez, doi:10.1137/1.9781611973365, Algorithm 4.1 and Eqs. (4.7)-(4.9)). The
+    and Martínez, doi:10.1137/1.9781611973365, Algorithm 4.1 and Eqs. (4.7)-(4.9)). The
     guide's [constrained problems](../../algorithms/qhd.md#constrained-problems) section
     explains each step.
 
@@ -2260,9 +2275,9 @@ def solve_augmented_lagrangian(problem, *, qhd, options=AugmentedLagrangian(), r
     infeasibility <= epsilon_f (Algencan's Eqs. (10.7)-(10.8)), and the status is
     `feasible_complementary`. With `feasibility` the test is infeasibility <= epsilon_f,
     and the status is `feasible`. Otherwise it stops after `options.max_iterations`
-    rounds, when an inner result has no valid point, when the cumulative `limits` cannot
-    fund a round, or when an inner planning, preparation or execution raises after the
-    first round
+    rounds, when an inner result has no valid point, when the remaining cumulative
+    `limits` cannot cover another round, or when an inner planning, preparation or
+    execution raises after the first round
     ([`AugmentedLagrangianRecord`][nwqlib.algorithms.qhd.constrained_records.AugmentedLagrangianRecord]
     lists the statuses). No round is retried. A stopping status does not assess
     optimality. Like QHD itself, the layer is not a global optimizer. The rounds read
@@ -2270,12 +2285,13 @@ def solve_augmented_lagrangian(problem, *, qhd, options=AugmentedLagrangian(), r
     and no status is a statement about the continuous problem. Read feasibility,
     complementarity and `termination` alongside the objective. In the first round an
     error propagates unchanged, because no round has completed and a configuration that
-    QHD rejects should surface at once. That includes a first round whose Run refuses
-    the limits, while limits that the layer's own test finds unable to fund the first
-    round's circuit or shots end the run with `budget_exhausted` after zero rounds.
+    QHD rejects should surface at once. That includes a first round whose Run rejects
+    the limits, while limits that, by the layer's own test, cannot cover the first
+    round's circuits or shots end the run with `budget_exhausted` after zero rounds.
 
     Args:
-        problem (ConstrainedOptimization): The problem, with live SymPy expressions.
+        problem (ConstrainedOptimization): The problem, with SymPy expressions that
+            can be evaluated, not a saved problem description.
         qhd (QHD): The QHD configuration of every round.
         options (AugmentedLagrangian): The layer's options.
         refinement (BoxRefinement | None): Box refinement of every round's inner
@@ -2284,7 +2300,9 @@ def solve_augmented_lagrangian(problem, *, qhd, options=AugmentedLagrangian(), r
             `nwqlib.solve`.
         execution (str | None): `"quantum"` (the default) or `"classical"`, as in
             `nwqlib.solve`.
-        shots (int | None): Shots per round, or None for exact readout.
+        shots (int | None): Shots per round, or None for exact readout, in which the
+            outcome probabilities are computed without shot sampling.
+            Numerical errors can remain.
         seed (int | None): Nonnegative root seed of the run.
         limits (ExecutionLimits | None): Cumulative limits of the whole run, the
             defaults when None. Each round's Run, or each level's Run with refinement,
@@ -2311,7 +2329,8 @@ def solve_augmented_lagrangian(problem, *, qhd, options=AugmentedLagrangian(), r
 
     Inequality representation:
         Under `options.inequality_form="slack"` or `"auto"` the round first fixes how
-        its kept inequalities enter (Proposition 54 of
+        its kept inequalities, those that `absorb_bounds=True` did not turn into box
+        bounds, enter (Proposition 54 of
         [the mathematics page](../../mathematics.md#r54)). A converted inequality adds a
         slack variable, after the problem's variables and with the box `[0, U]` of its
         cap, and the round plans its inner objective L(x, s) instead, reads a joint
@@ -2324,8 +2343,9 @@ def solve_augmented_lagrangian(problem, *, qhd, options=AugmentedLagrangian(), r
         problem, from the preprocessed box and the round's slack boxes, with `qhd`. This
         is the order of the reproduction scripts of Wu et al., arXiv:2605.12066v1, which
         refine inside each multiplier round. `refinement.point_rule` reads every level
-        and must equal `options.inner_point`, which has no second role, and two
-        different rules are rejected before any work, as are stall-split and level
+        and must equal `options.inner_point`, which has no separate role with
+        refinement, and two different rules are rejected before any work, as are
+        stall-split and level
         initial-state options that the QHD configuration cannot carry out. A stall
         split, when the options ask for one, acts within each round's refinement with
         the options' budget.
@@ -2336,7 +2356,7 @@ def solve_augmented_lagrangian(problem, *, qhd, options=AugmentedLagrangian(), r
         with an inequality representation, by the point rules that the Point rules note
         of [`AugmentedLagrangian`][nwqlib.algorithms.qhd.constrained_records.AugmentedLagrangian]
         describes. The outer point is the projection onto the original variables, and
-        effective_value is the PHR value L_k evaluated at that projection when a
+        `effective_value` is the PHR value L_k evaluated at that projection when a
         representation is present. The best and last points are chosen among rounds by
         the rules above, not among levels.
 
@@ -2351,8 +2371,9 @@ def solve_augmented_lagrangian(problem, *, qhd, options=AugmentedLagrangian(), r
         Each refinement level checks the original objective and constraints at the
         original-coordinate projection of every compared point. If an off-grid mean
         makes an original function nonfinite or undefined, the level records
-        `mean_unavailable` and uses its valid grid point. The level's inner-value
-        comparison keeps its existing table and coordinate-transformation conventions.
+        `mean_unavailable` and uses its valid grid point. This check leaves the level's
+        comparison of inner values, with its table and coordinate-transformation
+        conventions, unchanged.
 
     Failures and stopping with refinement:
         When an original function is not finite and real at a level's grid point, or at
@@ -2377,25 +2398,28 @@ def solve_augmented_lagrangian(problem, *, qhd, options=AugmentedLagrangian(), r
 
     Limits with refinement:
         `limits` stays cumulative over all rounds and levels, and each level's Run gets
-        what the earlier rounds and levels left. The configuration fixes before the
-        first round at most `max_iterations * refinement.max_levels` inner solves and the
-        nominal counted-work envelope `AugmentedLagrangianRecord.admitted_work_bound`.
+        what the earlier rounds and levels left. Before the first round the
+        configuration fixes at most `max_iterations * refinement.max_levels` inner
+        solves and the nominal upper bound on counted work,
+        `AugmentedLagrangianRecord.admitted_work_bound`.
 
     Random streams:
         Every round's random streams come from `SeedSequence(seed).spawn`, as
-        [`compare`][nwqlib.scientist.compare] seeds its candidates, and the round
+        [`compare`][nwqlib.scientist.compare] seeds the Plans it compares, and the round
         records its child's entropy and spawn key. With refinement, level z of round k
         plans from the z-th child of the round's child, whose spawn key `(k, z - 1)` its
         level record keeps.
 
     Saved runs:
         With `directory` every inner Run is saved under `iterations/<k>/run/`, or
-        `iterations/<k>/levels/<z>/run/` with refinement, and the outer record is
-        rewritten after each completed round or level and once more at the end, so that
-        `resume_augmented_lagrangian` can continue an interrupted run. The outer record
-        stores the configuration of the backend of every inner Run, and the model of a
+        `iterations/<k>/levels/<z>/run/` with refinement, and the outer record, the
+        file `controller.json` with the run's arguments and its completed rounds and
+        levels, is rewritten after each completed round or level and once more at the
+        end, so that `resume_augmented_lagrangian` can continue an interrupted run. The
+        outer record
+        holds the configuration of the backend of every inner Run, and the model of a
         noisy Aer backend is saved once in the directory. The rounds are the same as
-        without a directory, except that a saved Run also stores its run log and inputs,
+        without a directory, except that a saved Run also writes its run log and inputs,
         which count against `max_data_bytes`, so a run whose data limit binds can stop
         earlier, and that a round whose preparation raised reads its counts from its
         closed Run folder.
@@ -2478,7 +2502,7 @@ def plan_augmented_lagrangian(problem, *, qhd, options=AugmentedLagrangian(), ex
     Plan. Later rounds' multipliers and penalties depend on the points that executed
     rounds read, so their representations, Plans and costs are not known here. The
     structural bounds of a whole run, at most `options.max_iterations` rounds within the
-    nominal work and byte envelopes of `AugmentedLagrangianRecord.admitted_work_bound`, hold for
+    nominal work and byte bounds of `AugmentedLagrangianRecord.admitted_work_bound`, hold for
     every round. They bound the recorded categories, with the symbolic term-count scope
     described there, rather than general preprocessing execution or the exact costs of
     later rounds. Box refinement is not planned here. A refined round keeps the PHR form
@@ -2487,12 +2511,13 @@ def plan_augmented_lagrangian(problem, *, qhd, options=AugmentedLagrangian(), ex
     search model.
 
     Args:
-        problem (ConstrainedOptimization): The problem, with live SymPy expressions.
+        problem (ConstrainedOptimization): The problem, with SymPy expressions that
+            can be evaluated, not a saved problem description.
         qhd (QHD): The QHD configuration of every round.
         options (AugmentedLagrangian): The layer's options.
         execution (str | None): `"quantum"` (the default) or `"classical"`, as in
-            `solve_augmented_lagrangian`. Automatic selection converts inequalities on
-            the quantum route only.
+            `solve_augmented_lagrangian`. Automatic selection converts inequalities
+            under quantum execution only.
         shots (int | None): Shots per round, or None for exact readout.
         seed (int | None): Nonnegative root seed of the run.
 
@@ -2505,7 +2530,7 @@ def plan_augmented_lagrangian(problem, *, qhd, options=AugmentedLagrangian(), ex
 
     Raises:
         ValueError: As `solve_augmented_lagrangian` before its first Run, including a
-            round-0 planning that QHD refuses, which a solve would raise from its first
+            round-0 planning that QHD rejects, which a solve would raise from its first
             round.
     """
     import numpy as np
@@ -2552,15 +2577,15 @@ def _continuation(problem, setup, iterations):
 
 
 def _solves(problem, plan, identity, representation):
-    """Whether the inner ``plan`` solves the recorded inner objective ``identity`` of a round of ``problem``.
+    """Whether the inner ``plan`` solves the recorded inner objective, with content hash ``identity``, of a round of ``problem``.
 
-    The identity is recomputed as the round formed it (``_inner_problem``):
+    The content hash is recomputed as the round formed it (``_inner_problem``):
     the ``srepr`` of the Plan's objective, the ``srepr`` of the problem's
     variables followed by the slack variables of ``representation`` as
     ``_slack_symbols`` names them, and the Plan's box. A Plan over other
     variables, slack symbols or box, or of another objective, gives another
-    identity. Resume uses it to bind the reopened Run of the round in
-    progress to that round.
+    content hash. Resume uses it to check that the reopened Run of the round
+    in progress belongs to that round.
     """
     from .records import objective_reference
 
@@ -2585,9 +2610,9 @@ def _rounds(problem, qhd, setup, refinement, backend, execution, shots, root, li
     and discarded, and ``_continuation`` gives the state of the next round,
     so it plans from the child and with the multipliers, penalty and spent
     limits of the uninterrupted run. With ``outer``, a ``_durable.Directory``,
-    every inner Run is durable in its round's or level's folder, the outer
-    record is committed after every round that goes on and after every
-    completed level, and the final record is committed at the end. A round
+    every inner Run is saved in its round's or level's folder, the outer
+    record is written after every round that goes on and after every
+    completed level, and the final record is written at the end. A round
     or level whose Run exists continues that Run (``_durable.reopen``), and
     an error of that reopening, or an outcome of the reopened Run that only
     new work could resolve (``_durable.unrecoverable``), propagates instead
@@ -2879,10 +2904,10 @@ _COMPARED_TEXT = (
 
 @dataclass(frozen=True)
 class ConstrainedQHDResult:
-    """Result of an augmented-Lagrangian run: its record, its live problem and its inner QHD results.
+    """Result of an augmented-Lagrangian run: its record, its problem and its inner QHD results.
 
-    The live problem is the `ConstrainedOptimization` with its SymPy expressions, which
-    the portable record describes but does not hold.
+    The problem is the `ConstrainedOptimization` with its SymPy expressions, which the
+    portable record describes but does not hold.
 
     `solve_augmented_lagrangian`, `resume_augmented_lagrangian` and
     `load_augmented_lagrangian` return it. The answer is `candidate`, the best point in
@@ -2900,7 +2925,7 @@ class ConstrainedQHDResult:
     Attributes:
         record: The portable
             [`AugmentedLagrangianRecord`][nwqlib.algorithms.qhd.constrained_records.AugmentedLagrangianRecord].
-        problem: The live ConstrainedOptimization.
+        problem: The ConstrainedOptimization, with its SymPy expressions.
         results: The inner QHDAnalysis of each round in `record.iterations`, or None for
             a round whose inner solve raised. With refinement, each round's entry is the
             tuple of the QHDAnalysis of its completed levels, in level order.
@@ -3114,16 +3139,17 @@ class ConstrainedQHDResult:
         return lines
 
     def __str__(self):
-        """Summarize the run and its default coverage bounds from stored records.
+        """Summarize the run and its default coverage bounds from its records.
 
         Multipliers are listed by the problem position of their constraint.
-        When the best round chose a most probable grid point, its copied mode
-        status (``ALEvaluation.mode_status``) follows the point. It is the
-        status of the selected joint inner point before projection when that
-        round has slack axes, and of its inner point otherwise. For a run with
-        shots it carries the empirical wording of the inner Result
-        (``records.QHDAnalysis``), since a resolved mode of observed counts
-        gives no proof of the mode of the sampled population.
+        When the best round chose a most probable grid point, the mode status
+        copied from its inner result (``ALEvaluation.mode_status``) follows
+        the point. It is the status of the selected joint inner point before
+        projection when that round has slack axes, and of its inner point
+        otherwise. For a run with shots it carries the empirical wording of
+        the inner Result (``records.QHDAnalysis``), since a resolved mode of
+        observed counts gives no proof of the mode of the distribution that
+        the backend samples.
         """
         return "\n".join(self._summary_lines(self._confidence(DEFAULT_FAILURE_PROBABILITY)))
 
@@ -3202,7 +3228,7 @@ class ConstrainedQHDResult:
         return str(self)
 
     def report(self, *, failure_probability=DEFAULT_FAILURE_PROBABILITY):
-        """Return a JSON-ready report built only from the stored record and content hashes.
+        """Return a JSON-ready report built only from the run's record and content hashes.
 
         It performs no objective evaluation, planning or measurement. `multipliers` maps each constraint's
         problem position, as a string, to its original-unit multiplier estimate
@@ -3215,9 +3241,11 @@ class ConstrainedQHDResult:
         position, the round's slack-grid error bound and why the policy chose the forms
         (`InnerRepresentation`), and is None under `inequality_form="phr"`.
 
-        With counts and box refinement, `confidence` contains selected region mass lower
-        bounds for each level's backend-sampled distribution conditioned on valid decoding,
-        with simultaneous 95% confidence by default. The horizon is
+        With counts and box refinement, `confidence` contains lower bounds on the mass of
+        each level's selected region, the box formed by the marginal intervals that the
+        level keeps or the chosen side of a stall split, in the level's backend-sampled
+        distribution conditioned on valid decoding, with simultaneous 95% confidence by
+        default. The horizon is
         `max_iterations * max_levels` for the whole run, including early termination.
         Hoeffding and one-sided Clopper–Pearson bounds each use half the failure budget,
         and each level reports the larger available bound. The dimension includes its
@@ -3231,7 +3259,7 @@ class ConstrainedQHDResult:
                 Set to `None` to omit the statistical report.
 
         Returns:
-            report (dict): JSON-ready summary, interpretation statements, stored record,
+            report (dict): JSON-ready summary, interpretation statements, the record,
                 multipliers, inner Result hashes, refinement details, coverage bounds and
                 inequality forms.
 
@@ -3270,13 +3298,13 @@ class ConstrainedQHDResult:
         """Write the run to a new directory and return its path.
 
         The directory holds `constrained.json` (format `qhd.constrained/4`) with the record,
-        `problem.pickle` with the live SymPy objective, variables and constraints, and
+        `problem.pickle` with the SymPy objective, variables and constraints, and
         `iterations/<k>/result/`, each inner Result saved by its own archive. With
         refinement each completed level z of round k has its Result under
         `iterations/<k>/levels/<z>/result/` instead, and the record nests the refinement
         records. One format, `qhd.constrained/4`, covers both shapes, because the record
         itself says which shape a folder has. `load_augmented_lagrangian` reads it back. The
-        archive stores the problem itself, because no Plan holds a ConstrainedOptimization.
+        archive saves the problem itself, because no Plan holds a ConstrainedOptimization.
         A failed save removes the directory.
 
         Args:
@@ -3317,10 +3345,10 @@ def load_augmented_lagrangian(path):
 
     `load_augmented_lagrangian(path)` reads the directory that
     `ConstrainedQHDResult.save` wrote and returns the `ConstrainedQHDResult`. The record
-    supplies the original problem and completed rounds. The SymPy reader resolves
-    SymPy classes only and compares rebuilt expressions with their stored descriptions.
-    The attached problem must have the record's
-    problem hash. Each inner Result is loaded with `load_result` and must have the
+    supplies the original problem and completed rounds. Reading `problem.pickle`
+    resolves SymPy classes only, and each rebuilt expression is compared with its saved
+    description. The rebuilt problem must have the problem's content hash in the
+    record. Each inner Result is loaded with `load_result` and must have the
     recorded result and Plan hashes. With refinement each level's Result must have the
     result and Plan hashes of its `RefinementLevel`.
 
@@ -3375,7 +3403,7 @@ def _belongs(item, result):
 
 
 def _run_results(path, iterations, backend):
-    """Read the inner Results of the recorded rounds of a durable run from their Runs (``_durable.saved_result``).
+    """Read the inner Results of the recorded rounds of a run saved in a directory from their Runs (``_durable.saved_result``).
 
     One Result per round, None for a round without one, or with refinement
     the tuple of the Results of its completed levels, as
@@ -3409,12 +3437,12 @@ def resume_augmented_lagrangian(directory, *, backend, progress=None, end_at_unf
     completed rounds and levels. The layer wrote every file of the directory, and resume
     reads them as they are. A directory is read-only like a saved Run folder
     ([Saved folders are read-only](../../saved_evidence.md#saved-folders-are-read-only)),
-    and resume does not detect edits. Before any new work, `backend` must have the stored
+    and resume does not detect edits. Before any new work, `backend` must have the saved
     configuration,
-    and for a noisy Aer run resume binds the noise model saved in the directory to its
+    and for a noisy Aer run resume attaches the noise model saved in the directory to its
     own copy of `backend`, so that the Runs it creates run the original model in a new
     process too. Another backend raises ValueError before anything is reopened, planned
-    or committed. The expressions rebuilt from `problem.pickle` must match the stored
+    or saved. The expressions rebuilt from `problem.pickle` must match the saved
     objective, ordered variables and constraints, or ValueError is raised before any completed Result is
     read or the run advances, since an expression that the reader cannot reproduce would
     otherwise continue the run as another problem. The completed rounds' and levels'
@@ -3424,18 +3452,18 @@ def resume_augmented_lagrangian(directory, *, backend, progress=None, end_at_unf
 
     The rounds then continue from the last completed round, with the state and the
     random stream of the uninterrupted run. A round in progress reuses the inequality
-    representation that it committed before its first inner Run, after checking that it
-    rebuilds the committed inner objective, so automatic selection is not repeated, and
+    representation saved before its first inner Run, after checking that it rebuilds the
+    saved inner objective, so automatic selection is not repeated, and
     a completed round's Result must belong to its recorded inner Plan. A round or level
     whose Run exists continues that Run with `load_run(...).wait()`, and none gets a
     second Run, so completed work is read from the records and a continued Run is
     counted once, by its own run log. When that Run cannot finish without new work,
     because the interruption stopped a local preparation, measurement or classical
     evolution whose outcome nothing can retrieve, its error propagates with a note, and
-    the outer record keeps its committed rounds and levels unchanged. With
+    the outer record keeps its saved rounds and levels unchanged. With
     `end_at_unfinishable=True` the run instead ends there with `inner_failed`, keeps its
     completed rounds and records the Run's error as the failure. This option handles an
-    unfinishable continuation after a Run has reopened. A Run folder without a committed
+    unfinishable continuation after a Run has reopened. A Run folder without a saved
     run-log header fails during reopen and is not handled by `end_at_unfinishable`.
     Reopen does not remove or recreate that folder automatically. Before a completed
     round or level exists, an inner failure still propagates. Resume covers an
@@ -3446,8 +3474,8 @@ def resume_augmented_lagrangian(directory, *, backend, progress=None, end_at_unf
 
     Resuming gives the records of an uninterrupted saved run with the same root entropy,
     apart from the fields that differ between any two saved executions, namely the
-    identifiers of the Runs and Results, which every Run draws anew, the stored-data
-    byte counts, whose text of wall times and measured timings varies in length from run
+    identifiers of the Runs and Results, which every Run draws anew, the byte counts of
+    the saved data, whose text of wall times and measured timings varies in length from run
     to run, and the content hashes that include these fields. Those byte counts enter
     the remainder of `max_data_bytes`, so a run whose data limit is almost spent can
     stop at another round, as two uninterrupted saved runs can.
@@ -3456,17 +3484,17 @@ def resume_augmented_lagrangian(directory, *, backend, progress=None, end_at_unf
         directory (str | Path): The directory of
             `solve_augmented_lagrangian(..., directory=...)`.
         backend (object): The backend of the original call, whose configuration the
-            directory stores. None stands for `AerBackend()` under quantum execution, as
+            directory records. None stands for `AerBackend()` under quantum execution, as
             in the original call. For a noisy Aer run in a new process,
-            `AerBackend(noise_model_id=...)` with the identifier of the original
-            binding, which the error for another backend names.
+            `AerBackend(noise_model_id=...)` with the `noise_model_id` of the original
+            backend, which the error for another backend names.
         progress (object | None): Progress callback of the inner Runs that this call
             creates or continues, as in `nwqlib.solve`.
         end_at_unfinishable (bool): Default `False`, which raises the Run's error and
             leaves the directory as it is for a later resume. True ends the run with
             `inner_failed` at a round or level whose Run cannot finish without new work.
             It handles an unfinishable continuation after a Run has reopened, not a Run
-            folder without a committed run-log header, which fails during reopen. Before
+            folder without a saved run-log header, which fails during reopen. Before
             a completed round or level exists, an inner failure still propagates.
 
     Returns:
@@ -3475,8 +3503,8 @@ def resume_augmented_lagrangian(directory, *, backend, progress=None, end_at_unf
 
     Raises:
         TypeError: If `end_at_unfinishable` is not a bool.
-        ValueError: If `backend` differs from the stored configuration, or the rebuilt
-            problem differs from the stored record.
+        ValueError: If `backend` differs from the saved configuration, or the rebuilt
+            problem differs from the saved record.
     """
     import numpy as np
     from nwqlib.execution import ExecutionLimits
@@ -3519,13 +3547,13 @@ def constrained_grid_minimum(result, *, max_work=GRID_MINIMUM_MAX_WORK, max_byte
     `constrained_grid_minimum(result)` evaluates f, h and g in binary64 at every point
     of the preprocessed box's grid and returns a
     [`ConstrainedGridMinimum`][nwqlib.algorithms.qhd.constrained_records.ConstrainedGridMinimum].
-    Its `gap` is the run's stored best objective minus the least evaluated feasible
+    Its `gap` is the run's recorded best objective minus the least evaluated feasible
     objective, in original units. The solver never calls it.
 
     The explicit grid reference evaluates the original objective and required
     constraints on the declared original-variable grid. It chooses the lexicographically
     first point attaining the least computed feasible objective. Feasibility uses the
-    normalized residual test at the stored tolerance. All reported reference values come
+    normalized residual test at the recorded tolerance. All reported reference values come
     from the same evaluated table. The result describes this finite numerical grid and
     supplies neither a continuous optimum nor an expression-evaluation error
     certificate.
@@ -3533,7 +3561,7 @@ def constrained_grid_minimum(result, *, max_work=GRID_MINIMUM_MAX_WORK, max_byte
     Selection. Given a finite reference objective array f and a Boolean feasible mask,
     ``argmin(where(feasible, f, inf))`` returns the first feasible minimum in C order,
     which is the lexicographically first tuple. For each original equality value h and
-    inequality value g, the stored positive scale is applied before comparing with the
+    inequality value g, the recorded positive scale is applied before comparing with the
     tolerance: the violation is ``max(max(abs(h/s_h)), max(max(g/s_g, 0)))``, with an
     empty maximum zero. All raw values must be finite and real, even at infeasible
     points. Division may overflow if a scale is tiny, which gives infinite infeasibility
@@ -3543,10 +3571,10 @@ def constrained_grid_minimum(result, *, max_work=GRID_MINIMUM_MAX_WORK, max_byte
     reference table, and re-evaluating only the chosen point scalarly would not restore
     a scalar ranking.
 
-    The signed gap compares a stored objective with a fresh grid minimum and can be
-    negative. Let G be the nonempty grid subset passing this check's computed
+    The signed gap compares a recorded objective with a freshly evaluated grid minimum
+    and can be negative. Let G be the nonempty grid subset passing this check's computed
     feasibility test, and let the chosen point a lie in G. Suppose a finite E >= 0
-    bounds the absolute error of the stored objective at a and of every fresh objective
+    bounds the absolute error of the recorded objective at a and of every fresh objective
     evaluation on G, relative to exact values at those same coordinates. For finite
     reported gap r and u = 2**-53, the exact gap `F(a) - min_G F` is at most
     `r/(1-u) + 2*E` when r >= 0, and `r/(1+u) + 2*E` when r < 0. These are
@@ -3562,14 +3590,14 @@ def constrained_grid_minimum(result, *, max_work=GRID_MINIMUM_MAX_WORK, max_byte
     the initial check certifies the exact real domain or bounds expression-evaluation
     error.
 
-    A run with box refinement is refused. Its rounds search nested grids that each run
+    A run with box refinement is rejected. Its rounds search nested grids that each run
     chooses from its own distributions, and the preprocessed box's grid is only the
     first of them, so a feasible minimum of that grid is not the finite-grid reference
     of the points the run compared, and the gap would mix points of different grids.
 
     Before the first evaluation, the reference checks its work and the bytes of one slab,
     the block of grid points it evaluates at a time in C order, against `max_work` and
-    `max_bytes` by the laws in
+    `max_bytes` by the counting rules in
     [Engineering constants](../../ENGINEERING_CONSTANTS.md#qhd-augmented-lagrangian-defaults).
     It keeps no reference table of all `K**d` grid points.
 

@@ -1,4 +1,4 @@
-"""Immutable numerical output and its actual acquisition provenance."""
+"""Immutable saved arrays, each with the record of the measurement or computation that produced it."""
 
 from nwqlib._limits import DEFAULT_MAX_BYTES
 
@@ -49,14 +49,14 @@ class ArrayOutput(Record):
     """One requested complex128 or float64 array in its original coordinates and frame.
 
     A complex128 vector may be declared as a unit direction or modulo a global
-    phase. A float64 array holds real values in its coordinates. It admits the
+    phase. A float64 array holds real values in its coordinates. It accepts the
     ``physical`` or ``unit`` frame for a vector and the ``physical`` frame for
-    an operator, and only ``global_phase="physical"``: its signs are stored
-    values, and ``modulo_global_phase`` describes the phase freedom of a
+    an operator, and only ``global_phase="physical"``, because its signs are
+    saved values and ``modulo_global_phase`` describes the phase freedom of a
     complex state direction, which a real array does not declare.
 
     Attributes:
-        name: Unique output name within its selected kernel/readout.
+        name: Unique output name within its kernel or readout.
         kind: vector or operator, determining one or two basis-sized axes.
         basis: Original coordinate basis and dimension.
         frame: physical magnitude or normalized unit-vector frame.
@@ -93,12 +93,12 @@ class ArrayOutput(Record):
 
     @property
     def encoding(self):
-        """Persistence encoding: ``complex128-le-c`` or ``float64-le-c``."""
+        """Encoding of the saved bytes, ``complex128-le-c`` or ``float64-le-c``."""
         return _ARRAY_ENCODINGS[self.dtype][0]
 
     @property
     def storage_dtype(self):
-        """Little-endian NumPy dtype string of the stored payload, ``<c16`` or ``<f8``."""
+        """Little-endian NumPy dtype string of the saved payload, ``<c16`` or ``<f8``."""
         return _ARRAY_ENCODINGS[self.dtype][1]
 
     @property
@@ -124,8 +124,8 @@ _READOUT_COMPONENTS = {"probabilities": ("float64", "float64-le-c", "<f8"),
 class ReadoutArray(Record):
     """One component array of a probability readout, in C order.
 
-    It is not an ``ArrayOutput``: a probability array has no amplitude's
-    unit-vector or global-phase meaning. Let k be the number of observed
+    It is not an ``ArrayOutput``, because a probability array has none of the
+    unit-vector or global-phase meaning of an amplitude. Let k be the number of observed
     qubits, D = 2^k and s the number of nonzero returned probabilities.
     Outcome integer j denotes the bit string ``format(j, f"0{k}b")``, and
     ``observation.qubits[0]`` supplies its least significant bit. The
@@ -141,8 +141,8 @@ class ReadoutArray(Record):
       padding bits of the last word zero.
 
     A length can be zero (an empty sparse return). The two dtypes of a sparse
-    readout stay separate arrays: a homogeneous two-column float array loses
-    integer indices or counts above 2**53. The manifest records the actual
+    readout stay separate arrays, because a homogeneous two-column float array
+    loses integer indices or counts above 2**53. The manifest records the
     encoding, shape, dtype, byte count, payload digest and acquisition
     provenance of each component.
 
@@ -168,12 +168,12 @@ class ReadoutArray(Record):
 
     @property
     def encoding(self):
-        """Persistence encoding: ``float64-le-c`` or ``uint64-le-c``."""
+        """Encoding of the saved bytes, ``float64-le-c`` or ``uint64-le-c``."""
         return _READOUT_COMPONENTS[self.component][1]
 
     @property
     def storage_dtype(self):
-        """Little-endian NumPy dtype string of the stored payload: ``<f8`` or ``<u8``."""
+        """Little-endian NumPy dtype string of the saved payload, ``<f8`` or ``<u8``."""
         return _READOUT_COMPONENTS[self.component][2]
 
     @property
@@ -191,23 +191,23 @@ class ReadoutArray(Record):
 
 
 def probability_readout(values, indices=None, *, width):
-    """Check one probability marginal at publication and choose its stored encoding.
+    """Check one probability marginal when it is saved and choose its saved encoding.
 
-    Publication owns the value checks. Loading checks the declared layout and
-    associations without rereading the values. ``values`` is float64 and
+    The values are checked here, when the marginal is saved. Loading checks
+    the declared layout and associations without rereading the values. ``values`` is float64 and
     either dense (``indices`` None, shape ``(2**width,)``, outcome j at
     position j) or sparse with ``indices`` of shape ``(m,)`` for a width of at
     most 64 or ``(m, W)`` packed words with ``W = ceil(width/64)``. The checks
     are:
 
-    - Type and layout: exact supported dtype, shape, contiguity and endian
-      conversion before publication, O(1) headers and O(m) only when a
+    - Type and layout: exact supported dtype, shape, contiguity and byte-order
+      conversion before saving, O(1) headers and O(m) only when a
       conversion copy is required.
     - Finite probabilities: blockwise ``np.isfinite(values).all()``, O(m)
       work and O(C) Boolean scratch for block length C.
     - Nonnegative probabilities: blockwise ``values >= 0``, before canonical
       zero removal.
-    - Unique legal keys: dense positions give uniqueness. Sparse input is
+    - Unique valid keys: dense positions give uniqueness. Sparse input is
       sorted, then ``index[1:] > index[:-1]`` and a width/domain check. This
       is O(m) for sorted input and O(m log m) with an O(m) index workspace to
       sort unsorted input. For width 64 every uint64 index is in range, and
@@ -220,11 +220,11 @@ def probability_readout(values, indices=None, *, width):
     the raw-byte crossover ``B_dense = 8D``, ``B_sparse = 16s`` (``8*(W+1)*s``
     with W index words), not an empirical speed threshold. A dense input keeps
     its buffer on the dense branch and forms indices only on the sparse
-    branch. The adaptive policy guarantees ``B_actual <= 8D``. The stored-entry
+    branch. This adaptive choice guarantees ``B_actual <= 8D``. The saved-entry
     count D of a dense marginal and its nonzero count s are different
     quantities.
 
-    The total is ``math.fsum`` of the stored values, computed once here and
+    The total is ``math.fsum`` of the saved values, computed once here and
     saved, so the unit endpoint ``fsum(p_j) <= fl(1+w)`` of
     ``ObservationChunk.validate_unit_bound`` is the exact acceptance
     predicate. ``np.sum`` with the same comparison could change acceptance for
@@ -364,13 +364,13 @@ class ArtifactManifest(Record):
 
 
 class UnavailableOutput(Record):
-    """A declared array output that its producer did not produce, and the reason.
+    """A declared array output that its computation did not produce, and the reason.
 
     An observation lists it in place of the array, so a missing output is
     explicit instead of looking like an empty result.
 
     Attributes:
-        output: Selected named array declaration that was not produced.
+        output: The named array declaration that was not produced.
         reason: Nonempty explanation of why that output is unavailable.
     """
 
@@ -426,32 +426,33 @@ class ArtifactHandle:
 
 
 class ArtifactStore:
-    """One finite numerical-data lifetime, shared by execution and analysis.
+    """The saved arrays of one Run or Result under one byte limit, shared by execution and analysis.
 
-    The data-byte cap bounds stored arrays. Publication can use at most two
-    array-sized temporary copies, for endian or layout conversion and for
-    immutable ownership, and none for a handed-over private array
-    (``_publish``). That finite size follows from the admitted array, not a
-    metadata work ledger. The cap does not claim to bound process RSS or all
-    undocumented SDK workspace.
+    The byte limit bounds the saved arrays. Saving an array can use at most
+    two temporary copies of its size, one to convert its byte order or
+    layout and one to make it immutable, and none for a private array that
+    the caller hands over (``_publish``). That bound follows from the checked
+    array, not from a separate count of metadata work. The limit does not
+    bound the memory of the process or undocumented SDK workspace.
 
-    A restored inventory is registered lazily: a manifest costs O(1)
-    metadata and zero hydrated payload bytes until its array is first read
-    (``get``). Hydration keeps one copy per payload digest for the store's
-    lifetime. Lazy loading does not imply eviction, so with already hydrated
-    payloads totalling H the store's payload peak is H + B + C for a new
-    payload of B bytes read in journal blocks of C bytes.
+    Restored manifests are registered without reading their arrays, so a
+    manifest costs O(1) metadata and no payload bytes until its array is
+    first read (``get``). Reading keeps one copy per payload digest for the
+    store's lifetime. Deferred reading does not imply eviction, so with
+    already read payloads totalling H the store's payload peak is H + B + C
+    for a new payload of B bytes read in blocks of C bytes from the run log
+    (``run.sqlite``, the SQLite file in which a Run records each step).
     """
 
     def __init__(self, *, max_bytes=DEFAULT_MAX_BYTES):
-        """Create an empty store with a cap of ``max_bytes`` array bytes.
+        """Create an empty store with a limit of ``max_bytes`` array bytes.
 
         ``_persistence`` is None for a standalone store. A Run installs its
-        reservation and publication callbacks there, so each array commits in
-        the same journal transaction as the observation that produced it.
+        reservation and saving callbacks there, so each array commits in
+        the same run-log transaction as the observation that produced it.
         ``_loader`` is None for a standalone store. A Run installs a callable
         that returns ``(read_chunks, chunk_bytes)`` for a manifest whose bytes
-        its journal holds, or None, so a restored array hydrates on first use.
+        its run log holds, or None, so a restored array is read on first use.
         """
         if type(max_bytes) is not int or max_bytes < 0:
             raise ValueError("artifact storage requires a finite nonnegative byte cap")
@@ -472,7 +473,7 @@ class ArtifactStore:
         return handle
 
     def _restore(self, manifests):
-        """Restore the charged inventory without inventing missing native data.
+        """Register the saved manifests and count their bytes, without inventing missing backend data.
 
         Each manifest is registered without reading its payload. The array is
         read on first use through ``_loader`` (``get``).
@@ -494,7 +495,7 @@ class ArtifactStore:
         return self._data_bytes
 
     def snapshot(self):
-        """Freeze the inventory as handle references, without copying any array."""
+        """Return the current handles as a tuple, without copying any array."""
         with self._lock:
             return tuple(self._handles.values())
 
@@ -506,12 +507,12 @@ class ArtifactStore:
             self._cap = max_bytes
 
     def get(self, manifest):
-        """Return the handle for ``manifest`` when its array is available, hydrating it on first use.
+        """Return the handle for ``manifest`` when its array is available, reading it into memory on first use.
 
-        Lookup needs the whole manifest, not only its identity, and the stored
-        manifest must equal it. A description cannot reach data published
+        Lookup needs the whole manifest, not only its content hash, and the
+        saved manifest must equal it. A description cannot reach data saved
         under different provenance. A restored manifest whose bytes the
-        store's loader can read is hydrated once (``_hydrate``).
+        store's loader can read is read once (``_hydrate``).
         """
         if type(manifest) is not ArtifactManifest:
             raise TypeError("artifact access requires its full provenance-qualified manifest")
@@ -543,25 +544,26 @@ class ArtifactStore:
                     or (self._loader is not None and self._loader(manifest) is not None))
 
     def _hydrate(self, manifest, read_chunks, *, chunk_bytes):
-        """Materialize one registered payload on first access into a single private buffer.
+        """Read one registered payload into a single private buffer on first access.
 
-        The stored dtype, shape, byte count and block order determine its
-        layout. The returned array exposes a read-only view. With previous
-        hydrated arrays excluded, the explicit payload-buffer peak is the
-        payload byte count plus one journal block when both the consumer and
-        the iterator release each block before reading the next. Stream the
-        block inventory or account for its separate metadata storage.
+        The saved dtype, shape, byte count and block order determine its
+        layout. The returned array exposes a read-only view. With arrays read
+        earlier excluded, the explicit payload-buffer peak is the payload byte
+        count plus one run-log block when both the calling code and the
+        iterator release each block before reading the next. A loader must
+        stream its list of blocks or count that list's separate metadata storage.
 
-        One private byte buffer of size B is allocated, each journal block is
+        One private byte buffer of size B is allocated, each run-log block is
         copied directly into a memoryview of it and released before the next
         block is read, and the final NumPy view is created over a read-only
-        memoryview, so the explicit peak payload memory of one hydration is
+        memoryview, so the explicit peak payload memory of one read is
         B + C for blocks of C bytes (16N + C for N complex128 entries).
-        Loading is trusted: the shape, encoding, block order, block sizes and
-        completeness are checked, and no value scan, digest recomputation or
-        summary recheck runs. Publication checked the values and computed the
-        summaries from the bytes that were hashed. ``manifest.data_bytes``
-        stays B. The Run charges stored bytes, not this transient workspace.
+        Loading trusts the saved values. The shape, encoding, block order,
+        block sizes and completeness are checked, and no value scan, digest
+        recomputation or summary recheck runs. Saving checked the values and
+        computed the summaries from the bytes that were hashed.
+        ``manifest.data_bytes`` stays B. The Run counts saved bytes against
+        its limit, not this transient workspace.
         The buffer is kept per payload digest for the store's lifetime, so a
         second restored manifest with the same bytes, of the same or another
         dtype and shape, gets its own typed view of that buffer without a
@@ -611,46 +613,47 @@ class ArtifactStore:
             return handle
 
     def check_capacity(self, data_bytes):
-        """Reject ``data_bytes`` more array bytes when stored plus new would exceed the cap."""
+        """Reject ``data_bytes`` more array bytes when saved plus new bytes would exceed the limit."""
         if type(data_bytes) is not int or data_bytes < 0:
             raise ValueError("data capacity requires nonnegative integer bytes")
         if self._data_bytes + data_bytes > self._cap:
             raise ValueError(f"array publication needs {data_bytes} bytes with {self._data_bytes} already stored; limit is {self._cap}")
 
     def _publish(self, array, *, output, provenance, private=False):
-        """Publish one declared array as immutable little-endian data.
+        """Save one declared array as immutable little-endian data.
 
         An ``ArrayOutput`` is complex128 or float64. A ``ReadoutArray`` is
         float64 or uint64 and has had its value checks
         (``probability_readout``) before it arrives here. Shape and dtype
         are checked before any copy. Nonfinite values of an
-        ``ArrayOutput`` reject. The check reads the array in blocks of at most
+        ``ArrayOutput`` are rejected. The check reads the array in blocks of at most
         ``_FINITE_CHECK_ENTRIES`` entries (one operator row when a row is
         longer), so its Boolean scratch does not grow with the array. A Run
         reserves the bytes against the acquisition's output reservation before
         the copy. The array is then converted to the declared little-endian
-        dtype (``<c16``, ``<f8`` or ``<u8``) and frozen, and only then
-        hashed, so the digest and the manifest identity do not depend on the
-        host byte order. A manifest already in the store (same bytes and same
-        acquisition) returns the existing handle without a second charge.
+        dtype (``<c16``, ``<f8`` or ``<u8``) and made immutable, and only then
+        hashed, so the digest and the manifest's content hash do not depend on
+        the byte order of the computer. A manifest already in the store (same
+        bytes and same acquisition) returns the existing handle without
+        counting its bytes again.
 
         Ownership: with ``private=True`` the caller hands over an array that no
         other code references and gives up its own reference. When that array
-        is the only NumPy array over its C-contiguous data in the stored dtype
-        (it owns the data, or its base is a non-array buffer owner such as a
-        simulator's result buffer), publication marks it read-only and keeps it
-        instead of copying it, and the published handle holds a view of it
-        that cannot be made writeable. The kept array itself is not copied into
-        immutable bytes, so code that reached it through the view's ``base``
-        could make it writeable again. Publication relies on the handover
+        is the only NumPy array over its C-contiguous data in the saved dtype
+        (it owns the data, or its base is a buffer object that is not an
+        array, such as a simulator's result buffer), saving marks it read-only
+        and keeps it instead of copying it, and the returned handle holds a
+        view of it that cannot be made writeable. The kept array itself is not
+        copied into immutable bytes, so code that reached it through the view's
+        ``base`` could make it writeable again. Saving relies on the handover
         instead. Any other array is copied into immutable bytes, after a
-        conversion copy when its byte order or layout differs from the stored
-        one, so later changes by the caller cannot reach the published data.
+        conversion copy when its byte order or layout differs from the saved
+        one, so later changes by the caller cannot reach the saved data.
         ``reduce_amplitudes`` returns a new array that nothing else holds, and
-        amplitude publication hands it over. A probability readout hands over
+        the saving of amplitudes hands it over. A probability readout hands over
         the arrays that ``probability_readout`` returns, the adapter's dense
         buffer included. Points of one trajectory that share one saved marginal
-        hand over the same buffer, which stays read-only and is published once
+        hand over the same buffer, which stays read-only and is saved once
         per point under that point's manifest.
         """
         import numpy as np

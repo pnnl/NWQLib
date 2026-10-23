@@ -1,4 +1,4 @@
-"""Explicit ADAPT state/sector/scalar checks with scoped verification receipts."""
+"""Explicit ADAPT state, sector and scalar checks and their verification records."""
 
 from nwqlib._limits import DEFAULT_MAX_BYTES
 
@@ -95,8 +95,8 @@ class AdaptVerificationOptions(Record):
         be an integer or half-integer s, and ``s(s+1)`` must be finite when
         the sector check is selected. The supplied-energy comparison needs
         both ``reference_energy`` and ``reference_tolerance``, and that
-        energy must be a concrete real scalar with provenance and no point
-        bindings.
+        energy must be a concrete real scalar with a stated source and no
+        point bindings.
         """
         if not self.comparisons or len(set(self.comparisons)) != len(self.comparisons):
             raise ValueError("verification requires distinct selected comparisons")
@@ -283,8 +283,8 @@ def _residual_metrics(sigma, energy, eigenvalues, options, mode, stop_reason):
     so some eigenvalue of H lies in ``[E - sigma, E + sigma]``. This gives the
     ``spectral_nearness`` endpoints, which say nothing about which eigenvalue
     it is. The Kato-Temple bound ``lambda_1 >= E - sigma**2 / (eta - E)``
-    needs ``E`` to be the Rayleigh quotient of ``psi`` and a lower bound
-    ``eta`` on the next eigenvalue ``lambda_2``. The second Ritz value
+    needs ``E`` to be the Rayleigh quotient of ``psi`` and an independently
+    established ``eta`` with ``E < eta <= lambda_2``. The second Ritz value
     is an upper bound on ``lambda_2``, so ``kato_heuristic_lower`` is a heuristic
     endpoint and not a certified bound. Sampled results report only the norm
     and its square.
@@ -325,21 +325,21 @@ def _residual_metrics(sigma, energy, eigenvalues, options, mode, stop_reason):
 
 
 def _lowered_native_circuits(plan, context, selected, counts, *, max_work, max_bytes):
-    """Build and lower, once, every circuit that the native Ritz evolution in ``verify`` simulates.
+    """Build and decompose, once, every circuit that the circuit-level Ritz evolution in ``verify`` simulates.
 
     Returns ``({(): reference, (index, theta): suffix}, synthesis_work)``.
-    The reference is the actual preparation circuit of the Plan's reference
-    state. Each suffix applies the uncontrolled native gate of one selected
+    The reference is the preparation circuit of the Plan's reference
+    state. Each suffix applies the uncontrolled Qiskit gate of one selected
     generator, built by the same factory and cache key as the query gates
     (``_native_generator``). Every circuit is decomposed as for Aer execution
     (``AER_EXECUTION_DECOMPOSE_REPS``). A supplied reference circuit can hold
     a dense ``UnitaryGate``, which Aer applies as its matrix but ``decompose``
     would expand through Qiskit's inexact synthesis, so it is first replaced
-    by its exact synthesis. That synthesis is admitted against ``max_work``
+    by its exact synthesis. That synthesis is checked against ``max_work``
     and ``max_bytes`` before it starts, and ``synthesis_work`` is its work
-    law (``_dense_synthesis.dense_synthesis_size``), which the caller adds to
-    its total. No state is simulated here, so the verification work law can
-    charge the instructions these circuits actually contain before any
+    formula (``_dense_synthesis.dense_synthesis_size``), which the caller adds
+    to its total. No state is simulated here, so the verification work
+    formula can count the instructions these circuits contain before any
     statevector exists.
     """
     from qiskit import QuantumCircuit
@@ -385,7 +385,7 @@ def _statevector_evolution_work(circuit, dimension):
     gate with a matrix on ``k`` qubits costs one unit for its copy in the
     instruction that ``evolve`` or ``from_instruction`` converts the circuit
     to (a gate reached through a definition is not copied, so this
-    overcharges it by one), ``4**k`` to form its
+    overcounts it by one), ``4**k`` to form its
     ``2**k``-by-``2**k`` matrix, ``dimension * 2**k`` multiply-adds to apply
     it, and ``2 * dimension`` for the at most two copies of the state that
     Qiskit makes when it transposes the gate's qubits to the front of the
@@ -413,7 +413,7 @@ def _statevector_evolution_work(circuit, dimension):
 def _largest_evolved_gate(circuit):
     """Return the largest qubit count ``k`` of a gate matrix that evolving ``circuit`` forms.
 
-    The census follows ``_statevector_evolution_work``: a gate with a matrix
+    The count follows ``_statevector_evolution_work``. A gate with a matrix
     counts its own width, a barrier nothing, and any other instruction the
     gates of its definition.
     """
@@ -432,9 +432,9 @@ def _largest_evolved_gate(circuit):
 
 
 def _state_frontier(length):
-    """Return ``F(l)``, the full-vector frontier of streaming a Ritz state of ``l`` selections.
+    """Return ``F(l)``, the largest number of full vectors held at once while streaming a Ritz state of ``l`` selections.
 
-    A multi-gate native suffix can hold the current state, a transposed or
+    A multi-gate Qiskit suffix can hold the current state, a transposed or
     reshaped copy and a contraction result together, three additional full
     vectors during an evolution (Qiskit's ``Statevector._evolve_operator``).
     The scalar multiply-add into the Ritz state needs one temporary. For
@@ -442,12 +442,12 @@ def _state_frontier(length):
     reference, single 1 and the accumulator, and during the last product
     evolution at most ``l - 2`` later-needed product prefixes, the
     accumulator and three evolution vectors, ``l + 2``. So ``F(0) = 3``,
-    ``F(1) = 5`` and ``F(l) = max(6, l + 2)``. These are upper frontiers, not
+    ``F(1) = 5`` and ``F(l) = max(6, l + 2)``. These are upper bounds, not
     a promise that every gate layout allocates that many arrays. The final
     normalizer's two complex arrays and Boolean scan scratch lie below it
     apart from its one-byte mask, and the classical two-buffer Taylor action
-    fits within the same frontier, with its shared action remainder and the
-    packed tables charged separately.
+    fits within the same bound, with its shared action remainder and the
+    packed tables counted separately.
     """
     if length == 0:
         return 3
@@ -468,9 +468,9 @@ def verify(plan, result, *, options):
     exact absolute difference of two recorded scalars and builds no state.
     Classical plans reuse the prefix vectors saved with the Result when they
     are present and build the missing ones by generator exponentials.
-    Quantum plans build them from the native gates. Both stream the Ritz
-    combination (``adapt_acquisition.stream_ritz``): a basis or prefix array
-    is released after its final contribution and successor evolution.
+    Quantum plans build them from the Qiskit gates. Both stream the Ritz
+    combination (``adapt_acquisition.stream_ritz``), which frees a basis or
+    prefix array once it has contributed and its successor has been evolved.
 
     Args:
         plan: The ADAPT Plan that produced ``result``.
@@ -478,10 +478,11 @@ def verify(plan, result, *, options):
         options: The selected ``AdaptVerificationOptions``.
 
     Returns:
-        ``(receipt, facts)``: the ``VerificationReceipt`` with the actual
+        ``(receipt, facts)``: the ``VerificationReceipt`` with the
         application counts, and one ``FramedFact`` per reported scalar, in the
-        order of ``options.verification_checks``. A concrete value is
-        witnessed by the receipt. A value that is missing or not finite has
+        order of ``options.verification_checks``. Each concrete value
+        carries evidence with status ``"witnessed"`` that names this receipt.
+        A value that is missing or not finite has
         availability ``unknown``.
     """
     if type(options) is not AdaptVerificationOptions:

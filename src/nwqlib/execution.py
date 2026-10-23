@@ -1,4 +1,4 @@
-"""SDK-free execution declarations and explicit prepared/run entry points."""
+"""Execution records that need no quantum SDK, and the entry points that prepare and run a Plan."""
 
 from nwqlib._limits import DEFAULT_MAX_BYTES, DEFAULT_MAX_DIRECT_AMPLITUDES
 
@@ -52,10 +52,10 @@ class ExecutionMode(str, Enum):
 
 
 class RegisterMap(Record):
-    """Declared register name and least-significant-first native bit positions.
+    """Declared register name and its bit positions in the corresponding layout, least significant first.
 
     Attributes:
-        name: Register name in the associated selected/native layout.
+        name: Register name in the associated logical or backend layout.
         bits: Ordered global bit positions belonging to that register.
     """
 
@@ -64,15 +64,17 @@ class RegisterMap(Record):
 
 
 class LogicalPreparationReceipt(Record):
-    """Logical-lowering facts for the parent's selected construction, stored without replay.
+    """Counts from building the logical circuit of the parent record's construction, saved so the build is not repeated.
 
-    These are the counts that lowering already measured, kept so that inspection
-    and reopening never lower again. dynamic_visits counts admitted dynamic IR
-    visits, not native gates. reserved_work is the admitted dynamic/definition
-    size law, not the outer run reservation or measured CPU/RSS.
-    defined_selections are actually built native definition templates,
-    including cached bases, not specialization or operation counts. Exact call
-    arguments remain in the selected Realization.
+    These are the counts that lowering (building the Qiskit circuit) already
+    measured, kept so that inspection and reopening never lower again.
+    dynamic_visits counts the visits of checked dynamic IR nodes, not native
+    gates. reserved_work is the value of the size formula for the dynamic
+    nodes and definitions, not the Run's reservation or measured CPU time or
+    memory. defined_selections are the native definition templates actually
+    built, including cached bases, and are not counts of specializations or
+    operations. The exact call arguments remain in the Realization that
+    planning chose.
     """
 
     dynamic_visits: Count
@@ -81,12 +83,14 @@ class LogicalPreparationReceipt(Record):
 
 
 class CountsSampling(Record):
-    """Actual producer semantics, separate from an assumed statistical model.
+    """How the backend actually samples counts, separate from an assumed statistical model.
 
-    fixed_seed resets the producer's sampling stream to seed on every call.
-    fresh obtains a new physical acquisition. Its job coordinates identify the
-    data, without establishing IID or stationarity. unknown supplies neither
-    premise. RuntimeOptions.seed can select compilation alone on hardware.
+    With fixed_seed, the backend resets its sampling stream to seed on every
+    call. With fresh, every call draws new samples, and the job coordinates
+    identify the data without establishing that the samples are independent
+    and identically distributed or stationary. unknown supplies neither
+    assumption. On hardware, RuntimeOptions.seed can affect the compilation
+    alone.
     """
 
     kind: Literal["fixed_seed", "fresh", "unknown"]
@@ -148,22 +152,34 @@ class PreparedArtifact(Record):
         native_operations: Prepared operation count, or None when unavailable.
             For a coherent statevector readout on Aer, a trajectory included,
             it counts the backend evolution operations that execute, including
-            every executed forward and inverse view operation, and no save
-            instruction: a save evaluates or copies the current state and
-            inserts no state error into the continuing state. It is not
+            every executed operation of a readout view (a basis change applied
+            before a point's readout) and of its inverse. It counts no save
+            instruction, because a save evaluates or copies the current state
+            and adds no state error to the continuing state. It is not
             multiplied by the number of saved labels or points, and one
             whole-trajectory count gives a conservative window for every
-            point. On Aer, a body with control flow and sampled counts count
-            every instruction of the prepared backend circuit. Other adapters
-            state their own count.
+            point. On Aer, for a body with control flow and for sampled
+            counts, it counts every instruction of the prepared backend
+            circuit. Other adapters state their own count.
         host_preparation_work_reserved: Setup work of the classical
             computation counted for this preparation.
         selected_kernel_id: Content hash of the classical computation's
             declaration, or None for a circuit.
         transformation: Description of how the planned circuit was turned
             into the backend's circuit.
-        population: `"unconditional"`, `"native_conditioned"` or
-            `"unknown"`, which shots the measured counts cover.
+        population: The recorded conditioning of an exact readout, in which
+            the simulator computes probabilities, Pauli expectation values or
+            amplitudes without shot sampling, subject to numerical rounding.
+            The value is `"unconditional"`, `"native_conditioned"` or
+            `"unknown"`. For an exact readout, `"unconditional"` means that
+            no measurement or reset precedes it. `"native_conditioned"`,
+            possible only for Pauli expectation and probability readouts,
+            marks a preceding measurement or reset that can condition the
+            simulator state from which the readout is computed. `"unknown"`
+            means that the conditioning could not be established, for example
+            after unresolved control flow. Every other readout kind, sampled
+            counts included, and every classical routine use
+            `"unconditional"`.
         payload: Where the backend's circuit bytes are saved, or None. It
             holds no bytes itself.
         native_quantum_layout: Layout of the compiled quantum registers.
@@ -319,7 +335,7 @@ class PreparedArtifact(Record):
         + e**2`` with ``omega`` equal to this record's ``probability_window``
         and ``(t, e)`` its ``statevector_roundoff``. An unassessed correction
         gives None, not the uncorrected window, so it yields no finite
-        mass-check budget.
+        allowance for the check of a total probability.
         """
         if self.statevector_roundoff is None:
             return None
@@ -327,12 +343,13 @@ class PreparedArtifact(Record):
 
     @model_validator(mode="after")
     def _execution_kind(self):
-        """Keep host and quantum receipts disjoint so neither can fabricate the other's facts.
+        """Keep the records of classical routines and of circuits disjoint, so neither can carry the other's facts.
 
-        A host receipt names its selected kernel and carries no lowering, layout,
-        native basis, payload, backend or population other than unconditional. A
-        quantum receipt carries its logical lowering receipt and no host fields.
-        Counts receipts must state their actual sampling semantics.
+        The record of a classical routine names its kernel and carries no lowering,
+        layout, native basis, payload, backend or population other than
+        unconditional. The record of a circuit carries its record of logical
+        lowering (``LogicalPreparationReceipt``) and no host fields. A counts
+        record must state how its counts are sampled.
         """
         if (self.observation.kind == "counts") != (self.counts_sampling is not None):
             raise ValueError("counts preparations require their actual sampling semantics")
@@ -359,10 +376,10 @@ class PreparedArtifact(Record):
 
 
 class PayloadRef(Record):
-    """Local payload key, format and byte count, without content authentication.
+    """Key, format and byte count of a locally saved payload, without a check of its content.
 
-    key locates one saved input or an already identified result artifact.
-    Loading these metadata does not load a provider SDK.
+    key locates one saved input or an output file already identified by its
+    content hash. Loading these metadata does not load a provider SDK.
     """
 
     format: Text
@@ -372,7 +389,7 @@ class PayloadRef(Record):
 
 class PauliValue(Record):
     """One exact Pauli expectation. Its unit bound depends on the executed circuit's
-    roundoff and is checked with the preparation receipt, see
+    roundoff and is checked against the preparation record by
     ObservationChunk.validate_unit_bound."""
 
     kind: Literal["pauli"] = "pauli"
@@ -435,25 +452,25 @@ class EstimateValue(Record):
 
 
 class ProbabilityArrays(Record):
-    """The stored form of one probability marginal: array manifests and scalar summaries.
+    """The saved form of one probability marginal, with its array manifests and scalar summaries.
 
-    Probability readouts store their numerical values in binary arrays. The
-    observation chunk contains the array manifests, outcome layout and scalar
-    population summaries. Dense probabilities use outcome positions as
+    Probability readouts save their numerical values in binary arrays. The
+    observation chunk contains the array manifests, the outcome layout and
+    scalar summaries of the probabilities. Dense probabilities use outcome positions as
     indices: ``probabilities`` has shape ``(D,)``, ``D = 2**width``, and every
     outcome exists by position, including exact zeros. Sparse probabilities
     use sorted unique integer indices: ``indices`` has shape ``(s,)`` for a
     width of at most 64, or ``(s, W)`` packed words with ``W =
     ceil(width/64)``, word zero least significant, and ``probabilities`` holds
     the ``s`` strictly positive values. The first selected probability qubit is
-    least significant in the outcome index. The arrays are published with the
-    chunk's acquisition (``artifacts.ReadoutArray``). The summaries are
-    computed once at publication from the bytes that are hashed
+    least significant in the outcome index. The arrays are saved with the
+    chunk (``artifacts.ReadoutArray``). The summaries are computed once, when
+    the arrays are saved, from the bytes that are hashed
     (``artifacts.probability_readout``), which also checks the values, so
     loading checks this layout and the manifests' associations and rereads no
-    value. The stored-entry count D of a dense marginal and its nonzero count
-    s are different quantities. The unit endpoint compares ``mass`` with one
-    plus the receipt's window (``ObservationChunk.validate_unit_bound``).
+    value. The saved-entry count D of a dense marginal and its nonzero count
+    s are different quantities. The unit check compares ``mass`` with one
+    plus the preparation record's window (``ObservationChunk.validate_unit_bound``).
 
     Attributes:
         encoding: dense or sparse.
@@ -494,11 +511,12 @@ class ProbabilityArrays(Record):
 
 
 class ScalarValue(Record):
-    """A selected scalar statistic with explicit frame and availability.
+    """A scalar statistic with its frame and availability.
 
-    The selected host/amplitude declaration and method own its mathematical
-    domain. The encoded_branch frame may denote a selected normalized quantum mass or
-    an unnormalized host branch norm, according to that declaration.
+    The classical-routine or amplitude declaration of the Plan and its Method
+    fix the statistic's mathematical domain. The encoded_branch frame may denote a
+    normalized quantum mass or an unnormalized classical branch norm,
+    according to that declaration.
     """
 
     kind: Literal["scalar"] = "scalar"
@@ -563,8 +581,8 @@ class VerificationReceipt(Record):
     `(receipt, facts)`, and so do `verify_projected`, `verify_energy_shift`
     and `verify_number_sector`. The raw values sit in the `facts` of each
     entry of `applications`. Each returned fact
-    with a value cites this verification record: its
-    `fact.evidence.artifact` is `receipt.content_id`. Loading a saved
+    with a value cites this verification record through its
+    `fact.evidence.artifact`, which equals `receipt.content_id`. Loading a saved
     verification record creates no new invocation and repeats no computation.
     A missing verification record does not show whether a reference ran, and
     two verification records do not show that their calls were statistically
@@ -578,7 +596,7 @@ class VerificationReceipt(Record):
             for a record built by hand or of unknown origin.
         result_id: Content hash of the checked Result.
         construction_id: Content hash of the construction of that Plan.
-        artifact_ids: Content hashes of the stored arrays that the check
+        artifact_ids: Content hashes of the saved arrays that the check
             read, distinct. Empty when it read none.
         reference: The [`Source`][nwqlib.core.records.Source] of the
             reference computation or check.
@@ -627,8 +645,9 @@ class VerificationReceipt(Record):
     def _lineage(self):
         """Require distinct targets and application names, and application facts with declared or no evidence.
 
-        A fact witnessed by this receipt can exist only after the receipt does, so
-        an application fact inside it may carry declared evidence or none.
+        A fact whose evidence is this record can exist only after the record
+        does, so a fact of an application inside it may carry declared
+        evidence or none.
         """
         if len(set(self.artifact_ids)) != len(self.artifact_ids):
             raise ValueError("verification target artifacts must be distinct")
@@ -864,12 +883,15 @@ class Histogram:
 
 
 class ObservationChunk(Record):
-    """The statistics of one measurement, or of one point of a trajectory, as stored with a Run or Result.
+    """One recorded batch of outputs, or the outputs of one trajectory point, as saved with a Run or Result.
 
     `data.observations.chunks` holds them, and a Method's `analyze` reads
-    them, as [Run your own circuit](../own_circuit.md) shows. A chunk keeps
-    the sufficient statistics of its measurement, never one record per
-    shot. Chunks of different attempts stay distinct even when their values
+    them, as [Run your own circuit](../own_circuit.md) shows. The outputs
+    can be sampled counts, an exact readout (probabilities, Pauli
+    expectation values or amplitudes that a simulator computes without shot
+    sampling, subject to numerical rounding), a provider's estimate of an
+    expectation value, or the results of a classical routine. A chunk keeps their sufficient statistics, never one
+    record per shot. Chunks of different attempts stay distinct even when their values
     are equal. Their identifiers record where the data came from and are not
     evidence that random measurements are independent.
 
@@ -888,26 +910,26 @@ class ObservationChunk(Record):
     read its arrays, and its `histogram()` raises an error
     that names the loader to use.
 
-    A trajectory measurement stores one chunk per observation point. The
+    A trajectory stores one chunk per observation point. The
     chunk names its `point` and resolved `boundary`, so a saved value maps to
     its body, point and preparation record after reloading. A trajectory
     stores one full declaration in its preparation record and one row per
     point, with only that point's readout declaration and the content hash
     of the shared declaration on the row. Storage and validation are linear
-    in the total accepted declarations and payloads, with no per-point copy
+    in the total size of the declarations and payloads, with no per-point copy
     or rescan of the full schedule. The chunk's `observation` is
     `ObservationSpec.point_observation` of the point, and `trajectory_id` is
     the content hash of the full declaration. Joining the chunk to its
     preparation record, in `validate_unit_bound` and when the Run records the
-    chunk, checks both. Point chunks share their measurement's completion,
-    preparation, shots and backend work. The chunks of one measurement share
-    its run, attempt and job, and differ in `chunk`. A missing point makes
+    chunk, checks both. Point chunks share the completion, preparation,
+    shots and backend work of the execution that produced them. The chunks
+    of one execution share its run, attempt and job, and differ in `chunk`. A missing point makes
     the quantity that depends on it incomplete. It never causes the shared
     prefix to be run again in analysis or loading.
 
     Attributes:
         schema_version: Fixed `3`. Version of the saved record format.
-        run_id: Identifier of the Run that made the measurement.
+        run_id: Identifier of the Run that produced the data.
         execution: `"quantum_circuit"` or `"host_kernel"`, the kind of
             computation that produced the data.
         plan_id: Content hash of the Plan.
@@ -922,16 +944,25 @@ class ObservationChunk(Record):
             outcome coordinates are read.
         classical_layout: Order of the classical registers, which fixes how
             count labels are read.
-        attempt: Identifier of the attempt that was set aside for this
-            measurement.
+        attempt: Identifier of the attempt that was set aside for the
+            execution that produced the data.
         job: Identifier of the job that produced the data, not of a later
             reduction.
         chunk: Position of this part within that job.
         observation: The readout against which the returned statistics are
             checked. For a trajectory point, it is that point's single-point
             readout.
-        population: `"unconditional"`, `"native_conditioned"` or
-            `"unknown"`, which shots the statistics cover.
+        population: The recorded conditioning of an exact readout,
+            `"unconditional"`, `"native_conditioned"` or `"unknown"`. For an
+            exact readout, `"unconditional"` means that no measurement or
+            reset precedes it. `"native_conditioned"`, possible only for
+            Pauli expectation and probability readouts, marks a preceding
+            measurement or reset that can condition the simulator state from
+            which the readout is computed. `"unknown"` means that the
+            conditioning could not be established, for example after
+            unresolved control flow.
+            Every other readout kind, sampled counts included, and the
+            results of every classical routine use `"unconditional"`.
         returned_shots: Total of the returned counts, or None when no shot
             total is available.
         trajectories: Number of trajectories, or None when unavailable or
@@ -959,7 +990,7 @@ class ObservationChunk(Record):
         physical_scale_unavailable: Why ``physical_scale`` is None, because the
             scale is unavailable or no recovery applies. Classical and
             amplitude chunks set exactly one of the two fields.
-        artifacts: Manifests of the arrays saved from this measurement.
+        artifacts: Manifests of the arrays saved from these outputs.
         applications: Records of the classical operator applications.
         unavailable: Named outputs that could not be produced.
         point: ID of the trajectory point whose values this chunk holds, or
@@ -1081,16 +1112,16 @@ class ObservationChunk(Record):
 
     @classmethod
     def _from_probability_arrays(cls, values, indices=None, *, store=None, **fields):
-        """Build a probability chunk from its arrays, publishing them to ``store`` when given.
+        """Build a probability chunk from its arrays, saving them in ``store`` when given.
 
-        The arrays are checked and their stored encoding chosen by
+        The arrays are checked and their saved encoding chosen by
         ``artifacts.probability_readout``, which also computes the summaries
-        from the bytes that are hashed. The caller hands the arrays over: a
-        published array is kept without a copy when it owns its data
+        from the bytes that are hashed. The caller hands the arrays over, so a
+        saved array is kept without a copy when it owns its data
         (``ArtifactStore._publish`` with ``private=True``). Without a store the
         manifests carry the digest of the same canonical bytes and the chunk
         keeps the arrays in memory. Either way the chunk keeps its Histogram,
-        so reading it right after publication reads no store.
+        so reading it right after saving reads no store.
         """
         from nwqlib.artifacts import ArtifactManifest as Manifest
         observation = fields["observation"]
@@ -1252,19 +1283,18 @@ class ObservationChunk(Record):
 
     @property
     def acquisition_key(self):
-        """``(run_id, attempt, job, chunk)``, which identifies the data of one measurement.
+        """``(run_id, attempt, job, chunk)``, which identifies the outputs that one chunk records.
 
         A Run stores, deduplicates and joins observations under this key. Two
-        chunks with equal values but different keys are different
-        measurements, except that the point chunks of one trajectory
-        measurement share its run, attempt and job and differ only in
-        ``chunk``.
+        chunks with equal values but different keys remain distinct records.
+        The point chunks of one trajectory come from one execution, share its
+        run, attempt and job, and differ only in ``chunk``.
         """
         return self.run_id, self.attempt, self.job, self.chunk
 
     @model_validator(mode="after")
     def _statistics(self):
-        """Admit readout values, populations and artifact provenance for the declared execution
+        """Check the readout values, populations and array provenance for the declared execution
         kind.
         """
         # A reduction point's one-point readout is the singleton trajectory of
@@ -1517,7 +1547,7 @@ class ObservationChunk(Record):
 
 
 class ObservationView(Record):
-    """Bounded supplied chunks. Identical fetches deduplicate only by acquisition ID."""
+    """A bounded collection of chunks. Identical retrieved chunks merge only when they share an acquisition key."""
 
     schema_version: Literal[2] = 2
     chunks: tuple[ObservationChunk, ...] = ()
@@ -1526,8 +1556,8 @@ class ObservationView(Record):
     def _deduplicate(self):
         """Keep one copy of a chunk fetched twice, and reject different data under one key.
 
-        Equal values under different acquisition keys stay separate chunks,
-        because they come from separate acquisitions.
+        Equal values under different acquisition keys remain separate chunks,
+        including point chunks from one trajectory.
         """
         unique = {}
         for item in self.chunks:
@@ -1616,14 +1646,14 @@ class ExecutionLimits(Record):
             the exact syntheses of dense unitaries that the Run makes while
             it prepares circuits. It counts the syntheses of a backend that
             translates a circuit to its gate basis. When building the Qiskit circuit adds control
-            to a selected block, it also counts the exact syntheses needed
+            to a circuit block, it also counts the exact syntheses needed
             for that control and Qiskit's work to control the synthesized
             circuits. The default allows the synthesis
-            of one dense unitary on 8 qubits (5.2e8 units) and refuses one on
+            of one dense unitary on 8 qubits (5.2e8 units) and rejects one on
             9 qubits (4.0e9 units). The work of a preparation's syntheses is
             checked against the remaining allowance before the first of them
             starts. Each distinct matrix is synthesized and counted once while
-            the Run is open, and again after the Run is reopened. A refused
+            the Run is open, and again after the Run is reopened. A rejected
             preparation still counts against `max_total_circuits` and leaves
             its experiment unprepared, so a later call can prepare it after
             the limit is raised. Syntheses that a Method counts against its
@@ -1676,7 +1706,7 @@ class LimitAmendment(Record):
             uncertain ones included.
         raw_shots: Shots requested explicitly so far. Unknown sampling inside
             an estimate that a provider manages is not included.
-        stored_data_bytes: Bytes of the Run's stored data, without
+        stored_data_bytes: Bytes of the Run's saved data, without
             `pending_output_bytes`. Both byte counts describe the data the
             Run accounts for, never physical memory.
         pending_output_bytes: Bytes set aside for outputs not yet received.
@@ -1712,7 +1742,7 @@ class LimitAmendment(Record):
 
 
 def _validate_limit_amendments(amendments, *, current):
-    """Validate an ordered cap chain without reading or reproducing execution."""
+    """Check an ordered history of limit amendments without reading or repeating any execution."""
     previous = None
     counts = (0, 0, 0, 0)
     for sequence, amendment in enumerate(amendments, 1):
@@ -1728,24 +1758,34 @@ def _validate_limit_amendments(amendments, *, current):
 
 
 class ConsumptionEvent(Record):
-    """One acquisition attempt of a Run and the work charged for it, recorded apart from its scientific result.
+    """One acquisition attempt of a Run and the work counted for it, recorded apart from its scientific result.
 
-    status is reserved before the call and then becomes completed (with its
-    observation), uncertain or failed. Started quantum failures keep the full reserved shots as
-    uncertain exposure, because the provider may have executed or billed them.
-    A durably recorded synchronous host exception is failed, with its invocation
-    and work still charged. A process interruption without that record is uncertain.
-    A synchronous adapter cannot determine actual provider billing after failure.
-    evaluations counts requested non-count observable readouts, not simulator
-    trajectories. A trajectory schedule of K points is one evaluation.
-    A completed trajectory attempt's observation_id is the content identity
-    of the ObservationView of its point chunks in schedule order, which binds
-    the complete collection.
-    provider_managed_sampling marks unknown sampling cost behind
-    a provider estimate. In that case shots counts zero explicitly prescribed raw shots,
-    without claiming zero physical sampling or a provider-spend bound.
-    assessment_id is bound before native work. timing measures its named scope,
-    separately from started/finished lifecycle timestamps and scientific output.
+    An acquisition is one execution of a prepared circuit with its specified
+    readout and shot count, or one invocation of a classical routine,
+    together with the collection of the resulting data. status is reserved
+    before the call and then becomes completed (with its observation),
+    uncertain or failed. A circuit execution that started and then failed
+    keeps all its reserved shots as uncertain work in the exposure, because
+    the provider may have executed or billed them. An ordinary ``Exception``
+    raised by a synchronous classical routine, or by the checks of its
+    output, makes the attempt failed once that outcome is saved in the run
+    log (``run.sqlite``, the SQLite file in which a Run records each step),
+    with its invocation and work still counted. An interruption such as
+    ``KeyboardInterrupt`` leaves the attempt uncertain even though its
+    exception is recorded, and so does a process stop before the outcome is
+    saved. After a failure, a
+    synchronous adapter cannot determine what the provider actually billed.
+    evaluations counts the requested readouts other than counts, not
+    simulator trajectories, and a trajectory schedule of K points is one
+    evaluation. The observation_id of a completed trajectory attempt is the
+    content hash of the ObservationView of its point chunks in schedule
+    order, which binds the complete collection. provider_managed_sampling
+    marks an unknown sampling cost behind a provider estimate. In that case
+    shots counts zero explicitly prescribed raw shots, without claiming zero
+    physical sampling or a bound on the provider's spending. assessment_id is
+    bound before the backend work starts. timing measures its named scope,
+    separately from the started and finished timestamps and from the
+    scientific output.
     """
 
     schema_version: Literal[2] = 2
@@ -1794,7 +1834,7 @@ class ConsumptionEvent(Record):
 
 
 class JobLocator(Record):
-    """A provider/scheduler job identity with credential-free account context."""
+    """The identifier of a provider or scheduler job, with its account context and no credentials."""
 
     provider: Text
     job_id: Text
@@ -1808,10 +1848,11 @@ class JobLocator(Record):
 
 
 class PendingPreparation(Record):
-    """Original local data and remote upload/compile lifecycle, without shots.
+    """A remote preparation in progress, with its original local data and the state of its upload and compilation.
 
-    The SDK circuit data lives in local_data, so revisions never hash or parse
-    its contents. A known upload or compile ID is stored before further work.
+    It holds no shots. The SDK's circuit data is in local_data, so revisions
+    of this record never hash or parse it. An upload or compile identifier is
+    saved as soon as it is known, before further work.
     """
 
     preparation_id: Text
@@ -1850,11 +1891,12 @@ def point_chunk_key(result_key, point):
 
 
 class SubmissionItem(Record):
-    """One acquisition's exact position in the submitted result population.
+    """The exact position of one acquisition among the results of its submission.
 
-    item identifies the submitted PUB/circuit. result_key is the decoder's
-    stable chunk key, not a flattened histogram. Optional child job and
-    provider result identifiers are part of the provider association.
+    item identifies the submitted circuit or Qiskit primitive unified bloc
+    (PUB). result_key is the decoder's stable chunk key, not a flattened
+    histogram. The optional child job and provider result identifiers belong
+    to the association with the provider's results.
     """
 
     schema_version: Literal[2] = 2
@@ -1880,22 +1922,23 @@ class SubmissionItem(Record):
 
 
 class SubmissionRecord(Record):
-    """One admitted physical request, separate from its acquisition items.
+    """One request to a backend that passed the checks before running, separate from its acquisition items.
 
-    An intent reserves one possible job even if its acknowledgement is lost.
-    Provider billing and local native invocation evidence are not inferred
-    from request count.
+    The submission intent, the record written before the backend is
+    contacted, counts one possible job even if its acknowledgement is lost.
+    Neither the provider's billing nor the number of local backend
+    invocations is inferred from the number of requests.
 
     A detached or reconciled submission moves from intent to acknowledged (its
     locator is known) and then to completed, failed or cancelled as the provider
     reports. A synchronous submission goes from intent straight to completed,
-    with its locator. An intent found on reopen, a call that raised, or a
+    with its locator. An intent found on reopening, a call that raised, or a
     provider that reports an uncertain state makes it uncertain.
     A terminal submission sets results_consumed when its remaining observations
-    are published or its unpublished output can no longer be retrieved. This
-    flag stops further retrieval and releases pending output capacity. A failed
-    submission with consumed results can still have uncertain attempts and
-    charged execution exposure.
+    are saved or its unsaved output can no longer be retrieved. This flag
+    stops further retrieval and releases the bytes reserved for pending
+    output. A failed submission with consumed results can still have
+    uncertain attempts whose work stays counted in the exposure.
     """
 
     schema_version: Literal[2] = 2
@@ -1978,7 +2021,7 @@ class ExecutionTrace(Record):
             each starts.
         data_bytes_reserved: Bytes set aside for outputs, summed over the
             attempts.
-        data_bytes: Bytes of the Run's stored data when the trace was taken.
+        data_bytes: Bytes of the Run's saved data when the trace was taken.
         synthesis_work_reserved: Work of the exact syntheses of dense
             unitaries counted against `max_synthesis_work` in this Run.
         local_prepared_ids: Content hashes of the successful preparations
@@ -2021,7 +2064,7 @@ class ExecutionTrace(Record):
         return len(self.submissions)
 
     def validate_observation(self, chunk):
-        """Join one quantum result to its actual job/item in constant time."""
+        """Check one observation of a circuit against its job and submission item, in constant time."""
         if chunk.execution == "host_kernel":
             return
         submission, item = self._acquisition(chunk.attempt)
@@ -2035,8 +2078,8 @@ class ExecutionTrace(Record):
 
     @model_validator(mode="after")
     def _host_reservations(self):
-        """Reconcile limits, submissions and host reservations against the actual attempt
-        inventory.
+        """Check the limits, submissions and host reservations against the recorded
+        attempts.
         """
         _validate_limit_amendments(self.limit_amendments, current=self.limits)
         if self.limits is not None and self.data_bytes > self.limits.max_data_bytes:

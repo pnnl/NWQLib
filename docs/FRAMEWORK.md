@@ -66,7 +66,7 @@ Every solver accepts arbitrary inputs within its stated theoretical domain. A so
 - The scientific data the user supplies, such as `A`, `u0`, `T`, Hamiltonian terms, basis data, source functions or measurement operators.
 - The assumptions and automatic conversions that bring an input into the theoretical domain, such as a PSD shift, normalization, padding, truncation, discretization or a change of basis.
 
-Initialization, encoding or embedding, subroutine and measurement choices belong to the Method and its Plan, unless a reference or a preparation itself defines the requested scientific population. One Method's choices never force another Method to change the same scientific target.
+Initialization, encoding or embedding, subroutine and measurement choices belong to the Method and its Plan, unless a reference or a preparation itself defines the requested scientific population, the set of states or outcomes over which the requested quantity is defined. One Method's choices never force another Method to change the same scientific target.
 
 Examples may supply heat-equation matrices, H6 chemistry data, small diagonal spectra or power-grid test systems, but they call the same generic solver APIs that users call with their own valid data. When an algorithm is restricted to a special class of equations, the restriction appears in the class or function name, the option validation, the report and the README status table.
 
@@ -114,7 +114,7 @@ The Plan's `Program`, NWQLib's description of a circuit as named block calls, ca
 
 A valid change of subroutine creates a new Plan and never alters an existing Plan or Result. Estimating the same Plan under another cost model asks a new analysis question, which neither compiles nor changes the Plan. A comparison of built circuits names the gate basis, rotation precision, synthesis settings and version, and whether it counts the represented, compiled or executed circuits. A missing cost formula leaves only the quantities that depend on it unknown, and unknown is not zero.
 
-All Methods, adaptive ones included, share one execution, observation, storage and reporting lifecycle. A new Method supplies its construction, readout and analysis, and it adds no family switch to the shared code and no copy of that lifecycle. A domain check belongs in the record or input type that knows the domain, and a Method-specific result field belongs where the code that reads it is. A supported circuit or host path reaches the code that uses its output, or it rejects the request before doing unsupported work. A dense reference, a weaker output or another execution mode is never substituted silently.
+All Methods, adaptive ones included, share one execution, observation, storage and reporting lifecycle. A new Method supplies its construction, readout and analysis, and it adds no family switch to the shared code and no copy of that lifecycle. A domain check belongs in the record or input type that knows the domain, and a Method-specific result field belongs where the code that reads it is. A supported circuit or classical path reaches the code that uses its output, or it rejects the request before doing unsupported work. A dense reference, a weaker output or another execution mode is never substituted silently.
 
 Analysis returns the requested quantity together with the content hashes of the contributions it used, any partial state and the evidence that is still missing. A scalar output does not also return a full state. Reanalysis, reports and loading need only the saved data and do no new backend or reference work. Verification runs only when requested. Resource estimation and inspection of a prepared circuit work without running the scientific computation, and each names what its numbers are based on.
 
@@ -123,17 +123,17 @@ Analysis returns the requested quantity together with the content hashes of the 
 These operations have separate costs and evidence:
 
 - **Planning** validates inputs and options, resolves implementations, applies analytic cost formulas and does only the approximation work that synthesis needs. It may inspect the supplied representation and its structure. It does not execute a backend, simulate a circuit, build candidate circuits in order to measure them, transpile before the construction is chosen, rebuild dense operators from circuits, or run dense reference linear algebra only to enrich a report.
-- **Realization** resolves one setting of the checked Plan without running it. **Preparation** checks that setting against its limits and builds only its circuit or host kernel. Inspection, when requested, counts the operations of a prepared circuit without submitting it. Represented workloads, successful preparations and executions are counted separately. On a local backend, `prepare(plan, settings="all")` prepares every setting of a static Plan once, before any submission, so that all of them can be inspected. An adaptive Method whose later settings depend on earlier outcomes cannot prepare them in advance.
-- **Execution** runs the requested prepared circuit or kernel according to the algorithm's scientific meaning. Resource estimation never executes a circuit, and totals of built or executed circuits are named as such.
+- **Realization** resolves one setting of the checked Plan without running it. **Preparation** checks that setting against its limits and builds only its circuit or classical routine (a host kernel in the code). Inspection, when requested, counts the operations of a prepared circuit without submitting it. Represented workloads, successful preparations and executions are counted separately. On a local backend, `prepare(plan, settings="all")` prepares every setting of a static Plan once, before any submission, so that all of them can be inspected. An adaptive Method whose later settings depend on earlier outcomes cannot prepare them in advance.
+- **Execution** runs the requested prepared circuit or classical routine according to the algorithm's scientific meaning. Resource estimation never executes a circuit, and totals of built or executed circuits are named as such.
 - **Validation** covers independent simulation, dense scientific references, empirical fidelity and diagnostics that only enrich a report. It runs only on request, unless it is itself the requested theory computation. An error or fidelity value that was not requested is saved as null or as a not-evaluated status, never as zero error or unit fidelity.
 
 A computation counts as needed by synthesis only when it changes the provider, tier, repetition count, degree, or the coefficients or phases of the built circuit, or when it decides whether the returned synthesis is accepted. A diagnostic that only enriches a report stays out of planning even when its cost is polynomial. Planning cost is measured against the representation the user supplied, so a dense input of exponential size does not justify a second simulation or a dense reference computation.
 
 Public circuit builders build the circuit the Plan fixed. Resource estimation is a separate operation that adds up the cost formulas registered for the Program's blocks, and inspection, when requested, reports the operation counts of the prepared circuit it inspected. Builders share no table that dispatches resource options. Raw `gate_counts` and counts of gates acting on exactly two qubits are not counts in a device's native gate set. A backend target alone is metadata and never triggers transpilation.
 
-### Package import surface
+### Package imports {#package-import-surface}
 
-The package root loads its public names lazily, on first access, through PEP 562. The public API is what each module's `__all__` and the [API reference](api/index.md) list. Importing metadata must not load the full scientific stack or any vendor SDK. A native subpackage that the caller imports explicitly may load the SDK it requires.
+The package root loads its public names lazily, on first access, through PEP 562. The public API is what each module's `__all__` and the [API reference](api/index.md) list. Importing metadata must not load the full scientific stack or any vendor SDK. A subpackage for one SDK, when the caller imports it explicitly, may load that SDK.
 
 `tests/test_shared_contracts.py` checks lazy loading.
 
@@ -155,7 +155,7 @@ Pauli or probability readout does not require returning a full state. When a Qis
 
 ## Circuit readability options
 
-Options for barriers and final measurements control presentation or execution and are not scientific parameters. Builders keep the shared final-measurement policy, insert subroutine barriers only at documented boundaries, and store these choices in the serialized options, so that diagrams and executed circuits can be reproduced.
+Options for barriers and final measurements control presentation or execution and are not scientific parameters. Builders keep the shared final-measurement policy, insert subroutine barriers only at documented boundaries, and record these choices in the saved options, so that diagrams and executed circuits can be reproduced.
 
 ## Backend and provider policy
 
@@ -203,7 +203,7 @@ sympy>=1.14.0
 pydantic>=2.13.5,<3
 ```
 
-Without any vendor SDK, the base distribution supports [scientific records](records/README.md), checked inputs, Method metadata, symbolic planning and resource totals, saved results and the host numerical paths that Methods choose. Circuit operations and the power-of-two LCHS Pauli and Trotter kernels require Qiskit, and Aer execution also requires Aer. Pure NumPy MPS compression needs no circuit SDK. Each Method's Plan and descriptor record which of these requirements its operations have.
+Without any vendor SDK, the base distribution supports [scientific records](records/README.md), checked inputs, Method metadata, symbolic planning and resource totals, saved results and the classical numerical paths that Methods choose. Circuit operations and the power-of-two LCHS Pauli and Trotter routines require Qiskit, and Aer execution also requires Aer. Pure NumPy MPS compression needs no circuit SDK. Each Method's Plan and descriptor record which of these requirements its operations have.
 
 [Install](quickstart.md#install) lists the optional extras and what each one installs, including the separate `scikit_tt` install that the MPS route needs.
 
@@ -231,15 +231,15 @@ Introductory examples use simple models and direct explanations. Scientific exam
 
 Connect inputs, chosen parameters, observations, checks and reported quantities through their Plan and Result records. Give each scientific comparison an independent reference or relation, its scope and a readable interpretation. Say which checks the example executed and which it only provides as code. A generation or syntax check does not validate numerical results. Show how readers can inspect and save the relevant report or evidence without starting more computation. Break the workflow into readable notebook cells, and explain the mathematics and purpose of nontrivial code. Keep authoring status and internal review notes out of the tutorial.
 
-A beginner example executes on the default Aer backend at a bounded size. Label resource-only, host or reference, subroutine and full-circuit paths accurately. Provider submission, costly verification and larger studies run only when the reader selects them. Up-to-date code or printed planning metadata does not show that anything executed or that a result is accurate.
+A beginner example executes on the default Aer backend at a bounded size. Label resource-only, classical or reference, subroutine and full-circuit paths accurately. Provider submission, costly verification and larger studies run only when the reader selects them. Up-to-date code or printed planning metadata does not show that anything executed or that a result is accurate.
 
 The percent-format sources in `examples/generators/` are the originals. `examples/generators/build_notebooks.py` generates each notebook from its source, so the notebook runs the same code with the same deterministic seeds where seeds apply. Edit the source and regenerate the notebook, as [Notebook generation](MAINTENANCE.md#notebook-generation) describes. When a change affects them, check both notebook freshness and notebook execution, because neither replaces the other.
 
-Update an example when the public name it imports changes, and keep no alias for an old import spelling. Keep presentation code in the example and scientific code in the library module it belongs to. Merge two examples only after each of their distinct scientific operations has a working new home. Test workload and output meaning with bounded fixtures. A list of file names does not prove coverage.
+Update an example when the public name it imports changes, and keep no alias for an old import spelling. Keep presentation code in the example and scientific code in the library module it belongs to. Merge two examples only after each of their distinct scientific operations has a working new home. Test workload and output meaning with test inputs of bounded size. A list of file names does not prove coverage.
 
 ## Reporting standard
 
-Reports are built from the stored Plan choices, assessments, preparation records, observations and analyses. Keep formatting separate from computation, with `print()` only in presentation code. Reports, loading and certificates never map, compile, solve eigenproblems, reconstruct states, replay optimizers or execute references. Resource operations return their own quantities with a stated scope and evidence.
+Reports are built from the recorded Plan choices, assessments, preparation records, observations and analyses. Keep formatting separate from computation, with `print()` only in presentation code. Reports, loading and certificates never map, compile, solve eigenproblems, reconstruct states, replay optimizers or execute references. Resource operations return their own quantities with a stated scope and evidence.
 
 Required report sections:
 
@@ -248,7 +248,7 @@ Required report sections:
 - Algorithm summary: algorithm name, subroutines used, approximation order, theoretical equations and relevant paper references.
 - Execution summary: backend, execution mode, shots, random seed, Qiskit version, provider package version, and transpilation settings when applied.
 - Parameters: tolerances, beta or kernel choices, QPE precision, Trotter steps, state-preparation method, block-encoding convention, QSP degree and phase count, ancilla counts and truncation parameters.
-- Resources: the planned workload and what its counts are based on, the preparations, attempts and observations that occurred, applicable gate counts and the target they were counted for, independent capacity and consumption quantities, and unknown costs. Text and machine-readable fields come from the same stored records.
+- Resources: the planned workload and what its counts are based on, the preparations, attempts and observations that occurred, applicable gate counts and the target they were counted for, independent capacity and consumption quantities, and unknown costs. Text and machine-readable fields come from the same saved records.
 - Evidence: requested accuracy and conditioning, sources of uncertainty, the checks that ran, the preparation records of reference computations, the thresholds, and conclusions that are unavailable or conditional. A reference value that was not requested stays unavailable.
 - Interpretation: a short explanation of what the output means for the scientific problem and what limitations remain.
 
@@ -256,7 +256,7 @@ Reports are printable, serialize to JSON, carry a version and are stable enough 
 
 Each report declares its current format and keeps its complete scientific fields, their meanings and the content hashes through loading. The [API reference](api/workflow.md#save-and-reopen) documents the current types and the inputs that loading needs. Saved `Source` text never chooses an executable import or recreates a live binding to code. Validation of the current format remains required, and converters from development schemas are not.
 
-Static and adaptive reports keep the measurement settings and the compatible observation streams, with the iteration history of adaptive Methods (their saved controller state). Seeds alone do not prove independence. Error combinations and checks keep their error frames (the quantity, metric and unit an error refers to), assumptions and sources. A nominal interval or residual does not establish total accuracy or that the ground state was identified. [Plan, compare and solve](scientist.md) and the algorithm guides describe the reports and verification that are supported.
+Static and adaptive reports keep the measurement settings and the compatible observation streams, with the iteration history of adaptive Methods (their saved iteration state). Seeds alone do not prove independence. Error combinations and checks keep their error frames (the quantity, metric and unit an error refers to), assumptions and sources. A nominal interval or residual does not establish total accuracy or that the ground state was identified. [Plan, compare and solve](scientist.md) and the algorithm guides describe the reports and verification that are supported.
 
 ## Documentation and commenting standard
 
@@ -270,7 +270,7 @@ Use Google-style docstrings. Docstrings for scientific methods include:
 
 Inline comments explain non-obvious scientific or circuit logic and do not repeat the code. Keep research sources and citations, and remove descriptions of superseded implementations.
 
-Every hardcoded engineering value has a comment at its definition that explains the choice and the condition for revisiting it, plus an entry in [Engineering constants](ENGINEERING_CONSTANTS.md). This includes instance-size guards, numerical tolerances, safety factors, accuracy factors, schedule defaults and budgets. Document paper-derived values with their equations and engineering choices with their reasons. A historical value needs a scientific or engineering basis that still applies, and its age alone does not justify keeping it.
+Every hardcoded engineering value has a comment at its definition that explains the choice and the condition for revisiting it, plus an entry in [Engineering constants](ENGINEERING_CONSTANTS.md). This includes instance-size limits, numerical tolerances, safety factors, accuracy factors, schedule defaults and budgets. Document paper-derived values with their equations and engineering choices with their reasons. A historical value needs a scientific or engineering basis that still applies, and its age alone does not justify keeping it.
 
 Public record docstrings use `Args:` or `Attributes:` entries whose names match the dataclass fields. Literal-valued fields list their accepted spellings. Scientific quantities state units, normalization and shape when the type does not make them obvious.
 
@@ -326,5 +326,5 @@ The root README states the validation scope accurately:
 - Give installation commands for the package and its extras.
 - List dependencies and Qiskit target versions.
 - Cite the scientific papers that define the implemented methods.
-- Avoid implying that archived outputs are validated library guarantees.
+- Avoid implying that saved outputs of earlier runs are validated library guarantees.
 - Point developers to the tests and examples for each algorithm.

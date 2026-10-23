@@ -1,6 +1,6 @@
 """File readers and writers.
 
-An SDK is imported only where native output is consumed.
+A quantum SDK is imported only by the functions that take or return its objects.
 """
 
 from nwqlib.io.materialization import QasmMaterialization, QasmMaterializationBudget, materialize_qasm3_file

@@ -1,4 +1,4 @@
-"""Select a validated experiment closure using an already admitted graph index."""
+"""Select one experiment of a checked Program, with every definition it depends on, using the index built by the check."""
 
 from .expressions import Binary, Binding, ExprRef, ParameterRef, walk_kept
 from .records import BlockCall, Definition, MeasurementBatch, RangeAxis
@@ -6,12 +6,14 @@ from .validation import children
 
 
 def select_experiment(admission, batch_id, setting_index, axis_values, *, bindings=None, parent_id=None):
-    """Keep selected dependencies and all global constraints and register layouts.
+    """Return the Program of one experiment, keeping its dependencies and all global constraints and register layouts.
 
-    The caller owns the admitted immutable source index. Plan reuses that index
-    across experiments, and direct Program selection creates one for its operation.
-    New composite nodes have enclosing Program ancestry rather than hashing the
-    whole original batch's setting table for every selected point.
+    The caller holds the immutable index of the checked source Program. Plan
+    reuses that index across experiments, and a direct call of
+    ``Program.select_experiment`` creates one for its own use. The new batch
+    node records no parent of its own. The new Program names the source
+    Program as its parent instead, so the whole setting table of the original
+    batch is not hashed for every selected point.
 
     Args:
         admission: An ``_Admission`` of the source Program after ``setup``.
@@ -21,8 +23,8 @@ def select_experiment(admission, batch_id, setting_index, axis_values, *, bindin
         bindings: Complete effective bindings of the point, or None to merge the
             Program's bindings with the setting's bindings and the axis values,
             which take precedence over the Program's.
-        parent_id: Identity recorded as the new Program's parent, or None for
-            the source Program's identity.
+        parent_id: Content hash recorded as the new Program's parent, or None
+            for the source Program's content hash.
 
     Returns:
         A validated Program rooted at a copy of the batch with only the

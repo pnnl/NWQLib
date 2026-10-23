@@ -51,8 +51,8 @@ class ComparisonRow:
     prior_work: tuple = ()
 
     def __post_init__(self):
-        """Bind a candidate to its actual Plan, allocation and evidence, or an explicit
-        applicability failure.
+        """Check that the row holds its Method's own Plan, estimate, Allocation and
+        evidence, or the reason why the Method cannot handle the Problem.
         """
         from nwqlib.backends.assessment import PlanEstimate
         from nwqlib.backends.profiles import Allocation
@@ -241,11 +241,11 @@ def plan(
 def _plan_with_streams(problem, method, output, execution, shots, streams, *, accuracy=None):
     """Call ``Method.plan`` and check that the Plan keeps what the caller supplied.
 
-    With ``accuracy``, the Method's ``sampling_shots`` connector first
-    selects the shots, and a Method without one raises ``ApplicabilityError``.
-    The Plan must hold the same Problem, Method and output objects, the RNG
-    snapshot taken after planning draws and the accuracy criterion that selected
-    its acquisition. A Plan that substituted any of them would attach later data
+    With ``accuracy``, the Method's ``sampling_shots`` first chooses the
+    shots, and a Method without it raises ``ApplicabilityError``. The Plan
+    must hold the same Problem, Method and output objects, the state of the
+    random streams after the planning draws and the accuracy criterion that
+    chose its shots. A Plan that substituted any of them would attach later data
     to a question the caller did not ask.
     """
     if accuracy is not None:
@@ -335,14 +335,14 @@ def prepare(plan, *, backend=None, limits=None, progress=None, directory=None, s
             preparations. The limit check above already covers them, so
             `"all"` adds nothing to the limits and prepares nothing that a
             completed submit would not. `"all"` needs local Aer, local
-            NWQ-Sim or classical execution on this computer. Another backend is refused
+            NWQ-Sim or classical execution on this computer. Another backend is rejected
             before a Run exists, because its preparation can be a remote
             compilation that the provider charges for. This restriction lasts
             until the cost disclosure and the handling of pending remote
             preparations are decided ([Preparing every setting on remote
             backends](../ROADMAP.md#preparing-every-setting-on-remote-backends)).
             A Method whose later settings depend on earlier outcomes (RWPE,
-            Lanczos with `SensitivitySampling`, ADAPT) refuses `"all"` before
+            Lanczos with `SensitivitySampling`, ADAPT) rejects `"all"` before
             a Run exists, and its message says what it can prepare instead.
 
     Returns:
@@ -353,7 +353,7 @@ def prepare(plan, *, backend=None, limits=None, progress=None, directory=None, s
         TypeError: If `plan` is neither a Plan nor a row of a comparison.
         ValueError: If `settings` is neither `"first"` nor `"all"`, or if
             `"all"` is requested on another backend or for a Method that
-            refuses it.
+            rejects it.
         ApplicabilityError: If `plan` is a row without a Plan, or the Plan
             lists unmet requirements.
 
@@ -552,8 +552,11 @@ def solve(
         execution (str | None): `"quantum"` (the default for a Problem) or
             `"classical"`, which evaluates that Method's numerical model.
         shots (int | None): Positive number of shots for sampled readout, or
-            `None` for exact readout. A Method setting can choose the
-            measurement instead, for example `Lanczos(sampling=...)`.
+            `None` for exact readout, in which a simulator computes
+            probabilities, Pauli expectation values or amplitudes without
+            shot sampling. Numerical rounding remains. A Method setting can
+            choose the measurement instead, for example
+            `Lanczos(sampling=...)`.
         seed (int | None): Nonnegative seed of the random streams that
             planning and measurement of a Problem use. A seed does not
             establish statistical independence.

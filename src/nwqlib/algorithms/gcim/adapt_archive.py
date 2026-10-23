@@ -1,6 +1,6 @@
-"""ADAPT input, compiler and cache snapshots.
+"""Saving and loading of ADAPT inputs, compiler data and caches.
 
-Loading never replans.
+Loading never plans again.
 """
 
 from nwqlib._choice_archive import unsupported_archive_format
@@ -53,7 +53,7 @@ def _compiler_entries(compilers):
     """Return ``((pool index, kind, active modes, occupation blocks), ...)`` of built compiler plans.
 
     ``compilers`` is a Plan's ``adapt.CompilerPlans`` map, or such entries
-    saved from one, which a reopened Run's context or a Result snapshot
+    saved from one, which a reopened Run's context or a Result copy
     holds. A classical Plan's empty tuple and None give no entries.
     """
     from .adapt import CompilerPlans
@@ -105,24 +105,24 @@ def _read_compilers(rows, files):
 
 
 def save(plan, files):
-    """Save original and processed inputs together with the generator compiler payloads built so far.
+    """Save original and processed inputs together with the generator compiler data built so far.
 
     A generator's compiler plan is built when that generator is first
     selected (``adapt.CompilerPlans``), so only those plans are saved, by pool
     index. Shared-index compiler blocks are the generator's matrices on its
     active occupation states. Storing them lets a reopened Plan bind the same
     compiler data without repeating the block construction. A generator
-    first selected after reopening builds its plan then. A durable Run
+    first selected after reopening builds its plan then. A Run saved to disk
     writes this archive before any selection, so the plans it builds later
     are saved with its checkpoints (``save_context``).
 
     The archive format is ``adapt/7``. Its saved reconstruction carries the
     Hamiltonian action allowance (``hamiltonian_action_work``) computed at
-    planning under this format's law, and loading reuses it without
+    planning under this format's work formula, and loading reuses it without
     recomputing it, so an archive of an earlier format, whose query and
-    action laws differ, is refused. A classical Plan's packed action tables
-    are not saved. Loading packs them again under their own admission
-    (``adapt_actions.build_action_tables``).
+    action work formulas differ, is rejected. A classical Plan's packed
+    action tables are not saved. Loading packs them again and checks their
+    cost again (``adapt_actions.build_action_tables``).
     """
     method = plan.method
     inputs = plan._native["inputs"]
@@ -249,14 +249,14 @@ def load(saved, files):
 
 
 def save_context(context, files):
-    """Persist current state/action caches, compiled gates and the compiler plans built so far.
+    """Save the current state and action caches, compiled gates and the compiler plans built so far.
 
     The Run's Plan archive is written before any selection, so the compiler
-    plans of generators selected later travel with the context
+    plans of generators selected later are saved with the context
     (``_write_compilers``). ``ArchiveFiles`` writes each array or gate object once and later
     checkpoints of the same Run refer to its file, so a checkpoint writes
-    only the entries added since the previous one. The Run's journal or the
-    Result's RunData owns the collected chunks and their order.
+    only the entries added since the previous one. The Run's run log or the
+    Result's RunData holds the collected chunks and their order.
     """
     from collections.abc import Mapping
     from .adapt_acquisition import AdaptContext
@@ -298,16 +298,16 @@ def save_context(context, files):
 
 
 def load_context(data, files):
-    """Restore a saved ``AdaptContext`` without acquisition, analysis or circuit rebuilding.
+    """Restore a saved ``AdaptContext`` without data collection, analysis or circuit rebuilding.
 
     Chain keys return as tuples so cache lookups match live keys. The Run or
-    the Result owns the observations, and the context stores none: a reopened
+    the Result holds the observations, and the context stores none. A reopened
     Run rebuilds the observation index from its own chunks
     (``ADAPT._load_live_run_context``), and a Result keeps them in its
     RunData.
     Saved compiler plans return as ``(pool index, kind, active modes,
-    occupation blocks)`` entries, which the reopened Run's
-    controller adopts into its Plan's map (``adapt_acquisition.drive_adapt``)
+    occupation blocks)`` entries, which the ADAPT iteration of the reopened
+    Run takes into its Plan's map (``adapt_acquisition.drive_adapt``)
     through ``adapt.CompilerPlans.restore`` at the saved pool indices.
     """
     from .adapt_acquisition import AdaptContext

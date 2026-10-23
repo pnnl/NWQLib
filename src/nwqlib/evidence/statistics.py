@@ -1,4 +1,9 @@
-"""Bounded scalar covariance with explicit framed values and joint-data identity."""
+"""Exact variance of a linear estimator from supplied variances and covariances.
+
+Each input carries its error frame. Each random variable is identified by the
+content hash of its own data (`data_id`), and the joint data set of all the
+variables by its content hash (`joint_id`).
+"""
 
 from pydantic import model_validator
 
@@ -140,7 +145,7 @@ def linear_variance(*, joint_id: str, frame: ErrorFrame,
     supplied covariance c must satisfy the Cauchy-Schwarz inequality
     `c**2 <= Var(X) Var(Y)`. That pairwise test does not show that the whole
     covariance matrix is positive semidefinite, and no impossible value is
-    repaired. The record space is O(number of terms + supplied pairs), and
+    repaired. The space used is O(number of terms + supplied pairs), and
     no dense matrix is formed.
 
     The evidence of the result is `proved_relation` only when every input

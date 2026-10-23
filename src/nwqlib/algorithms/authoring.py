@@ -63,8 +63,8 @@ class MethodCase:
 def _saved_content(result):
     """Return the saved content of a Result in a form that can be compared.
 
-    Saved arrays enter by their manifests, because reopened array handles
-    differ between loads, so the check reads no full array. Whether the values
+    Saved arrays are compared by their manifests, because the array objects
+    returned by reopening differ between loads, so the check reads no full array. Whether the values
     are right is decided by the case's `accepts` relation.
     """
     data = result.data
@@ -82,7 +82,7 @@ def check_method(case: MethodCase) -> dict:
     the Result. The Method's `error_model` must equal the Plan's, and its
     `result_type` must name the Result class. The wrong Result from
     `invalid_result` must be a valid record that the Method's `validate_plan`
-    rejects. The legal Result must save, reload unchanged and still pass the
+    rejects. The original Result must save, reload unchanged and still pass the
     relation. The wrong-answer step shows that the Method's own Plan and Result
     check catches a scientifically wrong answer under the same Plan, which a
     record's own field checks cannot do. Nothing beyond the case's callback is

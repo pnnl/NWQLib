@@ -1,14 +1,14 @@
-"""Numerical error entries of one native QHD circuit: preparation, block angles, omitted blocks and phase.
+"""Numerical error entries of one quantum QHD circuit: preparation, block angles, omitted blocks and phase.
 
-For the binary encoding the angle-formation and phase entries live here
-(``binary_angle_formation``, ``binary_phase_allowance``). Its pruning and
-AQFT bounds are those of the reconstruction
+For the binary encoding the angle-formation and phase entries are computed
+here (``binary_angle_formation``, ``binary_phase_allowance``). Its pruning
+and AQFT bounds are those of the reconstruction
 (``records.QHDReconstruction.pruning_error_bound`` and ``aqft_error_bound``),
 and ``resources.circuit_resources`` names its other entries. The rest of
 this module concerns the one-hot circuit.
 
 These entries complete the stage chain of ``evolution_bounds`` for the
-native circuit, on the valid one-hot subspace and with the physical phase
+quantum circuit, on the valid one-hot subspace and with the physical phase
 included. After the exact split product S with the exponents
 ``alpha^_k = delta a^_k`` and ``beta^_k = delta b^_k`` (exact products of the
 binary64 ``delta = fl(total_time/num_steps)`` and the stored step weights),
@@ -21,13 +21,14 @@ the chain continues, each stage against the next:
    blocks that ``rotation_threshold`` pruned or that planning omitted below
    the normal binary64 range (``rotation_pruning``).
 3. the ideal kept blocks and the stored scalar phase ``exp(i Phi^)`` against
-   the native circuit: the fused hopping gate's own parameter
-   (``block_errors``), the phase-diagonal provider's phase wrap, which has no
-   qualified bound, and the phase bookkeeping (``phase_allowance``).
+   the Qiskit circuit, through the fused hopping gate's own parameter
+   (``block_errors``), the phase wrap of the phase-diagonal construction of
+   a projector (``provider="diagonal_synthesis"``), which has no qualified
+   bound, and the phase bookkeeping (``phase_allowance``).
 
-Pruning precedes numerical lowering, because two separately lowered circuits
-could acquire different phase roundings that the dropped angles alone do not
-bound. The preparation compares input states and is added once to the
+Pruning precedes circuit construction, because two separately built
+circuits could acquire different phase roundings that the dropped angles
+alone do not bound. The preparation compares input states and is added once to the
 evolution error (``preparation_error``). Every exponential perturbation
 below uses ``||exp(-i x G) - exp(-i y G)|| <= |x - y| ||G||`` for a Hermitian
 G, which also gives ``||exp(-i y G) - I|| <= |y| ||G||``. The values are
@@ -80,8 +81,7 @@ def preparation_error(reconstruction, method, grid):
     cap applies. The complete product-direction error is consequently at
     most D_G = min(sqrt(2), A+d*eta_K). This uses the aggregate construction
     of restricted_state_error and its Gaussian arithmetic assumptions,
-    without another amplitude evaluation or a native Kronecker-product
-    operation.
+    without another amplitude evaluation or an explicit Kronecker product.
 
     Tensor-product telescoping of unit directions gives a direction
     allowance D capped at sqrt(2). It is zero for a uniform direction,
@@ -90,9 +90,9 @@ def preparation_error(reconstruction, method, grid):
     d*c_K*u to first order, c_K = K*(K-1)/2 + pi*(K-1), under the tail-norm
     and scalar-function assumptions of append_amplitude_chain, which is
     conservative for a chain that the lower-range cutoff shortens. That
-    cutoff adds its exact charge Delta per register
-    (``initial_state.chain_selection``), and the per-register charges add by
-    the same telescoping. The result is min(2, D+d*c_K*u+sum Delta), still
+    cutoff adds its exact error contribution Delta per register
+    (``initial_state.chain_selection``), and the per-register contributions
+    add by the same telescoping. The result is min(2, D+d*c_K*u+sum Delta), still
     an estimate because higher-order chain terms are omitted. Later
     synthesis of preparation rotations belongs to the synthesis entry.
 
@@ -120,13 +120,13 @@ def preparation_error(reconstruction, method, grid):
 
 
 def block_errors(reconstruction, method, grid):
-    """Return the exact block-angle entries of the native circuit and the counts that its phase allowance needs.
+    """Return the exact block-angle entries of the quantum circuit and the counts that its phase allowance needs.
 
     Formation (stage 1). An occurrence has the nominal duration ``t = r delta``,
     an exact rational with r = 1/2 for a second-order potential factor and
     for an odd-indexed link in the second-order kinetic layers, and r = 1
-    otherwise (``compiler.QHDCompiler``). Planning admits ``delta/2`` as a
-    normal number, so the stored half duration is exact
+    otherwise (``compiler.QHDCompiler``). Planning checks that ``delta/2`` is
+    a normal number, so the stored half duration is exact
     (``schedules.step_weights``), and the nominal durations stay the
     reference of this stage. A hopping occurrence on a link of variable j intends
     the signed exponent ``lambda* = -t a^_k/(2 h_j**2)`` of
@@ -134,10 +134,11 @@ def block_errors(reconstruction, method, grid):
     ``angle`` is ``lambda^`` (``kinetic.KineticCompiler``), so it costs
     ``min(2, |lambda^ - lambda*|)``. A projector on s qubits for table value v
     intends ``zeta* = t b^_k v`` of the traceless ``P - I/2**s`` of norm
-    ``1 - 2**-s`` (the identity part belongs to the phase ledger), so it costs
-    ``min(2, (1 - 2**-s) |zeta^ - zeta*|)``. Both discrepancies are exact
-    rationals, about ``3u |lambda*|`` and ``2u |zeta*|``, since planning
-    admits every product in the normal range (``validation._normal_range``).
+    ``1 - 2**-s`` (the identity part belongs to the running phase total), so
+    it costs ``min(2, (1 - 2**-s) |zeta^ - zeta*|)``. Both discrepancies are
+    exact rationals, about ``3u |lambda*|`` and ``2u |zeta*|``, since planning
+    checks that every product lies in the normal range
+    (``validation._normal_range``).
 
     Omitted blocks (stage 2). Every step intends each link for a total
     duration delta (first order once, second order the odd links twice for
@@ -151,21 +152,21 @@ def block_errors(reconstruction, method, grid):
     which bounds their removal at their intended exponents. It is
     nonnegative because every kept block is one of the intended occurrences.
 
-    Hopping parameters (stage 3). The native gate is
+    Hopping parameters (stage 3). The circuit gate is
     ``XXPlusYYGate(theta^)`` with ``theta^ = 2 fl(2 t^ c)`` of the stored
     duration t^ and coefficient (``pauli_evolution._hopping_parameter``),
     whose restricted exponent is ``theta^/2``, so a kept block adds
-    ``min(2, |theta^/2 - lambda^|)``. The builder doubles the stored angle's
-    own product, so this is zero whenever theta^ is finite.
+    ``min(2, |theta^/2 - lambda^|)``. The circuit construction doubles the
+    stored angle's own product, so this is zero whenever theta^ is finite.
 
     Returns:
         A dict with ``formation``, ``omitted`` and ``hopping`` (exact
         rationals) and ``dense``, the kept projector blocks with the
-        phase-diagonal provider, both potential halves included.
+        phase-diagonal construction, both potential halves included.
 
     Raises:
         ValueError: A hopping gate parameter is not a finite binary64
-            number, so the native circuit cannot be built.
+            number, so the circuit cannot be built.
     """
     from nwqlib.subroutines.hamiltonian_evolution.pauli_evolution import _hopping_parameter
 
@@ -214,16 +215,16 @@ def block_errors(reconstruction, method, grid):
 
 
 def phase_allowance(reconstruction, method, grid, counts):
-    """Return an upper allowance, in radians, on the native circuit's global phase against the exact identity phase.
+    """Return an upper bound on the operator-norm error that the quantum circuit's global phase causes.
 
     The reference is ``Phi = -sum_k delta (a^_k sum_j h_j**-2 + b^_k c +
     b^_k sum_(S,r) 2**-|S| v_(S,r))`` with exact products of the stored data.
     ``method._compiled_phase_allowance`` bounds ``|Phi^ - Phi|`` for the
     stored ``physical_phase`` Phi^, the formation and compensated
-    accumulation of the ledger (E_ledger), from the ledger's contribution
-    count M (``method._phase_contributions``).
-    ``method._native_phase_allowance`` adds the top-level native assignments,
-    one per kept projector block and one for Phi^,
+    accumulation of the running phase total (E_ledger), from its
+    contribution count M (``method._phase_contributions``).
+    ``method._native_phase_allowance`` adds the top-level phase assignments
+    of the circuit, one per kept projector block and one for Phi^,
     ``E_top = 2u (Y + |Phi^|) + 20u (B + 1)`` with u = 2**-53, B kept
     projectors and ``Y = sum_b |zeta^_b| 2**-s_b``, under Qiskit 2.6.0's
     rounded ``rem_euclid`` phase setter. Both evaluate every operation upward.
@@ -239,23 +240,26 @@ def phase_allowance(reconstruction, method, grid, counts):
     most ``lambda + a + 4u k + 4u <= 2u v + 20u`` radians (``6 < tau < 7``).
     Repeated halving of the child's angle errs by less than lambda
     (``e_(j+1) <= e_j/2 + lambda/2``), so each child adds at most 21u, and the
-    allowance is ``E_native + 21u B_dense``, charged once. It assumes
+    allowance is ``E_native + 21u B_dense``, counted once. It assumes
     round-to-nearest, gradual underflow, finite operations and finite exact
     divisors. A phase allowance E costs at most E in 2-norm, since
     ``|exp(i E) - 1| <= E``. ``counts`` is the dict of ``block_errors``.
 
-    Planning establishes the stated relative-error premises for admitted
-    contributions. Lower-range omissions are charged by their exact omitted
-    identity action, separately from that arithmetic allowance
-    (``compiler.QHDCompiler``, ``validation._normal_range``). The ledger
-    formation and accumulation charges apply to the stored duration, weights
-    and coefficients. Native assignment arithmetic has its separate
-    allowance, including gradual underflow. The value bounds this phase
-    stage only. It does not qualify dense lowering or the other stages of
+    Planning establishes the stated relative-error assumptions for the
+    contributions it keeps. Lower-range omissions are counted by their exact
+    omitted identity action, separately from that arithmetic allowance
+    (``compiler.QHDCompiler``, ``validation._normal_range``). The formation
+    and accumulation allowances of the running phase total apply to the
+    stored duration, weights and coefficients. The arithmetic of the
+    circuit's phase assignments has its separate allowance, including
+    gradual underflow. The value bounds this phase stage only. It does not
+    cover the circuit construction of dense diagonals or the other stages of
     the circuit's state error.
 
     Returns:
-        The allowance as an exact rational capped at 2.
+        The phase contribution to the operator-norm error, the phase
+        allowance in radians against the exact identity phase capped at 2,
+        as an exact rational.
     """
     from .method import _compiled_phase_allowance, _native_phase_allowance, _phase_contributions
 
@@ -269,32 +273,35 @@ def phase_allowance(reconstruction, method, grid, counts):
 
 
 def binary_phase_allowance(reconstruction, method, grid):
-    """Return an upper allowance, in radians, on a native binary circuit's global phase.
+    """Return an upper bound on the operator-norm error that the global phase of a binary quantum circuit causes.
 
-    The Walsh terms are the Plan's stored ``QHDReconstruction.walsh_phase``,
-    the ``binary.WalshPhaseTerms`` that ``binary.compile_binary_steps``
-    returned for the stored blocks at planning. The binary phase ledger holds only the
-    objective constant's contributions ``-fl(dt fl(b_k c))``, M of them
-    (``method._phase_contributions``), and
+    The Walsh terms are the Plan's ``QHDReconstruction.walsh_phase``, the
+    ``binary.WalshPhaseTerms`` that ``binary.compile_binary_steps``
+    returned for the Plan's blocks at planning. The binary running phase
+    total holds only the objective constant's contributions
+    ``-fl(dt fl(b_k c))``, M of them (``method._phase_contributions``), and
     the Walsh diagonals keep their identity phases apart
     (``binary.WalshPhaseTerms``). ``method._native_phase_allowance`` with
     those Walsh terms gives
     ``E_native = E_ledger + F_W + 2u (Y_W + |Phi^|) + 20u (B_W + 1)``, which
-    charges the formation of the Walsh identity phases once, their
+    counts the formation of the Walsh identity phases once, their
     assignments to the circuit and the final assignment of the stored
     physical phase Phi^. The reconstruction allowance ``R_W`` belongs to the
     ``ir_product`` reference, not to the circuit, and is not added. A dense
     diagonal keeps its identity phase inside its gate definition, which is
-    part of its lowering and not of this allowance.
+    part of its circuit construction and not of this allowance.
 
-    Planning establishes the stated relative-error premises for admitted
-    contributions. Lower-range omissions are charged by their exact omitted
-    identity action, separately from that arithmetic allowance
+    Planning establishes the stated relative-error assumptions for the
+    contributions it keeps. Lower-range omissions are counted by their exact
+    omitted identity action, separately from that arithmetic allowance
     (``binary.compile_binary_steps``, ``validation._normal_range``). The Walsh
-    formation allowance charges the identity phases' own underflow.
+    formation allowance covers the identity phases' own underflow. A phase
+    allowance E in radians costs at most E in 2-norm, since
+    ``|exp(i E) - 1| <= E``.
 
     Returns:
-        The allowance as an exact rational capped at 2.
+        The phase contribution to the operator-norm error, the phase
+        allowance ``E_native`` in radians capped at 2, as an exact rational.
     """
     from .method import _compiled_phase_allowance, _native_phase_allowance, _phase_contributions
 
@@ -307,7 +314,7 @@ def binary_phase_allowance(reconstruction, method, grid):
 def _trig_interval(value, argument, ratio):
     """Return ``[low, high]`` enclosing ``f(pi ratio)`` from the returned ``value = f(argument)``, f = sin or cos.
 
-    Under the one-ulp premise the returned value is within ``2u`` of
+    Under the one-ulp assumption the returned value is within ``2u`` of
     ``f(argument)`` for a value in [-1, 1], and both functions are
     1-Lipschitz, so with ``eta = max(|argument - ratio pi_low|,
     |argument - ratio pi_high|)`` the exact ``f(pi ratio)`` lies within
@@ -327,7 +334,7 @@ def _spectral_scale():
 def _kinetic_walsh_summary(model, bits, spacing):
     """Return ``(C, B_c)`` of one variable's kinetic Walsh coefficients, or ``(None, None)`` when an enclosure is missing.
 
-    ``C = sum_(m != 0) |c^_m|`` over the actual coefficients of
+    ``C = sum_(m != 0) |c^_m|`` over the computed coefficients of
     ``binary.kinetic_walsh`` and ``B_c = sum_(m != 0) rho_m`` with
     ``rho_m = max(|c^_m - low_m|, |c^_m - high_m|)`` for an interval
     ``[low_m, high_m]`` that encloses the exact analytic coefficient c_m, so
@@ -349,8 +356,8 @@ def _kinetic_walsh_summary(model, bits, spacing):
     ``-1/h**2``. Here h is the spacing and b the register's bit count.
     For b > 1, each factor is recomputed with the same call on the same
     binary64 argument as ``kinetic_walsh`` and enclosed by ``_trig_interval``
-    under the one-ulp premise for ``math.sin`` and ``math.cos``, the premise
-    ``binary.qft_error_bound`` states for its sines. On this branch,
+    under the one-ulp assumption for ``math.sin`` and ``math.cos``, the
+    assumption ``binary.qft_error_bound`` states for its sines. On this branch,
     ``kinetic_fd_summary_up`` multiplies outward binary64 enclosures of the
     nonnegative factors and divides by outward binary64 enclosures of the
     exact ``h**2``, using the known sign for the coefficient's error radius.
@@ -361,8 +368,9 @@ def _kinetic_walsh_summary(model, bits, spacing):
     have a nonzero analytic coefficient, so the enclosure is formed on that
     sparse set and every other mask adds its exact coefficient magnitude,
     which is zero for the exact zeros of ``kinetic_walsh``. The
-    finite-difference summary is ``kinetic_fd_summary_up``: upper binary64
-    values of C and B_c, converted exactly to Fractions for the later chain.
+    finite-difference summary is ``kinetic_fd_summary_up``, which returns
+    upper binary64 values of C and B_c, converted exactly to Fractions for
+    the later chain.
     Its C can exceed the exact coefficient-magnitude sum, and its ``B_c`` can
     exceed the sum of radii obtained by propagating the same factor
     intervals in exact rational arithmetic. An infinite upper value
@@ -401,9 +409,9 @@ def kinetic_fd_summary_up(coefficients, bits, spacing):
     """Return upper binary64 values ``(C_up, B_up)`` of ``_kinetic_walsh_summary`` for finite differences.
 
     This finite-difference summary implements the interval recurrence
-    below. It consumes the already formed, admitted
-    coefficients of ``kinetic_walsh("finite_difference", ...)`` in their
-    original order and returns upper floats. Every trigonometric factor gets
+    below. It reads the already formed and range-checked coefficients of
+    ``kinetic_walsh("finite_difference", ...)`` in their original order and
+    returns upper floats. Every trigonometric factor gets
     one exact ``_trig_interval`` call, converted downward/upward, and each
     mask's interval starts from its base interval and propagates
     ``L' = down(L L_f)``, ``U' = up(U U_f)`` level by level, with a lower
@@ -478,7 +486,7 @@ def _kinetic_energy_summary(grid, var_index, model):
     ``E_q = 2 sin(pi |q|/K)**2/h**2``, exact 0 at q = 0 and exactly ``2/h**2``
     at ``|q| = K/2``. Otherwise the sine returned by NumPy at the source's
     argument ``x_q = pi (|q|/K)`` is enclosed by ``_trig_interval`` under the
-    one-ulp premise for the actual NumPy ``sin``, and the interval
+    one-ulp assumption for NumPy's ``sin``, and the interval
     ``[2 s_low**2/h**2, 2 s_high**2/h**2]`` follows.
     """
     from .split_step import kinetic_eigenvalues
@@ -513,9 +521,9 @@ def binary_angle_formation(reconstruction, method, grid, model):
     The reference uses ``X = r Fraction(dt) Fraction(weight)``, r = 1, or 1/2
     for a second-order potential half, with ``dt = fl(total_time/N)`` and the
     step's stored weight, the stored potential tables as exact data, the
-    analytic kinetic energies and mathematical pi in the QFT. The emitted
-    exponent x (``QHDBinaryBlock.exponent``) uses the actual stored duration,
-    so ``eps_x = |Fraction(x) - X|`` is the product rounding, the stored half
+    analytic kinetic energies and mathematical pi in the QFT. The circuit's
+    exponent x (``QHDBinaryBlock.exponent``) uses the stored duration, so
+    ``eps_x = |Fraction(x) - X|`` is the product rounding, the stored half
     duration being exact (``schedules.step_weights``). With u = 2**-53 and
     ``gamma_n = n u/(1 - n u)``, every quantity below is an exact rational
     of the stored binary64 data, each block occurrence's allowance is
@@ -523,11 +531,11 @@ def binary_angle_formation(reconstruction, method, grid, model):
     Walsh normalization enters here through ``rho_m``. A rotation or dense
     phase entry omitted because its product would fall below ``2**-1022``
     is compared through its exact value before omission, which has no
-    formation error, and its removal is charged in ``rotation_pruning``
-    (``binary.PhaseTable.synthesize``), so no omission is charged twice.
+    formation error, and its removal is counted in ``rotation_pruning``
+    (``binary.PhaseTable.synthesize``), so no omission is counted twice.
 
     Walsh blocks. The identity phase stays at ``-X c0`` on both sides, since
-    ``identity_phase`` charges its formation (``F_W``). Let rho_m enclose
+    ``identity_phase`` counts its formation (``F_W``). Let rho_m enclose
     ``|c^_m - c_m|``, ``C = sum_(m != 0) |c^_m|``, ``B_c = sum_(m != 0) rho_m``
     and ``R_theta = (1/2) sum_(m != 0) |theta^_m - 2 x c^_m|`` with the
     computed angles ``theta^_m = fl((2 x) c^_m)``. The Z strings commute and
@@ -540,7 +548,7 @@ def binary_angle_formation(reconstruction, method, grid, model):
         ``e_W <= min(2, |X| B_c + eps_x C + R_theta)``.
 
     Every mask participates, including spurious nonzero coefficients, and
-    the population is taken before pruning. The doubling of x is exact, a
+    the set of masks is taken before pruning. The doubling of x is exact, a
     kept or threshold-pruned angle is a normal product within
     ``u |2 x c^_m|`` of ``2 x c^_m``, and a range-omitted angle keeps its
     exact virtual value ``2 x c^_m``, so ``R_theta <= u |x| C``. For a
@@ -563,7 +571,7 @@ def binary_angle_formation(reconstruction, method, grid, model):
     outward. When an unscaled sum is not representable, the reduction uses
     scaled upper terms or exact integer units. The resulting angle-formation
     allowance may be larger than the exact-rational evaluation but cannot be
-    smaller under these arithmetic premises. The upper values a and C are
+    smaller under these arithmetic assumptions. The upper values a and C are
     computed once per table and converted exactly to Fractions, and the rest
     of the scalar chain, exact exponent discrepancies and per-block caps
     included, stays exact. An infinite upper a or C caps a nonzero block
@@ -580,7 +588,7 @@ def binary_angle_formation(reconstruction, method, grid, model):
     gives ``min(2, u |x| M_E + eps_x M_E + |X| H_E)``. Dense
     formation covers the whole diagonal, its mean included. The wrap,
     multiplexor rounding and the definition's global phase of the dense
-    lowering belong to the later ``diagonal_wrap`` entry.
+    circuit construction belong to the later ``diagonal_wrap`` entry.
 
     QFT angles. Each controlled phase takes ``ldexp(math.pi, -r)``, exact
     scaling of ``p_low = math.pi``, and ``||CP(a) - CP(b)|| =
@@ -590,21 +598,22 @@ def binary_angle_formation(reconstruction, method, grid, model):
     ``eps_pi = p_high - p_low >= |math.pi - pi|``, and a conjugation
     ``F^dagger D F`` of a unitary diagonal by twice that. The d N_s
     conjugations give ``min(2, 2 d N_s eps_pi (b - 2 + 2**(1-b)))``, zero for
-    b = 1. This charge uses the full QFT, and the later ``aqft`` entry
+    b = 1. This term uses the full QFT, and the later ``aqft`` entry
     compares the full stored-angle QFT with its truncation.
 
-    The result is ``min(2, sum_b e_b + E_(Q,pi))`` over every selected block
-    occurrence, both potential halves and every kinetic variable of every
-    step included. The Walsh identity coefficient and the objective constant
-    are excluded because ``identity_phase`` charges their formation and
-    native assignments. The work is two upward ``fsum`` reductions over each
-    distinct potential table (``binary._scaled_absolute_sum_up``), ``O(b K)``
-    array operations per finite-difference kinetic table with one exact
-    enclosure per trigonometric factor (``kinetic_fd_summary_up``), and
-    constant work per occurrence, with no transform, circuit or state. The trigonometric
-    enclosures rest on the one-ulp premise for ``math.sin``, ``math.cos``
+    The result is ``min(2, sum_b e_b + E_(Q,pi))`` over every block
+    occurrence of the Plan, both potential halves and every kinetic variable
+    of every step included. The Walsh identity coefficient and the objective
+    constant are excluded because ``identity_phase`` counts their formation
+    and their phase assignments in the circuit. The work is two upward
+    ``fsum`` reductions over each distinct potential table
+    (``binary._scaled_absolute_sum_up``), ``O(b K)`` array operations per
+    finite-difference kinetic table with one exact enclosure per
+    trigonometric factor (``kinetic_fd_summary_up``), and constant work per
+    occurrence, with no transform, circuit or state. The trigonometric
+    enclosures rest on the one-ulp assumption for ``math.sin``, ``math.cos``
     and NumPy's ``sin``, a platform assumption like that of
-    ``binary.qft_error_bound``. The premise is conditional. The bound was
+    ``binary.qft_error_bound``. The assumption is conditional. The bound was
     tested against an independent exact evaluation on macOS arm64 and Linux
     aarch64, and NumPy's SIMD ``sin`` on Linux x86-64 hosts has not been
     checked (docs/dependency_issues.md, "Platform math libraries").

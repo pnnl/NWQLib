@@ -1,6 +1,6 @@
-"""One durable local-data -> upload -> compile frontier owned by Run.
+"""The saved progress of one remote preparation, from local data through upload to compilation, kept by the Run.
 
-Only a fresh stage can create a remote resource. An interrupted intent is
+Only a new stage can create a remote resource. An interrupted intent is
 reconciled by its original preparation identity, which the backend records on
 the remote resource it creates, and a known resource is never submitted again.
 
@@ -25,12 +25,13 @@ from nwqlib.execution import PendingPreparation, PayloadRef
 
 
 def _save(run, pending, **fields):
-    """Commit one revision of the pending record, then install it in live state.
+    """Commit one revision of the pending record, then put it into the Run's in-memory state.
 
     Every revision between the initial ``local`` record (``begin_preparation``)
     and completion (``_finish_native_preparation``) goes through this write.
-    The initial record, each revision and the completion commit before live
-    state changes, so live state never runs ahead of the journal.
+    The initial record, each revision and the completion commit before the
+    in-memory state changes, so that state never runs ahead of the run log
+    (``run.sqlite``, the SQLite file in which the Run records each step).
     """
     revised = pending.revise(**fields)
     run._write((("remote_preparation", revised.preparation_id, revised),))
@@ -62,10 +63,10 @@ def begin_preparation(data, *, run, reservation, fields, items, setting, binding
 
 
 def refresh_preparation(preparation_id, *, run):
-    """Refresh one original preparation once and return its handle or its saved pending state.
+    """Refresh one original preparation once and return its prepared circuit or its saved pending state.
 
-    No circuit construction or quantum acquisition occurs here. A terminal
-    compilation consumes its selected local data only when building its receipt.
+    No circuit is built or run here. A finished compilation reads its local
+    data only when it builds its preparation record.
     """
     from nwqlib._prepared_execution import restore_prepared
     with run._lock:
@@ -85,14 +86,14 @@ def refresh_preparation(preparation_id, *, run):
 def _advance(pending, run, *, data=None):
     """Move one preparation forward without waiting and return its new state or handle.
 
-    Local data are read from the journal only when a stage needs them. Initial
+    Local data are read from the run log only when a stage needs them. Initial
     submission never waits for compilation. Once compilation is pending, each
     call makes one ``refresh_compile`` and either saves the provider status or
-    publishes the finished receipt through ``_finish_native_preparation``,
+    saves the finished preparation record through ``_finish_native_preparation``,
     joined to the original static workflow item. Cancellation marks a ``local``
     or ``uploaded`` preparation as cancelled without a provider call, and a
     compile already running receives one cancellation request. Unless a
-    journal write has already failed, any error keeps every acknowledged
+    write to the run log has already failed, any error keeps every acknowledged
     identity and turns an unacknowledged intent into its uncertain state. The
     error then propagates.
     """

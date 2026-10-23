@@ -1,15 +1,15 @@
-"""NWQ-Sim runner build and local detached backend adapter.
+"""Build of the NWQ-Sim runner, and the adapter for local NWQ-Sim jobs that continue after Python exits.
 
 NWQLib runs NWQ-Sim through its own small runner (``_native/nwqsim_runner.cpp``)
-compiled for one public backend/method pair. Python lowers each circuit to
+compiled for one public backend/method pair. Python translates each circuit to
 Qiskit-convention U and CX gates, writes one JSON request into a spool
-directory named by the submission UUID, and launches the runner as a detached
-process. The runner writes one terminal result file, beside binary files for
+directory named by the submission UUID, and launches the runner as a separate
+process that continues after Python exits. The runner writes one terminal result file, beside binary files for
 amplitudes, probability marginals and saved trajectory states, and a CPU/SV
 trajectory request is evolved once and observed at every point. After a crash it leaves
 a ``.claim`` directory, which marks an attempt whose outcome must be checked
-before anyone reruns it. ``reconcile`` uses the same spool path to bind a lost
-launch acknowledgement to its result without starting a second process.
+before anyone reruns it. ``reconcile`` uses the same spool path to match a lost
+launch acknowledgement with its result without starting a second process.
 docs/nwqsim.md records the qualified NWQ-Sim revision, the reason revision
 ``b35763d`` is rejected, and the byte formulas used by ``_buffer_bytes``.
 """
@@ -53,7 +53,7 @@ NWQSIM_CPU_TARGET = BackendTarget(name="nwqsim_cpu_sv", provider="nwqsim",
 
 
 def _target(backend, method):
-    """Return the declared target. Only CPU/SV reads host amplitudes, so only it has exact readouts."""
+    """Return the declared target. Only CPU/SV reads the amplitudes in host memory, so only it has exact readouts."""
     if backend == "CPU" and method == "SV":
         return NWQSIM_CPU_TARGET
     return BackendTarget(name=f"nwqsim_{backend.lower()}_{method.lower()}", provider="nwqsim",
@@ -63,11 +63,11 @@ def _target(backend, method):
 
 
 def _route(backend, method, ranks):
-    """Reject backend/method/rank routes that the NWQ-Sim public factory cannot run as selected.
+    """Reject backend, method and rank combinations that NWQ-Sim's public state-creation function cannot run as configured.
 
     NVGPU_MPI SV/DM constructors increment an uninitialized ``gpu_mem`` counter
-    at both inspected revisions. The MPI factory silently substitutes SV for
-    DM, which would change the selected method. The public SV_MPI constructor
+    at both inspected revisions. NWQ-Sim's MPI state creation silently
+    substitutes SV for DM, which would change the configured method. The public SV_MPI constructor
     requires a power-of-two rank count. The table in docs/nwqsim.md lists the
     same routes.
     """
@@ -85,7 +85,7 @@ def _route(backend, method, ranks):
 
 
 def _buffer_bytes(backend, method, ranks, width, observation):
-    """Known resident state/work/sample arrays per process, excluding SDK workspace.
+    """Bytes of the resident state, work and sample arrays of known size per process, excluding SDK workspace.
 
     Returns (state bytes, readout bytes). The formulas follow the inspected
     NWQ-Sim constructor and sampler allocations listed in docs/nwqsim.md and
@@ -103,16 +103,16 @@ def _buffer_bytes(backend, method, ranks, width, observation):
     - CPU readout: ``16`` bytes per marginal entry (the runner's compensated
       sum) for probabilities, otherwise ``8`` bytes per shot (the sampled
       outcomes, which the runner projects, sorts and counts in place). A
-      trajectory holds one marginal's sums at a time, so it charges its
+      trajectory holds one marginal's sums at a time, so it counts its
       largest marginal. Its saved states and marginals are written to files
-      one point at a time, which the output limit admits.
-      The marginal leaves the runner as a dense float64 sidecar of
-      ``8 * 2**k`` bytes, which the output limit admits (``_result``).
+      one point at a time, which the output limit covers.
+      The marginal leaves the runner as a dense float64 side file of
+      ``8 * 2**k`` bytes, which the output limit covers (``_result``).
     - MPI/SV ``32*dim // ranks`` per process: four local float64 arrays, and
       ``24*shots`` for three full-shot arrays (global and local outcomes and
       the random draws).
     - GPU SV/DM ``48*dim + 16``: two host and four device float64 arrays, two
-      of them with one extra slot, and ``32*shots`` for four full-shot arrays
+      of them with one extra entry, and ``32*shots`` for four full-shot arrays
       (outcomes and random draws, on host and device).
     """
     shots = observation.shots
@@ -158,7 +158,7 @@ _ROUNDOFF_SOURCES = (
 
 
 def _roundoff_exclusions(build):
-    """Receipt exclusions for a runner's ``--describe`` output, from the rule above.
+    """Preparation-record exclusions for a runner's ``--describe`` output, from the rule above.
 
     ``roundoff_base_revision`` names the base when the runner's revision
     descends from it and is null otherwise. ``roundoff_sources_identical``
@@ -206,7 +206,7 @@ def _describe(executable, backend, method):
 
 
 def _phase_factor(executable, phase, *, run):
-    """Ask the selected runner for the finite binary64 factor used by its output product."""
+    """Ask the configured runner for the finite binary64 phase factor by which it multiplies its output."""
     # The scalar reply is at most 128 ASCII bytes. The admitted 256 bytes are
     # an untuned allowance for its read and decode, with no recorded derivation.
     run.check_data(256)
@@ -229,7 +229,7 @@ def _phase_factor(executable, phase, *, run):
 
 
 def _phase_envelope(factor, width):
-    """Return the ``(t, e)`` envelope of the output phase product.
+    """Return the ``(t, e)`` error bound of multiplying the output by the phase factor.
 
     It is ``(0.0, 0.0)`` when no factor is applied or the factor is exactly one.
     """
@@ -241,7 +241,7 @@ def _phase_envelope(factor, width):
 
 @dataclass(frozen=True)
 class _PreparedNWQSim:
-    """One runner request. payload is the exact JSON the runner reads, and input_id binds its result."""
+    """One runner request. payload is the exact JSON the runner reads, and input_id ties its result to it."""
 
     circuit: object
     payload: bytes
@@ -250,7 +250,7 @@ class _PreparedNWQSim:
 
 
 class NWQSimExecutionError(RuntimeError):
-    """A terminal native failure, carrying the evolution count the runner reported, if valid.
+    """A final failure reported by the runner, carrying the evolution count it reported, if valid.
 
     The count is kept so that a failed attempt still records the evolutions it
     actually performed. An invalid count becomes None rather than a guess.
@@ -262,7 +262,7 @@ class NWQSimExecutionError(RuntimeError):
 
 
 class NWQSimBackend(Record):
-    """NWQ-Sim simulator run locally as a detached process, with statevector or density-matrix simulation.
+    """NWQ-Sim simulator run locally in a process that outlives Python, with statevector or density-matrix simulation.
 
     Build it with keyword arguments, for example
     `NWQSimBackend(executable=..., spool=..., max_input_bytes=..., max_output_bytes=..., max_buffer_bytes=...)`,
@@ -283,33 +283,39 @@ class NWQSimBackend(Record):
             `"NVGPU_MPI"` is rejected, because its constructors read an
             uninitialized GPU memory counter in the inspected NWQ-Sim sources.
         method: Default `"SV"`. `"SV"` (statevector) or `"DM"` (density matrix).
-            `"MPI"` supports `"SV"` only, because its factory silently substitutes
-            SV for DM.
+            `"MPI"` supports `"SV"` only, because NWQ-Sim's state-creation
+            function silently substitutes SV for DM.
         ranks: Default `1`. Positive. Number of cooperating MPI processes. Only
             `"MPI"` accepts more than one, and it requires a power of two.
         mpi_launcher: Default `"mpirun"`. Installed launcher for local MPI runs.
         executable: Required. Absolute path of the built runner.
         spool: Required. Absolute path of the directory for request and result
-            files. It identifies a detached job after Python exits, so it cannot
-            be relative.
+            files. It identifies the job after Python exits, so it cannot be
+            relative.
         max_input_bytes: Required. Positive. Limit in bytes on each request file.
         max_output_bytes: Required. Positive. Limit in bytes on each result file
             that NWQLib reads.
-        max_buffer_bytes: Required. Positive. Limit in bytes on the known state,
-            work and sample arrays of each process, including host and device
+        max_buffer_bytes: Required. Positive. Limit in bytes on the state, work
+            and sample arrays of known size in each process, including host and device
             storage on a GPU. It excludes fused gates, SDK workspace and
             whole-process memory.
         optimization_level: Default `0`. Qiskit transpiler level, 0 to 3, of the
             translation to U and CX gates.
             A level other than 0 adds the [roundoff
-            exclusion](../glossary.md#roundoff-exclusion)
-            `"optimization_level"` to the [preparation
-            record](../glossary.md#preparation-record).
+            exclusion](../glossary.md#roundoff-exclusion) `"optimization_level"`,
+            a label for a condition that the roundoff derivation of exact
+            readouts does not cover, to the [preparation
+            record](../glossary.md#preparation-record) that NWQLib saves for
+            each prepared circuit.
             [`PreparedArtifact.state_error()`][nwqlib.execution.PreparedArtifact.state_error]
-            then gives no [state budget](../glossary.md#state-budget).
-            The probability window remains a readout-check convention for
-            that execution, and the operation count describes the compiled
-            circuit. Levels 2 and 3
+            then gives no [state budget](../glossary.md#state-budget), the
+            first-order bound on the 2-norm distance, up to a global phase, of
+            the simulated state from the exact state. The probability window,
+            the roundoff window of exact execution, which for circuits that the
+            roundoff derivation covers is a first-order bound on how far
+            binary64 roundoff can move the total probability from one, remains
+            a readout-check convention for that execution, and the operation
+            count describes the compiled circuit. Levels 2 and 3
             resynthesize two-qubit blocks with Qiskit's own synthesis. At those
             levels an exact readout or trajectory is refused when transpilation
             relabels wires by removing permutations, because the runner reads the
@@ -339,9 +345,9 @@ class NWQSimBackend(Record):
 
     @model_validator(mode="after")
     def _paths(self):
-        """Reject an unsupported route, and relative runner or spool paths.
+        """Reject an unsupported backend/method pair, and relative runner or spool paths.
 
-        The spool path identifies a detached job after the Python process
+        The spool path identifies the job after the Python process
         exits, so it must not depend on the working directory.
         """
         _route(self.backend, self.method, self.ranks)
@@ -352,11 +358,13 @@ class NWQSimBackend(Record):
     def target_for(self, observation):
         """The declared target of the configured backend/method pair.
 
-        A trajectory whose points this route cannot serve is refused here,
-        before any preparation charge: an amplitude point (its point array is
-        not published by the detached refresh), and a reduction declared at an
-        explicit position before the last point's explicit position whose
-        reducer is not registered phase invariant (no phase ledger).
+        A trajectory whose points this backend/method pair cannot serve is
+        refused here, before the preparation is counted against the run's
+        limits. Such points are an amplitude point (the refresh of a job that
+        continues after Python exits saves no point arrays), and a reduction
+        declared at an explicit position before the last point's explicit
+        position whose reducer is not registered phase invariant (Qiskit reports
+        no phase per segment).
         ``_trajectory_request`` repeats the reduction check on the resolved
         boundaries, which also covers the end shorthand.
         """
@@ -386,7 +394,7 @@ class NWQSimBackend(Record):
         return 36
 
     def _lower(self, logical, *, run, seed, exact, amplitudes=False):
-        """Lower one logical circuit to U/CX at the selected optimization level.
+        """Translate one logical circuit to U and CX at the configured optimization level.
 
         Levels 0 and 1 receive the exact synthesis of each dense unitary
         (``Run._exact_dense_unitaries``). Levels 2 and 3 resynthesize two-qubit
@@ -394,7 +402,7 @@ class NWQSimBackend(Record):
         as given (docs/dependency_issues.md). Without a coupling map, levels 2
         and 3 may elide SWAP and permutation gates and relabel the wires that
         follow them, which Qiskit reports as a layout. Measurements follow the
-        relabeling, so counts stay correct and their receipt records the final
+        relabeling, so counts stay correct and their preparation record keeps the final
         layout, but an exact readout (``exact``) reads the state in logical wire
         order and is refused.
 
@@ -403,7 +411,7 @@ class NWQSimBackend(Record):
         marginals but can change the pre-measurement amplitudes. Amplitude readouts
         of measured circuits therefore require level 0 or 1, or a circuit without
         measurements. Exact probability readouts remain subject to the separate
-        refusal whenever lowering reports a layout.
+        refusal whenever translation reports a layout.
 
         For a computational-basis diagonal unitary D=diag(d_x) with |d_x|=1,
         |(D psi)_x|^2 = |psi_x|^2 for every x. Summing over unobserved
@@ -412,11 +420,11 @@ class NWQSimBackend(Record):
         subset. For a mixed state the diagonal of D rho D^dagger is also
         unchanged. This requires the removed gates to be terminal relative to
         the affected measured wires, with no later operation that can turn
-        their phases into the requested population. NWQ-Sim's accepted
+        their phases into the requested probabilities. NWQ-Sim's accepted
         single-endpoint circuits have terminal measurements only and reject
         reset and dynamic control. Qiskit's RemoveDiagonalGatesBeforeMeasure
         pass removes diagonal one- and two-qubit gates (checked with Qiskit
-        2.6.0). Counts use the actual post-lowering measurement map, and Pauli
+        2.6.0). Counts use the measurement map after translation, and Pauli
         readouts refuse a measured circuit at every level.
         """
         from qiskit import transpile
@@ -436,7 +444,7 @@ class NWQSimBackend(Record):
         return native
 
     def _exclusions(self, exclusions):
-        """Add the marker of a non-default optimization level to a receipt's exclusions."""
+        """Add the marker of a non-default optimization level to a preparation record's exclusions."""
         return exclusions | ({"optimization_level"} if self.optimization_level != 0 else set())
 
     def _build(self, context):
@@ -446,21 +454,21 @@ class NWQSimBackend(Record):
         return context["build"]
 
     def prepare(self, circuit, *, observation, runtime, position, source_definitions, run, snapshot, views=None):
-        """Admit one observation, lower it to U/CX and encode the runner request.
+        """Check one observation, translate it to U and CX and encode the runner request.
 
         The readout, width, classical-bit, MPI rank and shot, and state-buffer
-        admissions run before the runner is described or the circuit is
-        lowered. The MPI global-gate transfer check runs during lowering, and
-        the input-byte limit applies while the request is encoded
-        (``_stream_request``). An amplitude endpoint, or a trajectory with a
-        reduction at its last boundary, asks the runner once for its output
-        phase factor after lowering (``_phase_factor``) and records that
-        factor's envelope in ``statevector_roundoff``. A Pauli readout keeps only the
+        checks run before the runner is described or the circuit is
+        translated. The MPI global-gate transfer check runs during translation,
+        and the input-byte limit applies while the request is encoded
+        (``_stream_request``). An amplitude readout at the end of the circuit,
+        or a trajectory with a reduction at its last boundary, asks the runner
+        once for its output phase factor after translation (``_phase_factor``)
+        and records the error bound of that factor in ``statevector_roundoff``. A Pauli readout keeps only the
         instruction prefix before its original position. Measurements must be
         terminal, and their clbit-to-qubit map travels with the request so the
         runner builds count keys in NWQLib order. The runtime seed selects
-        both the transpiler seed and the native sampler seed. A trajectory
-        (CPU/SV) is lowered once and executed as one evolution
+        both the transpiler seed and NWQ-Sim's sampler seed. A trajectory
+        (CPU/SV) is translated once and executed as one evolution
         (``_trajectory_request``). ``views`` maps each view's tail and inverse
         definition to its logical circuit on the body's registers.
         """
@@ -519,7 +527,7 @@ class NWQSimBackend(Record):
         local_dim = (1 << native.num_qubits) // self.ranks
 
         def gates():
-            """Yield each native U/CX gate as its request object, one at a time, in circuit order."""
+            """Yield each U/CX gate of the translated circuit as its request object, one at a time, in circuit order."""
             measured = False
             for item in native.data:
                 operation = item.operation
@@ -582,15 +590,15 @@ class NWQSimBackend(Record):
                                  | _roundoff_exclusions(build)))))
 
     def _trajectory_request(self, circuit, observation, runtime, boundaries, views, run, snapshot, build, target):
-        """Lower a trajectory once and encode it as one runner evolution observed at every point.
+        """Translate a trajectory once and encode it as one runner evolution read at every point.
 
-        Evaluate all selected point readouts while advancing one coherent
-        simulator state. A point's boundary precedes its reversible readout
-        view. Pauli saves leave the state unchanged. A probability view applies
-        its selected tail, saves the marginal, and applies the exact inverse
-        before continuation. Count actual native operations through the final
-        observation, including all executed view operations, and admit the sum
-        of the point payloads before acquisition.
+        Evaluate all point readouts while advancing one coherent simulator
+        state. A point's boundary precedes its reversible readout view. Saving a
+        Pauli expectation leaves the state unchanged. A probability view applies
+        its tail, saves the marginal, and applies the exact inverse before
+        continuation. Count the U/CX gates executed through the final point,
+        including all executed view operations, and check the summed point
+        outputs against the limits before execution.
 
         Trajectory readout evaluates the declared points of one deterministic,
         noiseless coherent evolution. The body and every view must pass
@@ -599,38 +607,46 @@ class NWQSimBackend(Record):
         runner has no noise and evolves a pure state. The body is cut after the
         last point, since nothing after the last observation is executed, and a
         full-width barrier labeled ``nwqlib_boundary_<b>`` marks each distinct
-        boundary b of the bound body before Qiskit lowers it to U/CX once, at
-        the adapter's optimization level: saves are placed at the original bound circuit
-        boundaries before lowering can move independent gates across them, and
-        each boundary's native gate position is read from its barrier, without
-        constructing any prefix again. Each view's tail is lowered once, and
-        its inverse is the reversed, adjointed tail of that same lowered
-        sequence (U(t, p, l) becomes U(-t, -l, -p), and CX is its own inverse), so
-        the declared inverse definition is not lowered separately. The runner
+        boundary b of the bound body before Qiskit translates it to U/CX once,
+        at the adapter's optimization level. Saves are thus placed at the
+        original boundaries of the bound circuit before translation can move
+        independent gates across them, and each boundary's position in the U/CX
+        sequence is read from its barrier, without constructing any prefix
+        again. Each view's tail is translated once, and its inverse is the
+        reversed, adjointed tail of that same translated sequence (U(t, p, l)
+        becomes U(-t, -l, -p), and CX is its own inverse), so the declared
+        inverse definition is not translated separately. The runner
         applies an inverse only when a later point follows.
 
-        The CPU/SV roundoff model charges the U/CX gates actually executed
-        through the observation, including earlier reversible readout
-        excursions. Segment-local fusion uses no more than the charged fold and
+        The CPU/SV roundoff model counts the U/CX gates executed through each
+        point, including earlier reversible readout tails and their inverses.
+        Fusion within a segment uses no more than the counted fold and
         application operations. The model remains first order and subject to
-        the receipt's exclusions. The receipt's G is therefore the body's U/CX
-        gates through the last point plus every forward tail and every inverse
-        that runs, and the runner reports the same count back. Save
-        instructions add readout work but no coherent gate charge, and neither
-        G nor the number of simulations grows with the number of points.
+        the preparation record's exclusions. The record's G is therefore the
+        body's U/CX gates through the last point plus every forward tail and
+        every inverse that runs, and the runner reports the same count back.
+        Save instructions add readout work but no coherent gates. G is counted
+        after the body is translated with a marker at every requested boundary,
+        and every readout tail and inverse that executes is added to it. Adding
+        a point can therefore change the translated body, for example by
+        extending it or by preventing gate cancellations across the new
+        marker, and it can require additional view operations, including the
+        inverse of a formerly final view's tail. The number of simulations
+        stays one, whatever the number of points.
 
-        A phase-sensitive intermediate output uses the phase ledger of its
-        actual boundary-preserving native construction. Scalar reducers
-        declared invariant under one common input phase can consume raw saved
-        amplitudes. Relative branch phases remain part of the coherent
-        preparation. Qiskit's lowering reports one global phase for the whole
-        lowered prefix and no ledger per segment, so a reduction point before
+        An intermediate output that depends on the global phase needs the phase
+        accumulated through its boundary in the translated circuit. Scalar
+        reducers declared invariant under one common input phase can use raw
+        saved amplitudes. Relative branch phases remain part of the coherent
+        preparation. Qiskit's translation reports one global phase for the whole
+        translated prefix and no phase per segment, so a reduction point before
         the last boundary is served only for a reducer registered
         ``phase_invariant`` and reads the raw saved amplitudes. A saved state at
         the last boundary is multiplied, as an output copy, by the phase of the
-        lowered prefix through that boundary, which includes the logical
-        circuit's own top-level phase. Amplitude points are refused: their
-        detached point-array publication is not part of the refresh route.
+        translated prefix through that boundary, which includes the logical
+        circuit's own top-level phase. Amplitude points are refused, because the
+        refresh of a job that continues after Python exits saves no point
+        arrays.
         """
         from qiskit.circuit import Barrier
         from qiskit.circuit.library import CXGate, UGate
@@ -656,7 +672,7 @@ class NWQSimBackend(Record):
             marked.append(Barrier(circuit.num_qubits, label=f"nwqlib_boundary_{last}"), marked.qubits)
 
         def lowered(logical):
-            """Lower one logical circuit to U/CX at the selected level (``_lower``)."""
+            """Translate one logical circuit to U/CX at the configured level (``_lower``)."""
             return self._lower(logical, run=run, seed=runtime.seed, exact=True)
 
         native = lowered(marked)
@@ -676,7 +692,7 @@ class NWQSimBackend(Record):
             raise ValueError("Qiskit lowering changed the trajectory's boundary markers")
 
         def gate_list(logical):
-            """U/CX request gates of one lowered view tail."""
+            """U/CX request gates of one translated view tail."""
             tail = lowered(logical)
             gates = []
             for item in tail.data:
@@ -772,17 +788,17 @@ class NWQSimBackend(Record):
             ))))
 
     def admit_batch(self, natives):
-        """Admit exactly one prepared circuit, since one runner request evolves one circuit."""
+        """Accept exactly one prepared circuit, since one runner request evolves one circuit."""
         if len(natives) != 1:
             raise ValueError("one NWQ-Sim runner request executes exactly one prepared circuit")
 
     def launch(self, natives, *, submission_id, run):
-        """Create the spool directory once, write the request and start the runner detached.
+        """Create the spool directory once, write the request and start the runner in its own session.
 
         ``mkdir(exist_ok=False)`` makes a repeated launch for the same UUID
         fail before a second process starts. The process runs in its own
-        session, so it outlives the Python process, and the locator records
-        its PID and host for later liveness checks.
+        session, so it outlives the Python process, and the job locator records
+        its PID and host, so that later checks can tell whether it still runs.
         """
         from nwqlib.execution import JobLocator
         self.admit_batch(natives)
@@ -807,7 +823,7 @@ class NWQSimBackend(Record):
         return JobLocator(provider=self.kind, job_id=submission_id, process_id=process.pid, host=platform.node())
 
     def restore_native(self, record, payload=None, *, run):
-        """Restore the result association from a receipt and its saved request bytes, if any."""
+        """Restore the result association from a preparation record and its saved request bytes, if any."""
         if record.payload.format != NWQSIM_FORMAT:
             raise ValueError("prepared NWQ-Sim payload has an unsupported format")
         kind = "pauli" if record.observation.kind == "pauli_expectation" else record.observation.kind
@@ -859,21 +875,22 @@ class NWQSimBackend(Record):
     def can_reconcile(self, submission, *, run):
         """Whether automatic waiting has an original process or terminal output.
 
-        A directory alone does not establish that Popen ran. Without an
-        observable process or result, report the uncertain outcome instead of
-        polling forever. A later explicit resume can still bind output that
-        arrives at the original path, without replacing or refunding the job.
-        This checks file metadata and an existing child handle only.
+        A directory alone does not establish that Popen ran. Without a process
+        or result that NWQLib can check, report the uncertain outcome instead of
+        polling forever. A later explicit resume can still collect output that
+        arrives at the original path, without replacing the job or returning
+        its counted work. This checks file metadata and an existing child
+        process object only.
         """
         output = Path(self.spool)/submission.submission_id/"result.json"
         process = run._state["backend_context"].get("processes", {}).get(submission.submission_id)
         return output.is_file() or (process is not None and process.poll() is None)
 
     def reconcile(self, submission, natives, *, run):
-        """Bind a lost launch acknowledgement to the result file at the original spool path, if any.
+        """Match a lost launch acknowledgement with the result file at the original spool path, if any.
 
-        The deterministic spool location of the submission UUID binds the
-        terminal result to the saved intent, and no replacement process is
+        The deterministic spool location of the submission UUID ties the
+        final result to the saved intent, and no replacement process is
         launched. The result is not read here: ``refresh`` parses it once and
         checks its ``input_id`` against the original request before any value
         is used, and a mismatch fails there.
@@ -888,9 +905,9 @@ class NWQSimBackend(Record):
         return JobLocator(provider=self.kind, job_id=submission.submission_id, host=platform.node())
 
     def _packet(self, output, native):
-        """Admit and parse a result file that names this request and, when completed, this build.
+        """Check and parse a result file that names this request and, when completed, this build.
 
-        A completed packet must report exactly one native evolution, since the
+        A completed packet must report exactly one evolution, since the
         runner evolves the circuit once regardless of shots or ranks.
         """
         if output.stat().st_size > self.max_output_bytes:
@@ -912,7 +929,7 @@ class NWQSimBackend(Record):
 
         A nonzero process or scheduler exit blocks success even when a
         completed packet exists. Amplitudes and probability marginals come
-        from binary sidecars (``_sidecar``): interleaved complex128 amplitudes
+        from binary side files (``_sidecar``): interleaved complex128 amplitudes
         and a dense float64 marginal of ``2**k`` values whose index bit zero
         is the first observed qubit. A marginal, of a single endpoint or of a
         trajectory point (``_trajectory_values``), reaches the decoder as that
@@ -943,15 +960,15 @@ class NWQSimBackend(Record):
 
 
     def _sidecar(self, output, descriptor, name, count, *, earlier=0):
-        """Read one binary sidecar ``<result>.<name>`` after checking its declared layout and bytes.
+        """Read one binary side file ``<result>.<name>`` after checking its declared layout and bytes.
 
         ``name`` ends in ``amplitudes`` (``complex128-native``) or
         ``probabilities`` (``float64-native``). The descriptor must name the
-        file beside the result, its native dtype, the admitted element count
+        file beside the result, its native dtype, the accepted element count
         and bytes, and the file must have exactly those bytes. The result, the
-        ``earlier`` bytes of sidecars already read for it and this sidecar must
-        together fit ``max_output_bytes``, which ``refresh`` reserved before
-        this read.
+        ``earlier`` bytes of side files already read for it and this side file
+        must together fit ``max_output_bytes``, which ``refresh`` set aside
+        before this read.
         """
         import numpy as np
         dtype = (("complex128-native", np.complex128) if name.endswith("amplitudes")
@@ -1020,12 +1037,12 @@ def _trajectory_points(observation):
 def _streamed_gate_bound(name, wires, params, *, preceded_by_comma):
     """Largest compact JSON size of one U or CX request gate, checked before it is encoded.
 
-    The U/CX request writer admits each compact JSON gate before encoding or
-    writing it. A U gate costs at most ``134+digits(q)`` bytes and a CX gate at
+    The U/CX request writer checks each compact JSON gate against the limit
+    before encoding or writing it. A U gate costs at most ``134+digits(q)`` bytes and a CX gate at
     most ``38+digits(q0)+digits(q1)``, plus its list separator. Fixed request
-    fields and the closing suffix are reserved separately. The writer
-    validates finite binary64 parameters and verifies each actual encoded
-    length against the bound.
+    fields and the closing suffix are counted separately. The writer
+    validates finite binary64 parameters and verifies each encoded length
+    against the bound.
 
     Derivation, for the fields ``name``, ``qubits`` and ``params`` in compact
     ASCII JSON with separators ``(',', ':')``, finite binary64 parameters and
@@ -1036,7 +1053,7 @@ def _streamed_gate_bound(name, wires, params, *, preceded_by_comma):
     longer, with two wires, one comma and an empty parameter list, so
     ``B_CX = 37 + d(q0) + d(q1) + 1 = 38 + d(q0) + d(q1)``. One byte is added
     for the preceding list comma except at the first gate. The 32-byte float
-    envelope is the binary64 JSON envelope of ``_run_journal._json_bound``.
+    bound is the binary64 JSON bound of ``_run_journal._json_bound``.
     Signs, exponent and decimal point are inside it. The bound covers no other
     spelling (spaces, indentation, custom float formatting or extra fields).
     """
@@ -1054,7 +1071,7 @@ def _streamed_gate_bound(name, wires, params, *, preceded_by_comma):
 
 
 def _write_gate(stream, gate, *, used, limit, suffix_bytes, first):
-    """Admit one gate by ``_streamed_gate_bound``, then encode and write it. Return the bytes used."""
+    """Check one gate against ``_streamed_gate_bound``, then encode and write it. Return the bytes used."""
     bound = _streamed_gate_bound(gate["name"], gate["qubits"], gate["params"],
                                 preceded_by_comma=not first)
     if bound > limit-used-suffix_bytes:
@@ -1071,11 +1088,11 @@ def _write_gate(stream, gate, *, used, limit, suffix_bytes, first):
 def _stream_request(head, gates, tail, limit):
     """Encode the runner request with its gates written one at a time. Return (bytes, gate count).
 
-    The request is the compact journal JSON of ``head``, then ``"gates"``,
+    The request is the compact run-log JSON of ``head``, then ``"gates"``,
     then ``tail``, in that key order, so it is the same bytes as encoding the
     whole request object at once. The fixed fields of ``head`` and ``tail``
-    are bounded and encoded first, and the closing suffix stays reserved
-    while each gate is admitted by ``_write_gate`` before it is written. No
+    are bounded and encoded first, and the closing suffix stays counted
+    while each gate is checked by ``_write_gate`` before it is written. No
     list of all gate objects and no second text copy of the request is made.
     ``limit`` is the smaller of the input-byte limit and the Run's data limit.
     """
@@ -1096,11 +1113,11 @@ def _stream_request(head, gates, tail, limit):
 
 
 def build_runner(source: str | Path, output: str | Path, *, backend: str = "CPU", method: str = "SV", compiler: str | None = None) -> Path:
-    """Build one selected native route against an explicit clean source checkout.
+    """Build the runner for one backend/method pair from a clean NWQ-Sim source checkout.
 
     This explicit operation invokes the existing C++17 compiler. It installs or
     downloads nothing and builds no separate frontend. The executable's
-    ``--describe`` output keeps the NWQ-Sim revision, the actual compiler and
+    ``--describe`` output keeps the NWQ-Sim revision, the compiler used and
     whether the exact-probability roundoff derivation covers that revision
     (``_ROUNDOFF_BASE_REVISION``). Ordinary backend imports never call this
     operation.
@@ -1108,9 +1125,9 @@ def build_runner(source: str | Path, output: str | Path, *, backend: str = "CPU"
     Args:
         source: NWQ-Sim source checkout containing its bundled headers.
         output: New executable path. An existing file is not overwritten.
-        backend: CPU, MPI, NVGPU or AMDGPU public factory route.
+        backend: NWQ-Sim backend, CPU, MPI, NVGPU or AMDGPU.
         method: SV or DM. MPI requires SV.
-        compiler: Existing compiler. Defaults to c++, mpic++, nvcc or hipcc for the selected route.
+        compiler: Existing compiler. Defaults to c++, mpic++, nvcc or hipcc for the chosen backend.
 
     Returns:
         Absolute path of the newly built executable.

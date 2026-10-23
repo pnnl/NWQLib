@@ -1,4 +1,4 @@
-"""Constant-source LCHS numerical kernels and explicit remainder bounds."""
+"""Constant-source LCHS numerical routines and explicit remainder bounds."""
 
 from __future__ import annotations
 

@@ -6,13 +6,13 @@ Use this page to find the bound, identity, error budget or resource formula behi
 
 NWQLib computes expectations, projected eigenvalues, phase and energy estimates, linear-system solutions, linear differential-equation solutions, and finite-grid quantum Hamiltonian descent trajectories. Its quantum constructions and classical models share explicit input operators, normalization conventions, reconstruction maps, and resource descriptions. This makes the distinction between a circuit's output and a physical answer part of the mathematical specification. An inverse polynomial produces an unnormalized success branch. A subspace eigensolver produces a Ritz value. A position distribution produces an optimization candidate. Each requires additional relations before its error can be interpreted in the user's requested units.
 
-This distinction also determines the meaning of a resource estimate. A bound on the number of calls to a block encoding does not determine its gate count, and a gate count does not determine a physical runtime. Similarly, a sampling interval does not cover polynomial approximation, circuit bias, loss of a trial direction, or failure to prepare a target eigenstate. NWQLib carries these obligations separately and combines them when the required premises are available.
+This distinction also determines the meaning of a resource estimate. A bound on the number of calls to a block encoding does not determine its gate count, and a gate count does not determine a physical runtime. Similarly, a sampling interval does not cover polynomial approximation, circuit bias, loss of a trial direction, or failure to prepare a target eigenstate. NWQLib keeps these cost and error terms separate and combines them when the required premises are established.
 
-The results below describe the mathematical constructions that NWQLib implements. They cover all seven algorithm families, their shared subroutines, circuit synthesis, resource composition, and verification. The central contributions are finite and composable statements: polynomial residuals in physical units, quadrature bounds with explicit domains, derivatives through a truncated overlap subspace, error budgets for the actual emitted evolution, and resource laws evaluated without expanding the computation.
+The results below describe the mathematical constructions that NWQLib implements. They cover all seven algorithm families, their shared subroutines, circuit synthesis, resource composition, and verification. The central contributions are finite and composable statements: polynomial residuals in physical units, quadrature bounds with explicit domains, derivatives through a truncated overlap subspace, error budgets for the evolution as implemented, and resource formulas evaluated without expanding the computation.
 
-Each numbered result has one provenance label. **From a reference** identifies a published construction or theorem and its precise source. **Derived in NWQLib** identifies an implementation-linked derivation whose contribution can lie in a new combination of established arguments. **Improved from a reference** identifies a correction, additional case, sharper bound, or computationally usable form of a named source result. These labels describe provenance relative to the cited sources. They do not assert worldwide priority. For each result, the Contribution column of the implementation and evidence index in Section 13 states whether it is standard material and what it adds to its sources.
+Each numbered result carries one of three origin labels. **From a reference** identifies a published construction or theorem and its precise source. **Derived in NWQLib** identifies an implementation-linked derivation whose contribution can lie in a new combination of established arguments. **Improved from a reference** identifies a correction, additional case, sharper bound, or computationally usable form of a named source result. These labels describe the origin of a result relative to the cited sources. They do not assert worldwide priority. For each result, the Contribution column of the implementation and evidence index in Section 13 states whether it is standard material and what it adds to its sources.
 
-Throughout, vector norms are Euclidean and matrix norms are spectral unless a subscript states otherwise. In floating-point error formulas, the binary64 unit roundoff is $u=2^{-53}$, and $\gamma_n=nu/(1-nu)$ when $nu<1$. Where $u$ denotes a unit-box coordinate, as in Proposition 48, the roundoff constant is written $u_{\rm fp}=2^{-53}$. An analytic inequality and its floating-point evaluation are different objects. An ordinary binary64 evaluation of an upper-bound formula is not an interval certificate. Conditional roundoff results state their arithmetic or backend assumptions. The analytic results are established by the proofs below or by the cited source theorems. Library terms that the derivations use, such as [Plan](glossary.md#plan), [work units](glossary.md#work-units), [admission](glossary.md#admission), [charge](glossary.md#charge), [state budget](glossary.md#state-budget) and [mass window](glossary.md#mass-window), are defined in the [Glossary](glossary.md).
+Throughout, vector norms are Euclidean and matrix norms are spectral unless a subscript states otherwise. In floating-point error formulas, the binary64 unit roundoff is $u=2^{-53}$, and $\gamma_n=nu/(1-nu)$ when $nu<1$. Where $u$ denotes a unit-box coordinate, as in Proposition 48, the roundoff constant is written $u_{\rm fp}=2^{-53}$. An analytic inequality and its floating-point evaluation are different objects. An ordinary binary64 evaluation of an upper-bound formula is not an interval certificate. Conditional roundoff results state their arithmetic or backend assumptions. The analytic results are established by the proofs below or by the cited source theorems. Library terms that the derivations use are defined in the [Glossary](glossary.md). A [Plan](glossary.md#plan) holds the choices that a method makes once for one problem, such as the construction and its parameters. [Work units](glossary.md#work-units) count scalar operations by a stated formula and are not measured CPU time. The [state budget](glossary.md#state-budget) is a first-order bound on the 2-norm distance, up to a global phase, of a computed state from the exact state of its model, and the [mass window](glossary.md#mass-window) is the allowed deviation of a computed probability mass from its model value.
 
 Symbols defined within a result have local scope. In the Lanczos results with $\alpha>0$, $K=(H-cI)/\alpha$ is the normalized Hermitian operator. In Proposition 31, $K=W\sqrt{I-\Sigma^2}V^\dagger$ is the dilation-completion matrix. Scalar counts denoted by $K$, and the polynomial $K(x)$ in Proposition 19, are defined where they are used.
 
@@ -37,7 +37,7 @@ Result and proposition numbers are stable identifiers, cited in the documentatio
 | [Proposition 10. Differentiation through the kept overlap subspace](#r10) | The derivative of a selected Ritz value, including the motion of the truncated trial space, for fixed rank and a simple Ritz value |
 | [Proposition 11. Variance-weighted pilot allocation](#r11) | The main-stage shot allocation $n_k\propto\lvert g_k\rvert\sqrt{v_k}$ that minimizes the linearized variance for continuous allocations, conditional on a pilot stage |
 | [Proposition 12. Linear-work Gram noise estimates and confidence cutoff](#r12) | The expected Frobenius error of the sampled Gram matrix and the confidence radius $\epsilon_S$ that motivates the overlap cutoff. Neither alone bounds the Ritz-energy error |
-| [Proposition 58. Non-destructive Lanczos continuation and its resource counts](#r58) | One trajectory, in which each readout basis change is undone before the next readout or walk, supplies the required moment readouts on the exact simulated route (`shots=None`). The Plan supplies algebraically known moments, including $\mu_0=1$. The proposition gives exact decoding identities that keep total-mass and padding terms, coherent operation counts, saves and saved bytes |
+| [Proposition 58. Non-destructive Lanczos continuation and its resource counts](#r58) | With exact readout (`shots=None`, probabilities computed without shot sampling, subject to numerical rounding), one trajectory, in which each readout basis change is undone before the next readout or walk, supplies the required moment readouts. The Plan supplies algebraically known moments, including $\mu_0=1$. The proposition gives exact decoding identities that keep the total-mass and padding terms, and the counts of coherent operations, saves and saved bytes |
 | **GCiM and ADAPT** ([Section 5](#5-gcim-and-adapt)) | |
 | [Result 13. Generator-coordinate projection and thresholded diagonalization](#r13) | The projected pencil $H_pf=ESf$, canonical orthogonalization above an overlap threshold, and ADAPT basis growth and stopping. Thresholding alone does not identify the ground state |
 | [Proposition 14. Removing identity offsets before a projected solve](#r14) | Solving without the identity offset $cI$ and adding $c$ is exactly equivalent, and avoids amplifying the offset by the inverse overlap scale |
@@ -47,7 +47,7 @@ Result and proposition numbers are stable identifiers, cited in the documentatio
 | **Quantum linear systems** ([Section 6](#6-quantum-linear-systems)) | |
 | [Proposition 18. Relative polynomial residual and physical solution recovery](#r18) | Relative solution error at most $\epsilon_{\rm inv}$ from an inverse-polynomial residual bound when every singular value of $A/\alpha$ is at least $1/\kappa$, and the physical recovery factor $\lVert b\rVert\kappa s/\alpha$ |
 | [Proposition 19. Correct signed shortcut reflection and norm-search direction](#r19) | The corrected sign in Dalzell's shortcut-reflection bound and the direction of the norm search |
-| [Proposition 20. Outward coverage of a rounded periodic encoding gap](#r20) | Error and smallest-eigenvalue bounds for the stored periodic encoding of $mI+d(2I-S-S^\dagger)$, and a polynomial domain covering both gaps |
+| [Proposition 20. Outward coverage of a rounded periodic encoding gap](#r20) | Error and smallest-eigenvalue bounds for the rounded periodic encoding of $mI+d(2I-S-S^\dagger)$, and a polynomial domain covering both gaps |
 | **QSP and QSVT** ([Section 7](#7-quantum-signal-processing-and-singular-value-transformation)) | |
 | [Result 21. QSP conventions and the real-polynomial branch](#r21) | The $W_x$ and reflection phase conventions, and the real polynomial obtained by combining the $+\Phi$ and $-\Phi$ passes |
 | [Proposition 22. A valid polynomial norming grid and a counterexample to a published extension](#r22) | The Chebyshev-node norming factor $\sec(\pi d/(2N))$, also for complex coefficients and affine intervals, and an exact counterexample to its published extension to an equispaced grid |
@@ -73,8 +73,8 @@ Result and proposition numbers are stable identifiers, cited in the documentatio
 | [Proposition 38. Stable interval integrals for the three schedules](#r38) | Stable step integrals of the quadratic, shifted-cubic and cubic schedules, with their floating-point allowances |
 | [Proposition 39. Finite time-ordering and coefficient-quadrature bounds](#r39) | A per-step time-ordering bound (the smaller of an integral form and a derivative form) and the midpoint-quadrature error |
 | [Derivation: QHD schedule values, integrals and derivative bounds](#qhd-schedule-arithmetic) | The rounding of each schedule's point values and step integrals, the exact rational values that the coefficient residual uses, and the derivative bounds $a_*,b_*,A_1,A_2,B_1,B_2$ that Proposition 39 needs |
-| [Proposition 40. Product bounds for the actual one-hot and binary steps](#r40) | Product-formula errors of the emitted one-hot and binary steps, and commutator bounds computed from support tables |
-| [Proposition 41. Split-step roundoff and work at a fixed grid](#r41) | Roundoff propagation in the classical split-step kernel, its observed first-order budget, and its work and storage |
+| [Proposition 40. Product bounds for the actual one-hot and binary steps](#r40) | Product-formula errors of the built one-hot and binary steps, and commutator bounds computed from support tables |
+| [Proposition 41. Split-step roundoff and work at a fixed grid](#r41) | Roundoff propagation in the classical split-step evaluation, its observed first-order budget, and its work and storage |
 | **QHD: circuit construction errors** | |
 | [Proposition 42. Compensated running phase total and the phase condition for kept states](#r42) | The error bound of the compensated running phase total, the Qiskit phase-assignment allowances, and the requirement that the phase allowance of a state kept with `keep_state=True` be finite and below $\pi$ |
 | [Proposition 43. Signed binary momentum and sparse kinetic polynomials](#r43) | The signed Walsh expansion of $q^2$ for the binary spectral kinetic, the Walsh structure of the finite-difference kinetic, and the difference between the two kinetic models |
@@ -95,18 +95,18 @@ Result and proposition numbers are stable identifiers, cited in the documentatio
 | **QHD: box refinement** | |
 | [Proposition 48. Search-model normalization and affine invariance](#r48) | Range normalization of the search model and its invariance under positive affine maps of box and objective, in exact table arithmetic |
 | Proposition 48, [Selection across refinement levels](#selection-across-refinement-levels) | A conditional bound on the round objective of the point chosen across completed refinement levels |
-| [Proposition 49. Marginal refinement and guaranteed joint mass](#r49) | Joint mass from marginals and simultaneous selected region coverage using Hoeffding and Clopper–Pearson bounds |
-| Proposition 49, [Finite-shot confidence](#finite-shot-confidence) | A population joint-mass bound from counts, simultaneous over levels, axes and intervals, and sufficient shot counts |
+| [Proposition 49. Marginal refinement and guaranteed joint mass](#r49) | Joint mass from marginals and simultaneous coverage of the selected regions using Hoeffding and Clopper–Pearson bounds |
+| Proposition 49, [Finite-shot confidence](#finite-shot-confidence) | A bound from counts on the joint mass of the sampled distribution, simultaneous over levels, axes and intervals, and sufficient shot counts |
 | [Proposition 50. A sufficient stall condition and the limitation of a valley split](#r50) | The stall condition, what a valley split keeps, and the count test for a resolved valley |
 | **QHD: fault-tolerant resources** | |
 | [Proposition 52. Budgeted Clifford replacement and the logarithmic T estimate](#r52) | Clifford replacement within a synthesis budget, the per-rotation tolerance, and the logarithmic T estimate, which is an estimate and not a bound |
 | **Resources, error composition and verification** ([Section 12](#12-resource-composition-error-evidence-and-verification)) | |
 | [Proposition 55. Sound resource composition on a compact program](#r55) | Rules for composing work, depth and storage over a compact program without expanding repetitions |
-| [Proposition 56. Error composition with units, provenance, and failure probabilities](#r56) | A total error bound and failure probability from components in one frame. A missing component leaves a subtotal |
+| [Proposition 56. Error composition with units, sources, and failure probabilities](#r56) | A total error bound and failure probability from components expressed in the same norm, units, normalization and target quantity. A missing component leaves a subtotal |
 | [Proposition 57. Scale-aware Gram and fidelity verification windows](#r57) | Floating-point bounds for a computed Gram matrix and the upper excursion window of a normalized fidelity |
-| [Derivation: error budget of the `expm_multiply` reference](#expm-multiply-error-budget) | The first-order 2-norm error budget $\delta$ of a classical kernel that evolves a unit state with SciPy's `expm_multiply`, the start terms of the QHD initial states, the mass window built from $\delta$, and a measured comparison |
+| [Derivation: error budget of the `expm_multiply` reference](#expm-multiply-error-budget) | The first-order 2-norm error budget $\delta$ of a classical evaluation that evolves a unit state with SciPy's `expm_multiply`, the start terms of the QHD initial states, the mass window built from $\delta$, and a measured comparison |
 | Derivation of the `expm_multiply` budget, [QHD initial-state vectors](#qhd-initial-state-vectors) | The per-variable entries of the uniform, kinetic ground and Gaussian initial states and the first-order error of each vector |
-| [Derivation: QHD operation sizes](#qhd-operation-sizes) | The work units and bytes that QHD planning counts against `QHD.max_work` and `QHD.max_bytes` for support tables, step rows, the initial state, the augmented-Lagrangian layer and the classical kernels, with measured examples |
+| [Derivation: QHD operation sizes](#qhd-operation-sizes) | The work units and bytes that QHD planning counts against `QHD.max_work` and `QHD.max_bytes` for support tables, step rows, the initial state, the augmented-Lagrangian layer and the classical evaluations, with measured examples |
 
 [Section 13](#13-implementation-and-evidence-index) gives the code and the repository checks for each result, and [Section 14](#14-open-mathematical-problems) lists open problems.
 
@@ -115,9 +115,9 @@ Result and proposition numbers are stable identifiers, cited in the documentatio
 <a id="r1"></a>
 ### Proposition 1. Simultaneous sampling bounds for a weighted expectation
 
-**Provenance: Improved from a reference. Evidence: proved under the stated sampling model.**
+**Origin: Improved from a reference. Evidence: proved under the stated sampling model.**
 
-Let $O=c_0I+\sum_{j=1}^m c_jP_j$ be Hermitian, with real coefficients and Pauli strings $P_j$. Let $X_{j,k}\in[-1,1]$ have conditional mean $\mu_j$ at every acquisition in setting $j$. Independent identically distributed shots are one sufficient model. For fixed counts $n_j\ge1$, $0<\delta<1$, and a predeclared family of $F\ge m\ge1$ settings, define
+Let $O=c_0I+\sum_{j=1}^m c_jP_j$ be Hermitian, with real coefficients and Pauli strings $P_j$. Let the samples $X_{j,k}\in[-1,1]$ of setting $j$ each have conditional mean $\mu_j$. Independent identically distributed shots are one sufficient model. For fixed counts $n_j\ge1$, $0<\delta<1$, and a predeclared family of $F\ge m\ge1$ settings, define
 
 ```math
 r_j=\sqrt{\frac{2\log(2F/\delta)}{n_j}}.
@@ -148,7 +148,7 @@ This permits stopping at a data-dependent sample count under the fixed-target co
 <a id="r2"></a>
 ### Proposition 2. Affine readout correction with shared calibration
 
-**Provenance: Derived in NWQLib. Evidence: proved conditional on a stationary affine channel.**
+**Origin: Derived in NWQLib. Evidence: proved conditional on a stationary affine channel.**
 
 Suppose an observed binary mean satisfies $z=a\mu+b$. Calibration at true means $+1$ and $-1$ gives means $z_0,z_1$. If $d=z_0-z_1\ne0$, then
 
@@ -156,18 +156,18 @@ Suppose an observed binary mean satisfies $z=a\mu+b$. Calibration at true means 
 a=d/2,\qquad b=(z_0+z_1)/2,\qquad \mu=\frac{2z-z_0-z_1}{d},\qquad \nabla\mu=\left(\frac2d,-\frac{1+\mu}{d},\frac{\mu-1}{d}\right).
 ```
 
-For a joint rectangular confidence set in $(z,z_0,z_1)$, if the denominator has constant nonzero sign throughout the rectangle, the extreme corrected means occur at its vertices. Its image can then be intersected with the physical parameter interval $[-1,1]$. If several science terms share calibration, their contributions to a first-order variance must be combined by calibration population before squaring.
+For a joint rectangular confidence set in $(z,z_0,z_1)$, if the denominator has constant nonzero sign throughout the rectangle, the extreme corrected means occur at its vertices. Its image can then be intersected with the physical parameter interval $[-1,1]$. If several science terms share calibration, their coefficient-weighted derivatives with respect to each shared calibration mean must be summed before squaring in a first-order variance.
 
-**Proof.** Solving the two calibration equations gives $a,b$, and differentiating the rational expression gives the displayed Jacobian. Holding two coordinates fixed leaves a ratio of affine functions of the remaining coordinate. Its derivative has constant sign or is identically zero as long as the denominator does not vanish. Its extrema are therefore at endpoints. Applying this argument successively to the three coordinates proves the vertex rule. A weighted output $Y=\sum_jc_j\mu_j$ has differential $dY=\sum_s g_s\,dz_s$, where $g_s$ is the sum of all coefficient-weighted derivatives using population $s$. Hence its linearized variance is $g^T\Sigma g$. Replacing this by a sum of per-term variances would omit cross terms created by shared calibration. The variance is a delta-method approximation, whereas rectangle propagation is a finite conditional coverage statement. The channel's stationarity and transfer from calibration to science remain physical premises.
+**Proof.** Solving the two calibration equations gives $a,b$, and differentiating the rational expression gives the displayed Jacobian. Holding two coordinates fixed leaves a ratio of affine functions of the remaining coordinate. Its derivative has constant sign or is identically zero as long as the denominator does not vanish. Its extrema are therefore at endpoints. Applying this argument successively to the three coordinates proves the vertex rule. A weighted output $Y=\sum_jc_j\mu_j$ has differential $dY=\sum_s g_s\,dz_s$, where $g_s$ is the sum of the coefficient-weighted derivatives of all terms that use the sampled mean $z_s$. Hence its linearized variance is $g^T\Sigma g$. Replacing this by a sum of per-term variances would omit cross terms created by shared calibration. The variance is a delta-method approximation, whereas rectangle propagation is a finite conditional coverage statement. The channel's stationarity and its transfer from the calibration to the science measurements remain physical premises.
 
 ## 3. Phase and energy estimation
 
-For $U=e^{-i\tau H}$ and a normalized preparation $|\psi\rangle$, the signal is $z_p=\langle\psi|U^p|\psi\rangle$. At a controlled-power boundary, ancilla expectations satisfy $\langle X_a\rangle=\operatorname{Re}z_p$ and $\langle Y_a\rangle=\operatorname{Im}z_p$. Exact non-destructive readout can acquire both along one controlled trajectory. Sampled Hadamard tests acquire them from separate sets of shots. Hamiltonian energy is the negative eigenphase of $U$, divided by $\tau$. An accepted near-unitary dense input $A$ defines the single unitary base $V=\operatorname{polar}(A)$ before any power is selected. Static QPE signals are evaluated against powers of that base, so controlled gap products obey the unitary semigroup relation in exact arithmetic.
+For $U=e^{-i\tau H}$ and a normalized preparation $|\psi\rangle$, the signal is $z_p=\langle\psi|U^p|\psi\rangle$. At a controlled-power boundary, ancilla expectations satisfy $\langle X_a\rangle=\operatorname{Re}z_p$ and $\langle Y_a\rangle=\operatorname{Im}z_p$. Exact readout (`shots=None`), in which the simulator computes these expectations without shot sampling, subject to numerical rounding, can obtain both non-destructively from one controlled trajectory. Sampled Hadamard tests estimate them from separate sets of shots. Hamiltonian energy is the negative eigenphase of $U$, divided by $\tau$. A dense input $A$ accepted as near-unitary defines the single unitary base $V=\operatorname{polar}(A)$ before any power is chosen. The signals of QCELS, SPE and RFE, whose powers are fixed before any measurement, are evaluated against powers of that base, so controlled gap products obey the unitary semigroup relation in exact arithmetic.
 
 <a id="r3"></a>
 ### Result 3. The QCELS scalar objective
 
-**Provenance: From a reference. Evidence: the cited analytic identity.**
+**Origin: From a reference. Evidence: the cited analytic identity.**
 
 The least-squares fit $z_p\approx a e^{-ip\theta}$ eliminates its complex amplitude as
 
@@ -180,7 +180,7 @@ The energy estimate is $\theta/\tau$. This is [Ding and Lin, Eqs. (2), (9)–(12
 <a id="r4"></a>
 ### Result 4. Fourier estimators and their target populations
 
-**Provenance: From a reference. Evidence: the cited estimator identities.**
+**Origin: From a reference. Evidence: the cited estimator identities.**
 
 Statistical phase estimation (SPE) approximates the spectral cumulative distribution and compares its filtered estimate with half a supplied lower bound $\eta$ on the target spectral weight. NWQLib keeps the zero-frequency contribution $1/2$ exactly, samples positive odd frequencies by coefficient magnitude, and includes their conjugate contributions. The implemented grid crossing follows [Wan, Berta and Campbell, Eqs. (2), (6), Appendix A Eqs. (A1)–(A2), and Algorithm 1][SPE]. Its grid has more decision points than the paper's binary search, so the paper's failure allocation must be changed before its coverage theorem can be applied.
 
@@ -195,7 +195,7 @@ The largest magnitude selects phase $2\pi j/K$, with energy $-2\pi j/(K\tau)$ af
 <a id="r5"></a>
 ### Result 5. Gaussian random-walk phase updates
 
-**Provenance: From a reference. Evidence: the cited Gaussian moment update.**
+**Origin: From a reference. Evidence: the cited Gaussian moment update.**
 
 For the experiment time $1/\sigma_k$ and feedback convention of [Granade and Wiebe, Algorithm 1 and Eqs. (5)–(7)][RWPE], one Bernoulli datum $d_k$ updates
 
@@ -208,7 +208,7 @@ Thus $\sigma_k=\sigma_0((e-1)/e)^{k/2}$ is known before the outcomes. These are 
 <a id="r6"></a>
 ### Result 6. Coherent phase-register readout
 
-**Provenance: From a reference. Evidence: the cited theorem.**
+**Origin: From a reference. Evidence: the cited theorem.**
 
 For an eigenstate of $U$ with phase $\phi\in[0,1)$, controlled powers $U^{2^j}$, followed by the inverse quantum Fourier transform on an $m$-qubit phase register, give amplitudes
 
@@ -221,7 +221,7 @@ The nearest $m$-bit phase outcome has probability at least $4/\pi^2$. [Cleve, Ek
 <a id="r7"></a>
 ### Proposition 7. Controlled Pauli powers, pruning, and CX cost
 
-**Provenance: Derived in NWQLib. Evidence: proved for the specified circuit decomposition.**
+**Origin: Derived in NWQLib. Evidence: proved for the specified circuit decomposition.**
 
 Let $H=c_I I+\sum_{j=1}^L c_jP_j$, where $P_j$ has nonidentity support $w_j\ge1$. A controlled second-order Suzuki step that applies every Pauli term twice has
 
@@ -231,14 +231,14 @@ N_{\rm CX}=4\sum_{j=1}^Lw_j.
 
 If a discarded set has coefficient absolute sum $m$, its contribution to a power at signed physical time $t$ is at most $|t|m$ in operator norm. The identity coefficient must appear as a phase on the control.
 
-**Proof.** A Pauli rotation needs a parity ladder and its inverse, with $2(w_j-1)$ CX gates. Controlling only its central $R_z$ adds two CX gates, for $2w_j$ per occurrence. The Suzuki step has two occurrences per term. Basis changes are one-qubit gates. This is the controlled Pauli-evolution decomposition used by Qiskit 2.6.0, before routing and optimization. For pruning, $\|H-H'\|\le\sum_{j\in D}|c_j|=m$. Duhamel's identity for Hermitian generators gives $\|e^{-itH}-e^{-itH'}\|\le|t|m$. The controlled version has the same difference norm because its other block is zero. Finally, $\operatorname{ctrl}(e^{-itc_I}U)$ has the phase $e^{-itc_I}$ on its control-one branch. Removing it changes the measured interference signal. This connects the Pauli coefficient budget, the actual controlled construction, and its circuit count.
+**Proof.** A Pauli rotation needs a parity ladder and its inverse, with $2(w_j-1)$ CX gates. Controlling only its central $R_z$ adds two CX gates, for $2w_j$ per occurrence. The Suzuki step has two occurrences per term. Basis changes are one-qubit gates. This is the controlled Pauli-evolution decomposition used by Qiskit 2.6.0, before routing and optimization. For pruning, $\|H-H'\|\le\sum_{j\in D}|c_j|=m$. Duhamel's identity for Hermitian generators gives $\|e^{-itH}-e^{-itH'}\|\le|t|m$. The controlled version has the same difference norm because its other block is zero. Finally, $\operatorname{ctrl}(e^{-itc_I}U)$ has the phase $e^{-itc_I}$ on its control-one branch. Removing it changes the measured interference signal. This connects the Pauli coefficient budget, the controlled construction as implemented, and its CX count.
 
 ## 4. Chebyshev Lanczos
 
 <a id="r8"></a>
 ### Result 8. The Chebyshev projected pencil
 
-**Provenance: From a reference. Evidence: the cited polynomial identities.**
+**Origin: From a reference. Evidence: the cited polynomial identities.**
 
 Write $H=cI+\alpha K$, with $K=K^\dagger$, $\|K\|\le1$, and $\mu_j=\langle\psi|T_j(K)|\psi\rangle$. On the trial vectors $T_i(K)|\psi\rangle$, $0\le i<m$,
 
@@ -250,12 +250,12 @@ S_{ij}=\tfrac12(\mu_{i+j}+\mu_{|i-j|}),
 K_{ij}^{\rm proj}=\tfrac14(\mu_{i+j+1}+\mu_{|i+j-1|}+\mu_{|i-j|+1}+\mu_{||i-j|-1|}),\qquad H^{\rm proj}=cS+\alpha K^{\rm proj}.
 ```
 
-These follow [Kirby, Motta and Mezzacapo, Eqs. (13)–(19)][Kirby]. Sampled acquisition uses separately prepared moment settings and the readout identities of [Kirby, Lemma 1 and Eqs. (23)–(27)][Kirby]. The exact simulated route with `shots=None` uses the single trajectory of [Proposition 58](#r58). The physical shift multiplies $S$, not the coordinate identity. A full requested trial dimension does not establish full trial rank or overlap with the ground state.
+These follow [Kirby, Motta and Mezzacapo, Eqs. (13)–(19)][Kirby]. With finite shots, each moment setting is prepared separately and read with the identities of [Kirby, Lemma 1 and Eqs. (23)–(27)][Kirby]. Exact readout (`shots=None`) uses the single trajectory of [Proposition 58](#r58). The physical shift multiplies $S$, not the coordinate identity. A full requested trial dimension does not establish full trial rank or overlap with the ground state.
 
 <a id="r9"></a>
 ### Proposition 9. Two moments per recurrence step
 
-**Provenance: Improved from a reference. Evidence: proved in exact arithmetic.**
+**Origin: Improved from a reference. Evidence: proved in exact arithmetic.**
 
 All moments $\mu_0,\ldots,\mu_{2m-1}$ can be computed classically with $m$ applications of $K$, $O(mD)$ vector arithmetic, and $O(D+m)$ storage for a $D$-dimensional operator accessed by matrix-vector products.
 
@@ -265,12 +265,12 @@ All moments $\mu_0,\ldots,\mu_{2m-1}$ can be computed classically with $m$ appli
 \mu_{2k}=2\langle v_k,v_k\rangle-\mu_0,\qquad \mu_{2k+1}=2\langle v_k,v_{k+1}\rangle-\mu_1.
 ```
 
-The last odd moment uses $v_m$, requiring exactly $m$ applications from $v_0$. Each step contributes constant-many inner products. Storing the two current recurrence vectors $v_{k-1}$ and $v_k$, a temporary vector for $v_{k+1}$, and the $2m$ scalar moments proves the stated storage bound. This reduces the straightforward recurrence through degree $2m-1$ without changing the moment definition. It is a classical computation and supplies no claim about quantum access cost.
+The last odd moment uses $v_m$, requiring exactly $m$ applications from $v_0$. Each step contributes a constant number of inner products. Storing the two current recurrence vectors $v_{k-1}$ and $v_k$, a temporary vector for $v_{k+1}$, and the $2m$ scalar moments proves the stated storage bound. This reduces the straightforward recurrence through degree $2m-1$ without changing the moment definition. It is a classical computation and implies nothing about the cost of quantum access.
 
 <a id="r10"></a>
 ### Proposition 10. Differentiation through the kept overlap subspace
 
-**Provenance: Improved from a reference. Evidence: proved for fixed rank and a simple selected Ritz value.**
+**Origin: Improved from a reference. Evidence: proved for fixed rank and a simple selected Ritz value.**
 
 Let $S=V_Rs_RV_R^\dagger+V_Ds_DV_D^\dagger$ be Hermitian, with $s_R$ above a cutoff and $s_D$ below it. Suppose every kept-discarded gap is nonzero and no eigenvalue crosses the cutoff under the perturbation. Let $c=V_Ry$ solve the reduced pencil, with $c^\dagger Sc=1$ and selected simple Ritz value $E$. Then
 
@@ -297,9 +297,9 @@ Substitution yields $W$ and its adjoint. Rotations within either subspace cancel
 <a id="r11"></a>
 ### Proposition 11. Variance-weighted pilot allocation
 
-**Provenance: Improved from a reference. Evidence: proved for a local linearization and continuous allocations.**
+**Origin: Improved from a reference. Evidence: proved for a local linearization and continuous allocations.**
 
-For sampled acquisition with independent shots within and across separately prepared moment settings, with per-shot variances $v_k$, local energy derivatives $g_k$, and $n_k$ main-stage shots, the linearized variance is
+For moments sampled with independent shots within and across separately prepared moment settings, with per-shot variances $v_k$, local energy derivatives $g_k$, and $n_k$ main-stage shots, the linearized variance is
 
 ```math
 V=\sum_k\frac{g_k^2v_k}{n_k}\ge\frac{\left(\sum_k|g_k|\sqrt{v_k}\right)^2}{N},\qquad \sum_kn_k=N.
@@ -312,9 +312,9 @@ Equality holds on nonzero-weight settings when $n_k\propto|g_k|\sqrt{v_k}$. The 
 <a id="r12"></a>
 ### Proposition 12. Linear-work Gram noise estimates and confidence cutoff
 
-**Provenance: Derived in NWQLib. Evidence: proved under independent moment acquisition.**
+**Origin: Derived in NWQLib. Evidence: proved for independently measured moments.**
 
-For sampled acquisition from separate preparations, assume independent and unbiased moment estimates, with $\sigma_k^2=\operatorname{Var}(\widehat\mu_k)$. For the $m\times m$ Gram matrix of Result 8,
+For moments sampled from separate preparations, assume independent and unbiased moment estimates, with $\sigma_k^2=\operatorname{Var}(\widehat\mu_k)$. For the $m\times m$ Gram matrix of Result 8,
 
 ```math
 \mathbb E\|\widehat S-S\|_F^2=\sum_{k=0}^{2m-2}w_k\sigma_k^2,\qquad w_k=(h_k+t_k+c_k)/4,
@@ -326,14 +326,14 @@ where $h_k=m-|k-(m-1)|$, $t_0=m$, $t_k=2(m-k)$ for $0<k<m$, and $t_k=0$ otherwis
 \|\widehat S-S\|_2\le m\sqrt{\frac{2\log(2r/\delta)}{n_{\min}}}=:\epsilon_S.
 ```
 
-**Proof.** An entry uses moment indices $a=i+j$, $b=|i-j|$. Its variance is $(\sigma_a^2+\sigma_b^2+2\mathbf1_{a=b}\sigma_a^2)/4$. Counting antidiagonals, absolute-difference diagonals, and their coincidences gives $h,t,c$. The expected squared Frobenius norm is the sum of entry variances even though entries share moments. These weights take $O(m)$ scalar work. For the confidence statement, Hoeffding's Theorem 2 and a union bound give $\max_k|\widehat\mu_k-\mu_k|\le e=\sqrt{2\log(2r/\delta)/n_{\min}}$. Every entry error is at most $e$, hence the Frobenius norm is at most $me$. Weyl's inequality implies that an observed overlap eigenvalue above $2\epsilon_S$ has a corresponding population eigenvalue above $\epsilon_S$. This motivates the explicit confidence cutoff. The empirical variance formula, used with sample variances, supplies an exploratory noise scale rather than that coverage guarantee. Neither quantity alone bounds the Ritz-energy error.
+**Proof.** An entry uses moment indices $a=i+j$, $b=|i-j|$. Its variance is $(\sigma_a^2+\sigma_b^2+2\mathbf1_{a=b}\sigma_a^2)/4$. Counting antidiagonals, absolute-difference diagonals, and their coincidences gives $h,t,c$. The expected squared Frobenius norm is the sum of entry variances even though entries share moments. These weights take $O(m)$ scalar work. For the confidence statement, Hoeffding's Theorem 2 and a union bound give $\max_k|\widehat\mu_k-\mu_k|\le e=\sqrt{2\log(2r/\delta)/n_{\min}}$. Every entry error is at most $e$, hence the Frobenius norm is at most $me$. Weyl's inequality implies that, when an eigenvalue of $\widehat S$ exceeds $2\epsilon_S$, the corresponding eigenvalue of $S$ exceeds $\epsilon_S$. This motivates the explicit confidence cutoff. The empirical variance formula, used with sample variances, supplies an exploratory noise scale rather than that coverage guarantee. Neither quantity alone bounds the Ritz-energy error.
 
 <a id="r58"></a>
 ### Proposition 58. Non-destructive Lanczos continuation and its resource counts {#proposition-58-non-destructive-lanczos-continuation-and-its-resource-population}
 
-**Provenance: Derived in NWQLib from [Kirby, Motta and Mezzacapo, arXiv:2208.00567v4, Eqs. (23)–(26)][Kirby]. Evidence: proved for coherent unitary evolution and non-destructive saves, with exact raw-mass and padding identities.**
+**Origin: Derived in NWQLib from [Kirby, Motta and Mezzacapo, arXiv:2208.00567v4, Eqs. (23)–(26)][Kirby]. Evidence: proved for coherent unitary evolution and non-destructive saves, with exact raw-mass and padding identities.**
 
-**Statement.** On the exact simulated route with `shots=None`, one initial preparation and $m-1$ walks provide the readouts needed for the moments $\mu_1,\ldots,\mu_{2m-1}$ of Result 8, while the Plan supplies $\mu_0=1$ algebraically. At boundary $j$, a requested even view defined in premise 2 reads $\mu_{2j}$ and a requested odd view defined there reads $\mu_{2j+1}$, and each view is undone before the next view or walk. This holds under the four premises below: deterministic coherent simulation with non-destructive probability saves, restored views, the active-subspace and padding convention, and the distinction between ideal and rounded states. For an arbitrary, possibly unnormalized vector entering an ideal view, the decoded values satisfy exact relations that keep its total-mass and padding contributions. The proposition also gives the coherent operation counts of the executed, paired and separate-circuit schedules, the number of saves and the saved bytes. Hardware and sampled routes use separate preparations for their moment settings, and non-destructive simulator access supplies no hardware acquisition saving or independence claim for numerical errors.
+**Statement.** With exact readout (`shots=None`), one initial preparation and $m-1$ walks provide the readouts needed for the moments $\mu_1,\ldots,\mu_{2m-1}$ of Result 8, while the Plan supplies $\mu_0=1$ algebraically. At boundary $j$, a requested even view, a basis change followed by a probability save as defined in premise 2, reads $\mu_{2j}$, and a requested odd view defined there reads $\mu_{2j+1}$. Each view is undone before the next view or walk. This holds under the four premises below: deterministic coherent simulation with non-destructive probability saves (simulator instructions that record outcome probabilities without changing the state), restored views, the active-subspace and padding convention, and the distinction between ideal and rounded states. For an arbitrary, possibly unnormalized vector entering an ideal view, the decoded values satisfy exact relations that keep its total-mass and padding contributions. The proposition also gives the coherent operation counts of the executed, paired and separate-circuit schedules, the number of saves and the number of saved bytes. Hardware and sampled execution prepare each moment setting separately, and non-destructive access in the simulator gives neither a saving in hardware measurements nor independence of numerical errors.
 
 Let $|\phi\rangle$ be the normalized reference $|\psi\rangle$ of Result 8. For the Pauli encoding, write $H=cI+\sum_{l=0}^{L-1}c_lP_l$, where the $c_l$ are real and nonzero and the $P_l$ are nonidentity Pauli operators. Put $\alpha=\sum_l|c_l|>0$, $K=\sum_l(c_l/\alpha)P_l$, $a=\lceil\log_2 L\rceil$, and
 
@@ -351,10 +351,10 @@ Thus SELECT acts as identity on padding. Set $W=RU$ and $|\psi_j\rangle=W^j(|G\r
 
 The premises are as follows.
 
-1. **Deterministic coherent simulation.** The selected preparation and walk describe coherent evolution, and the backend supports non-destructive probability saves. There is no mid-circuit measurement, reset, postselection, stochastic noise trajectory, or outcome-dependent continuation. The setting `shots=None` alone does not establish these premises.
+1. **Deterministic coherent simulation.** The preparation and walk describe coherent evolution, and the backend supports non-destructive probability saves. There is no mid-circuit measurement, reset, postselection, stochastic noise trajectory, or outcome-dependent continuation. The setting `shots=None` alone does not establish these premises.
 2. **Restored views.** The even view applies $T_e=\mathrm{PREP}^\dagger\otimes I$, saves the index marginal, and applies $T_e^{-1}=\mathrm{PREP}\otimes I$ before continuation. The odd view applies $T_o=B=\sum_{l=0}^{2^a-1}|l\rangle\langle l|\otimes B_l$, where $B_lP_lB_l^\dagger$ is the computational-basis Pauli parity on active address $l$, and $B_l=I$ on padding. It saves the index and system marginal and applies $B^\dagger$ before continuation. At a shared boundary the next view also starts from the restored state. The last save needs no inverse when nothing follows it.
-3. **Active subspace and padding convention.** The ideal walk stays in the span of addresses $0,\ldots,L-1$, where $U_{\rm read}=U$. An odd outcome at an active address has score $\operatorname{sign}(c_l)$ times the Pauli-support parity. A padded address has score zero. Exact probability reduction keeps every returned weight with denominator one, including any mass on padding. It performs no normalization or postselection. For sampled counts the denominator is the total returned count, including padding.
-4. **Rounded states.** The ideal identities concern exact arithmetic. A computed state can have nonunit total mass, padding mass, and errors from preceding view excursions. These populations stay in the decoder. Rounded representations of a view and its adjoint can also have a nonzero restoration residual, which must be distinguished from non-destructive saving.
+3. **Active subspace and padding convention.** The ideal walk stays in the span of addresses $0,\ldots,L-1$, where $U_{\rm read}=U$. An odd outcome at an active address has score $\operatorname{sign}(c_l)$ times the Pauli-support parity. A padded address has score zero. Exact decoding of the probabilities keeps every returned weight with denominator one, including any mass on padding. It performs no normalization or postselection. For sampled counts the denominator is the total returned count, including padding.
+4. **Rounded states.** The ideal identities concern exact arithmetic. A computed state can have nonunit total mass, padding mass, and errors from preceding view excursions. The decoded values include these contributions. Rounded representations of a view and its adjoint can also have a nonzero restoration residual, which must be distinguished from non-destructive saving.
 
 **Proof.** Since $R^2=U^2=I$, $RWR=W^\dagger$ and $R|\psi_0\rangle=|\psi_0\rangle$. The block-encoding identity $\langle\psi_0|W^k|\psi_0\rangle=\mu_k$ therefore gives
 
@@ -396,7 +396,7 @@ The vector $f$ includes the current view's construction and application errors. 
 \widehat x_{\rm after}=(I+E)x+F_{\rm inv}e_f+e_b,\qquad \|\widehat x_{\rm after}-x\|_2\le\|E\|_2\|x\|_2+\|F_{\rm inv}\|_2\|e_f\|_2+\|e_b\|_2.
 ```
 
-Saving itself contributes no state disturbance. An adjoint of a rounded matrix need not be its exact inverse, so exact-arithmetic restoration does not imply bitwise equality of computed trajectories or a certified numerical bound when a preparation record excludes native operations from its error model.
+Saving itself contributes no state disturbance. An adjoint of a rounded matrix need not be its exact inverse, so exact-arithmetic restoration does not imply bitwise equality of computed trajectories, or a certified numerical bound when the error model recorded for the prepared circuit leaves out some of its backend operations.
 
 **Resource counts.** For $L\ge2$, write $g_{\rm init}$ for the coherent cost of preparing both registers, $g_W$ for one complete walk, and $g_e,g_{e^{-1}},g_o,g_{o^{-1}}$ for the forward and inverse readout-tail costs in the circuit executed by the selected backend. The walk cost already includes SELECT, coefficient unpreparation, the positive zero reflection, and coefficient preparation. A schedule that explicitly reads both degrees at each of the $m$ boundaries and restores every view has
 
@@ -410,23 +410,23 @@ coherent operations and $2m$ saves. The executed full NWQLib schedule supplies d
 G_{\rm exact}=g_{\rm init}+(m-1)g_W+(m-1)(g_e+g_{e^{-1}})+m g_o+(m-1)g_{o^{-1}}.
 ```
 
-Separate circuits for acquired degrees $1,\ldots,2m-1$ use $2m-1$ initial preparations and $\sum_{k=1}^{2m-1}\lfloor k/2\rfloor=m(m-1)$ walks. They need the forward tail for each degree and no restoration tail, giving the coherent cost
+Separate circuits for the degrees $1,\ldots,2m-1$ use $2m-1$ initial preparations and $\sum_{k=1}^{2m-1}\lfloor k/2\rfloor=m(m-1)$ walks. They need the forward tail for each degree and no restoration tail, giving the coherent cost
 
 ```math
 G_{\rm separate}=(2m-1)g_{\rm init}+m(m-1)g_W+(m-1)g_e+m g_o.
 ```
 
-These compare one evaluation per acquired degree. Sampled work also counts its shot repetitions and measurements. The walk ratio is $m$ for $m>1$, while a total-gate comparison must include the displayed readout-tail and inverse-tail terms. A preparation record counts the actual emitted native operations, including any executed final inverse or suffix. Saves count toward readout work and output storage, but are excluded from the coherent-operation count.
+These counts compare one evaluation of each degree read from the circuit. Sampled work also counts its shot repetitions and measurements. The walk ratio is $m$ for $m>1$, while a total-gate comparison must include the displayed readout-tail and inverse-tail terms. The record of a prepared circuit counts the backend operations of that circuit, including any executed final inverse or suffix. Saves count toward readout work and output storage, but are excluded from the coherent-operation count.
 
-For a nonempty set $A$ of acquired degrees, let $J=\max_{k\in A}\lfloor k/2\rfloor$ and $k_*=\max A$. The trajectory stops after $J$ walks, uses $|A|$ saves, and executes an inverse for every requested view except the final one. With $g_k$ and $g_{k^{-1}}$ the costs of the view for degree $k$ and its inverse,
+For a nonempty set $A$ of degrees read from the circuit, let $J=\max_{k\in A}\lfloor k/2\rfloor$ and $k_*=\max A$. The trajectory stops after $J$ walks, uses $|A|$ saves, and executes an inverse for every requested view except the final one. With $g_k$ and $g_{k^{-1}}$ the costs of the view for degree $k$ and its inverse,
 
 ```math
 G_A=g_{\rm init}+Jg_W+\sum_{k\in A}g_k+\sum_{k\in A\setminus\{k_*\}}g_{k^{-1}},\qquad N_{W,\rm separate}(A)=\sum_{k\in A}\lfloor k/2\rfloor.
 ```
 
-Algebraically known degrees contribute no save. For $L=1$, $a=0$ and $K^2=I$, so every even moment is algebraic and only the selected odd settings remain. If $\alpha=0$, the scalar-operator route supplies all moments algebraically. An empty acquired set needs no preparation, walk, or save.
+Algebraically known degrees contribute no save. For $L=1$, $a=0$ and $K^2=I$, so every even moment is algebraic and only the requested odd settings remain. If $\alpha=0$, $H$ is a multiple of the identity and all moments are supplied algebraically. An empty set $A$ needs no preparation, walk, or save.
 
-The simulator state has width $w=n+a$, including the index register. Each even save contains $2^a$ real probabilities and each odd save contains $2^w$ real probabilities. With $N_e$ even and $N_o$ odd acquired degrees, the saved float64 numerical payload is $8(N_e2^a+N_o2^w)$ bytes. For the full $L\ge2$ schedule this is $8[(m-1)2^a+m2^w]$ bytes, in addition to the live complex128 state of $16\,2^w$ bytes and implementation workspace, metadata, and transport copies. Aer accumulates the selected saves until completion. Proposition 9's $O(D+m)$ storage law concerns the classical recurrence and does not bound this simulator storage.
+The simulator state has width $w=n+a$, including the index register. Each even save contains $2^a$ real probabilities and each odd save contains $2^w$ real probabilities. With $N_e$ even and $N_o$ odd degrees read from the circuit, the saved float64 probabilities occupy $8(N_e2^a+N_o2^w)$ bytes. For the full $L\ge2$ schedule this is $8[(m-1)2^a+m2^w]$ bytes, in addition to the live complex128 state of $16\,2^w$ bytes and implementation workspace, metadata, and transport copies. Aer keeps the requested saves until the circuit completes. Proposition 9's $O(D+m)$ storage bound concerns the classical recurrence and does not bound this simulator storage.
 
 
 ## 5. GCiM and ADAPT
@@ -434,27 +434,27 @@ The simulator state has width $w=n+a$, including the index register. Each even s
 <a id="r13"></a>
 ### Result 13. Generator-coordinate projection and thresholded diagonalization
 
-**Provenance: From a reference. Evidence: the cited projected equations.**
+**Origin: From a reference. Evidence: the cited projected equations.**
 
-For normalized preparation columns $V=(\phi_1,\ldots,\phi_m)$, generator-coordinate-inspired methods (GCiM) form $H_p=V^\dagger HV$, $S=V^\dagger V$, and solve $H_pf=ESf$. [Zheng et al. (2023), Eqs. (13)–(15), (33)–(34)][GCIM2023]. Canonical orthogonalization keeps overlap eigenvectors above a selected positive threshold and solves $X^\dagger H_pX$, where $X=V_RS_R^{-1/2}$. [Epperly, Lin and Nakatsukasa, Algorithm 1.1][Epperly], and [Zheng et al. (2024), Appendix F, Eqs. (F1)–(F3)][GCIM2024]. The exact pencil has Rayleigh–Ritz bounds within its trial space. A noisy acquired pencil need not obey the full operator's spectral enclosure, and thresholding alone does not identify its ground state.
+For normalized preparation columns $V=(\phi_1,\ldots,\phi_m)$, generator-coordinate-inspired methods (GCiM) form $H_p=V^\dagger HV$, $S=V^\dagger V$, and solve $H_pf=ESf$. [Zheng et al. (2023), Eqs. (13)–(15), (33)–(34)][GCIM2023]. Canonical orthogonalization keeps overlap eigenvectors above a selected positive threshold and solves $X^\dagger H_pX$, where $X=V_RS_R^{-1/2}$. [Epperly, Lin and Nakatsukasa, Algorithm 1.1][Epperly], and [Zheng et al. (2024), Appendix F, Eqs. (F1)–(F3)][GCIM2024]. The exact pencil has Rayleigh–Ritz bounds within its trial space. A pencil assembled from noisy measurements need not obey the full operator's spectral enclosure, and thresholding alone does not identify its ground state.
 
 The adaptive variant screens a surrogate product state using $\langle[H,A_j]\rangle$, selects a largest-magnitude unselected generator, and expands the basis with its individual excitation and the cumulative product state. Its default fixed angle is $\pi/4$. The basis-growth construction and flat-energy stopping rule follow [Zheng et al. (2024), main text p. 4 and Methods p. 9][GCIM2024]. The published stopping threshold is the smaller of a user cap and $20\%$ of the remaining pool size, applied to a counter of consecutive small energy changes. This is a search heuristic. Optional product-state optimization does not replace the projected pencil by a variational energy of the surrogate.
 
 <a id="r14"></a>
 ### Proposition 14. Removing identity offsets before a projected solve
 
-**Provenance: Derived in NWQLib. Evidence: proved in exact arithmetic, with a first-order conditioning analysis.**
+**Origin: Derived in NWQLib. Evidence: proved in exact arithmetic, with a first-order conditioning analysis.**
 
 If $H=cI+H_0$, then $H_p=cS+H_{0,p}$. Solving $(H_{0,p},S)$ and adding $c$ to each Ritz value is exactly equivalent to solving $(H_p,S)$ with the same overlap subspace. It avoids amplification of the identity offset by the inverse overlap scale during numerical orthogonalization.
 
 **Proof.** Since $X^\dagger SX=I$, $X^\dagger H_pX=cI+X^\dagger H_{0,p}X$. Their eigenvectors coincide and their eigenvalues differ by $c$. A perturbation $\Delta H_p$ produces an orthogonalized perturbation bounded by $\|X\|^2\|\Delta H_p\|=\|\Delta H_p\|/s_{\min}$. Thus an assembly or multiplication error on the scale $u|c|$ can enter on the scale $u|c|/s_{\min}$, with additional norm and dimension factors determined by the multiplication. Removing the offset before products removes that source of amplification. It cannot recover low-order information already lost when the original entries of $H$ were supplied.
 
-The same identity explains why overlap observations should also supply the identity contribution of the measured Hamiltonian pencil. Independent identity acquisitions would replace $cS$ by a different noisy matrix and break exact shift covariance.
+The same identity explains why the identity contribution to the measured Hamiltonian pencil should be taken from the overlap measurements. Measuring the identity term independently would replace $cS$ by a different noisy matrix and break exact shift covariance.
 
 <a id="r15"></a>
 ### Proposition 15. Pauli insertion after a complete generator exponential
 
-**Provenance: Improved from a reference. Evidence: proved for an anti-Hermitian Pauli-sum generator.**
+**Origin: Improved from a reference. Evidence: proved for an anti-Hermitian Pauli-sum generator.**
 
 Let $A=i\sum_k a_kP_k$, with real $a_k$, and let $\chi=e^{\theta A}\psi$. For the observable $O$ seen after this factor in an ansatz, define $E_{k,\pm}=\langle\chi|e^{\mp i\pi P_k/4}Oe^{\pm i\pi P_k/4}|\chi\rangle$. Then
 
@@ -469,7 +469,7 @@ No commutation among the $P_k$ is required. This specializes the derivative deco
 <a id="r16"></a>
 ### Proposition 16. Exact active-block synthesis for shared-index fermionic generators
 
-**Provenance: Derived in NWQLib. Evidence: proved for the supported real anti-Hermitian generators.**
+**Origin: Derived in NWQLib. Evidence: proved for the supported real anti-Hermitian generators.**
 
 The shared-index double-excitation generators can be synthesized from their finite occupation blocks by fermionic permutations and two-level rotations. This supplies the cases outside the compact pair/split and four-distinct formulas of [Magoulas and Evangelista, Sections V–VI and Tables I–II][SpinAdapted].
 
@@ -478,7 +478,7 @@ The shared-index double-excitation generators can be synthesized from their fini
 <a id="r17"></a>
 ### Result 17. What a full-space residual can establish
 
-**Provenance: From a reference. Evidence: standard spectral residual and Temple bounds.**
+**Origin: From a reference. Evidence: standard spectral residual and Temple bounds.**
 
 For a normalized vector $v$, Hermitian $H$, Rayleigh quotient $\rho=v^\dagger Hv$, and residual norm $r=\|Hv-\rho v\|$, the interval $[\rho-r,\rho+r]$ contains some eigenvalue. If an independently valid excited-state lower bound $\beta>\rho$ places every eigenvalue except the ground eigenvalue above $\beta$, then
 
@@ -493,9 +493,9 @@ The inclusion and Temple inequalities are [Zhu, Argentati and Knyazev, Section 2
 <a id="r18"></a>
 ### Proposition 18. Relative polynomial residual and physical solution recovery
 
-**Provenance: Derived in NWQLib. Evidence: proved conditional on the spectral domain and polynomial bound.**
+**Origin: Derived in NWQLib. Evidence: proved conditional on the spectral domain and polynomial bound.**
 
-Let $A$ be invertible and $\alpha\ge\|A\|$. Here $\kappa$ denotes the selected polynomial-domain parameter `polynomial_kappa`. The record `kappa_be` gives the encoded-gap parameter or a supplied bound, while `condition_number` gives the original ratio $\sigma_{\max}(A)/\sigma_{\min}(A)$ when known. The polynomial parameter also includes its domain floor and, for the automatic periodic encoding, outward coverage of the rounded encoded gap described in Proposition 20. Suppose an odd polynomial $P$ satisfies
+Let $A$ be invertible and $\alpha\ge\|A\|$. Here $\kappa$ denotes the chosen polynomial-domain parameter `polynomial_kappa`. The field `kappa_be` gives the encoded inverse-gap parameter or a supplied bound, while `condition_number` gives the original ratio $\sigma_{\max}(A)/\sigma_{\min}(A)$ when known. The polynomial parameter also includes its domain floor and, for the automatic periodic encoding, outward coverage of the rounded encoded gap described in Proposition 20. Suppose an odd polynomial $P$ satisfies
 
 ```math
 \sup_{1/\kappa\le|x|\le1}|\kappa xP(x)-1|\le\epsilon_{\rm inv},
@@ -519,12 +519,12 @@ For a circuit encoding $P/s$ on a normalized right-hand side, the physical recov
 
 The classical model evaluates the lower block $y=VP(\Sigma/\alpha)U^\dagger\widehat b$ directly from one original factorization, with $\widehat b=b/\|b\|$. Conjugating $\mathcal H$ by ${\rm diag}(U,V)$ gives $\begin{pmatrix}0&S\\S&0\end{pmatrix}$ with $S=\Sigma/\alpha$, whose even powers are diagonal and whose odd powers carry the odd powers of $S$ in the off-diagonal blocks, so linear combination gives the odd polynomial identity. Starting from $(0,\widehat b)$ instead would produce $UP(\Sigma/\alpha)V^\dagger\widehat b$ in the upper block. For Hermitian $A$, one eigendecomposition supplies signed eigenvalues $\lambda$ and the action $VP(\lambda/\alpha)V^\dagger\widehat b$. Using $P(|\lambda|)$ would lose the sign of negative eigenvalues. For the positive padding $A\oplus\alpha I$ with zero-padded $b$, the factors extend as $U\oplus I$, $V\oplus I$ and $\Sigma\oplus\alpha I$. The dummy coordinates have zero weight and no inverse output, so they need no decomposition.
 
-NWQLib fits the relative residual in odd Chebyshev coefficients and checks it on an affine Chebyshev grid using Proposition 22 with degree $d+1$. The fit's accepted numerical bound concerns this polynomial stage. Spectral estimates, block-encoding error, fitted phases, and readout remain separate. The degree form $O(\kappa\log(\kappa/\epsilon))$ comes from [Childs, Kothari and Somma, Lemmas 17–19, Eqs. (74), (77), (88)][CKS]. The finite search limit inspired by that form is not a theorem that this least-squares fit must succeed below it.
+NWQLib fits the relative residual in odd Chebyshev coefficients and checks it on an affine Chebyshev grid using Proposition 22 with degree $d+1$. The numerical bound checked for the fit concerns this polynomial stage. Spectral estimates, block-encoding error, fitted phases, and readout remain separate. The degree form $O(\kappa\log(\kappa/\epsilon))$ comes from [Childs, Kothari and Somma, Lemmas 17–19, Eqs. (74), (77), (88)][CKS]. The finite search limit inspired by that form is not a theorem that this least-squares fit must succeed below it.
 
 <a id="r19"></a>
 ### Proposition 19. Correct signed shortcut reflection and norm-search direction
 
-**Provenance: Improved from a reference. Evidence: proved from the source formulas.**
+**Origin: Improved from a reference. Evidence: proved from the source formulas.**
 
 Let $0<\Delta<1$, $0<\eta<1$, $\ell=\lceil\log(2/\eta)/(2\Delta)\rceil$, and
 
@@ -553,24 +553,24 @@ The same source's Eq. (44) gives ideal kernel-projection success $q(t)=t^2/(t^2+
 <a id="r20"></a>
 ### Proposition 20. Outward coverage of a rounded periodic encoding gap
 
-**Provenance: Derived in NWQLib. Evidence: proved from the stored coefficients.**
+**Origin: Derived in NWQLib. Evidence: proved for the rounded coefficients.**
 
-For $A=mI+d(2I-S-S^\dagger)$ on $2^q\ge2$ periodic sites, with $m>0$, $d\ge0$, the exact spectral endpoints are $m$ and $m+4d$. Let the implementation store $c_0=\operatorname{fl}(m+2d)$ and normalization $\widehat\alpha$. Set
+For $A=mI+d(2I-S-S^\dagger)$ on $2^q\ge2$ periodic sites, with $m>0$, $d\ge0$, the exact spectral endpoints are $m$ and $m+4d$. Let $c_0=\operatorname{fl}(m+2d)$ and $\widehat\alpha$ be the binary64 diagonal coefficient and normalization that the implementation uses. Set
 
 ```math
 e_0=|c_0-m-2d|,\quad e_\alpha=|\widehat\alpha-c_0-2d|,\quad g=c_0-2d-e_\alpha.
 ```
 
-The ideal block of the stored coefficient construction, before native gate-synthesis roundoff, has physical operator error at most $e_0+e_\alpha$, and its smallest eigenvalue is at least $g$. If $g>0$, choosing the polynomial domain parameter to cover $\widehat\alpha/\min(m,g)$ covers both the original and encoded gaps.
+The ideal block of the construction with these rounded coefficients, before native gate-synthesis roundoff, has physical operator error at most $e_0+e_\alpha$, and its smallest eigenvalue is at least $g$. If $g>0$, choosing the polynomial domain parameter to cover $\widehat\alpha/\min(m,g)$ covers both the original and encoded gaps.
 
-**Proof.** The Fourier eigenvalues of $S+S^\dagger$ are $2\cos(2\pi k/2^q)$. Changing the diagonal contributes norm $e_0$. The normalization residual contributes at most $e_\alpha$, by the construction's coefficient sum. The triangle inequality gives the error, and Weyl's inequality gives the gap. Exact rational evaluation on the stored binary64 numbers followed by upward conversion makes the error and domain coverage outward. For $q=1$, the two wrapped shifts coincide and their coefficients combine to $-2dX$, giving the same endpoints. The encoded gap parameter, physical condition number, and polynomial-domain floor are distinct quantities.
+**Proof.** The Fourier eigenvalues of $S+S^\dagger$ are $2\cos(2\pi k/2^q)$. Changing the diagonal contributes norm $e_0$. The normalization residual contributes at most $e_\alpha$, by the construction's coefficient sum. The triangle inequality gives the error, and Weyl's inequality gives the gap. Exact rational evaluation on these binary64 numbers followed by upward conversion makes the error and domain coverage outward. For $q=1$, the two wrapped shifts coincide and their coefficients combine to $-2dX$, giving the same endpoints. The encoded inverse-gap parameter, physical condition number, and polynomial-domain floor are distinct quantities.
 
 ## 7. Quantum signal processing and singular-value transformation
 
 <a id="r21"></a>
 ### Result 21. QSP conventions and the real-polynomial branch
 
-**Provenance: From a reference. Evidence: the cited polynomial calculus.**
+**Origin: From a reference. Evidence: the cited polynomial calculus.**
 
 In the $W_x$ convention,
 
@@ -578,12 +578,12 @@ In the $W_x$ convention,
 W(x)=\begin{pmatrix}x&i\sqrt{1-x^2}\\i\sqrt{1-x^2}&x\end{pmatrix},\qquad U_\Phi(x)=e^{i\phi_0Z}\prod_{j=1}^d W(x)e^{i\phi_jZ}.
 ```
 
-Its upper-left entry has the degree and parity constraints of [Martyn et al., Theorem 1 and Eqs. (1)–(3)][Martyn]. Zero phases give $T_d(x)$. The reflection convention uses the shifts in their Eq. (14) and Appendix A.2, Eq. (A5), with the compensating factor $i^d$ kept explicitly. Quantum singular-value transformation (QSVT) applies this calculus to the selected block encoding, subject to its input and output projectors. [Gilyén et al., Theorem 17 and Lemma 19][GSLW]. A coherent combination of the $+\Phi$ and $-\Phi$ passes obtains the real polynomial as in Corollary 18, Eq. (33). The phase convention and the $(b,0)$ dilation orientation of Proposition 18 jointly determine the physical output.
+Its upper-left entry has the degree and parity constraints of [Martyn et al., Theorem 1 and Eqs. (1)–(3)][Martyn]. Zero phases give $T_d(x)$. The reflection convention uses the shifts in their Eq. (14) and Appendix A.2, Eq. (A5), with the compensating factor $i^d$ kept explicitly. Quantum singular-value transformation (QSVT) applies this calculus to a block encoding, subject to its input and output projectors. [Gilyén et al., Theorem 17 and Lemma 19][GSLW]. A coherent combination of the $+\Phi$ and $-\Phi$ passes obtains the real polynomial as in Corollary 18, Eq. (33). The phase convention and the $(b,0)$ dilation orientation of Proposition 18 jointly determine the physical output.
 
 <a id="r22"></a>
 ### Proposition 22. A valid polynomial norming grid and a counterexample to a published extension
 
-**Provenance: Improved from a reference. Evidence: proved using the cited norming theorem.**
+**Origin: Improved from a reference. Evidence: proved using the cited norming theorem.**
 
 For a polynomial of degree at most $d<N$, sampled at $x_j=\cos((2j-1)\pi/(2N))$, $1\le j\le N$,
 
@@ -600,7 +600,7 @@ This is [Ehlich and Zeller, Satz 2, Eqs. (12)–(14), pp. 42–43][EZ]. It also 
 <a id="r23"></a>
 ### Proposition 23. Symmetric-phase Jacobians and an oversampled Newton step
 
-**Provenance: Improved from a reference. Evidence: proved in exact arithmetic where the coefficient Jacobian is invertible.**
+**Origin: Improved from a reference. Evidence: proved in exact arithmetic where the coefficient Jacobian is invertible.**
 
 For symmetric phases $\phi_j=\theta_{\min(j,d-j)}$, all objective-node derivatives can be formed in $O(Md)$ arithmetic on $2\times2$ matrices. An oversampled least-squares Newton step on the node residual equals the Newton step on the definite-parity Chebyshev coefficients when the latter Jacobian is invertible. This extends the objective construction of [Dong, Meng, Whaley and Lin, Eqs. (23)–(24), (27)–(30)][DMWL] and the coefficient Newton iteration of [Dong, Lin, Ni and Wang, Eq. (3.1), Algorithm 3.1][DLNW].
 
@@ -612,12 +612,12 @@ For symmetric phases $\phi_j=\theta_{\min(j,d-j)}$, all objective-node derivativ
 
 for $j>0$, and $\partial U/\partial\phi_0=iZU$. Prefix and suffix products give every column at constant work per phase and node. Columns $j$ and $d-j$ add into one free column, with the center counted once.
 
-Let $\alpha$ be the target coefficient vector, $\beta(\theta)$ the realized one, and $V$ the parity-restricted Chebyshev evaluation matrix at the distinct positive nodes $x_j=\cos((2j-1)\pi/(4M))$, $1\le j\le M$. The residual and Jacobian are $r=V(\beta-\alpha)$, $J=V\beta'$. The positive nodes are accompanied by their negatives through parity. Since $2M>d$, a parity polynomial vanishing at all these points is zero, so $V$ has full column rank. If $\beta'$ is invertible, $s=(\beta')^{-1}(\beta-\alpha)$ solves $Js=r$ exactly and is the unique least-squares step. Step halving until the sampled maximum residual decreases preserves improvement relative to the current iterate. It supplies no global convergence theorem near the QSP amplitude boundary.
+Let $\alpha$ be the target coefficient vector, $\beta(\theta)$ the one produced by the phases, and $V$ the parity-restricted Chebyshev evaluation matrix at the distinct positive nodes $x_j=\cos((2j-1)\pi/(4M))$, $1\le j\le M$. The residual and Jacobian are $r=V(\beta-\alpha)$, $J=V\beta'$. The positive nodes are accompanied by their negatives through parity. Since $2M>d$, a parity polynomial vanishing at all these points is zero, so $V$ has full column rank. If $\beta'$ is invertible, $s=(\beta')^{-1}(\beta-\alpha)$ solves $Js=r$ exactly and is the unique least-squares step. Step halving until the sampled maximum residual decreases preserves improvement relative to the current iterate. It supplies no global convergence theorem near the QSP amplitude boundary.
 
 <a id="r24"></a>
 ### Proposition 24. A finite Bessel-tail budget and explicit amplification residual
 
-**Provenance: Derived in NWQLib. Evidence: proved conditional on the child and phase residual bounds.**
+**Origin: Derived in NWQLib. Evidence: proved conditional on the error bound of the input block encoding and the phase residual bounds.**
 
 The Jacobi–Anger expansions of [Gilyén et al., Lemma 57, Eqs. (53)–(54)][GSLW] separate cosine and sine into even and odd Chebyshev polynomials. For finite real $\tau>0$ and an integer terminal $T\ge0$ with $q=\tau/[2(T+2)]<1$, the uncomputed Bessel suffix satisfies
 
@@ -639,9 +639,9 @@ For a degree $d$, the complete combined tail is $C(d,T)=2\sum_{k=d+1}^{T}|J_k(\t
 B_c=2\sum_{\substack{d_c\lt k\le T\\k\ \mathrm{even}}}|J_k(\tau)|+2R_T,\qquad B_s=2\sum_{\substack{d_s\lt k\le T\\k\ \mathrm{odd}}}|J_k(\tau)|+2R_T.
 ```
 
-Their sum counts the whole analytic suffix twice conservatively. Independently rounded parity records need not sum bit for bit to the separately evaluated combined record.
+Their sum counts the whole analytic suffix twice conservatively. Independently rounded parity bounds need not sum bit for bit to the separately evaluated combined bound.
 
-The selector searches inside $H=\min(\lceil\tau\rceil,\texttt{max_degree})+200$, with $\texttt{min_degree}\le d\le\min(\texttt{max_degree},T-1)$ and $0<\epsilon<1$. Among positive finite remainders whose finite complete tail meets $\epsilon$, it minimizes $(d,C(d,T),T)$ lexicographically. Degree has priority, followed by tail and then earlier terminal. This minimum concerns usable certificates in this finite horizon, evaluated with ordinary binary64 sums and special functions.
+The search for the degree $d$ and terminal $T$ runs inside $H=\min(\lceil\tau\rceil,\texttt{max_degree})+200$, with $\texttt{min_degree}\le d\le\min(\texttt{max_degree},T-1)$ and $0<\epsilon<1$. Among positive finite remainders whose finite complete tail meets $\epsilon$, it minimizes $(d,C(d,T),T)$ lexicographically. Degree has priority, followed by tail and then earlier terminal. This minimum concerns usable certificates in this finite horizon, evaluated with ordinary binary64 sums and special functions.
 
 The candidate set is bounded analytically. For $T\ge3$, let $g_T=R_T(T)=(T/2)^{T+1}2(T+2)/[(T+1)!(T+4)]$. Its consecutive ratio is
 
@@ -651,7 +651,7 @@ The candidate set is bounded analytically. For $T\ge3$, let $g_T=R_T(T)=(T/2)^{T
 
 The first factor exceeds $5/2$ by its first three binomial terms, the second is at least $2/5$, and the last exceeds one. Thus $g_T\ge g_3=135/448>1/4$. Since $R_T(\tau)$ increases with $\tau$ where $q<1$, $T\le\tau$ cannot satisfy $4R_T\le\epsilon$. The ordinary candidates therefore start at $\max(\texttt{min_degree}+1,3,\lfloor\tau\rfloor+1)$ and end at $H$. The sole additional candidate is $T=2$ when $\texttt{min_degree}=1$ and $\tau<3$, since $R_2(3)=9/10>1/4$. There are at most 202 candidates, so suffix work is $O(202(H+1))$ and Bessel values are computed through $H$ once.
 
-The logarithmic evaluation uses $(T+1)(\log\tau-\log2)-\log\Gamma(T+2)-\log(1-q)$, preserving positive subnormal arguments before the logarithm. A final exponential underflow is an unusable zero marker. If only such candidates pass the finite-tail check, the first passing terminal and degree provide a polynomial with all tail bounds and slack `None`. A positive usable certificate takes priority. If neither candidate type exists, the finite search refuses. The known-array limit is $96(H+1)$ bytes, with a separate NumPy addressability check. These evaluations are not outward-rounded enclosures. Degree has priority, so the selected certificate can report a larger complete tail than an eligible higher-degree certificate.
+The logarithmic evaluation uses $(T+1)(\log\tau-\log2)-\log\Gamma(T+2)-\log(1-q)$, preserving positive subnormal arguments before the logarithm. A final exponential that underflows to zero marks the remainder as unusable. If only such candidates pass the finite-tail check, the first passing terminal and degree provide a polynomial with all tail bounds and slack `None`. A positive usable certificate takes priority. If neither type of candidate exists, the finite search raises an error. The numerical arrays of known size occupy at most $96(H+1)$ bytes, which are checked against `max_bytes`, and NumPy's addressable array size is checked separately. These evaluations are not outward-rounded enclosures. Degree has priority, so the selected certificate can report a larger complete tail than an eligible higher-degree certificate.
 
 For amplification, set $B=aV+D$, $\|D\|\le e_B$. Expanding $BB^\dagger B$ gives three linear terms of norm at most $a^2e_B$, three quadratic terms of norm at most $ae_B^2$, and one cubic term of norm at most $e_B^3$. Adding $3D$ proves the bound. For QSP evolution, one may take
 
@@ -659,14 +659,14 @@ For amplification, set $B=aV+D$, $\|D\|\le e_B$. Expanding $BB^\dagger B$ gives 
 e_B=a\bigl(\epsilon_{\cos}+\epsilon_{\sin}+s(r_{\cos}+r_{\sin})\bigr)+|t|\epsilon_{\rm child},\qquad a=1/(2s),
 ```
 
-provided target and encoded generators are Hermitian. Here $\epsilon_{\cos},\epsilon_{\sin}$ are truncation bounds and $r_{\cos},r_{\sin}$ are phase-fit residual bounds. The child term follows Gilyén et al., Lemma 61, and is conservatively unscaled by $a$. The raw block error relative to $V$ is at most $1-(3a-4a^3)+r_{\rm OAA}$. Recovery by division through $3a-4a^3$ has residual $r_{\rm OAA}/(3a-4a^3)$. These are different output comparisons.
+provided target and encoded generators are Hermitian. Here $\epsilon_{\cos},\epsilon_{\sin}$ are truncation bounds, $r_{\cos},r_{\sin}$ are phase-fit residual bounds, and $\epsilon_{\rm child}$ bounds the error of the input block encoding of the generator. The term $|t|\epsilon_{\rm child}$ follows Gilyén et al., Lemma 61, and is conservatively not multiplied by $a$. The raw block error relative to $V$ is at most $1-(3a-4a^3)+r_{\rm OAA}$. Recovery by division through $3a-4a^3$ has residual $r_{\rm OAA}/(3a-4a^3)$. These are different output comparisons.
 
 ## 8. Linear combinations of Hamiltonian simulation
 
 <a id="r25"></a>
 ### Result 25. LCHS representation and the dissipativity premise
 
-**Provenance: From a reference. Evidence: the cited representation theorem.**
+**Origin: From a reference. Evidence: the cited representation theorem.**
 
 Let $A=L+iH$, with $L,H$ Hermitian and $L\succeq0$. Linear combination of Hamiltonian simulation (LCHS) represents $e^{-AT}$ as an integral of unitary evolutions generated by $kL+H$. For the near-optimal kernel,
 
@@ -674,14 +674,14 @@ Let $A=L+iH$, with $L,H$ Hermitian and $L\succeq0$. Linear combination of Hamilt
 e^{-AT}=\int_{\mathbb R}g_\beta(k)e^{-iT(kL+H)}\,dk,\qquad g_\beta(k)=\frac{e^{-(1+ik)^\beta}}{C_\beta(1-ik)},\qquad C_\beta=2\pi e^{-2^\beta},\quad0<\beta<1.
 ```
 
-See [An, Childs and Lin (ACL), Eqs. (6)–(7), Theorem 6, Eq. (12), and Eq. (60)][ACL]. The Cauchy-kernel construction is their Eq. (5), and the implemented Low–Somma kernel is [Low and Somma, Eq. (6), with the parameter and trapezoid rules of Theorems 2–4][LowSomma]. Bounds belong to the selected kernel and quadrature pair.
+See [An, Childs and Lin (ACL), Eqs. (6)–(7), Theorem 6, Eq. (12), and Eq. (60)][ACL]. The Cauchy-kernel construction is their Eq. (5), and the implemented Low–Somma kernel is [Low and Somma, Eq. (6), with the parameter and trapezoid rules of Theorems 2–4][LowSomma]. Each bound holds for a specific pair of kernel and quadrature rule.
 
-If a shift $s\ge0$ makes $L+sI\succeq0$, the original solution is recovered by $e^{-AT}=e^{sT}e^{-(A+sI)T}$. A norm-relative floating-point PSD window is a numerical decision, not a proof of positive semidefiniteness. Error propagation must include the recovery factor.
+If a shift $s\ge0$ makes $L+sI\succeq0$, the original solution is recovered by $e^{-AT}=e^{sT}e^{-(A+sI)T}$. A floating-point test of positive semidefiniteness with a norm-relative tolerance is a numerical decision, not a proof of positive semidefiniteness. Error propagation must include the recovery factor.
 
 <a id="r26"></a>
 ### Proposition 26. An integrated near-optimal-kernel tail bound
 
-**Provenance: Improved from a reference. Evidence: proved from the pointwise kernel estimate.**
+**Origin: Improved from a reference. Evidence: proved from the pointwise kernel estimate.**
 
 Let $c_\beta=\cos(\beta\pi/2)$ and $x=c_\beta K^\beta$. For every $K>0$,
 
@@ -694,7 +694,7 @@ Let $c_\beta=\cos(\beta\pi/2)$ and $x=c_\beta K^\beta$. For every $K>0$,
 <a id="r27"></a>
 ### Proposition 27. Composite Gauss quadrature without a lower bound on dissipative time
 
-**Provenance: Improved from a reference. Evidence: proved using an analytic-strip bound.**
+**Origin: Improved from a reference. Evidence: proved using an analytic-strip bound.**
 
 Divide $[-K,K]$ into $2m$ panels of width $h=K/m$, each with $Q\ge2$ Gauss–Legendre nodes. Choose $0<d_0<1$, $b_0=1-d_0$, and $\rho=\exp(\operatorname{arsinh}(2b_0/h))$. The quadrature error for the integral in Result 25 is at most
 
@@ -706,12 +706,12 @@ This applies for all $T\ge0$. It replaces the panel prescription in ACL Lemma 11
 
 **Proof.** In the strip $|\operatorname{Im}k|\le b_0$, both $1\pm ik$ have real part at least $d_0$. Thus $|1-ik|\ge d_0$ and $\operatorname{Re}(1+ik)^\beta\ge0$, giving $|g_\beta(k)|\le1/(C_\beta d_0)$. The Hermitian part of $-iT(kL+H)$ is $T\operatorname{Im}(k)L$, so its exponential norm is at most $e^{b_0T\|L\|}$, including when $L$ and $H$ do not commute. The Bernstein ellipse of each affine-mapped panel has semiminor axis $b_0$ when $\log\rho=\operatorname{arsinh}(2b_0/h)$. Apply [Trefethen, Theorem 19.3, Eq. (19.8)][ATAP] with $n=Q-1$, multiply by $h/2$, and sum the $2m$ panels. For the operator-valued integral, apply the scalar theorem to $v^\dagger F(k)u$, rotating its final error to the real axis if necessary, and take the supremum over unit $u,v$. This introduces no dimension factor.
 
-For each $m$, solve the scalar inequality for the least $Q$ that satisfies it. Once $4m$ exceeds the best total node count, no later candidate can improve it because $2mQ\ge4m$. This proves the finite stopping rule for the selector's search over this panel family. It is not an optimality theorem over all quadratures.
+For each $m$, solve the scalar inequality for the least $Q$ that satisfies it. Once $4m$ exceeds the best total node count, no later candidate can improve it because $2mQ\ge4m$. This proves the finite stopping rule for the search over this panel family. It is not an optimality theorem over all quadratures.
 
 <a id="r28"></a>
 ### Proposition 28. Constant-source Duhamel remainder in physical units
 
-**Provenance: Improved from a reference. Evidence: proved for constant $A$ and source $b$.**
+**Origin: Improved from a reference. Evidence: proved for constant $A$ and source $b$.**
 
 For $\dot x=-Ax+b$, write the source contribution as $\int_0^T e^{-A(T-s)}b\,ds$. An $m$-point Gauss–Legendre rule on $[0,T]$ has vector error at most
 
@@ -724,7 +724,7 @@ For $\dot x=-Ax+b$, write the source contribution as $\int_0^T e^{-A(T-s)}b\,ds$
 <a id="r29"></a>
 ### Proposition 29. Affine SELECT angles and source-time scaling
 
-**Provenance: Derived in NWQLib. Evidence: proved for a common product schedule and affine address law.**
+**Origin: Derived in NWQLib. Evidence: proved for a common product schedule and an affine address map.**
 
 Suppose the quadrature address $b\in\{0,1\}^a$ has $k(b)=k_0+\sum_qk_qb_q$. For a Pauli term $P$, any rotation position of the product formula with angle $\theta(b)=\theta_0+\sum_q\theta_qb_q$ is realized by one unconditional rotation and at most $a$ singly controlled rotations. For a joint QSP generator using reference time $T>0$, a branch with elapsed time $t_j$ must use diagonal weights $D_L(j)=(t_j/T)k_j$, $D_H(j)=t_j/T$.
 
@@ -734,12 +734,12 @@ Suppose the quadrature address $b\in\{0,1\}^a$ has $k(b)=k_0+\sum_qk_qb_q$. For 
 e^{-i\theta(b)P/2}=e^{-i\theta_0P/2}\prod_qe^{-ib_q\theta_qP/2}.
 ```
 
-This is an exact affine-table factorization. It applies to a rotation position shared across the selected branches. Varying repetition counts require the construction's common repetition blocks, and arbitrary nonlinear angle tables do not meet the premise. For the QSP branch, $T(D_L(j)L+D_H(j)H)=t_j(k_jL+H)$. Omitting either elapsed-time factor simulates a different Duhamel branch. Complex quadrature phases remain in SELECT, with PREP amplitudes $\sqrt{|c_j|/\alpha}$, so the selected block is $\sum_jc_jU_j/\alpha$, $\alpha=\sum_j|c_j|$. This is a structured specialization of [ACL, Appendix A.3, Lemma 24, Eq. (178)][ACL], and the effective-generator construction of [Pocrnic et al., Section IV, Eqs. (61)–(65)][Pocrnic].
+This is an exact affine-table factorization. It applies to a rotation position shared across the selected branches. Varying repetition counts require the construction's common repetition blocks, and arbitrary nonlinear angle tables do not meet the premise. For the QSP branch, $T(D_L(j)L+D_H(j)H)=t_j(k_jL+H)$. Omitting either elapsed-time factor simulates a different Duhamel branch. Complex quadrature phases remain in SELECT, with PREP amplitudes $\sqrt{|c_j|/\alpha}$, so the encoded block is $\sum_jc_jU_j/\alpha$, $\alpha=\sum_j|c_j|$. This is a structured specialization of [ACL, Appendix A.3, Lemma 24, Eq. (178)][ACL], and the effective-generator construction of [Pocrnic et al., Section IV, Eqs. (61)–(65)][Pocrnic].
 
 <a id="r30"></a>
 ### Proposition 30. One physical vector budget for several output frames
 
-**Provenance: Derived in NWQLib. Evidence: proved from norm inequalities.**
+**Origin: Derived in NWQLib. Evidence: proved from norm inequalities.**
 
 Suppose all required stage bounds have been converted into one physical vector error $\|x-y\|\le\delta$. Put $r=\|y\|$ and $w\ge\|O\|$. Then
 
@@ -755,18 +755,18 @@ If $r>\delta$, then $x\ne0$, and
 
 **Proof.** The reverse triangle inequality gives $|\|x\|-r|\le\delta$ and $\|x\|\le r+\delta$. Factor the difference of squared norms. Expanding the quadratic-form difference as $(x-y)^\dagger Ox+y^\dagger O(x-y)$ proves its bound. For the phase-sensitive unit-vector distance, add and subtract $x/r$. Each resulting distance is at most $\delta/r$.
 
-For normalized expectation, set $u=x/\|x\|$, $v=y/r$, $c=u^\dagger v$ and $s=\sqrt{1-|c|^2}$. Projection gives $\|x-y\|^2=|\|x\|-rc|^2+r^2s^2$, hence $s\le\delta/r$. The Hermitian matrix $D=uu^\dagger-vv^\dagger$ has trace zero and $\operatorname{tr}(D^2)=2s^2$, so its possible nonzero eigenvalues are $\pm s$ and $\|D\|_1=2s$. Trace duality gives $|\operatorname{tr}(OD)|\le\|O\|\|D\|_1\le2w\delta/r$. Complex vectors are allowed, and the public observable is Hermitian. The factor two is sharp. For $0<t<1$, choose $y=(1,0)^T$, $x=(1-t^2,it\sqrt{1-t^2})^T$ and $O=(uu^\dagger-yy^\dagger)/t$. Then $r=w=1$, $\|x-y\|=t$ and the expectation difference is $2t$.
+For normalized expectation, set $u=x/\|x\|$, $v=y/r$, $c=u^\dagger v$ and $s=\sqrt{1-|c|^2}$. Projection gives $\|x-y\|^2=|\|x\|-rc|^2+r^2s^2$, hence $s\le\delta/r$. The Hermitian matrix $D=uu^\dagger-vv^\dagger$ has trace zero and $\operatorname{tr}(D^2)=2s^2$, so its possible nonzero eigenvalues are $\pm s$ and $\|D\|_1=2s$. Trace duality gives $|\operatorname{tr}(OD)|\le\|O\|\|D\|_1\le2w\delta/r$. Complex vectors are allowed, and the observable supplied by the user is Hermitian. The factor two is sharp. For $0<t<1$, choose $y=(1,0)^T$, $x=(1-t^2,it\sqrt{1-t^2})^T$ and $O=(uu^\dagger-yy^\dagger)/t$. Then $r=w=1$, $\|x-y\|=t$ and the expectation difference is $2t$.
 
-Every component must have the same physical frame before summation. A missing component prevents a complete bound. Applying these nonlinear frame conversions separately to each component and then adding them need not reproduce a bound for the combined error.
+Every component must have the same physical frame, that is, the same norm, units, normalization and target quantity, before summation. A missing component prevents a complete bound. Applying these nonlinear frame conversions separately to each component and then adding them need not reproduce a bound for the combined error.
 
-The normalized relations require finite $r>\delta\ge0$ and finite nonnegative $w$. Missing, negative or nonfinite components, an empty component set or an overflowing sum make the complete budget unavailable. Normalized expectation uses exponent-scaled multiplication to avoid intermediate range loss. True zero $\delta$ or $w$ gives zero, while a positive final result outside binary64 gives `None`. Ordinary scalar evaluation is separate from native rounding and is not a fully outward-rounded certificate.
+The normalized relations require finite $r>\delta\ge0$ and finite nonnegative $w$. Missing, negative or nonfinite components, an empty component set or an overflowing sum make the complete budget unavailable. Normalized expectation uses exponent-scaled multiplication to avoid intermediate range loss. True zero $\delta$ or $w$ gives zero, while a positive final result outside binary64 gives `None`. Ordinary scalar evaluation is separate from rounding in the backend's own operations and is not a fully outward-rounded certificate.
 
 ## 9. Block encodings and state preparation
 
 <a id="r31"></a>
 ### Proposition 31. Singular-frame dilation and LCU normalization
 
-**Provenance: Derived in NWQLib. Evidence: proved in exact arithmetic.**
+**Origin: Derived in NWQLib. Evidence: proved in exact arithmetic.**
 
 Let $B=A/\alpha=W\Sigma V^\dagger$, $\|\Sigma\|\le1$, and $K=W\sqrt{I-\Sigma^2}V^\dagger$. The one-ancilla unitary
 
@@ -783,7 +783,7 @@ For $A=\sum_jc_jU_j$, prepare $\sum_j\sqrt{|c_j|/\alpha}|j\rangle$, apply SELECT
 <a id="r32"></a>
 ### Proposition 32. Circulant normalization and a Pauli-domain certificate
 
-**Provenance: Improved from a reference. Evidence: proved from Fourier and Pauli orthogonality.**
+**Origin: Improved from a reference. Evidence: proved from Fourier and Pauli orthogonality.**
 
 For a circulant $A=\sum_f\beta_fS^f$, the shift LCU has $\alpha=\sum_f|\beta_f|\le s\max_f|\beta_f|$, where $s$ is a padded band count. The right-hand side is the normalization obtained by scaling the sparse-access construction of [Camps et al., Theorem 4.1 and Section 4.2][Camps] to unit-magnitude entries. The comparison concerns normalization, not the total costs of the two access models.
 
@@ -793,12 +793,12 @@ Given only a finite Pauli table for $A$, define candidate bands from its first c
 \frac{\|A-C\|_F^2}{2^n}=\sum_{P\ {\rm supplied}}|a_P-c_P|^2+\sum_f|\beta_f|^2-\sum_{P\ {\rm supplied}}|c_P|^2.
 ```
 
-**Proof.** The normalization inequality follows by bounding each band magnitude by their maximum. For $P=i^{\#Y}X^fZ^z$, $P|0\rangle=i^{\#Y}|f\rangle$, so the first-column bands are obtained without a dense matrix. Pauli orthogonality gives $\|M\|_F^2=2^n\sum_P|m_P|^2$. Distinct cyclic shifts are Frobenius-orthogonal, giving $\|C\|_F^2/2^n=\sum_f|\beta_f|^2$. Split the Pauli sum into supplied and absent labels to obtain the identity. Multiplying its right-hand side by $2^n$ and taking the square root gives $\|A-C\|_F$, which bounds the spectral error. NWQLib evaluates the shift traces with exact scalar arithmetic and uses zero certified mismatch for automatic circulant selection. The certificate covers absent Pauli labels, which a comparison limited to supplied coefficients would miss.
+**Proof.** The normalization inequality follows by bounding each band magnitude by their maximum. For $P=i^{\#Y}X^fZ^z$, $P|0\rangle=i^{\#Y}|f\rangle$, so the first-column bands are obtained without a dense matrix. Pauli orthogonality gives $\|M\|_F^2=2^n\sum_P|m_P|^2$. Distinct cyclic shifts are Frobenius-orthogonal, giving $\|C\|_F^2/2^n=\sum_f|\beta_f|^2$. Split the Pauli sum into supplied and absent labels to obtain the identity. Multiplying its right-hand side by $2^n$ and taking the square root gives $\|A-C\|_F$, which bounds the spectral error. NWQLib evaluates the shift traces with exact scalar arithmetic, and its automatic choice of the circulant encoding requires a certified mismatch of zero. The certificate covers absent Pauli labels, which a comparison limited to supplied coefficients would miss.
 
 <a id="r33"></a>
 ### Proposition 33. TT-SVD discarded weight and normalized fidelity
 
-**Provenance: Improved from a reference. Evidence: proved for exact successive truncated SVDs.**
+**Origin: Improved from a reference. Evidence: proved for exact successive truncated SVDs.**
 
 Let $G$ be a normalized tensor and $T$ the raw tensor produced by a tensor-train SVD sweep. Let $D$ be the sum of squared singular values actually discarded at all stages. Then
 
@@ -815,14 +815,14 @@ The implemented rank rule uses a singular-value threshold and a maximum bond dim
 <a id="r34"></a>
 ### Result 34. Multiplexed rotations, phase diagonals, and preparation trees
 
-**Provenance: From a reference. Evidence: the cited exact gate decompositions.**
+**Origin: From a reference. Evidence: the cited exact gate decompositions.**
 
 A uniformly controlled rotation with $a\ge1$ address qubits uses $2^a$ CX gates in its Gray-code decomposition. A phase diagonal on $n$ qubits uses $2^n-2$ CX gates and $2^n-1$ $R_z$ rotations, apart from its global phase. [Shende, Bullock and Markov, Theorems 7–8][SBM], and [Möttönen et al., Section II, Fig. 2, Eq. (3)][Mottonen]. The magnitude tree for state preparation follows Möttönen et al., Section III, Eq. (8). It also sums to $2^n-2$ CX gates, before adding a phase diagonal for complex amplitudes. Removing an address bit on which the whole unitary table is exactly independent is a multiplexor identity. Affine angle tables have the stronger linear-size factorization of Proposition 29.
 
 <a id="r35"></a>
 ### Proposition 35. Gate-count bounds for exact dense synthesis and their control cost {#proposition-35-exact-dense-synthesis-envelopes-and-their-control-cost}
 
-**Provenance: Improved from a reference. Evidence: proved for the recursive gate template, conditional on accurate numerical factorizations.**
+**Origin: Improved from a reference. Evidence: proved for the recursive gate template, conditional on accurate numerical factorizations.**
 
 The implementation combines two-qubit KAK synthesis with the block-ZXZ recursion of [Krol and Al-Ars, Sections 4–5, Eqs. (5)–(11)][ZXZ]. It uses the diagonal transfer of [Shende, Bullock and Markov, Appendix A.2][SBM] when that transfer is numerically resolved. An arbitrary $n\ge2$ qubit input therefore has the conservative gate-count bounds
 
@@ -844,14 +844,14 @@ C_n=4C_{n-1}+3\,2^{n-1}-2,\quad Z_n=4Z_{n-1}+3\,2^{n-1},\quad H_n=4H_{n-1}+2,
 
 with $C_2=3$, $Z_2=H_2=0$. Solving the recurrences gives the formulas. A top demultiplexing has two $(m-1)$-qubit children and one $2^{m-1}$-CX multiplexor, so $C_m^{\rm bd}\le2C_{m-1}+2^{m-1}$. The smaller generic count $22\,4^n/48-3\,2^n/2+5/3$ of Krol and Al-Ars assumes all applicable diagonal transfers succeed. The conservative bounds remain valid when a nearly singular transfer is skipped.
 
-The same recursion gives cubic classical factorization work and quadratic array storage in matrix dimension $M$. At depth $j$, there are $4^j$ blocks of side $M/2^j$, so cubic work sums as $M^3\sum_j2^{-j}$, and the number of entries at any one depth is $M^2$. Additional $k$ controls handled by whole-matrix synthesis replace $M$ by $2^kM$, multiplying these leading work and storage terms by $8^k$ and $4^k$. Gate-wise control has a different cost derived from the gate count. These are representation-dependent laws, not a proof of CPU time or process memory.
+The same recursion gives cubic classical factorization work and quadratic array storage in matrix dimension $M$. At depth $j$, there are $4^j$ blocks of side $M/2^j$, so cubic work sums as $M^3\sum_j2^{-j}$, and the number of entries at any one depth is $M^2$. Additional $k$ controls handled by whole-matrix synthesis replace $M$ by $2^kM$, multiplying these leading work and storage terms by $8^k$ and $4^k$. Gate-wise control has a different cost derived from the gate count. These are counting formulas that depend on the representation, not a proof of CPU time or process memory.
 
-The algebraic synthesis is exact. Its implementation uses floating-point factorizations and small rounding-window replacements, so a uniform certified matrix-to-circuit error bound remains a separate obligation.
+The algebraic synthesis is exact. Its implementation uses floating-point factorizations and small rounding-window replacements, so a uniform certified matrix-to-circuit error bound must be established separately.
 
 <a id="r36"></a>
 ### Proposition 36. Low-order product bounds with exact integer step selection
 
-**Provenance: Improved from a reference. Evidence: proved from the cited bounds and exact arithmetic.**
+**Origin: Improved from a reference. Evidence: proved from the cited bounds and exact arithmetic.**
 
 Let $H=\sum_jH_j$ be Hermitian, ordered so $H_1$ acts first, and $R_j=\sum_{k>j}H_k$. Define
 
@@ -876,15 +876,15 @@ W_2=\frac13\sum_Ta_i a_j a_k+\frac16\sum_Aa_i^2a_j
 
 Either second-order coefficient bounds the error of r symmetric steps by $W|t|^3/r^2$, under the ordering and Hermiticity premises of [Childs et al., Eq. (121)][Trotter]. The relaxed expression uses pair tests, suffix sums and weighted anticommutation degrees, so a fresh evaluation takes $O(p^2\lceil q/64\rceil)$ work on packed q-qubit labels. The full triple structure can take cubic work.
 
-**Proof.** A nonzero Pauli commutator has norm two and a surviving nested commutator has norm four. Expansion gives $C_{12}^{\triangle}=4\sum_Ta_i a_j a_k$ and $C_{24}^{\triangle}=4\sum_Aa_i^2a_j$. Let $s_{ki}$ be the anticommutation parity. Bilinearity gives $s_{k,ij}=s_{ki}\mathbin{\mathrm{XOR}}s_{kj}\le s_{ki}+s_{kj}$. For $(i,j)\in A$, the nested mass $M_{ij}=\sum_{k>i}a_k s_{k,ij}$ is at most $S_i$ and at most $D_i+D_j-a_i$, because the second endpoint sum excludes $i$ and $s_{ij}=1$. The legal index $k=j$ remains included. All weights are nonnegative, proving $W_2\le W_{2,\mathrm{rel}}\le W_{2,\mathrm{suffix}}$, where the suffix expression replaces $U_{ij}$ by $S_i$. The full triangle coefficient itself upper-bounds the theorem's tail norms and is not the actual evolution error. Unitary telescoping gives $r^{-2}$. For the same positive time and allowance, exact inversion gives $r_{\mathrm{exact}}\le r_{\mathrm{rel}}\le\lceil\sqrt{W_{2,\mathrm{rel}}/W_2}\,r_{\mathrm{exact}}\rceil$ when $W_2>0$. A zero coefficient selects one step. This comparison precedes outward numerical evaluation.
+**Proof.** A nonzero Pauli commutator has norm two and a surviving nested commutator has norm four. Expansion gives $C_{12}^{\triangle}=4\sum_Ta_i a_j a_k$ and $C_{24}^{\triangle}=4\sum_Aa_i^2a_j$. Let $s_{ki}$ be the anticommutation parity. Bilinearity gives $s_{k,ij}=s_{ki}\mathbin{\mathrm{XOR}}s_{kj}\le s_{ki}+s_{kj}$. For $(i,j)\in A$, the nested mass $M_{ij}=\sum_{k>i}a_k s_{k,ij}$ is at most $S_i$ and at most $D_i+D_j-a_i$, because the second endpoint sum excludes $i$ and $s_{ij}=1$. The index $k=j$ remains included. All weights are nonnegative, proving $W_2\le W_{2,\mathrm{rel}}\le W_{2,\mathrm{suffix}}$, where the suffix expression replaces $U_{ij}$ by $S_i$. The full triangle coefficient itself upper-bounds the theorem's tail norms and is not the true evolution error. Unitary telescoping gives $r^{-2}$. For the same positive time and allowance, exact inversion gives $r_{\mathrm{exact}}\le r_{\mathrm{rel}}\le\lceil\sqrt{W_{2,\mathrm{rel}}/W_2}\,r_{\mathrm{exact}}\rceil$ when $W_2>0$. A zero coefficient selects one step. This comparison precedes outward numerical evaluation.
 
-For $P=p(p-1)/2$, $E=|A|$ and packed width $w=\lceil q/64\rceil$, relaxed work is $wP+2p+4E$. Its contraction scratch at block size $b$ is $72p+96b+96\lceil E/b\rceil+65536$ bytes, within the complete input, mask, pair and row-test limit. Weighted degrees are rebuilt for each restricted ordered node table, since differently weighted k-nodes cannot share them.
+For $P=p(p-1)/2$, $E=|A|$ and packed width $w=\lceil q/64\rceil$, the work of the relaxed expression is $wP+2p+4E$. The scratch memory of its contraction at block size $b$ is $72p+96b+96\lceil E/b\rceil+65536$ bytes, included in the limit on the complete input, mask, pair and row-test memory. Weighted degrees are rebuilt for each restricted ordered node table, since differently weighted k-nodes cannot share them.
 
-The production coefficient is evaluated with scaled binary64 upper products and sums, followed by rational rescaling. Its value $W_{\mathrm{up}}$ bounds the selected triangle expression. For formula order $o\in\{1,2\}$, time multiplication, division by $r^o$ and integer step inversion use exact rationals formed from $W_{\mathrm{up}}$ and the stored binary64 time. Reported bounds are rounded upward. This preserves a positive bound below the binary64 range and reports a range error above it. The selected count is minimal for $W_{\mathrm{up}}$, which can exceed the exact triangle coefficient. The record names the full or relaxed expression. Pruning consumes its allowance before step selection, and a zero remaining allowance permits only a zero coefficient.
+The coefficient used by the library is evaluated with scaled binary64 upper products and sums, followed by rational rescaling. Its value $W_{\mathrm{up}}$ bounds the chosen triangle expression. For formula order $o\in\{1,2\}$, time multiplication, division by $r^o$ and integer step inversion use exact rationals formed from $W_{\mathrm{up}}$ and the binary64 time. Reported bounds are rounded upward. This preserves a positive bound below the binary64 range and reports a range error above it. The resulting step count is minimal for $W_{\mathrm{up}}$, which can exceed the exact triangle coefficient. The result records whether the full or the relaxed expression was used. Pruning consumes its allowance before step selection, and a zero remaining allowance permits only a zero coefficient.
 
-For a common-grid QPE trajectory, nonnegative integer power $k$ targets $t_k=k\,\operatorname{val}(\tau)$, where $\operatorname{val}(\tau)$ is the exact real value of the stored binary64 time unit. Write $W$ for an upper bound on the second-order coefficient of the kept nonidentity generator, $C$ for its coefficient L1 mass, and $d_{\mathrm{drop}}$ for the dropped coefficient L1 mass. If the emitted binary64 step has exact real value $h$ and is repeated $r_k$ times, its product-formula bound is $W r_k|h|^3$. The time-displacement bound is $C|r_kh-t_k|$, and pruning contributes $d_{\mathrm{drop}}t_k$. These terms and the applicable identity-phase and rotation-angle formation bounds must fit the allowance at every power position. The shared grid gives sufficient prefix counts and does not assert an independently smallest count at each time.
+For a common-grid QPE trajectory, nonnegative integer power $k$ targets $t_k=k\,\operatorname{val}(\tau)$, where $\operatorname{val}(\tau)$ is the exact real value of the binary64 time unit. Write $W$ for an upper bound on the second-order coefficient of the kept nonidentity generator, $C$ for its coefficient L1 mass, and $d_{\mathrm{drop}}$ for the dropped coefficient L1 mass. If the binary64 step used in the circuit has exact real value $h$ and is repeated $r_k$ times, its product-formula bound is $W r_k|h|^3$. The time-displacement bound is $C|r_kh-t_k|$, and pruning contributes $d_{\mathrm{drop}}t_k$. These terms and the applicable identity-phase and rotation-angle formation bounds must fit the allowance at every power position. The shared grid gives sufficient prefix counts and does not assert an independently smallest count at each time.
 
-Let $S_2(h)$ be one fixed ordered second-order step with one-step operator bound $W|h|^3$. At an integer step boundary $r_p=t_p/h$, telescoping gives $\|S_2(h)^{r_p}-e^{-it_pH}\|\le Wh^2t_p$. If every power has the same absolute allowance, satisfying that allowance at the largest nonnegative time suffices for every earlier boundary. For allowances $\epsilon_p$, the step must satisfy $Wh^2\le\min_{p>0}\epsilon_p/t_p$. Pruning consumes $t_p$ times the dropped coefficient L1 mass before this comparison. A wholly zero-power schedule needs no evolution step selection. Every queried time must be represented by an integer step count, and finite representation of the step and rotation angles has separate numerical error.
+Let $S_2(h)$ be one fixed ordered second-order step with one-step operator bound $W|h|^3$. At an integer step boundary $r_p=t_p/h$, telescoping gives $\|S_2(h)^{r_p}-e^{-it_pH}\|\le Wh^2t_p$. If every power has the same absolute allowance, satisfying that allowance at the largest nonnegative time suffices for every earlier boundary. For allowances $\epsilon_p$, the step must satisfy $Wh^2\le\min_{p>0}\epsilon_p/t_p$. Pruning consumes $t_p$ times the dropped coefficient L1 mass before this comparison. A schedule whose powers are all zero needs no choice of evolution step. Every queried time must be represented by an integer step count, and finite representation of the step and rotation angles has separate numerical error.
 
 For periodic LCHS, write the diffusion coefficient as $\zeta\ge0$ and the coefficient of $Z_0$ as $v$. At quadrature node $k_j$, the two matching terms have norm $|k_j|\zeta$ each, including the coincident-neighbor case on two sites, and the potential term has norm $|v|$. The identity term is applied separately. Set
 
@@ -898,22 +898,22 @@ Then the weighted physical-action error for a unit input is at most $B_{\rm per}
 W_q=\frac{16a^2p_v+4g_q a^3}{12}+\frac{8ap_v^2+4g_q a^3}{24}.
 ```
 
-Unitary telescoping gives the $r^{-2}$ factor, and the triangle inequality for $\sum_jc_jU_j$ gives the weighted sum. The implementation constructs rational upper magnitudes $\overline c_j$ by outward scaled square-root evaluation, then evaluates $B_{\rm per}$ exactly from these values and the stored inputs. A tolerance selects $r=\max(1,\lceil\sqrt{\lceil B_{\rm per}/\epsilon\rceil}\rceil)$ before construction limits are applied. With a supplied fixed step count, a bound exceeding binary64 is reported as unavailable. These bounds concern the selected product formulas, with coefficient, gate-formation, and execution errors accounted for separately.
+Unitary telescoping gives the $r^{-2}$ factor, and the triangle inequality for $\sum_jc_jU_j$ gives the weighted sum. The implementation constructs rational upper magnitudes $\overline c_j$ by outward scaled square-root evaluation, then evaluates $B_{\rm per}$ exactly from these values and the binary64 inputs. A tolerance selects $r=\max(1,\lceil\sqrt{\lceil B_{\rm per}/\epsilon\rceil}\rceil)$ before construction limits are applied. With a supplied fixed step count, a bound exceeding binary64 is reported as unavailable. These bounds concern the product formulas described here, with coefficient, gate-formation, and execution errors accounted for separately.
 
-For diffusion-only rings at $q=1,2$, the ideal product error is zero and automatic selection chooses one step. Nonzero potential keeps both cross terms at every width. Zero diffusion gives $W_q=0$ for every potential, provided the selector's existing domain $\mathrm{mass}+4\zeta>0$ holds. Ideal zero product error leaves numerical formation, execution and readout errors separate.
+For diffusion-only rings at $q=1,2$, the ideal product error is zero and automatic selection chooses one step. Nonzero potential keeps both cross terms at every width. Zero diffusion gives $W_q=0$ for every potential, provided the domain condition $\mathrm{mass}+4\zeta>0$ of the step-count choice holds. Ideal zero product error leaves numerical formation, execution and readout errors separate.
 
 ## 11. Quantum Hamiltonian descent
 
 Quantum Hamiltonian descent (QHD) evolves a finite-grid state under $H(t)=a(t)T+b(t)V$, where $T$ is a kinetic operator and $V$ is a tabulated objective. A time-evolution approximation, a probability readout, and an optimization statement are distinct mathematical objects. The following results connect these objects only where their premises justify it.
 
-For the range-checked arithmetic in QHD planning, put $\nu_{\rm fp}=2^{-1022}$, $\lambda=2^{-1074}$, and let $\Omega$ be the largest finite binary64 number. A nonzero multiplicative result must have exact magnitude in $[\nu_{\rm fp},\Omega]$, reading its stored operands as exact reals. A rounded result equal to $\nu_{\rm fp}$ or $\Omega$ needs an exact boundary check. A zero is accepted as exact only when its operands or the mathematical construction establish it. Under round-to-nearest arithmetic these conditions justify the relative-error model, and accepted power-of-two scalings are exact. Finite addition and subtraction may produce exact subnormal scratch values under gradual underflow. Positive error terms are evaluated exactly or outward, so a positive term below $\lambda$ is reported as $\lambda$.
+For the range-checked arithmetic in QHD planning, put $\nu_{\rm fp}=2^{-1022}$, $\lambda=2^{-1074}$, and let $\Omega$ be the largest finite binary64 number. A nonzero multiplicative result must have exact magnitude in $[\nu_{\rm fp},\Omega]$, reading its binary64 operands as exact reals. A rounded result equal to $\nu_{\rm fp}$ or $\Omega$ needs an exact boundary check. A zero is accepted as exact only when its operands or the mathematical construction establish it. Under round-to-nearest arithmetic these conditions justify the relative-error model, and power-of-two scalings that pass these checks are exact. Finite addition and subtraction may produce exact subnormal scratch values under gradual underflow. Positive error terms are evaluated exactly or outward, so a positive term below $\lambda$ is reported as $\lambda$.
 
-Stored objective tables need only be finite and may contain subnormal entries. Compiled potential and binary phase constructions can omit a contribution whose required arithmetic falls below the normal range, with the error terms of Propositions 42 and 44. Structured one-hot preparation can stop at a lower-range link, with the state-error term of Proposition 53. Kinetic coefficients, energies, and one-hot kinetic terms outside the accepted range are refused, while phase products of accepted binary kinetic tables can be omitted and counted as error terms. Required nonfinite or overflowing arithmetic is refused. The direct classical kernels use the original stored tables and complete initial vectors. These construction checks supply range premises for the error budgets, while elementary-function and transform accuracy remain separate assumptions.
+Objective tables need only be finite and may contain subnormal entries. Compiled potential and binary phase constructions can omit a contribution whose required arithmetic falls below the normal range, with the error terms of Propositions 42 and 44. Structured one-hot preparation can stop at a lower-range link, with the state-error term of Proposition 53. Kinetic coefficients, energies, and one-hot kinetic terms that fail the range check above are rejected, while phase products of binary kinetic tables that pass the check can be omitted and counted as error terms. A construction that requires nonfinite or overflowing arithmetic is rejected. The direct classical evaluations use the original tables and complete initial vectors. These construction checks supply range premises for the error budgets, while elementary-function and transform accuracy remain separate assumptions.
 
 <a id="r37"></a>
 ### Result 37. Grid Hamiltonians and boundary-dependent spectra
 
-**Provenance: From a reference. Evidence: the cited discretization and elementary stencil spectra.**
+**Origin: From a reference. Evidence: the cited discretization and elementary stencil spectra.**
 
 The time-dependent model is [Leng et al., Eq. (1)][Leng]. Their Eqs. (F.7), (F.9), and the text after Eq. (F.4) specify the central-difference kinetic and grid potential with vanishing boundary values. For $K$ represented sites and spacing $h$, the Dirichlet kinetic eigenvalues and vectors are
 
@@ -928,7 +928,7 @@ The periodic uniform state is a zero-momentum eigenstate. The Dirichlet ground s
 <a id="r38"></a>
 ### Proposition 38. Stable interval integrals for the three schedules
 
-**Provenance: Derived in NWQLib. Evidence: proved identities and an analytic quadrature remainder.**
+**Origin: Derived in NWQLib. Evidence: proved identities and an analytic quadrature remainder.**
 
 For $0\le t_0<t_1$, let $h=t_1-t_0$. The quadratic schedule is $a(t)=(1+\gamma t^2)^{-1}$, $b(t)=1+\gamma t^2$, as recommended in [QHDOPT, Section 2.1][QHDOPT]. If $\gamma>0$, set $d=1+\gamma t_0t_1$, $z=\sqrt\gamma h/d$. Then
 
@@ -952,12 +952,12 @@ T_n(q)=\frac{q^n}{2}\left(\frac{(n+1)(n+2)}{1-q}+\frac{(2n+3)q}{(1-q)^2}+\frac{q
 
 Exactness through degree 31 and positive quadrature weights bound the relative panel error for $f$ and $zf$ by $2(1+q)^3(T_{32}(q)+T_{31}(q))<1.9\times10^{-23}$, using $q\le1/(4\sqrt3)$. For $zf$, its midpoint satisfies $m\ge L$, which bounds the additional degree-31 tail. Positive panel sums preserve the relative bound.
 
-Floating-point evaluation dominates this analytic truncation. The implementation's first-order kinetic-integral allowances are $32u$ for the quadratic schedule and $48u$ for the cubic schedule, under its elementary-function accuracy and scaled-arithmetic assumptions. For the quadratic formula, formation errors in $d$ and $z$ are at most $3u$ and $7u$. The logarithmic derivative of $\arctan z/z$ lies in $[-1,0]$. Its evaluation and division add $3u$, giving $10u$ for that factor and below $20u$ for the ordinary expression. The exponent-scaled branch and an underflowed intermediate in $d$ raise the allowance to $32u$. For the cubic formula, the computed $r$ defines $s'=r^3$ within $6u$ of $s$, and the logarithmic sensitivity to $s$ is at most one. Transformed-coordinate errors are at most $10u$ or $12u$ times the interval midpoint. The bounds $f\ge1/2$, $|f'|\le1$, and $|(zf)'|\le1$ give at most $24u$ relative error in either mean. Cubing, division, weights, and compensated summation add $7u$. The outer scaled products, segment formation, and the change in $s$ add at most $14u$, for $45u<48u$. These are first-order allowances, with a separate absolute subnormal error term. The cubic qualification is restricted to $s\in[10^{-8},10^8]$, $t\le10^4$.
+Floating-point evaluation dominates this analytic truncation. The implementation's first-order kinetic-integral allowances are $32u$ for the quadratic schedule and $48u$ for the cubic schedule, under its elementary-function accuracy and scaled-arithmetic assumptions. For the quadratic formula, formation errors in $d$ and $z$ are at most $3u$ and $7u$. The logarithmic derivative of $\arctan z/z$ lies in $[-1,0]$. Its evaluation and division add $3u$, giving $10u$ for that factor and below $20u$ for the ordinary expression. The exponent-scaled branch and an underflowed intermediate in $d$ raise the allowance to $32u$. For the cubic formula, the computed $r$ defines $s'=r^3$ within $6u$ of $s$, and the logarithmic sensitivity to $s$ is at most one. Transformed-coordinate errors are at most $10u$ or $12u$ times the interval midpoint. The bounds $f\ge1/2$, $|f'|\le1$, and $|(zf)'|\le1$ give at most $24u$ relative error in either mean. Cubing, division, weights, and compensated summation add $7u$. The outer scaled products, segment formation, and the change in $s$ add at most $14u$, for $45u<48u$. These are first-order allowances, with a separate absolute subnormal error term. The cubic allowance is restricted to $s\in[10^{-8},10^8]$, $t\le10^4$.
 
 <a id="r39"></a>
 ### Proposition 39. Finite time-ordering and coefficient-quadrature bounds
 
-**Provenance: Derived in NWQLib. Evidence: proved for finite Hermitian generators, nonnegative scalar schedules for the integral bound, and differentiable scalar schedules for the derivative bound.**
+**Origin: Derived in NWQLib. Evidence: proved for finite Hermitian generators, nonnegative scalar schedules for the integral bound, and differentiable scalar schedules for the derivative bound.**
 
 On a step $[\ell,r]$ of length $\Delta$, let $H(t)=a(t)T+b(t)V$ with finite Hermitian $T,V$, $A=\int_\ell^r a(t)\,dt$, $B=\int_\ell^r b(t)\,dt$, $M=e^{-i(AT+BV)}$, and $U$ be the exact time-ordered propagator. Let $C\ge\|[T,V]\|$ be a commutator bound.
 
@@ -979,7 +979,7 @@ If $\mu_T\ge\|T\|$, $\mu_V\ge\|V\|$, replacing the integrals by midpoint values 
 \frac{\Delta^3}{24}(A_2\mu_T+B_2\mu_V),\qquad A_2=\sup|a''|,\quad B_2=\sup|b''|.
 ```
 
-The code takes the per-step minimum of the available bounds, accumulates it with outward rounding and applies the unitary-distance cap of 2. Exact step integrals are used for the shifted cubic schedule and for the quadratic schedule with $\gamma=0$. Other schedules use the derivative allowance $w_{\rm der}$ alone, because their computed kinetic integrals are not certified upper endpoints. An unavailable commutator bound remains unavailable.
+The code takes the per-step minimum of the available bounds, accumulates it with outward rounding and applies the unitary-distance cap of 2. Exact step integrals are used for the shifted cubic schedule and for the quadratic schedule with $\gamma=0$. Other schedules use the derivative allowance $w_{\rm der}$ alone, because their computed kinetic integrals are not certified upper endpoints. Without a commutator bound, the time-ordering bound is unavailable.
 
 **Proof.** Put $Z(t)=-i\int_\ell^tH(v)\,dv$, $W(t)=e^{Z(t)}$. Its right logarithmic derivative is $\int_0^1e^{sZ}Z'e^{-sZ}\,ds$. Subtracting $Z'$ and integrating the commutator derivative bounds the difference by $\|[Z,Z']\|/2$. Duhamel's identity then gives
 
@@ -995,15 +995,15 @@ Each is an upper bound for the same local error, so their minimum is also an upp
 
 The midpoint result follows from the scalar midpoint remainder and $\|e^{-iX}-e^{-iY}\|\le\|X-Y\|$ for Hermitian $X,Y$.
 
-Stored exponents $\widehat A,\widehat B$ add a separate term $|\widehat A-A|\mu_T+|\widehat B-B|\mu_V$. Raw norms are required here because the identity parts carry physical phase. Exact integrated coefficients remove midpoint quadrature error, but generally leave time-ordering error.
+Computed exponents $\widehat A,\widehat B$ add a separate term $|\widehat A-A|\mu_T+|\widehat B-B|\mu_V$. Raw norms are required here because the identity parts carry physical phase. Exact integrated coefficients remove midpoint quadrature error, but generally leave time-ordering error.
 
 ### Derivation: QHD schedule values, integrals and derivative bounds {#qhd-schedule-arithmetic}
 
-The schedule records in `src/nwqlib/algorithms/qhd/schedules.py` give the point values, step integrals and derivative bounds that planning and `evolution_bound` use, with their rounding in units of $u=2^{-53}$. [Proposition 38](#r38) states the step integrals and [Proposition 39](#r39) the bounds that use them. The statements below are those of the methods' docstrings, with the notation of these propositions.
+The schedule classes in `src/nwqlib/algorithms/qhd/schedules.py` give the point values, step integrals and derivative bounds that planning and `evolution_bound` use, with their rounding in units of $u=2^{-53}$. [Proposition 38](#r38) states the step integrals and [Proposition 39](#r39) the bounds that use them. The statements below are those of the methods' docstrings, with the notation of these propositions.
 
-**Point values.** Each point-value allowance bounds the relative error $|\hat f-f|/f$ of a computed weight $\hat f$ against its exact value $f$, to first order in $u$. For the quadratic schedule, $b(t)=1+\gamma t^2$ is formed as $(\gamma t)t$ with two roundings, and adding the positive 1 makes a third, so the relative error of $b$ is at most $3u$. It is at least 1 and fails the range only by overflowing, for which the refusal names a shorter `total_time`. $a(t)=1/(1+\gamma t^2)$ is the reciprocal of $b$, one more rounding, so its relative error is at most $4u$, and it must be a positive normal binary64 number. That fails once $b(t)$ exceeds about $4.5\times10^{307}$, and the refusal names a shorter `total_time` as the remedy (`QuadraticSchedule.kinetic_weight`, `potential_weight`).
+**Point values.** Each point-value allowance bounds the relative error $|\hat f-f|/f$ of a computed weight $\hat f$ against its exact value $f$, to first order in $u$. For the quadratic schedule, $b(t)=1+\gamma t^2$ is formed as $(\gamma t)t$ with two roundings, and adding the positive 1 makes a third, so the relative error of $b$ is at most $3u$. It is at least 1 and can leave the range only by overflowing, in which case the error message names a shorter `total_time`. $a(t)=1/(1+\gamma t^2)$ is the reciprocal of $b$, one more rounding, so its relative error is at most $4u$, and it must be a positive normal binary64 number. That condition fails once $b(t)$ exceeds about $4.5\times10^{307}$, and the error message names a shorter `total_time` as the remedy (`QuadraticSchedule.kinetic_weight`, `potential_weight`).
 
-For the cubic schedule, $a(t)=2/(s+t^3)$ forms $t^3$ as $(tt)t$ with two roundings, and the positive sum and the division add one each, so the relative error of $a$ is at most $4u$. For the shifted cubic schedule, $a(t)=(2/(s+t))^3$ forms $x=2/(s+t)$ with two roundings, which cubing triples, and the two products add two more, so the relative error of $a$ is at most $8u$. In both, $a$ is positive for every $t$, so a result that is zero or subnormal lies outside the normal binary64 range and raises, for example the cubic $a(10^{103})$ with $s=1$, whose exact value is about $2\times10^{-309}$. A lower-range refusal recommends reducing $s$ and/or `total_time`, since both may need to change. An upper-range refusal recommends a larger $s$. Both cubic schedules have $b(t)=2t^3$. Doubling is exact, and $(2tt)t$ has two roundings, so the relative error of $b$ is at most $2u$. It is zero only at $t=0$, so another zero or a subnormal value raises. The refusal names fewer steps or a longer `total_time` below the range, and a shorter `total_time` above it (`kinetic_weight`, `potential_weight` of `CubicSchedule` and `ShiftedCubicSchedule`).
+For the cubic schedule, $a(t)=2/(s+t^3)$ forms $t^3$ as $(tt)t$ with two roundings, and the positive sum and the division add one each, so the relative error of $a$ is at most $4u$. For the shifted cubic schedule, $a(t)=(2/(s+t))^3$ forms $x=2/(s+t)$ with two roundings, which cubing triples, and the two products add two more, so the relative error of $a$ is at most $8u$. In both, $a$ is positive for every $t$, so a result that is zero or subnormal lies outside the normal binary64 range and raises, for example the cubic $a(10^{103})$ with $s=1$, whose exact value is about $2\times10^{-309}$. When the result falls below the range, the error message recommends reducing $s$, `total_time` or both, since both may need to change. Above the range, it recommends a larger $s$. Both cubic schedules have $b(t)=2t^3$. Doubling is exact, and $(2tt)t$ has two roundings, so the relative error of $b$ is at most $2u$. It is zero only at $t=0$, so another zero or a subnormal value raises. The error message names fewer steps or a longer `total_time` below the range, and a shorter `total_time` above it (`kinetic_weight`, `potential_weight` of `CubicSchedule` and `ShiftedCubicSchedule`).
 
 **Step integrals.** The computed value $\hat I$ of each step integral $I$ satisfies $|\hat I-I|\le c\,u\,I+2\lambda$ to first order in $u$, with $\lambda=2^{-1074}$ the smallest subnormal. The term $2\lambda$ covers the rounding of the positive parts and of their sum when $I$ is subnormal, where no binary64 result can have a small relative error, and below $\lambda/2$ zero is the correctly rounded result. On $\gamma,s\in[10^{-8},10^8]$ and $0\le t\le10^4$, the constant $c$ is 20 for the quadratic $A$ with $\gamma>0$ (32 over the whole finite binary64 range), 1 for the quadratic $A$ and $B$ with $\gamma=0$, 16 for the quadratic $B$, 48 for the cubic $A$, and 16 for the cubic $B$ and both shifted-cubic integrals. These constants assume round-to-nearest binary64 with gradual underflow, correctly rounded basic operations and square root, at most one ulp of error in $\arctan$, $\operatorname{atan2}$ and the cube root, and a relative error of at most $2u$ for `fsum` of nonnegative terms. Python's `math` module takes these functions from the platform C library, so they are platform assumptions (module docstring of `schedules.py`).
 
@@ -1021,7 +1021,7 @@ For the cubic schedule, the partial-fraction primitive in $y=t/s^{1/3}$,
 
 cancels catastrophically for large $y$, where its terms are much larger than the integral, of order $h/y^3$. The quadrature of Proposition 38 therefore works on positive integrands only. With $r=s^{1/3}$, on a segment below $r$ of length $h$ starting at $t_0$, $y=t_0/r+(h/r)q$ gives $A_{\rm low}=(2h/r^3)\operatorname{mean}_q 1/(1+y^3)$. On a segment $[p,v]$ above $r$ of length $h$, $x=r/t$ maps it to $[r/v,r/p]$, whose length $(r/p)(h/v)$ is formed without subtracting $r/p-r/v$, so $A_{\rm high}=(2h/(rpv))\operatorname{mean}_q x/(1+x^3)$ with $x=r/v+(r/p)(h/v)q$. Both means are over $q\in[0,1]$, each by the 16-point Gauss–Legendre rule on four equal panels, and carry at most $31u$. Each interval costs 64 or 128 integrand evaluations, however close its endpoints or small $s$. Outside $s\in[10^{-8},10^8]$ and $t\le10^4$, a transformed coordinate can underflow only where the tail it describes is itself below the smallest subnormal $2^{-1074}$ or negligible in a bounded mean. For example $r/p<2^{-1022}$ needs $p>2^{663}$ even for the smallest $s$, and the whole remaining tail is then at most $\int_p^\infty 2t^{-3}\,dt=p^{-2}<2^{-1326}$ (`CubicSchedule.kinetic_integral`).
 
-**Exact rationals.** The coefficient residual of `evolution_bound` compares the stored midpoint weights with the exact rational values $(a(t),b(t))$ at an exact rational $t\ge0$, so under the midpoint rule it needs no roundoff estimate. Under the integrated rule it compares the stored exponents $\widehat A=\Delta\hat a$ and $\widehat B=\Delta\hat b$, the exact products of the stored step duration $\Delta$ and the stored step averages $\hat a,\hat b$, with the nominal integrals $A$ and $B$ over the step $[\ell,r]$ of Proposition 39, exactly where those integrals are rational. From here on, $r$ is the right end of the step, not the cube root above. $B$ is rational for every schedule, $(r-\ell)+\gamma(r^3-\ell^3)/3$ for the quadratic schedule and $(r^4-\ell^4)/2$ for both cubic schedules. $A$ is rational for the quadratic schedule with $\gamma=0$, where $A=r-\ell$, and for the shifted cubic schedule, where $A=4((s+\ell)^{-2}-(s+r)^{-2})$ and the exact subtraction has no cancellation error. For $\gamma>0$, $A$ is an arctangent difference, and for the cubic schedule it mixes a logarithm and an arctangent. There the residual uses the first-order relative error constant of the kinetic integral, 32 over the whole finite binary64 range for the quadratic schedule and 48 on $s\in[10^{-8},10^8]$ and $0\le t\le10^4$ for the cubic schedule (`exact_weights`, `exact_integrals`).
+**Exact rationals.** The coefficient residual of `evolution_bound` compares the computed midpoint weights with the exact rational values $(a(t),b(t))$ at an exact rational $t\ge0$, so under the midpoint rule it needs no roundoff estimate. Under the integrated rule it compares the computed exponents $\widehat A=\Delta\hat a$ and $\widehat B=\Delta\hat b$, the exact products of the binary64 step duration $\Delta$ and the computed step averages $\hat a,\hat b$, with the nominal integrals $A$ and $B$ over the step $[\ell,r]$ of Proposition 39, exactly where those integrals are rational. From here on, $r$ is the right end of the step, not the cube root above. $B$ is rational for every schedule, $(r-\ell)+\gamma(r^3-\ell^3)/3$ for the quadratic schedule and $(r^4-\ell^4)/2$ for both cubic schedules. $A$ is rational for the quadratic schedule with $\gamma=0$, where $A=r-\ell$, and for the shifted cubic schedule, where $A=4((s+\ell)^{-2}-(s+r)^{-2})$ and the exact subtraction has no cancellation error. For $\gamma>0$, $A$ is an arctangent difference, and for the cubic schedule it mixes a logarithm and an arctangent. There the residual uses the first-order relative error constant of the kinetic integral, 32 over the whole finite binary64 range for the quadratic schedule and 48 on $s\in[10^{-8},10^8]$ and $0\le t\le10^4$ for the cubic schedule (`exact_weights`, `exact_integrals`).
 
 **Derivative bounds.** On a step $[\ell,r]$, with exact rationals $0\le\ell<r$ and with $\gamma$ or $s$ read as the exact rational of its binary64 value, each schedule returns exact bounds $(a_*,b_*,A_1,A_2,B_1,B_2)$ on $|a|$, $|b|$ and their first two derivatives. These are analytic bounds over the whole interval, not sampled maxima, and `evolution_bound` uses them in the time-ordering and midpoint-quadrature bounds of Proposition 39 (`derivative_bounds`).
 
@@ -1046,9 +1046,9 @@ For the shifted cubic schedule, $a=8/(s+t)^3$ decreases with $a'=-24/(s+t)^4$ an
 <a id="r40"></a>
 ### Proposition 40. Product bounds for the actual one-hot and binary steps
 
-**Provenance: Improved from a reference. Evidence: proved by applying Proposition 36 to the emitted groups.**
+**Origin: Improved from a reference. Evidence: proved by applying Proposition 36 to the factor groups of the built steps.**
 
-Let $C,D_T,D_V$ bound $\|[T,V]\|$, $\|[T,[T,V]]\|$, and $\|[V,[V,T]]\|$. For stored step exponents $\alpha,\beta$, the binary first-order and symmetric second-order steps have errors at most
+Let $C,D_T,D_V$ bound $\|[T,V]\|$, $\|[T,[T,V]]\|$, and $\|[V,[V,T]]\|$. For computed step exponents $\alpha,\beta$, the binary first-order and symmetric second-order steps have errors at most
 
 ```math
 s_{\rm bin,1}=\tfrac12|\alpha\beta|C,\qquad s_{\rm bin,2}=\frac{\alpha^2|\beta|D_T}{12}+\frac{|\alpha|\beta^2D_V}{24}.
@@ -1098,14 +1098,14 @@ The identities $[T,V]_{xy}=T_{xy}(V_y-V_x)$ and $[V,[V,T]]_{xy}=T_{xy}(V_x-V_y)^
 \|[T,[T,V]]\|\le\min(D_{T,0},2\tau C)=:D_T,\qquad \|[V,[V,T]]\|\le\min(2\nu C,D_{V,\rm edge})=:D_V.
 ```
 
-For the dense spectral kinetic, or when edge bounds are unavailable, take $C_{\rm edge}=D_{V,\rm edge}=+\infty$ in these selections, so the range bounds stand alone. Summing step errors uses unitarity and can be capped by two. A bound based only on $[T,V]$ would miss the one-hot link error even for constant $V$.
+For the dense spectral kinetic, or when edge bounds are unavailable, take $C_{\rm edge}=D_{V,\rm edge}=+\infty$ in these minima, so the range bounds stand alone. Summing step errors uses unitarity and can be capped by two. A bound based only on $[T,V]$ would miss the one-hot link error even for constant $V$.
 
 <a id="r41"></a>
 ### Proposition 41. Split-step roundoff and work at a fixed grid
 
-**Provenance: Derived in NWQLib. Evidence: a proved propagation formula conditional on local numerical-error bounds.**
+**Origin: Derived in NWQLib. Evidence: a proved propagation formula conditional on local numerical-error bounds.**
 
-The split-step kernel applies $e^{-iB_kV/2}e^{-iA_kT}e^{-iB_kV/2}$, with the kinetic factor diagonal in an orthonormal DST-I or Fourier basis. This is the symmetric form of Leng et al., Eq. (C.3), using [Strang's splitting][Strang]. Suppose the initial state error is at most $\delta_0$, and step $k$ has relative numerical implementation error at most $\rho_k$. A finite propagation bound is
+The split-step evaluation applies $e^{-iB_kV/2}e^{-iA_kT}e^{-iB_kV/2}$, with the kinetic factor diagonal in an orthonormal DST-I or Fourier basis. This is the symmetric form of Leng et al., Eq. (C.3), using [Strang's splitting][Strang]. Suppose the initial state error is at most $\delta_0$, and step $k$ has relative numerical implementation error at most $\rho_k$. A finite propagation bound is
 
 ```math
 \delta_{\rm finite}\le(1+\delta_0)\prod_k(1+\rho_k)-1.
@@ -1121,7 +1121,7 @@ For a fixed execution with $\delta_0=\delta_0^{(1)}+O(u^2)$ and $\rho_k=\rho_k^{
 
 where $M$ is the number of support tables, $W=\sum_S\max|V_S|$, $C_E=13$, and $C_T=5$. Here $L(K)=\lceil\log_2K\rceil$ for FFT and $\lceil\log_2(2(K+1))\rceil$ for DST-I. Each normalized transform is assumed to satisfy $\|\operatorname{fl}(\mathcal Fx)-\mathcal Fx\|\le C_TL(K)u\|x\|$. Squared errors on orthogonal tensor fibers add, so the same factor applies to the whole tensor. One-ulp sine and cosine evaluations contribute at most $2u$ to a phase, and complex multiplication contributes $\sqrt2\gamma_2$. The implementation rounds their first-order coefficient $2+2\sqrt2$ upward to 5. Forming $A_k$ and its eigenvalue product gives the two additional units beside $C_E$. Summing $M$ tables, forming $B_k/2$, and multiplying the potential give the $(M+1)W$ term, zero when there are no tables.
 
-The kernel observes smaller angle-error terms on its computed trajectory. If entrywise angle errors are $q_m$, their action on a unit input $z$ is at most $(\sum_m|z_m|^2q_m^2)^{1/2}$. The kinetic error term for axis $j$ is therefore $(C_E+2)u|A_k|\|E_jz\|$, with $z$ observed after that axis's forward transform. Each potential half has error term
+The evaluation also computes smaller, a posteriori angle-error terms on its computed trajectory. If entrywise angle errors are $q_m$, their action on a unit input $z$ is at most $(\sum_m|z_m|^2q_m^2)^{1/2}$. The kinetic error term for axis $j$ is therefore $(C_E+2)u|A_k|\|E_jz\|$, with $z$ observed after that axis's forward transform. Each potential half has error term
 
 ```math
 \eta_{V,k}(z)=u|B_k/2|\left(2\|Vz\|+mW\right),\qquad m=\max(M-1,0).
@@ -1129,13 +1129,13 @@ The kernel observes smaller angle-error terms on its computed trajectory. If ent
 
 The two halves use their respective inputs. A diagonal unitary preserves their entry magnitudes, so the input moment of step $k$'s second half can also serve step $k+1$'s first half. The implementation takes one initial potential moment and one after each step's kinetic factors, for $N+1$ moments over $N$ steps. Reusing a moment across the computed phase multiplication omits a product of local roundoff terms of second order, consistently with the budget's first-order scope. Absolute half-exponents are counted separately, so signed weights do not cancel their allowances.
 
-The moments are evaluated after scaling. For kinetic angles $\widehat\theta_m$, let $s_m$ be their computed mode populations and let $a$ be the computed cap $|A_k|\max E_j$. The kernel forms
+The moments are evaluated after scaling. For kinetic angles $\widehat\theta_m$, let $s_m$ be their computed mode populations and let $a$ be the computed cap $|A_k|\max E_j$. The evaluation forms
 
 ```math
 a\left(\frac{\sum_m(\widehat\theta_m/a)^2s_m}{\sum_ms_m}\right)^{1/2}.
 ```
 
-Monotonic rounding makes $a$ at least every $|\widehat\theta_m|$, so these squared ratios cannot overflow. For a potential moment on computed input $y$, let $w_x=\widehat V_x|y_x|$, $S=\sum_x|y_x|^2$, and $b=\max_x|w_x|$, with $\widehat V$ the stored sum of the support tables. The kernel forms
+Monotonic rounding makes $a$ at least every $|\widehat\theta_m|$, so these squared ratios cannot overflow. For a potential moment on computed input $y$, let $w_x=\widehat V_x|y_x|$, $S=\sum_x|y_x|^2$, and $b=\max_x|w_x|$, with $\widehat V$ the computed sum of the support tables. The evaluation forms
 
 ```math
 \mu=b\left(\frac{\sum_x(w_x/b)^2}{S}\right)^{1/2}.
@@ -1143,9 +1143,9 @@ Monotonic rounding makes $a$ at least every $|\widehat\theta_m|$, so these squar
 
 The scaled potential squares lie in $[0,1]$, and the largest is one when $b>0$. Thus squaring cannot overflow, and all scaled squares below the normal range together affect this sum by less than $D\nu_{\rm fp}$, where $D=K^d$. A zero input or zero weighted potential gives zero. The implementation caps each observed moment at its Plan maximum and replaces a nonfinite moment by that maximum. Roundoff of the moment reductions and the use of $\widehat V$ enter the error term at second order under the relative-error model. Subnormal weighted products have an additional absolute rounding scale, so scaling alone does not establish an all-orders relative-error bound.
 
-The returned state budget is the smaller of the observed first-order sum and the Plan's first-order sum. The former determines the executed tie window through Proposition 45 with $e=5u$. The Plan budget determines the mass window and the upper limit of the tie window. A state budget and a probability window have different units and are related by that conversion.
+The returned state budget is the smaller of the observed first-order sum and the Plan's first-order sum. The former determines the tie window used at execution, through Proposition 45 with $e=5u$. The Plan budget determines the mass window and the upper limit of the tie window. A state budget and the mass and tie windows derived from it have different units and are related by that conversion.
 
-The transform constant and elementary-function accuracy are qualification assumptions. Finite checks cannot prove a uniform transform bound for all lengths. The stored budgets omit higher-order products and local errors, and their relative terms require the stated normal-arithmetic premises. All-orders local bounds would be needed to put implementation values into the finite product bound. The numerical reference uses the stored duration and weights, analytic kinetic eigenvalues at stored spacings, and the exact sum of the stored potential tables. Schedule, grid, potential-evaluation, and splitting errors belong elsewhere.
+The transform constant and elementary-function accuracy are assumptions supported by finite checks, which cannot prove a uniform transform bound for all lengths. The recorded budgets omit higher-order products and local errors, and their relative terms require the stated normal-arithmetic premises. All-orders local bounds would be needed to put implementation values into the finite product bound. The numerical reference uses the binary64 duration and weights, analytic kinetic eigenvalues at the binary64 spacings, and the exact sum of the binary64 potential tables. Schedule, grid, potential-evaluation, and splitting errors lie outside this budget.
 
 The evolution has $O(NdD\log K)$ transform work. Including moment observations, `split_step.sizes` uses the work proxy
 
@@ -1153,14 +1153,14 @@ The evolution has $O(NdD\log K)$ transform work. Including moment observations, 
 W_{\rm start}+D(d+M+7)+dK+N\left(2dL(K)D+(2d+13)D+7dK+d+4\right).
 ```
 
-Here $W_{\rm start}$ is the start-vector work. Apart from the transform term, which is a nominal level count, each per-step term counts one unit per element of an array pass that the kernel runs, while the once-per-evolution terms are nominal counts. Per axis and step these are $K$ angle products, two passes of $K$ for the phases (the product with $-i$ and the exponential), and four passes of $K$ that weight the kinetic moment (the sum of the mode populations, the division of the angles by their cap, the square and the reduction against the populations), $7dK$ in all. The $D$-length terms include one population pass per axis and seven passes for each potential moment. The potential angles are formed once for both halves of a step while the formula counts $2D$ for them. The potential moment reuses the angle array, the kinetic moment keeps $K$ mode populations, and the kernel stores $N$ scalar step error terms, giving $O(D+dK+N)$ main numerical arrays besides its stored input tables. The work proxy estimates the selected array operations and transform levels, with backend-internal work and workspace subject to their separate qualifications. At fixed $N$ and grid it depends on neither the kinetic coefficient nor the potential range. The number of steps needed for a desired physical accuracy can depend strongly on both.
+Here $W_{\rm start}$ is the start-vector work. Apart from the transform term, which is a nominal level count, each per-step term counts one unit per element of an array pass that the evaluation runs, while the once-per-evolution terms are nominal counts. Per axis and step these are $K$ angle products, two passes of $K$ for the phases (the product with $-i$ and the exponential), and four passes of $K$ that weight the kinetic moment (the sum of the mode populations, the division of the angles by their cap, the square and the reduction against the populations), $7dK$ in all. The $D$-length terms include one population pass per axis and seven passes for each potential moment. The potential angles are formed once for both halves of a step while the formula counts $2D$ for them. The potential moment reuses the angle array, the kinetic moment keeps $K$ mode populations, and the evaluation keeps $N$ scalar step error terms, giving $O(D+dK+N)$ main numerical arrays besides its input tables. The work proxy estimates these array operations and transform levels. The backend's internal work and workspace rest on separate assumptions. At fixed $N$ and grid the work proxy depends on neither the kinetic coefficient nor the potential range. The number of steps needed for a desired physical accuracy can depend strongly on both.
 
 <a id="r42"></a>
 ### Proposition 42. Compensated running phase total and the phase condition for kept states {#proposition-42-a-compensated-phase-ledger-and-phase-sensitive-admission}
 
-**Provenance: Improved from a reference. Evidence: proved under the stated floating-point model.**
+**Origin: Improved from a reference. Evidence: proved under the stated floating-point model.**
 
-Consider the exact identity phase of the stored one-hot discrete model,
+Consider the exact identity phase of the one-hot discrete model, with its binary64 parameters read as exact reals,
 
 ```math
 \Phi=-\sum_k\Delta t\left(a_k\sum_jh_j^{-2}+b_kc+b_k\sum_{S,r}2^{-|S|}v_{S,r}\right).
@@ -1176,25 +1176,25 @@ The implementation accumulates its contributions by compensated summation in a r
 D_{\rm form}=\eta_2(S_C+S_P)+\eta_KS_K,\qquad E_{\rm ledger}=D_{\rm form}+\beta_M(S_C+S_P+S_K+D_{\rm form}).
 ```
 
-Here $E_{\rm ledger}$ is the allowance of the running phase total, $M$ counts recorded contributions, including zero events for omitted identities, and an empty running total has allowance zero. The displayed expression bounds the arithmetic of accepted contributions using the original absolute sums. A constant or projector identity whose required products fall below the normal binary64 range is recorded as a zero event, and its exact omitted phase magnitude is added once to $E_{\rm ledger}$.
+Here $E_{\rm ledger}$ is the allowance of the running phase total, $M$ counts recorded contributions, including a zero contribution for each omitted identity, and an empty running total has allowance zero. The displayed expression bounds the arithmetic of the kept contributions using the original absolute sums. A constant or projector identity whose required products fall below the normal binary64 range is recorded as a zero contribution, and its exact omitted phase magnitude is added once to $E_{\rm ledger}$.
 
-For a potential projector $P$ on support size $s\ge1$, let $Z=tbv$ be its exact intended exponent from the stored duration, weight, and table value. A lower-range failure omits the occurrence and its identity contribution together. Since $P=(P-2^{-s}I)+2^{-s}I$ and $\|P-2^{-s}I\|=1-2^{-s}$, sufficient error terms are
+For a potential projector $P$ on support size $s\ge1$, let $Z=tbv$ be its exact intended exponent from the binary64 duration, weight, and table value. When the exponent falls below the normal range, the construction omits the occurrence together with its identity contribution. Since $P=(P-2^{-s}I)+2^{-s}I$ and $\|P-2^{-s}I\|=1-2^{-s}$, sufficient error terms are
 
 ```math
 E_{\rm projector}=(1-2^{-s})|Z|,\qquad E_{\rm identity}=2^{-s}|Z|.
 ```
 
-Their sum is $|Z|$, the bound for dropping the full projector. The first term is already included in the error source `rotation_pruning`, and the second enters the error source `identity_phase` through the running phase total. Both second-order halves count as occurrences. An omitted scalar constant contributes $|\Delta t\,b_kc|$ only to the identity term. The construction keeps the original table values, so a subnormal value amplified into accepted products need not be omitted.
+Their sum is $|Z|$, the bound for dropping the full projector. The first term is already included in the error source `rotation_pruning`, and the second enters the error source `identity_phase` through the running phase total. Both second-order halves count as occurrences. An omitted scalar constant contributes $|\Delta t\,b_kc|$ only to the identity term. The construction keeps the original table values, so a subnormal table value whose amplified products lie in the normal range need not be omitted.
 
-**Proof.** Each constant or projector contribution has two rounded products, giving $\eta_2$. A kinetic coefficient uses a rounded square, division, compensated sum over $d$ coordinates, and duration product. Multiplying their relative factors gives $\eta_K$. Compensated accumulation has error bounded by $u|X|+\gamma_{M-1}^2A$, with the slightly enlarged $\beta_MA$ covering its final rounding. This is the summation bound of [Ogita, Rump and Oishi, Proposition 4.5][CompSum]. The absolute sum of formed contributions is at most $S_C+S_P+S_K+D_{\rm form}$, which proves the displayed bound on the running total. An omitted contribution adds zero to the accumulator, so the same bound holds for the accepted contributions, and the triangle inequality adds each omitted phase $|a|$. Cancellation does not reduce the formation term. Every operation used to evaluate the positive bound is rounded outward in the implementation.
+**Proof.** Each constant or projector contribution has two rounded products, giving $\eta_2$. A kinetic coefficient uses a rounded square, division, compensated sum over $d$ coordinates, and duration product. Multiplying their relative factors gives $\eta_K$. Compensated accumulation has error bounded by $u|X|+\gamma_{M-1}^2A$, with the slightly enlarged $\beta_MA$ covering its final rounding. This is the summation bound of [Ogita, Rump and Oishi, Proposition 4.5][CompSum]. The absolute sum of formed contributions is at most $S_C+S_P+S_K+D_{\rm form}$, which proves the displayed bound on the running total. An omitted contribution adds zero to the accumulator, so the same bound holds for the kept contributions, and the triangle inequality adds each omitted phase $|a|$. Cancellation does not reduce the formation term. Every operation used to evaluate the positive bound is rounded outward in the implementation.
 
-Qiskit circuit phase assignments need an additional bound because phases are repeatedly reduced modulo the stored binary64 approximation $\widehat\tau$ to $2\pi$. Let $\lambda=2^{-1074}$, $\Delta_\tau=2^{-51}\ge|\widehat\tau-2\pi|$. For an intended increment of magnitude $v$ with formation error $e$, an existing stored phase in $[0,\widehat\tau]$ gives
+Qiskit circuit phase assignments need an additional bound because phases are repeatedly reduced modulo the binary64 approximation $\widehat\tau$ to $2\pi$. Let $\lambda=2^{-1074}$, $\Delta_\tau=2^{-51}\ge|\widehat\tau-2\pi|$. For an intended increment of magnitude $v$ with formation error $e$, a phase already held by the circuit in $[0,\widehat\tau]$ gives
 
 ```math
 H=\widehat\tau+v+e,\quad A=uH+\lambda,\quad K=(H+A)/\widehat\tau+1,\quad C(v,e)=e+A+\Delta_\tau K+\Delta_\tau.
 ```
 
-The terms respectively account for increment error, addition, use of the approximate period at a bounded reduction quotient, and rounding of the remainder. Since $6<\widehat\tau<7$, $\Delta_\tau=4u$, and $e\le\lambda$, the coefficient of $v$ is $u+4u(1+u)/\widehat\tau<2u$. The constant contribution is below $19u$ plus terms smaller than $u$, giving $C(v,e)\le2uv+20u$. Projector scaling uses $e=\lambda$, and the final stored phase is an exact input to its assignment, with $e=0$. Its prior formation error is covered separately by $E_{\rm ledger}$. Circular phase errors add. For $B$ projector assignments with absolute sum $Y$, and the final physical-phase assignment, this yields the implementation's conservative bound
+The terms respectively account for increment error, addition, use of the approximate period at a bounded reduction quotient, and rounding of the remainder. Since $6<\widehat\tau<7$, $\Delta_\tau=4u$, and $e\le\lambda$, the coefficient of $v$ is $u+4u(1+u)/\widehat\tau<2u$. The constant contribution is below $19u$ plus terms smaller than $u$, giving $C(v,e)\le2uv+20u$. Projector scaling uses $e=\lambda$, and the final binary64 phase is an exact input to its assignment, with $e=0$. Its prior formation error is covered separately by $E_{\rm ledger}$. Circular phase errors add. For $B$ projector assignments with absolute sum $Y$, and the final physical-phase assignment, this yields the implementation's conservative bound
 
 ```math
 E_{\rm native}=E_{\rm ledger}+2u(Y+|\widehat\Phi|)+20u(B+1).
@@ -1204,7 +1204,7 @@ This last form uses the specified Qiskit 2.6.0 phase setter and gradual underflo
 
 The objective constant enters the running phase total as a global phase, so a large phase-sensitive bound can include error that leaves the ideal readout probabilities unchanged and does not by itself establish poor readout accuracy.
 
-For one selected Walsh block, let $X=tw$ be its exact intended exponent, $x=\operatorname{fl}(tw)$, $\epsilon_x\ge|x-X|$, and $\overline c_0$ the accepted identity coefficient. Let $c_0^*$ be the corresponding exact coefficient and $\rho_0\ge|\overline c_0-c_0^*|$. Write $\overline\phi$ for the emitted identity phase, zero when its product is omitted. Then
+For one selected Walsh block, let $X=tw$ be its exact intended exponent, $x=\operatorname{fl}(tw)$, $\epsilon_x\ge|x-X|$, and $\overline c_0$ the computed identity coefficient. Let $c_0^*$ be the corresponding exact coefficient and $\rho_0\ge|\overline c_0-c_0^*|$. Write $\overline\phi$ for the identity phase in the built circuit, zero when its product is omitted. Then
 
 ```math
 e_W=|X|\rho_0+\epsilon_x|\overline c_0|+|\overline\phi+x\overline c_0|,\qquad F_W=\sum_{\text{Walsh blocks}}e_W.
@@ -1212,15 +1212,15 @@ e_W=|X|\rho_0+\epsilon_x|\overline c_0|+|\overline\phi+x\overline c_0|,\qquad F_
 
 Indeed $\overline\phi+Xc_0^*=(\overline\phi+x\overline c_0)+(X-x)\overline c_0+X(c_0^*-\overline c_0)$. The final absolute term is an exact scalar discrepancy covering either product rounding or omission. For a potential table of length $2^n$, $\rho_0=\gamma_n a+d_0$, where $a$ is its mean absolute value and $d_0$ its identity normalization omission, as in Proposition 44. An analytic kinetic table uses its coefficient enclosure instead. The implementation evaluates the allowance upward, using $|X|\le|x|+\epsilon_x$ and $\epsilon_x=u|tw|+\lambda$, the latter conservatively counting the half-ulp underflow term as a full $\lambda$.
 
-For reconstruction from the emitted identity phase and kept rotation angles, put $T_W=\frac12\sum_{\rm kept}|\theta_m|$. An $n$-level inverse Walsh butterfly, halving, and final subtraction give the per-entry allowance
+For reconstruction from the identity phase and kept rotation angles of the built circuit, put $T_W=\frac12\sum_{\rm kept}|\theta_m|$. An $n$-level inverse Walsh butterfly, halving, and final subtraction give the per-entry allowance
 
 ```math
 R_{W,\mathrm{block}}=u|\overline\phi|+\gamma_{n+1}T_W+2\lambda,\qquad R_W=\sum_{\text{Walsh blocks}}R_{W,\mathrm{block}}.
 ```
 
-The butterfly half-sum error is at most $\gamma_nT_W$. Combining the final relative rounding with it uses $\gamma_n+u(1+\gamma_n)\le\gamma_{n+1}$, and the absolute halving and subtraction terms fit within $2\lambda$. Reconstruction uses the actual emitted identity and kept angles. Omitted coefficients and virtual pruned angles do not enter $T_W$.
+The butterfly half-sum error is at most $\gamma_nT_W$. Combining the final relative rounding with it uses $\gamma_n+u(1+\gamma_n)\le\gamma_{n+1}$, and the absolute halving and subtraction terms fit within $2\lambda$. Reconstruction uses the identity phase and kept angles of the built circuit. Omitted coefficients and virtual pruned angles do not enter $T_W$.
 
-For Qiskit circuit phase assignments in the binary encoding, let $Y_W$ be the sum of emitted identity-phase magnitudes and $B_W$ the Walsh-block count. The allowance is
+For Qiskit circuit phase assignments in the binary encoding, let $Y_W$ be the sum of the identity-phase magnitudes in the built circuit and $B_W$ the Walsh-block count. The allowance is
 
 ```math
 E_{\rm native,bin}=E_{\rm ledger}+F_W+2u(Y_W+|\widehat\Phi|)+20u(B_W+1).
@@ -1228,14 +1228,14 @@ E_{\rm native,bin}=E_{\rm ledger}+F_W+2u(Y_W+|\widehat\Phi|)+20u(B_W+1).
 
 The `ir_product` phase comparison instead includes $F_W+R_W$ in addition to the allowance of the scalar running phase total. $R_W$ is not a Qiskit circuit error. Dense-diagonal wrapping and synthesis have their separate error-budget entry, whose unavailable status is not resolved by these Walsh formulas.
 
-The floating-point budget of `theory_flavor="ir_product"` on the binary encoding describes state operations on computed phase arrays and selected stored QFT angles. Its first-order arithmetic model excludes phase-array formation and the discrepancy between a reconstructed Walsh array and the exact action of the stored rotations. The phase allowance checked for a kept state includes $R_W$, but $R_W$ is not propagated into the readout accuracy of `theory_flavor="ir_product"`, the mode tie window or verification uncertainty.
+The floating-point budget of `theory_flavor="ir_product"` on the binary encoding describes state operations on computed phase arrays and the chosen binary64 QFT angles. Its first-order arithmetic model excludes phase-array formation and the discrepancy between a reconstructed Walsh array and the exact action of the rotations in the built circuit. The phase allowance checked for a kept state includes $R_W$, but $R_W$ is not propagated into the readout accuracy of `theory_flavor="ir_product"`, the mode tie window or verification uncertainty.
 
-Finally, a phase uncertainty $E$ changes a unit vector by at most $2\sin(\min(E,\pi)/2)$. This follows from $|e^{i\theta}-1|=2|\sin(\theta/2)|$. Once $E\ge\pi$, the bound is the full diameter two. A kept state is therefore accepted only with a finite phase allowance below $\pi$. Probabilities are invariant under a common phase, so this criterion concerns phase-sensitive states.
+Finally, a phase uncertainty $E$ changes a unit vector by at most $2\sin(\min(E,\pi)/2)$. This follows from $|e^{i\theta}-1|=2|\sin(\theta/2)|$. Once $E\ge\pi$, the bound is the full diameter two. A request to keep the state is therefore accepted only when its phase allowance is finite and below $\pi$. Probabilities are invariant under a common phase, so this criterion concerns phase-sensitive states.
 
 <a id="r43"></a>
 ### Proposition 43. Signed binary momentum and sparse kinetic polynomials
 
-**Provenance: Improved from a reference. Evidence: proved from the periodic spectrum and bit expansion.**
+**Origin: Improved from a reference. Evidence: proved from the periodic spectrum and bit expansion.**
 
 For $K=2^b$, the Fourier index is signed: $q=k$ for $k<K/2$, and $q=k-K$ otherwise. The spectral kinetic is $E_q^{\rm sp}=2\pi^2q^2/L^2$, with $L=Kh$. Let $w_\ell=2^\ell$ below the sign bit and $w_{b-1}=-2^{b-1}$. Then
 
@@ -1263,12 +1263,12 @@ The model difference remains substantive. For $|q|\le K/2$,
 
 Indeed $x^2-\sin^2x\le x^4/3$ for $0\le x\le\pi/2$, by $\sin x\ge x-x^3/6\ge0$, and substitute $x=\pi|q|h/L$. Fixed low momenta converge quadratically in $h$, while the Nyquist ratio is $\pi^2/4$. A trajectory comparison requires $\int|a(t)|\|(T_{\rm sp}-T_{\rm FD})\psi_{\rm sp}(t)\|dt$, obtained by Duhamel, or a valid upper bound on it. Initial low momentum alone does not control that integral in a nonconstant potential.
 
-The circuit error budget therefore reports `kinetic_model` as unavailable for a spectral kinetic, with no numerical value, and as not applicable for the finite-difference kinetic. The later circuit entries compare with the selected finite model. Including `kinetic_model` changes the reference to the finite-difference model, and its missing bound prevents that comparison from becoming complete. The objective-gap error model also declares this source for a spectral choice, without promoting a state-norm allowance into an optimization bound.
+The circuit error budget therefore reports `kinetic_model` as unavailable for a spectral kinetic, with no numerical value, and as not applicable for the finite-difference kinetic. The later circuit entries compare with the chosen finite model. Including `kinetic_model` changes the reference to the finite-difference model, and its missing bound prevents that comparison from becoming complete. The objective-gap error model also declares this source for a spectral choice, without promoting a state-norm allowance into an optimization bound.
 
 <a id="r44"></a>
 ### Proposition 44. Binary phase synthesis, bit reversal, and truncation budgets
 
-**Provenance: Derived in NWQLib. Evidence: proved for the selected diagonal and Fourier products.**
+**Origin: Derived in NWQLib. Evidence: proved for the selected diagonal and Fourier products.**
 
 For a diagonal table $V=\sum_m c_mZ_m$,
 
@@ -1276,19 +1276,19 @@ For a diagonal table $V=\sum_m c_mZ_m$,
 e^{-ixV}=e^{-ixc_0}\prod_{m\ne0}e^{-ixc_mZ_m}.
 ```
 
-A mask of weight $w$ needs $2(w-1)$ CX gates and one $R_z(2xc_m)$. A nonzero dense diagonal on $n$ qubits has the structural count $2^n-2$ CX gates. `"min_cx"`, the default of `BinarySynthesis.potential` and `BinarySynthesis.kinetic_phase`, chooses the smaller count of the accepted constructions at that exponent, selecting Walsh rotations on a tie. If all dense phases are omitted, its construction costs zero. This comparison concerns these two decompositions and does not imply minimum T count.
+A mask of weight $w$ needs $2(w-1)$ CX gates and one $R_z(2xc_m)$. A nonzero dense diagonal on $n$ qubits has the structural count $2^n-2$ CX gates. `"min_cx"`, the default of `BinarySynthesis.potential` and `BinarySynthesis.kinetic_phase`, chooses the smaller count of the constructions that pass the range checks at that exponent, selecting Walsh rotations on a tie. If all dense phases are omitted, its construction costs zero. This comparison concerns these two decompositions and does not imply minimum T count.
 
 **Proof and errors.** Commutativity gives the factorization. Computing the parity onto a pivot and uncomputing uses two ladders of $w-1$ CX gates. Threshold-pruning a computed rotation angle $\theta$ changes its factor by $2|\sin(\theta/4)|\le|\theta|/2$, and these error terms add by unitary telescoping.
 
-For a potential table of length $N=2^n$, let $\widehat s_m$ be its finite unnormalized Walsh butterfly outputs, $z_m=\widehat s_m/N$, and $c_m^*$ the exact Walsh coefficients of the stored table. Define $a=N^{-1}\sum_z|v_z|$. Every summand passes through $n$ rounded additions or subtractions, so $|z_m-c_m^*|\le\gamma_n a$ for $n u<1$. Exact subnormal sums and differences preserve that model. The normalization accepts $\overline c_m=z_m$ when $z_m=0$ or $|z_m|\ge\nu_{\rm fp}$, and otherwise sets $\overline c_m=0$ before an underflowing division. Thus
+For a potential table of length $N=2^n$, let $\widehat s_m$ be its finite unnormalized Walsh butterfly outputs, $z_m=\widehat s_m/N$, and $c_m^*$ the exact Walsh coefficients of the binary64 table. Define $a=N^{-1}\sum_z|v_z|$. Every summand passes through $n$ rounded additions or subtractions, so $|z_m-c_m^*|\le\gamma_n a$ for $n u<1$. Exact subnormal sums and differences preserve that model. The normalization sets $\overline c_m=z_m$ when $z_m=0$ or $|z_m|\ge\nu_{\rm fp}$, and otherwise sets $\overline c_m=0$ before an underflowing division. Thus
 
 ```math
 d_m=|\overline c_m-z_m|,\qquad |\overline c_m-c_m^*|\le\rho_m:=\gamma_n a+d_m.
 ```
 
-The accepted normal division is an exact power-of-two scaling. A computed zero still carries the $\gamma_n a$ term. In particular, the table $(\nu_{\rm fp},\nu_{\rm fp}+\lambda)$ has exact nonidentity coefficient $-\lambda/2$, whose positive omission error term must survive conversion to binary64. A dense-only table uses its values directly and needs no Walsh transform or Walsh range check.
+A division whose result lies in the normal range is an exact power-of-two scaling. A computed zero still carries the $\gamma_n a$ term. In particular, the table $(\nu_{\rm fp},\nu_{\rm fp}+\lambda)$ has exact nonidentity coefficient $-\lambda/2$, whose positive omission error term must survive conversion to binary64. A dense-only table uses its values directly and needs no Walsh transform or Walsh range check.
 
-For one block let $X=tw$ be its exact intended exponent, $x=\operatorname{fl}(tw)$ its accepted exponent, and $\epsilon_x=|x-X|$. With
+For one block let $X=tw$ be its exact intended exponent, $x=\operatorname{fl}(tw)$ its computed exponent, and $\epsilon_x=|x-X|$. With
 
 ```math
 C=\sum_{m\ne0}|\overline c_m|,\qquad B_c=\sum_{m\ne0}\rho_m=(N-1)\gamma_n a+\sum_{m\ne0}d_m,
@@ -1300,11 +1300,11 @@ the nonidentity Walsh formation error is at most
 \min\left(2,\ |X|B_c+(\epsilon_x+u|x|)C\right).
 ```
 
-To obtain it, split each phase discrepancy into coefficient error $X(\overline c_m-c_m^*)$, exponent error $(x-X)\overline c_m$, and rotation-product error. The doubled exponent is accepted and exact. A normal computed angle has half-angle error at most $u|x\overline c_m|$. A lower-range rotation is compared at this stage through its exact virtual angle $2x\overline c_m$, with zero product error, then counted for its removal in `rotation_pruning`. Summing all nonidentity masks, including computed zeros and spurious nonzeros, proves the bound. Analytic kinetic Walsh coefficients use their individual enclosure radii in $B_c$. The identity formation $F_W$ is counted separately by Proposition 42.
+To obtain it, split each phase discrepancy into coefficient error $X(\overline c_m-c_m^*)$, exponent error $(x-X)\overline c_m$, and rotation-product error. The doubled exponent passes the range check and is exact. A normal computed angle has half-angle error at most $u|x\overline c_m|$. A rotation whose angle falls below the normal range is compared at this stage through its exact virtual angle $2x\overline c_m$, with zero product error, then counted for its removal in `rotation_pruning`. Summing all nonidentity masks, including computed zeros and spurious nonzeros, proves the bound. Analytic kinetic Walsh coefficients use their individual enclosure radii in $B_c$. The identity formation $F_W$ is counted separately by Proposition 42.
 
-A range-omitted Walsh rotation contributes $|x\overline c_m|$ to `rotation_pruning`. For dense phases, range omission contributes $\max_{z\,\mathrm{omitted}}|xv_z|$ per block, with an empty maximum equal to zero, because the omitted generator is diagonal. The dense potential formation allowance is $(\epsilon_x+u|x|)\max_z|v_z|$. For accepted kinetic energies $\overline E_q$ with maximum magnitude $M_E$ and error radius $H_E\ge\max_q|\overline E_q-E_q|$, it is $(\epsilon_x+u|x|)M_E+|X|H_E$. These formation allowances compare range-omitted products through their exact virtual values. Coefficient omissions, rotation or dense-entry omissions, and omitted identity products therefore enter `angle_formation`, `rotation_pruning`, and $F_W$, respectively, without counting the same removal twice. Only the selected construction contributes omission counts and error terms. Dense wrapping and its later synthesis remain separate.
+A range-omitted Walsh rotation contributes $|x\overline c_m|$ to `rotation_pruning`. For dense phases, range omission contributes $\max_{z\,\mathrm{omitted}}|xv_z|$ per block, with an empty maximum equal to zero, because the omitted generator is diagonal. The dense potential formation allowance is $(\epsilon_x+u|x|)\max_z|v_z|$. For the computed kinetic energies $\overline E_q$ with maximum magnitude $M_E$ and error radius $H_E\ge\max_q|\overline E_q-E_q|$, it is $(\epsilon_x+u|x|)M_E+|X|H_E$. These formation allowances compare range-omitted products through their exact virtual values. Coefficient omissions, rotation or dense-entry omissions, and omitted identity products therefore enter `angle_formation`, `rotation_pruning`, and $F_W$, respectively, without counting the same removal twice. Only the construction that is used contributes omission counts and error terms. Dense wrapping and its later synthesis remain separate.
 
-Let $W=RF$ be the swap-free Fourier transform, where $R^2=I$ reverses the address bits. Then $W^\dagger(RDR)W=F^\dagger DF$. Relabeling the phase table therefore removes both swap layers exactly. The positive and negative Fourier conventions also give the same kinetic conjugation because both selected energy tables satisfy $E_{-k\bmod K}=E_k$.
+Let $W=RF$ be the swap-free Fourier transform, where $R^2=I$ reverses the address bits. Then $W^\dagger(RDR)W=F^\dagger DF$. Relabeling the phase table therefore removes both swap layers exactly. The positive and negative Fourier conventions also give the same kinetic conjugation because both choices of kinetic energy table satisfy $E_{-k\bmod K}=E_k$.
 
 If controlled phases at separations $r>m$ are omitted from a $b$-qubit Fourier transform, then
 
@@ -1314,18 +1314,18 @@ e_F\le\min\left(2,\sum_{r=m+1}^{b-1}(b-r)\,2\sin\frac{\pi}{2^{r+1}}\right).
 
 Each omitted controlled phase has difference norm $2|\sin(\theta/2)|$. Counting the $b-r$ occurrences and telescoping proves the bound. Replacing $F^\dagger DF$ by $\widetilde F^\dagger D\widetilde F$ costs at most $2e_F$, hence at most $2dNe_F$ over $N$ time steps and $d$ variables. This is an explicit norm budget for the approximate-QFT construction of [Coppersmith][Coppersmith].
 
-The stored QFT angles also differ from those using mathematical $\pi$. With $\epsilon_\pi\ge|\widehat\pi-\pi|$, exact accepted power-of-two scaling and the controlled-phase distance bound give
+The binary64 QFT angles also differ from those computed with the exact $\pi$. With $\epsilon_\pi\ge|\widehat\pi-\pi|$, exact power-of-two scaling and the controlled-phase distance bound give
 
 ```math
 E_{Q,\pi}\le\min\left(2,\ 2dN\epsilon_\pi\left(b-2+2^{1-b}\right)\right).
 ```
 
-Here $\sum_{r=1}^{b-1}(b-r)2^{-r}=b-2+2^{1-b}$, zero for $b=1$, and the factor two counts each kinetic conjugation's forward and inverse QFT. `angle_formation` includes this full-QFT error term. The `aqft` entry compares the full stored-angle transform with its truncation. Kinetic trigonometric enclosures and evaluation of the AQFT bound remain conditional on their stated elementary-function accuracy assumptions. The implementation evaluates $a$, $C$ and the finite-difference kinetic radii as upper binary64 values, correctly rounded sums moved upward and interval products propagated outward, and converts them exactly to rationals for the remaining chain, so the stored $a$ and $C$ may exceed their exact values by a few units in the last place and the kinetic radii in $B_c$ by more, and the allowance cannot be smaller than its exact-rational value.
+Here $\sum_{r=1}^{b-1}(b-r)2^{-r}=b-2+2^{1-b}$, zero for $b=1$, and the factor two counts each kinetic conjugation's forward and inverse QFT. `angle_formation` includes this full-QFT error term. The `aqft` entry compares the full transform, built with binary64 angles, with its truncation. Kinetic trigonometric enclosures and evaluation of the AQFT bound remain conditional on their stated elementary-function accuracy assumptions. The implementation evaluates $a$, $C$ and the finite-difference kinetic radii as upper binary64 values, correctly rounded sums moved upward and interval products propagated outward, and converts them exactly to rationals for the remaining chain, so the computed $a$ and $C$ may exceed their exact values by a few units in the last place and the kinetic radii in $B_c$ by more, and the allowance cannot be smaller than its exact-rational value.
 
 <a id="r45"></a>
 ### Proposition 45. Probability-difference windows for mode selection
 
-**Provenance: Derived in NWQLib. Evidence: proved conditional on a state-error bound.**
+**Origin: Derived in NWQLib. Evidence: proved conditional on a state-error bound.**
 
 If $\|\widehat\psi-e^{i\phi}\psi\|\le\delta$, $\|\psi\|=1$, and each computed probability has relative evaluation error at most $e$, then every computed difference obeys
 
@@ -1335,9 +1335,9 @@ If $\|\widehat\psi-e^{i\phi}\psi\|\le\delta$, $\|\psi\|=1$, and each computed pr
 
 **Proof.** Let $D_{ij}=|i\rangle\langle i|-|j\rangle\langle j|$, which has norm one. Expanding its expectation in $\widehat\psi=e^{i\phi}\psi+\epsilon$ bounds the state term by $2\delta\sqrt{p_i+p_j}+\delta^2\le2\delta+\delta^2$. The two evaluation errors add at most $e(|\widehat\psi_i|^2+|\widehat\psi_j|^2)\le e(1+\delta)^2$. This avoids adding two independent full-state probability bounds.
 
-The same expansion bounds mass error by $2\delta+\delta^2$. Evaluation of $D$ absolute squares and their sum contributes $(D+4)u(1+\delta)^2$ to first order for each classical kernel. Its pairwise tie conversion instead uses $e=5u$ in the displayed difference bound. The split-step route uses the observed first-order state budget of Proposition 41 for the tie window and its Plan budget for the mass window and the upper limit of the tie window. The other classical kernels, `theory_flavor="schrodinger"` and `theory_flavor="ir_product"`, use their Plan state budget for both conversions. These conversions inherit the premises and approximation order of their input budget. The direct one-hot product kernel applies the analytic projector and hopping blocks at their stored angles, and its first-order state-operation budget is $u(\mathrm{start}+10B_P+6B_H+5)$ for $B_P$ projector and $B_H$ hopping occurrences (`theory.onehot_product_state_error`).
+The same expansion bounds mass error by $2\delta+\delta^2$. Evaluation of $D$ absolute squares and their sum contributes $(D+4)u(1+\delta)^2$ to first order for each classical evaluation. Its pairwise tie conversion instead uses $e=5u$ in the displayed difference bound. The split-step evaluation uses the observed first-order state budget of Proposition 41 for the tie window and its Plan budget for the mass window and the upper limit of the tie window. The other classical evaluations, `theory_flavor="schrodinger"` and `theory_flavor="ir_product"`, use their Plan state budget for both conversions. These conversions inherit the premises and approximation order of their input budget. The direct one-hot product evaluation applies the analytic projector and hopping blocks at their binary64 angles, and its first-order state-operation budget is $u(\mathrm{start}+10B_P+6B_H+5)$ for $B_P$ projector and $B_H$ hopping occurrences (`theory.onehot_product_state_error`).
 
-The displayed inequality concerns the exact difference of the computed probabilities. The implemented comparison forms `peak - probability` in binary64 and does not add a separate subtraction-rounding term, so the formula is not an outward certificate for that complete comparison. Exact count populations are compared as integers and use no floating-point tie window. A mode selected within a nonzero window represents an unresolved probability ordering. The window is unrelated to objective optimality.
+The displayed inequality concerns the exact difference of the computed probabilities. The implemented comparison forms `peak - probability` in binary64 and does not add a separate subtraction-rounding term, so the formula is not an outward certificate for that complete comparison. Exact outcome counts are compared as integers and use no floating-point tie window. A mode selected within a nonzero window represents an unresolved probability ordering. The window is unrelated to objective optimality.
 
 Suppose $q_i$ are computed probabilities and $p_i$ are their model values on the observed valid set. Assume that every pairwise difference has error at most $W$. If the selected point $s$ satisfies $\operatorname{RN}(q_m-q_s)\le W$ for a computed maximizer $m$, then its model-probability deficit from any model maximizer in that set is at most $W+W/(1-u)$, where $u=2^{-53}$, provided the subtraction is finite. If that subtraction is exact, the bound is $2W$. For normalized model probabilities, either bound can be capped at 1.
 
@@ -1353,12 +1353,12 @@ Since $q_t\le q_m$,
  p_t-p_s\le q_t-q_s+W\le q_m-q_s+W.
 ```
 
-Put $d=q_m-q_s\ge0$. When subtraction is normal and finite, $\operatorname{RN}(d)=d(1+\delta)$ with $|\delta|\le u$. The actual acceptance test gives $d\le W/(1-u)$. A subnormal difference of binary64 inputs is exact. In either case the stated bound $W+W/(1-u)$ follows. If $q_s\ge q_m/2$, Sterbenz's exact-subtraction condition applies and gives $d\le W$, hence $2W$. The premises say nothing about an unobserved outcome. Counts use $W=0$ for their empirical frequencies, not for the unknown sampling distribution. With an unavailable window there is no supplied numerical $W$ premise.
+Put $d=q_m-q_s\ge0$. When subtraction is normal and finite, $\operatorname{RN}(d)=d(1+\delta)$ with $|\delta|\le u$. The implemented test $\operatorname{RN}(d)\le W$ then gives $d\le W/(1-u)$. A subnormal difference of binary64 inputs is exact. In either case the stated bound $W+W/(1-u)$ follows. If $q_s\ge q_m/2$, Sterbenz's exact-subtraction condition applies and gives $d\le W$, hence $2W$. The premises say nothing about an unobserved outcome. Counts use $W=0$ for their empirical frequencies, not for the unknown sampling distribution. When the window is unavailable, no numerical value of $W$ is supplied for this premise.
 
 <a id="r46"></a>
 ### Result 46. Normalized augmented-Lagrangian equations
 
-**Provenance: From a reference. Evidence: the cited PHR and augmented-Lagrangian identities.**
+**Origin: From a reference. Evidence: the cited PHR and augmented-Lagrangian identities.**
 
 Use normalized objective $f/s_f$, equalities $h_i/s_{h_i}$, and inequalities $g_j/s_{g_j}$, with positive scales, and suppress tildes below. Equality multipliers $\bar\lambda$ are unrestricted in sign, while inequality multipliers satisfy $\bar\mu\ge0$. A round with penalty $\rho>0$ uses
 
@@ -1374,14 +1374,14 @@ The tentative updates and penalty measure are
 \lambda^+=\bar\lambda+\rho h,\quad \mu^+=[\bar\mu+\rho g]_+,\quad V_j=\min(-g_j,\bar\mu_j/\rho),\quad m=\max(\|h\|_\infty,\|V\|_\infty).
 ```
 
-These follow Birgin and Martínez, Algorithm 4.1 and Eqs. (4.7)–(4.9). In particular $\mu^+-\bar\mu=-\rho V$. Under the default `penalty_update="on_insufficient_decrease"`, the penalty stays unchanged after the first round and whenever the current $m$ is at most `reduction_ratio` times its preceding value. Otherwise it is multiplied by `penalty_growth`, up to `max_penalty`. Safeguards, when selected, act on the multipliers for the next round. In original units, equality multipliers are $(s_f/s_{h_i})\lambda_i$, and inequalities have the analogous formula, from the scaled KKT equations and the book's Eq. (10.4).
+These follow Birgin and Martínez, Algorithm 4.1 and Eqs. (4.7)–(4.9). In particular $\mu^+-\bar\mu=-\rho V$. Under the default `penalty_update="on_insufficient_decrease"`, the penalty stays unchanged after the first round and whenever the current $m$ is at most `reduction_ratio` times its preceding value. Otherwise it is multiplied by `penalty_growth`, up to `max_penalty`. Safeguards, when enabled, act on the multipliers for the next round. In original units, equality multipliers are $(s_f/s_{h_i})\lambda_i$, and inequalities have the analogous formula, from the scaled KKT equations and the book's Eq. (10.4).
 
-Rescaling a constraint and its positive scale by the same factor leaves its normalized expression, residual tests, and updates unchanged in exact arithmetic. This does not guarantee identical binary64 runs, even for a power of two. The symbolic normalization divides by a binary64 SymPy scale before expansion, while a scale of one leaves exact symbolic coefficients unchanged. Different coefficient rounding can change a table tie, the selected point, or a stopping decision. Normalized multipliers remain the layer's state even when their original-unit conversion is not representable in the accepted range. Requesting such a conversion raises a range error.
+Rescaling a constraint and its positive scale by the same factor leaves its normalized expression, residual tests, and updates unchanged in exact arithmetic. This does not guarantee identical binary64 runs, even for a power of two. The symbolic normalization divides by a binary64 SymPy scale before expansion, while a scale of one leaves exact symbolic coefficients unchanged. Different coefficient rounding can change a table tie, the selected point, or a stopping decision. Normalized multipliers remain the state of the augmented-Lagrangian layer even when the conversion of a nonzero multiplier to original units falls outside the normal binary64 range. Requesting such a conversion raises a range error.
 
 <a id="r47"></a>
 ### Proposition 47. The finite-grid meaning of feasibility and complementarity stopping
 
-**Provenance: Derived in NWQLib. Evidence: proved bound and exact counterexample.**
+**Origin: Derived in NWQLib. Evidence: proved bound and exact counterexample.**
 
 Suppose $x$ is a $\delta$-approximate global minimizer of the round's augmented Lagrangian over a finite grid, and $x$ is feasible. Then for every feasible grid point $y$,
 
@@ -1434,9 +1434,9 @@ For a feasible inequality, let $s_j=-g_j(x)/s_{g,j}\ge0$ be its normalized slack
 
 `result.verify(checks=QHDVerification(comparisons=("grid_minimum",)))` evaluates the objective on the finite grid, including its constant term, as one array table from which every reported reference value is read. The returned gap compares freshly evaluated binary64 values. It is a diagnostic of that evaluated grid and does not by itself bound the gap for the exact mathematical objective. The comparison can also report `minimum_success_mass`, the observed weight of grid points whose evaluated objective differs from the evaluated minimum by at most `minimum_tolerance`. With zero tolerance, this counts ties in the evaluated values. The mass is computed from a kept state (`keep_state=True`), exact circuit probabilities returned by the backend or counts, and a classical Result without a kept state reports it as unavailable.
 
-`constrained_grid_minimum(result)` checks its work and memory against `max_work` and `max_bytes`, evaluates $f$, $h$ and $g$ on all $K^d$ grid points, and finds the least evaluated objective among grid points that pass the computed feasibility test. Its signed difference subtracts this freshly evaluated minimum from the result's stored best objective. That difference can be negative, including when the stored point belongs to the evaluated feasible grid, because the two values can have different rounding errors. An off-grid or infeasible stored point gives no grid-optimality conclusion. If no grid point passes computed feasibility, `indices`, `point`, `objective` and `gap` are `None`. The gap is also `None` when the result has no best point. The helper does not support a result that uses box refinement.
+`constrained_grid_minimum(result)` checks its work and memory against `max_work` and `max_bytes`, evaluates $f$, $h$ and $g$ on all $K^d$ grid points, and finds the least evaluated objective among grid points that pass the computed feasibility test. Its signed difference subtracts this freshly evaluated minimum from the best objective value recorded in the result. That difference can be negative, including when the recorded point belongs to the evaluated feasible grid, because the two values can have different rounding errors. An off-grid or infeasible recorded point gives no grid-optimality conclusion. If no grid point passes computed feasibility, `indices`, `point`, `objective` and `gap` are `None`. The gap is also `None` when the result has no best point. The helper does not support a result that uses box refinement.
 
-Let $G$ be finite and nonempty, $a\in G$, $F$ the mathematical objective, $s$ the stored objective at $a$, and $t_x$ the fresh evaluation at $x\in G$. Assume finiteness and a supplied bound $E\ge0$ with
+Let $G$ be finite and nonempty, $a\in G$, $F$ the mathematical objective, $s$ the recorded objective value at $a$, and $t_x$ the fresh evaluation at $x\in G$. Assume finiteness and a supplied bound $E\ge0$ with
 
 ```math
  |s-F(a)|\le E,\qquad |t_x-F(x)|\le E\quad(x\in G).
@@ -1457,9 +1457,9 @@ These are real bounds. A machine enclosure of the right side would require outwa
 <a id="r48"></a>
 ### Proposition 48. Search-model normalization and affine invariance
 
-**Provenance: Derived in NWQLib. Evidence: proved in exact table arithmetic, with a conditional evaluation bound.**
+**Origin: Derived in NWQLib. Evidence: proved in exact table arithmetic, with a conditional evaluation bound.**
 
-On box $B=a+D[0,1]^d$, decompose the stored objective into constant $c_0$ and support tables $T_S$. Set
+On box $B=a+D[0,1]^d$, decompose the objective into constant $c_0$ and support tables $T_S$. Set
 
 ```math
 c=c_0+\sum_S\min T_S,\qquad E\ge\sum_S(\max T_S-\min T_S)>0,\qquad V(u)=\kappa\frac{F(a+Du)-c}{E}.
@@ -1471,13 +1471,13 @@ Table correspondence can be ensured by transforming the tables one by one withou
 
 **Proof.** Every centered table lies between zero and its range. Their sum is between zero and $E$, proving the enclosure. The transformed box has $a'=sa+t$, $D'=sD$, and $F'(a'+D'u)=rF(a+Du)+c_1$. Under the table-correspondence premise, $T'_S(u_S)=rT_S(u_S)$ and $c'_0=rc_0+c_1$. Each table's minimum and range therefore scale by $r$. The homogeneous range rule gives $E'=rE$, while the definition of the shift gives $c'=rc+c_1$, so $V'=V$. The fixed kinetic and matching schedule and initial state give equal level dynamics. The gain $\kappa$ must be applied after range normalization, since multiplying the objective before forming its range cancels out.
 
-If original table evaluations have errors $e_S$, replanned scaled tables have errors $e'_S$, and $f=\kappa/E$, then each difference from the scaled stored table is at most $e'_S+fe_S$. Rounding the centered constant adds at most $u_{\rm fp}f\sum_S|\min T_S|$ in normal arithmetic, with binary64 unit roundoff $u_{\rm fp}=2^{-53}$. Thus the solved table sum lies in $[-\delta,\kappa+\delta]$, with
+If original table evaluations have errors $e_S$, replanned scaled tables have errors $e'_S$, and $f=\kappa/E$, then each difference from the scaled original table is at most $e'_S+fe_S$. Rounding the centered constant adds at most $u_{\rm fp}f\sum_S|\min T_S|$ in normal arithmetic, with binary64 unit roundoff $u_{\rm fp}=2^{-53}$. Thus the solved table sum lies in $[-\delta,\kappa+\delta]$, with
 
 ```math
 \delta=\sum_S(e'_S+fe_S)+u_{\rm fp}f\sum_S|\min T_S|.
 ```
 
-This is conditional on the actual expression-evaluation errors. A range near a few units in the last place cannot certify the objective's variation. Binary64 threshold and tie decisions need not be affine invariant. Finally, the physical kinetic under the coordinate change is $-\frac12\sum_jD_j^{-2}\partial_{u_j}^2$, so the search model is a different Hamiltonian on each box, not a coordinate rewrite of a fixed physical evolution.
+This bound is conditional on $e_S$ and $e'_S$ bounding the expression-evaluation errors. A range near a few units in the last place cannot certify the objective's variation. Binary64 threshold and tie decisions need not be affine invariant. Finally, the physical kinetic under the coordinate change is $-\frac12\sum_jD_j^{-2}\partial_{u_j}^2$, so the search model is a different Hamiltonian on each box, not a coordinate rewrite of a fixed physical evolution.
 
 #### Selection across refinement levels
 
@@ -1506,7 +1506,7 @@ With one level the $2\eta$ term is unnecessary. Partial observation replaces $G_
 <a id="r49"></a>
 ### Proposition 49. Marginal refinement and guaranteed joint mass
 
-**Provenance: Improved from a reference. Evidence: proved for any joint distribution on valid grid points, and for finite shots under the stated sampling model.**
+**Origin: Improved from a reference. Evidence: proved for any joint distribution on valid grid points, and for finite shots under the stated sampling model.**
 
 **Statement.** A product box whose axis intervals have conditional marginal masses $m_j$ has conditional joint mass at least $\max(0,1-\sum_j(1-m_j))$. For sampled refinement, let $P_z$ be the level's backend-sampled distribution conditioned on valid decoding and the earlier history, and let $B_z$ be its selected old-grid region. Under the premises below, with probability at least $1-\alpha$, all covered levels simultaneously satisfy
 
@@ -1522,7 +1522,7 @@ For the marginal relation, the complement of a product event is the union of the
 p_{\rm box}\ge\max\left(0,1-\sum_j(1-m_j)\right).
 ```
 
-Population marginal masses at least $\eta=1-\delta/d$ imply joint mass at least $1-\delta$. The distribution $\begin{pmatrix}0.8&0.1\\0.1&0\end{pmatrix}$, with index zero selected on both axes, attains the bound with marginals $0.9$ and joint mass $0.8$. Thus neither the threshold $0.9$ nor the product $0.81$ is a joint-mass lower bound. Applied to exact empirical frequencies, the same relation bounds the empirical distribution.
+If the sampled distribution has marginal masses at least $\eta=1-\delta/d$, its joint mass is at least $1-\delta$. The distribution $\begin{pmatrix}0.8&0.1\\0.1&0\end{pmatrix}$, with index zero selected on both axes, attains the bound with marginals $0.9$ and joint mass $0.8$. Thus neither the threshold $0.9$ nor the product $0.81$ is a joint-mass lower bound. Applied to exact empirical frequencies, the same relation bounds the empirical distribution.
 
 Centered cells put internal box faces at midpoints of neighboring grid coordinates, differing from the left-endpoint cells of [Wu et al., Eq. (14)][Wu]. Ordered resolved coordinates give ordered internal faces, so the next box is nonempty, contains the selected grid points and stays inside the parent box. The statistical event is the selected set of old-grid indices. Periodic refinement uses a nonwrapping interval at the seam, the cut at the identified lower and upper faces of the level's parent box.
 
@@ -1546,7 +1546,7 @@ I_K=|\mathcal I_K|=\sum_{a=0}^{K-1}(K-a)=\frac{K(K+1)}2.
 
 The marginal family has $J_z=d_z I_K$ events and the joint-box family has $N_z=I_K^{d_z}$ events. The greedy interval starts at a largest marginal entry and grows by adding a cell adjacent to either end of the current interval, so all its outputs belong to this family. The same families cover the selected mode, growth path, endpoints, split axis, valley and split side. The implementation uses their counts or logarithms without enumerating the boxes. Choosing a seam from the current batch or allowing wrapping intervals would require a different candidate family.
 
-For an ordinary level, $B_z$ is the product of `level.intervals`. At a stall split, its selected axis keeps $[0,v]$ or $[v,K-1]$, including the valley index $v$, and all other axes keep $[0,K-1]$. The stored `joint_mass` still concerns the ordinary intervals, which cover the whole box at a split. The new integer counts describe the selected region itself.
+For an ordinary level, $B_z$ is the product of `level.intervals`. At a stall split, its selected axis keeps $[0,v]$ or $[v,K-1]$, including the valley index $v$, and all other axes keep $[0,K-1]$. The recorded `joint_mass` still concerns the ordinary intervals, which cover the whole box at a split. The new integer counts describe the selected region itself.
 
 Write $C_{z,j}$ for valid draws whose coordinate $j$ lies in the selected interval, and $M_z$ for draws in their intersection. They come from the same joint observations, so
 
@@ -1554,7 +1554,7 @@ Write $C_{z,j}$ for valid draws whose coordinate $j$ lies in the selected interv
 \max\left\{0,S_z-\sum_j(S_z-C_{z,j})\right\}\le M_z\le\min_j C_{z,j}\le S_z.
 ```
 
-`RefinementLevel` stores $S_z$ as `valid_count`, $C_{z,j}$ as `region_axis_counts` and $M_z$ as `region_count`. `returned_shots` is the raw returned count. The confidence calculation uses these integers, not the rounded empirical masses `axis_masses` and `joint_mass` or the bound `joint_mass_bound` computed from them.
+`RefinementLevel` records $S_z$ as `valid_count`, $C_{z,j}$ as `region_axis_counts` and $M_z$ as `region_count`. `returned_shots` is the raw returned count. The confidence calculation uses these integers, not the rounded empirical masses `axis_masses` and `joint_mass` or the bound `joint_mass_bound` computed from them.
 
 #### Hoeffding bound
 
@@ -1573,7 +1573,7 @@ Allocate $\alpha_H=\alpha/2$ to this method over the whole run. A union bound ov
 2J_z e^{-2S_z\epsilon_z^2}=\frac{\alpha}{2H}.
 ```
 
-On this event every selected marginal mass is at least $C_{z,j}/S_z-\epsilon_z$. A whole axis has population mass one exactly. Let $A_z$ contain the axes whose selected interval is not whole and put $q_z=|A_z|$. Applying the complement union bound only to these axes gives
+On this event every selected marginal mass is at least $C_{z,j}/S_z-\epsilon_z$. An interval covering a whole axis has mass exactly one under $P_z$. Let $A_z$ contain the axes whose selected interval is not whole and put $q_z=|A_z|$. Applying the complement union bound only to these axes gives
 
 ```math
 L_{H,z}=\max\left\{0,1-\sum_{j\in A_z}\left(1-\frac{C_{z,j}}{S_z}\right)-q_z\epsilon_z\right\}.
@@ -1613,11 +1613,11 @@ Let $E_z$ be failure of either method's simultaneous event at level $z$, and tak
 \le\alpha.
 ```
 
-Outside that union, both lower bounds hold at every covered level, and therefore their maximum does too. The dimension and candidate family may vary with earlier history because they are fixed under each level's conditioning. The implementation uses the actual $d_z$, including slack coordinates. It neither reduces $H$ after early stopping nor substitutes a data-selected active-axis count for $d_z$ in either family correction.
+Outside that union, both lower bounds hold at every covered level, and therefore their maximum does too. The dimension and candidate family may vary with earlier history because they are fixed under each level's conditioning. The implementation uses the level's dimension $d_z$, including slack coordinates. It neither reduces $H$ after early stopping nor substitutes a data-selected active-axis count for $d_z$ in either family correction.
 
 #### Sufficient valid-shot budgets
 
-For a common sufficient budget across levels, fix a dimension upper bound $d$ before sampling and use $J=dI_K$ and $\epsilon_S=\sqrt{\log(4HJ/\alpha)/(2S)}$. Let $0<\eta\le1$ and $0<\delta<1$. For an ordinary box whose exact empirical marginal frequencies are all at least $\eta$, Hoeffding gives population mass at least $1-\delta$ whenever $\eta\ge1-\delta/d+\epsilon_S$. For $e>0$ and $\tau=\eta-1+\delta/d>0$, sufficient integer budgets are
+For a common sufficient budget across levels, fix a dimension upper bound $d$ before sampling and use $J=dI_K$ and $\epsilon_S=\sqrt{\log(4HJ/\alpha)/(2S)}$. Let $0<\eta\le1$ and $0<\delta<1$. For an ordinary box whose exact empirical marginal frequencies are all at least $\eta$, Hoeffding gives mass at least $1-\delta$ under the sampled distribution whenever $\eta\ge1-\delta/d+\epsilon_S$. For $e>0$ and $\tau=\eta-1+\delta/d>0$, sufficient integer budgets are
 
 ```math
 S\ge\left\lceil\frac{\log(4HJ/\alpha)}{2e^2}\right\rceil
@@ -1626,7 +1626,7 @@ S\ge\left\lceil\frac{\log(4HJ/\alpha)}{2\tau^2}\right\rceil
 \quad\text{for mass at least }1-\delta.
 ```
 
-The empirical threshold can be at most one when $S\ge\lceil d^2\log(4HJ/\alpha)/(2\delta^2)\rceil$. These are sufficient budgets for this argument, not necessary sample sizes for a particular distribution. When $\tau\le0$, the threshold alone gives no positive-radius guarantee of the requested mass, although the actual counts can give a stronger bound.
+The empirical threshold can be at most one when $S\ge\lceil d^2\log(4HJ/\alpha)/(2\delta^2)\rceil$. These are sufficient budgets for this argument, not necessary sample sizes for a particular distribution. When $\tau\le0$, the threshold alone gives no positive-radius guarantee of the requested mass, although the observed counts can give a stronger bound.
 
 For a level of dimension $d_z$ where the selected region receives all valid draws, $M=S$, a target mass $0<c<1$ has the CP sufficient budget
 
@@ -1636,21 +1636,21 @@ S\ge\left\lceil\frac{\log(\alpha/(2H I_K^{d_z}))}{\log c}\right\rceil.
 
 With $K=64$, $d_z=2$, $H=60$, $c=.99$ and $\alpha=.05$, the budget is 2295 valid draws. This result assumes the observed all-hit event and does not promise that a future batch will satisfy it. One-hot validity filtering can also make the valid count smaller than the raw shot count. At $\eta=.9999$ and $S=2295$, the integer threshold $C_j\ge\lceil\eta S\rceil$ still requires every marginal to receive all valid draws.
 
-For general $\eta$, actual integer counts satisfying $C_j\ge\lceil\eta S\rceil$ imply $M\ge\max(0,S-d(S-\lceil\eta S\rceil))$. The ceiling can make this threshold-derived bound decrease locally as $S$ grows. It is not a monotone curve suitable for unqualified binary search. The interval rule uses rounded marginal accumulation, so the report always uses the observed integers rather than replacing them by the nominal threshold. The library does not adjust shots from these formulas.
+For general $\eta$, observed integer counts satisfying $C_j\ge\lceil\eta S\rceil$ imply $M\ge\max(0,S-d(S-\lceil\eta S\rceil))$. The ceiling can make this threshold-derived bound decrease locally as $S$ grows. It is not a monotone curve suitable for unqualified binary search. The interval rule uses rounded marginal accumulation, so the report always uses the observed integers rather than replacing them by the nominal threshold. The library does not adjust shots from these formulas.
 
 #### Numerical evaluation and interpretation
 
-`_coverage.py` evaluates the formulas in binary64. Logarithms avoid forming $I_K^d$ or a possibly underflowing $\alpha/2$. For $0<M<S$, the inverse uses `scipy.special.betaincinv(M, S-M+1, exp(log_beta))` only when $S+1\le2^{53}$, so both integer shape parameters are exactly representable, and the target beta is at least the smallest normal binary64 value. These representation checks do not supply an inverse error bound. Large shapes and extreme tails can lose relative tail accuracy, and a returned quantile can be subnormal or round to zero.
+The module `_coverage.py` evaluates the formulas in binary64. Logarithms avoid forming $I_K^d$ or a possibly underflowing $\alpha/2$. For $0<M<S$, the inverse uses `scipy.special.betaincinv(M, S-M+1, exp(log_beta))` only when $S+1\le2^{53}$, so both integer shape parameters are exactly representable, and the target beta is at least the smallest normal binary64 value. These representation checks do not supply an inverse error bound. Large shapes and extreme tails can lose relative tail accuracy, and a returned quantile can be subnormal or round to zero.
 
 The $M=0$, all-hit and full-support cases use their separate formulas. Nonfinite inverse values, values outside $[0,1]$, and CP values rounded to one are unavailable. The report then uses the Hoeffding bound with its original half-budget. It does not reallocate the unused CP share after seeing the counts. Ordinary logarithm, square root, exponential and inverse-beta evaluation give numerical approximations to the mathematical bounds, not directed-rounding enclosures. The report marks `numerical_evaluation="binary64"`, uses approximate wording and preserves near-one values in its display. A reported deterministic one denotes the entire valid grid support of the level's conditional distribution.
 
-The bounds concern each level's backend-sampled distribution conditioned on valid decoding. For noisy one-hot readout, a conditional mass of one says nothing about the fraction of raw outcomes that decode validly. The bounds do not cover systematic differences from ideal quantum evolution, global-minimizer preservation or augmented-Lagrangian convergence. Different levels generally sample different populations, so their bounds cannot be multiplied into the final box's mass under the initial distribution. The valley-resolution screen of Proposition 50 has its own failure allowance. A claim combining that screen with region coverage must account for both.
+The bounds concern each level's backend-sampled distribution conditioned on valid decoding. For noisy one-hot readout, a conditional mass of one says nothing about the fraction of raw outcomes that decode validly. The bounds do not cover systematic differences from ideal quantum evolution, global-minimizer preservation or augmented-Lagrangian convergence. Different levels generally sample different distributions, so their bounds cannot be multiplied into the final box's mass under the initial distribution. The valley-resolution screen of Proposition 50 has its own failure allowance. A claim combining that screen with region coverage must account for both.
 
 
 <a id="r50"></a>
 ### Proposition 50. A sufficient stall condition and the limitation of a valley split
 
-**Provenance: Derived in NWQLib. Evidence: proved for a fixed realized refinement trajectory.**
+**Origin: Derived in NWQLib. Evidence: proved for a fixed realized refinement trajectory.**
 
 If both endpoint cells of an axis have marginal mass greater than $1-\eta$, every contiguous interval with mass at least $\eta$ covers the entire axis. A valley split can continue such a stalled search only by relaxing its ordinary mass-preservation condition. If splitting is triggered only when the unsplit search would stop, and the smallest value of one fixed objective comparison is kept over all completed levels, that value cannot be larger than the unsplit trajectory's with the same earlier observations.
 
@@ -1662,18 +1662,18 @@ There is a stronger exact-arithmetic consequence for the implemented greedy inte
 
 To prove the side bound, let $m$ be the greedy start and $e$ the last endpoint. Both have mass at least $h$. A valley between them has one on each strict side. Otherwise they lie on the same side. If the opposite strict side had total mass below $h$, its maximum would be below $h$. At the step when the greedy interval added that valley, the cell $w$ immediately outside the current interval toward $e$ had mass at most the valley mass. It lay between $m$ and $e$, so both its flanking maxima were at least $h$. It therefore had a strictly larger ratio, or a larger smaller peak when both valley masses were zero, and also passed the monotone acceptance rule. This contradicts the selected valley. The conclusion concerns exact sums. A rounded running sum can trigger a stall after the exact threshold was already reached, so its strict $<\eta$ conclusion does not automatically hold for a binary64 trajectory.
 
-For counts, the implementation also screens whether the valley is statistically resolved. With at most $H$ adaptive levels, $d$ axes, $K$ cells, $N$ valid independent shots in the current conditional population, and failure allowance $0<\alpha<1$, the analytic screen is
+For counts, the implementation also screens whether the valley is statistically resolved. With at most $H$ adaptive levels, $d$ axes, $K$ cells, $N$ valid independent shots from the current level's conditional distribution, and failure allowance $0<\alpha<1$, the analytic screen is
 
 ```math
 \min(C_L,C_R)-c_v>\sqrt{2N\log(2HdK/\alpha)}.
 ```
 
-Here $C_L,C_R$ are flanking-peak counts and $c_v$ the valley count. Hoeffding for cell indicators and a union bound give simultaneous cell error at most $\epsilon=\sqrt{\log(2HdK/\alpha)/(2N)}$. A selected peak-to-valley population difference is therefore positive when its empirical difference exceeds $2\epsilon$, giving the count rule. The implementation enlarges the computed logarithm by $1+2^{-40}$ and compares squared quantities as exact rationals, a conservative numerical realization under the elementary-function accuracy assumption. The union bound covers selection after inspecting the cells and, conditional on each previous history, selection of later levels. It requires fresh shots from the level's conditional population. A resolved valley is evidence of population shape, not of objective quality in the discarded region.
+Here $C_L,C_R$ are flanking-peak counts and $c_v$ the valley count. Hoeffding for cell indicators and a union bound give simultaneous cell error at most $\epsilon=\sqrt{\log(2HdK/\alpha)/(2N)}$. The difference between the masses of a selected peak and valley under the sampled distribution is therefore positive when its empirical difference exceeds $2\epsilon$, giving the count rule. The implementation enlarges the computed logarithm by $1+2^{-40}$ and compares squared quantities as exact rationals, a conservative numerical implementation under the elementary-function accuracy assumption. The union bound covers selection after inspecting the cells and, conditional on each previous history, selection of later levels. It requires fresh shots from the level's conditional distribution. A resolved valley is evidence about the shape of the sampled distribution, not about the objective values in the discarded region.
 
 <a id="r51"></a>
 ### Proposition 51. A distance bound for the augmented-Lagrangian and refinement composition
 
-**Provenance: Derived in NWQLib. Evidence: proved for the stated quadratic problem and inner-selection premise.**
+**Origin: Derived in NWQLib. Evidence: proved for the stated quadratic problem and inner-selection premise.**
 
 Consider $f(x,y)=(x-11/16)^2+(y-7/16)^2$, equality $4(x+y-1/8)=0$, and box $[-1,1]^2$. With scales $s_f=2$, $s_h=4$, the unique KKT point is $x_*=(3/16,-1/16)$, with normalized multiplier $1/2$. For a round entering with $\lambda\in[-1,1]$, $\rho\in[1,4]$, put
 
@@ -1712,7 +1712,7 @@ The last bound is Cauchy–Schwarz in the $H$ inner product, since $v^TH^{-1}v=2
 <a id="r52"></a>
 ### Proposition 52. Budgeted Clifford replacement and the logarithmic T estimate
 
-**Provenance: Derived in NWQLib. Evidence: proved replacement and allocation bounds, followed by an explicitly conditional cost estimate.**
+**Origin: Derived in NWQLib. Evidence: proved replacement and allocation bounds, followed by an explicitly conditional cost estimate.**
 
 Let $\delta=\theta-k\pi/2$ be the distance to a nearest Clifford rotation angle, with $|\delta|\le\pi/4$. The phase-minimized operator distance is
 
@@ -1720,7 +1720,7 @@ Let $\delta=\theta-k\pi/2$ be the distance to a nearest Clifford rotation angle,
 d_C=2\sin(|\delta|/4).
 ```
 
-Let $E$ be the positive finite binary64 synthesis budget and $N$ the initial arbitrary-rotation count. If $N=0$, the replacement threshold and per-rotation tolerance are `None` and the replacement error term is zero. For $N>0$, candidate Clifford replacements are tested against the exact rational share $q=E/N$. If $B$ replacements have exact accumulated distance bound $C$ and $M=N-B$ arbitrary rotations remain, store
+Let $E$ be the positive finite binary64 synthesis budget and $N$ the initial arbitrary-rotation count. If $N=0$, the replacement threshold and per-rotation tolerance are `None` and the replacement error term is zero. For $N>0$, candidate Clifford replacements are tested against the exact rational share $q=E/N$. If $B$ replacements have exact accumulated distance bound $C$ and $M=N-B$ arbitrary rotations remain, the library records
 
 ```math
  E_C=\operatorname{up64}(C),\qquad
@@ -1733,19 +1733,19 @@ For $M>0$, the per-rotation synthesis tolerance is
  \epsilon_{\rm rot}=\operatorname{down64}(R/M).
 ```
 
-The subtraction and division are formed from exact rational values before their directed conversion. The synthesis allowance in the error budget is the same stored $R$. Consequently the stored fields satisfy
+The subtraction and division are formed from exact rational values before their directed conversion. The synthesis allowance in the error budget is the same recorded $R$. Consequently the recorded values satisfy
 
 ```math
  E_C+M\epsilon_{\rm rot}\le E_C+R\le E.
 ```
 
-With no remaining arbitrary rotations, no per-rotation tolerance is needed. If $M>0$ but the downward-rounded tolerance is zero, `circuit_resources` and `run_resources` refuse that budget, and the Plan is unaffected. The stored per-rotation tolerance can be below the initial exact share $q$ because both directed roundings preserve the total budget.
+With no remaining arbitrary rotations, no per-rotation tolerance is needed. If $M>0$ but the downward-rounded tolerance is zero, `circuit_resources` and `run_resources` reject that budget, and the Plan is unaffected. The recorded per-rotation tolerance can be below the initial exact share $q$, because both directed roundings keep the total within the budget.
 
 **Proof.** Multiplying by the inverse Clifford leaves eigenvalues $e^{\pm i\delta/2}$. The optimal common phase bisects them, giving $d_C$. A replacement is therefore possible whenever $|\delta|\le4\arcsin(\epsilon/2)$.
 
 Each replacement is accepted with distance at most $q$, so $C\le Bq\le E$. Because $E$ itself is representable, the least representable value at least $C$ also satisfies $E_C\le E$. Thus $E-E_C\ge0$. Downward rounding gives $0\le R\le E-E_C$ and, for positive $M$, $0\le\epsilon_{\rm rot}\le R/M$. Multiplication by the positive integer $M$ and addition of $E_C$ prove both inequalities.
 
-For ideal unrounded bookkeeping one has
+In exact arithmetic without rounding, one has
 
 ```math
  \frac{E-C}{N-B}\ge\frac EN
@@ -1755,7 +1755,7 @@ For ideal unrounded bookkeeping one has
  C\le B E/N.
 ```
 
-This proves only the exact remaining share, not the stored one. Replacing $C$ by its upward-rounded value $E_C$ and applying two downward conversions can reduce the stored share. If $N=0$, neither $q$ nor a per-rotation tolerance is required. If $M=0$, the replacement error term alone is at most $E$. A unitary-distance cap on the replacement-error entry cannot increase that term. A synthesis law evaluated at the stored tolerance is still an estimation model, not proof that an arbitrary external compiler attained it.
+This proves the inequality only for the exact remaining share, not for the recorded one. Replacing $C$ by its upward-rounded value $E_C$ and applying two downward conversions can reduce the recorded share. If $N=0$, neither $q$ nor a per-rotation tolerance is required. If $M=0$, the replacement error term alone is at most $E$. A unitary-distance cap on the replacement-error entry cannot increase that term. A synthesis cost formula evaluated at the recorded tolerance is still an estimation model, not proof that an arbitrary external compiler attained it.
 
 For a fixed number $M>0$ of remaining arbitrary rotations and a real available budget $R>0$ with $R/M<1$, the model $r(\epsilon)=a\log_2(1/\epsilon)+b_0$, $a>0$, obeys
 
@@ -1765,14 +1765,14 @@ For a fixed number $M>0$ of remaining arbitrary rotations and a real available b
  \ge M[a\log_2(M/R)+b_0],
 ```
 
-provided $0<\epsilon_j<1$ and $\sum_j\epsilon_j\le R$. The first inequality is Jensen's inequality for the convex function $-\log$, and the second uses the decreasing cost as the total allowance grows. Equality in the real allocation problem uses $\epsilon_j=R/M$. Stored downward rounding can leave unused margin. When $R=0$ with rotations remaining, the logarithmic allocation formula is inapplicable, and `circuit_resources` and `run_resources` refuse that budget, with the Plan unaffected.
+provided $0<\epsilon_j<1$ and $\sum_j\epsilon_j\le R$. The first inequality is Jensen's inequality for the convex function $-\log$, and the second uses the decreasing cost as the total allowance grows. Equality in the real allocation problem uses $\epsilon_j=R/M$. Downward rounding of the recorded values can leave unused margin. When $R=0$ with rotations remaining, the logarithmic allocation formula is inapplicable, and `circuit_resources` and `run_resources` reject that budget, with the Plan unaffected.
 
 NWQLib uses $a=3$, $b_0=0$, the leading typical-rotation term of [Ross and Selinger][RossSelinger], and adds exact T gates already in the decomposition. The resulting number is an estimate, not a finite synthesis bound. Repeated structured angles do not become typical random instances merely because there are many of them. Standalone phase minimization also does not justify a controlled reuse without consistent phase representatives.
 
 <a id="r53"></a>
 ### Proposition 53. Nonnegative one-hot preparation and a finite product-state error
 
-**Provenance: Derived in NWQLib. Evidence: proved circuit identity and conditional numerical bounds.**
+**Origin: Derived in NWQLib. Evidence: proved circuit identity and conditional numerical bounds.**
 
 For nonnegative normalized amplitudes $\alpha_0,\ldots,\alpha_{K-1}$, let $r_m=(\sum_{j\ge m}\alpha_j^2)^{1/2}$. A one-hot chain with
 
@@ -1780,11 +1780,11 @@ For nonnegative normalized amplitudes $\alpha_0,\ldots,\alpha_{K-1}$, let $r_m=(
 \theta_m=2\operatorname{atan2}(r_m,\alpha_{m-1})
 ```
 
-prepares $\sum_j\alpha_j|e_j\rangle$. If the last positive amplitude has index $L$, the complete chain uses $3L$ CX gates. The implemented lower-range cutoff can emit a shorter prefix, with the error term below.
+prepares $\sum_j\alpha_j|e_j\rangle$. If the last positive amplitude has index $L$, the complete chain uses $3L$ CX gates. The implemented lower-range cutoff can build a shorter prefix, with the error term below.
 
 **Proof.** Initially excite qubit zero. Before link $m$, the unassigned amplitude is $r_{m-1}|e_{m-1}\rangle$. A controlled $R_y(\theta_m)$, followed by CX from qubit $m$ back to $m-1$, replaces it by $\alpha_{m-1}|e_{m-1}\rangle+r_m|e_m\rangle$. Induction proves the state. Each controlled rotation uses two CX gates, followed by the transfer CX. When $r_m=0$, the target has already been reached and all later controlled operations are unnecessary. This generalizes the uniform start of Leng et al., Algorithm 1, to kinetic-ground and Gaussian product starts.
 
-For the cutoff, read the stored nonnegative vector $v$ exactly, put $N_v=\|v\|>0$ and $r_m=(\sum_{i\ge m}v_i^2)^{1/2}$. At the first link $m$ whose computed controlled-$R_y$ half-angle is below $\nu_{\rm fp}$, including a rounded zero from a positive tail, the implementation stops before the link. The ideal prefix prepares $v_i/N_v$ for $i<m-1$, $r_{m-1}/N_v$ at $m-1$, and zero later. Its distance from the full target is
+For the cutoff, read the binary64 nonnegative vector $v$ exactly, put $N_v=\|v\|>0$ and $r_m=(\sum_{i\ge m}v_i^2)^{1/2}$. At the first link $m$ whose computed controlled-$R_y$ half-angle is below $\nu_{\rm fp}$, including a rounded zero from a positive tail, the implementation stops before the link. The ideal prefix prepares $v_i/N_v$ for $i<m-1$, $r_{m-1}/N_v$ at $m-1$, and zero later. Its distance from the full target is
 
 ```math
 D_m=\frac{\sqrt{(r_{m-1}-v_{m-1})^2+r_m^2}}{N_v}=\frac{r_m}{N_v}\sqrt{\frac{2r_{m-1}}{r_{m-1}+v_{m-1}}}\le\frac{\sqrt2\,r_m}{N_v}.
@@ -1796,7 +1796,7 @@ The second equality uses $r_{m-1}^2-v_{m-1}^2=r_m^2$. Let $L_m=\sum_{i\ge m}v_i\
 \Delta_m=\min\left(\sqrt2_{\rm up},\frac{\sqrt2_{\rm up}L_m}{1-\eta_K}\right)\quad\text{when }\eta_K<1.
 ```
 
-If a positive denominator is unavailable, $\sqrt2_{\rm up}$ bounds the distance between the two nonnegative unit vectors. A prefix ending before link $m$ has $m-1$ links and $3(m-1)$ CX gates. The same prefix determines the builder and rotation count. Per-register error terms add by tensor-product telescoping and enter `state_preparation` once, before its cap at two. This cutoff error term is a bound, while the combined preparation entry remains a first-order estimate because of its chain-roundoff terms. The stored amplitudes and the direct classical start continue to describe the complete vector.
+If a positive denominator is unavailable, $\sqrt2_{\rm up}$ bounds the distance between the two nonnegative unit vectors. A prefix ending before link $m$ has $m-1$ links and $3(m-1)$ CX gates. The same prefix determines the built circuit and its rotation count. Per-register error terms add by tensor-product telescoping and enter `state_preparation` once, before its cap at two. This cutoff error term is a bound, while the combined preparation entry remains a first-order estimate because of its chain-roundoff terms. The recorded amplitudes and the start vector of the direct classical evaluation still describe the complete vector.
 
 For a shifted Gaussian, let exact amplitudes be $t_i=e^{-y_i-\Delta_i}$, with $|\Delta_i|\le x_i$, and computed normal amplitudes $v_i=\operatorname{fl}(e^{-y_i})$. Under a one-ulp exponential assumption,
 
@@ -1812,12 +1812,12 @@ If each computed axis vector differs from its exact unit vector by at most $e_j$
 U_D=(d-1)\lceil\sqrt D\rceil\lambda,\qquad \lceil\sqrt D\rceil=\operatorname{isqrt}(D-1)+1.
 ```
 
-This dominates the $\sqrt D(d-1)\lambda/2$ absolute product allowance. It is formed by one correctly rounded quotient of the integers $(d-1)\lceil\sqrt D\rceil$ and $2^{1074}$, without converting $D$ to a float. The surrounding outward factor covers that rounding. The nonnegative-vector cap uses a computed-norm bound $N$ to give distance at most $\sqrt{N^2+1}$. A dimension beyond binary64, such as $4^{520}$, therefore need not prevent evaluation of this bound. `restricted_state_error` raises a `ValueError` naming the range failure whenever $U_D$ or the computed bound in units of $u$ is not finite. When $(d-1)\lceil\sqrt D\rceil$ dominates, the returned bound leaves the binary64 range before $U_D$ does, so at $K=4$ the error starts at $d=2035$. This is a metadata calculation and does not allocate the $D$ amplitudes. The uniform-start first-order allowance is separately $2u$. The elementary-function assumptions remain part of each bound's applicability.
+This dominates the $\sqrt D(d-1)\lambda/2$ absolute product allowance. It is formed by one correctly rounded quotient of the integers $(d-1)\lceil\sqrt D\rceil$ and $2^{1074}$, without converting $D$ to a float. The surrounding outward factor covers that rounding. The nonnegative-vector cap uses a computed-norm bound $N$ to give distance at most $\sqrt{N^2+1}$. A dimension beyond binary64, such as $4^{520}$, therefore need not prevent evaluation of this bound. `restricted_state_error` raises a `ValueError` naming the range failure whenever $U_D$ or the computed bound in units of $u$ is not finite. When $(d-1)\lceil\sqrt D\rceil$ dominates, the returned bound leaves the binary64 range before $U_D$ does, so at $K=4$ the error starts at $d=2035$. This calculation uses only the dimensions and does not allocate the $D$ amplitudes. The uniform-start first-order allowance is separately $2u$. The elementary-function assumptions remain part of each bound's applicability.
 
 <a id="r54"></a>
 ### Proposition 54. Slack variables for inequality constraints
 
-**Provenance: Derived in NWQLib. Evidence: proved identities and bounds with exact counterexamples, and one computed comparison of two evolutions.**
+**Origin: Derived in NWQLib. Evidence: proved identities and bounds with exact counterexamples, and one computed comparison of two evolutions.**
 
 **Statement.** Result 46 writes each PHR term as a minimum over a slack $z\ge0$. When that slack becomes an explicit coordinate $s_j$ of the inner objective, minimizing over it reproduces the PHR term exactly, also under an upper cap that contains the minimizer. The proposition has four parts.
 
@@ -1973,7 +1973,7 @@ F(\widehat x)-F(y)
 \le\delta+\sum_j\frac{\bar\mu_j^2}{2\rho}.
 ```
 
-Multiply by $s_f$ for original objective units. Feasibility and the inner-selection inequality are still premises. Neither a QHD mode nor exact probability readout alone supplies the latter. With a table error bounded by $\varepsilon_T$ on the relevant grid, selecting a table minimum contributes $2\varepsilon_T$ to $\varepsilon_{\rm in}$. Comparing reported relative values with errors bounded by $\varepsilon_R$ contributes another $2\varepsilon_R$. This follows by adding the error at the winner and at the comparison point. Search-model table errors must first be converted into $\mathcal L$ units by the positive factor $E/\kappa$ of Proposition 48, with transformation errors included.
+Multiply by $s_f$ for original objective units. Feasibility and the inner-selection inequality are still premises. Neither a QHD mode nor exact readout alone supplies the latter. With a table error bounded by $\varepsilon_T$ on the relevant grid, selecting a table minimum contributes $2\varepsilon_T$ to $\varepsilon_{\rm in}$. Comparing reported relative values with errors bounded by $\varepsilon_R$ contributes another $2\varepsilon_R$. This follows by adding the error at the winner and at the comparison point. Search-model table errors must first be converted into $\mathcal L$ units by the positive factor $E/\kappa$ of Proposition 48, with transformation errors included.
 
 Proposition 51 is an equality-only quadratic example. It has no inequality slack, so its own $E_{\max}$ is zero. Its inner-selection premise nevertheless has a useful error version. If, for the quadratic and the $x_*,m,H,M,\Delta$ of that proposition, the returned point $p$ satisfies
 
@@ -2047,7 +2047,7 @@ If the supports are disjoint and the domain is their Cartesian product, their mi
 
 A lower bound from a finite grid is not a lower bound on the continuous box or on every later refinement grid. On $[0,1]$, take $G(x)=(x-1/2)^2-1/100$. Its two interior-grid values at $1/3,2/3$ are both $4/225>0$, but $G(1/2)=-1/100$. The grid bound would give $U=0$ even though a continuous or later-grid point can need positive slack. To claim equivalence throughout the continuous box, replace table extrema with certified bounds on the support functions throughout their continuous domains. Affine constraints admit such bounds directly from endpoint values. General nonlinear continuous bounds require additional mathematics or a user-supplied valid bound.
 
-Stored binary64 tables also require an arithmetic qualification. If $|T_{j,A}-\widetilde T_{j,A}|\le e_{j,A}$ and $c_{0,j}\ge\widetilde c_{0,j}-e_{0,j}$ on the relevant domain, then
+Tables computed in binary64 also require bounds on their arithmetic errors. If $|T_{j,A}-\widetilde T_{j,A}|\le e_{j,A}$ and $c_{0,j}\ge\widetilde c_{0,j}-e_{0,j}$ on the relevant domain, then
 
 ```math
 \ell_j^{\rm safe}=\widetilde c_{0,j}-e_{0,j}
@@ -2094,11 +2094,11 @@ T_{\rm per}-T_{\rm D}
 \|T_{\rm per}-T_{\rm D}\|_2=\frac1{2h_s^2}.
 ```
 
-The difference has eigenvalues $\pm1/(2h_s^2)$ on the span of the two endpoint basis vectors and zero elsewhere. Thus it is not a grid-error term that vanishes as $h_s\to0$. This comparison holds at the same coordinates and spacing. The actual endpoint-inclusive mesh also changes its spacing to $U/(K_s-1)$.
+The difference has eigenvalues $\pm1/(2h_s^2)$ on the span of the two endpoint basis vectors and zero elsewhere. Thus it is not a grid-error term that vanishes as $h_s\to0$. This comparison holds at the same coordinates and spacing. An endpoint-inclusive mesh with $K_s$ points also changes the spacing to $U/(K_s-1)$.
 
 In a joint evolution, $T_x+T_s+\operatorname{diag}\mathcal L$ acts on amplitudes for all represented $(x,s)$, not just on the minimizing slack at each $x$. Kinetic transport in $s$ and changes of $s^*(x)$ couple those amplitudes. Taking a pointwise minimum of potential values is neither taking a partial trace of the evolution nor eliminating the slack kinetic. Even a fine slack grid with a small error $E(x)$ therefore need not reproduce the distribution of an evolution under $L$ or its mode. This difference exists for Dirichlet slack axes as well. The periodic wrap is an additional choice of kinetic, not the sole source of changed dynamics. The spectral binary kinetic uses the same periodic Fourier representation and also does not impose a hard boundary at zero.
 
-A small computation illustrates the distinction. For $F=(x-1/2)^2+(y-1/2)^2$ and $G=x+y-1/2$ on $[0,1]^2$, with $\bar\mu=0$, $\rho=1$ and slack range $[0,1/2]$, the PHR form and the slack form were solved as ordinary QHD problems, using the classical split-step kernel (`theory_flavor="split_step"`) with exact readout, binary periodic $K=4$, 32 steps, total time 1, the default initial state and seed 7. The reported most-probable points projected to $(0.25,0.5)$ for the PHR form and $(0.25,0.25)$ for the slack form. The largest absolute difference between corresponding marginal probabilities, over both $x$ and $y$, was approximately $0.00335197$. This compares those two computed 16- and 64-component evolutions. It is not an augmented-Lagrangian convergence experiment or a claim of temporal convergence.
+A small computation illustrates the distinction. For $F=(x-1/2)^2+(y-1/2)^2$ and $G=x+y-1/2$ on $[0,1]^2$, with $\bar\mu=0$, $\rho=1$ and slack range $[0,1/2]$, the PHR form and the slack form were solved as ordinary QHD problems, using the classical split-step evaluation (`theory_flavor="split_step"`) with exact readout, binary periodic $K=4$, 32 steps, total time 1, the default initial state and seed 7. The reported most-probable points projected to $(0.25,0.5)$ for the PHR form and $(0.25,0.25)$ for the slack form. The largest absolute difference between corresponding marginal probabilities, over both $x$ and $y$, was approximately $0.00335197$. This compares those two computed 16- and 64-component evolutions. The software versions and platform of this recorded computation are unspecified, so the values serve as an illustration rather than a reproducible numerical reference. It is not an augmented-Lagrangian convergence experiment or a claim of temporal convergence.
 
 Suppose $U_0$ bounds every required continuous slack. On a periodic grid choose
 
@@ -2115,22 +2115,22 @@ This margin is a proved remedy for upper-endpoint coverage. It does not remove t
 <a id="r55"></a>
 ### Proposition 55. Sound resource composition on a compact program
 
-**Provenance: Derived in NWQLib. Evidence: proved conditional on valid leaf laws and declared execution semantics.**
+**Origin: Derived in NWQLib. Evidence: proved conditional on valid leaf cost rules and declared execution semantics.**
 
-For a finite selected program with exact or upper-bound leaf costs, the following rules produce valid total work and depth quantities. Serial composition adds work and depth. Explicit parallel composition on disjoint registers adds work and takes maximum depth. Repetition by $r$ multiplies work and serial depth by $r$. A branch uses the maximum of its alternatives, yielding an upper bound. An adaptive loop can use a per-round upper bound only if it holds uniformly over its allowed histories.
+For a finite program with exact or upper-bound leaf costs, the following rules produce valid total work and depth quantities. Serial composition adds work and depth. Explicit parallel composition on disjoint registers adds work and takes maximum depth. Repetition by $r$ multiplies work and serial depth by $r$. A branch uses the maximum of its alternatives, yielding an upper bound. An adaptive loop can use a per-round upper bound only if it holds uniformly over its allowed histories.
 
-**Proof.** Structural induction on the program proves each rule. The serial case concatenates executions. Disjoint parallel calls have summed operations and maximum elapsed logical depth under the declared concurrency. Repetition concatenates $r$ copies. Every realized branch is bounded by the maximum alternative. An adaptive loop with at most $r$ rounds is bounded by $r$ times a history-uniform upper bound. Without that bound, a finite round limit alone gives no numerical per-round cost.
+**Proof.** Structural induction on the program proves each rule. The serial case concatenates executions. Disjoint parallel calls have summed operations and maximum elapsed logical depth under the declared concurrency. Repetition concatenates $r$ copies. Every executed branch is bounded by the maximum alternative. An adaptive loop with at most $r$ rounds is bounded by $r$ times a history-uniform upper bound. Without that bound, a finite round limit alone gives no numerical per-round cost.
 
-Storage follows lifetime rather than total work. At a location, allocation adds its live width, release subtracts that same allocation, and the peak is the maximum live sum. Serial temporary workspace is reusable, while simultaneous parallel workspace adds. Input or output arrays resident for the entire workload add to every affected peak. Independent experiments need a scheduling premise before their temporary peaks can be reused. These rules also follow by tracking the realized live objects at each execution point.
+Storage follows lifetime rather than total work. At a location, allocation adds its live width, release subtracts that same allocation, and the peak is the maximum live sum. Serial temporary workspace is reusable, while simultaneous parallel workspace adds. Input or output arrays resident for the entire workload add to every affected peak. Independent experiments need a scheduling premise before their temporary peaks can be reused. These rules also follow by tracking the live objects at each point of the execution.
 
-The evaluator can apply the induction without expanding repetitions. It caches each node's result for each distinct combination of parameter values, live quantum widths by role and location, and available classical values, including whether each classical value exists on every path. Its cost therefore depends on the program graph with repetitions unexpanded and the number of these combinations visited, rather than the expanded gate count. It does not claim a bound linear in the graph when the number of combinations grows. A missing leaf law remains unknown. An estimated leaf produces an estimate, and a conditional leaf carries its assumptions. Neither can become a proved bound by algebraic composition.
+NWQLib's resource computation can apply the induction without expanding repetitions. It caches each node's result for each distinct combination of parameter values, live quantum widths by role and location, and available classical values, including whether each classical value exists on every path. Its cost therefore depends on the program graph with repetitions unexpanded and the number of these combinations visited, rather than the expanded gate count. It does not claim a bound linear in the graph when the number of combinations grows. The cost of a leaf without a cost rule remains unknown. An estimated leaf produces an estimate, and a conditional leaf carries its assumptions. Neither can become a proved bound by algebraic composition.
 
-For QHD run-resource projections, per-circuit arbitrary-rotation counts and T estimates remain distinct from their shot-weighted totals. Under exact readout, `shot_arbitrary_rotations` and `shot_t_estimate` are unavailable (`None`), because no intended hardware shot count was selected. They are not zero-work hardware estimates. A chosen shot multiplicity is needed to form them. This does not change the recorded acquisition count of zero shots for an exact-readout execution.
+For QHD run-resource projections, per-circuit arbitrary-rotation counts and T estimates remain distinct from their shot-weighted totals. Under exact readout, `shot_arbitrary_rotations` and `shot_t_estimate` are unavailable (`None`), because no intended hardware shot count was chosen. They are not zero-work hardware estimates. A chosen shot multiplicity is needed to form them. This does not change the recorded count of zero shots for an exact-readout execution.
 
 <a id="r56"></a>
-### Proposition 56. Error composition with units, provenance, and failure probabilities
+### Proposition 56. Error composition with units, sources, and failure probabilities {#proposition-56-error-composition-with-units-provenance-and-failure-probabilities}
 
-**Provenance: Derived in NWQLib. Evidence: proved conditional on a complete error decomposition.**
+**Origin: Derived in NWQLib. Evidence: proved conditional on a complete error decomposition.**
 
 Suppose a scientific output error has a valid decomposition into components with nonnegative bounds $\epsilon_i$, all expressed in the same norm, units, normalization, and target frame. If component $i$'s bound fails with probability at most $\delta_i$, then
 
@@ -2140,12 +2140,12 @@ Suppose a scientific output error has a valid decomposition into components with
 
 **Proof.** On the intersection of all component events, the triangle inequality gives the magnitude bound. The union bound controls the complement without requiring independence. A relative criterion needs an independently justified positive scale, and the failure event of a probabilistic scale bound joins the same union.
 
-The implementation associates each bound with its output, operator, construction, parameter point, and premises. These associations establish which mathematical statement is being applied. They do not prove an unverified premise. If any required component is unknown, the sum of known terms is a subtotal rather than a total upper bound. If a sufficient upper bound exceeds the requested tolerance, the conclusion is inconclusive because the true error may be smaller. A passed numerical consistency check supplies only the relation it actually checked. The soundness statement assumes the method's declared component list is complete, an obligation that the generic combiner cannot infer from types.
+The implementation associates each bound with its output, operator, construction, parameter point, and premises. These associations establish which mathematical statement is being applied. They do not prove an unverified premise. If any required component is unknown, the sum of known terms is a subtotal rather than a total upper bound. If a sufficient upper bound exceeds the requested tolerance, the conclusion is inconclusive because the true error may be smaller. A passed numerical consistency check supplies only the relation it actually checked. The soundness statement assumes that the method's declared list of components is complete, a condition that the general combination code cannot infer from the types of the components.
 
 <a id="r57"></a>
 ### Proposition 57. Scale-aware Gram and fidelity verification windows
 
-**Provenance: Derived in NWQLib. Evidence: proved under the standard arithmetic model and stated elementary-function assumptions.**
+**Origin: Derived in NWQLib. Evidence: proved under the standard arithmetic model and stated elementary-function assumptions.**
 
 For a matrix $V$ with complex columns of length $D$, let $\widehat S$ be the Gram matrix formed by floating-point inner products. Put $g=\sqrt2\gamma_{2D}<1$. An entrywise inner-product model gives
 
@@ -2171,7 +2171,7 @@ To derive it, the overlap error is at most $\sqrt2\gamma_{2D}\|x\|\|y\|$, and ea
 
 ### Derivation: error budget of the `expm_multiply` reference {#expm-multiply-error-budget}
 
-`expm_multiply_state_error(calls, start=s)` in `src/nwqlib/_validation.py` is the first-order 2-norm error budget $\delta$ of a classical kernel that evolves a unit initial state of length $D$ by SciPy's `expm_multiply`, which is [Al-Mohy and Higham, Algorithm 3.2][AlMohyHigham]. For each call with a Hermitian generator $G$ it takes a bound $N$ on $\lVert G-(\operatorname{tr}(G)/D)I\rVert_1$, the shifted matrix whose Taylor sum SciPy evaluates, and a bound $r$ on the nonzeros in a row. With $\bar\theta=\min(N,9.9)$ and $S=55\max(1,\lceil N/9.9\rceil)$, one call [charges](glossary.md#charge) (`expm_multiply_call_roundoff`)
+`expm_multiply_state_error(calls, start=s)` in `src/nwqlib/_validation.py` is the first-order 2-norm error budget $\delta$ of a classical evaluation that evolves a unit initial state of length $D$ by SciPy's `expm_multiply`, which is [Al-Mohy and Higham, Algorithm 3.2][AlMohyHigham]. For each call with a Hermitian generator $G$ it takes a bound $N$ on $\lVert G-(\operatorname{tr}(G)/D)I\rVert_1$, the shifted matrix whose Taylor sum SciPy evaluates, and a bound $r$ on the nonzeros in a row. With $\bar\theta=\min(N,9.9)$ and $S=55\max(1,\lceil N/9.9\rceil)$, one call has the roundoff coefficient (`expm_multiply_call_roundoff`)
 
 ```math
 c=N+2\sqrt2\,rNe^{\bar\theta}+S\left(2e^{\bar\theta}+7\right),
@@ -2187,7 +2187,7 @@ The extra $N$ covers the rounded subtraction of the trace shift, and $5$ each of
 
 The start term $s$ bounds the construction error of the initial vector (`src/nwqlib/algorithms/qhd/initial_state.py::restricted_state_error`). It is $2$ for the uniform state's $1/\sqrt D$, one correctly rounded square root and one division, and for the kinetic ground state on the periodic grid, which is the uniform state. It is about $9d-1$ for the kinetic ground state of $d$ variables on the Dirichlet grids, from $5u$ per sine entry after reducing its angle to $(0,\pi/2]$, $3u$ to normalize each variable and $d-1$ product roundings, to first order. For a Gaussian the bound is finite (`initial_state.GaussianState._variables` and `_gaussian_beta`). Its exponents $z$ are shifted by their minimum $z_{\min}$ before exponentiation, and each exponent carries the enclosure $\lvert z-\hat z\rvert\le5u\,\hat z/(1-10u)+2^{-1073}$. Each amplitude then errs by at most $v\,(\operatorname{expm1}(x)+2u)/(1-2u)$ for the exponent-error enclosure $x$, with an explicit allowance for subnormal and zero entries, which gives $\beta=\lVert t-v\rVert/\lVert v\rVert$ against the exact Gaussian vector $t$ and the direction bound $2\beta$ from the exact inequality $\bigl\lVert t/\lVert t\rVert-v/\lVert v\rVert\bigr\rVert\le2\beta$. Two common factors give $x$, $(5z+(z-z_{\min}))u$ against the computed minimum and $(5(z+z_m)+(z-z_m))u$ against the exact exponent of the minimizing entry, which is then exact, and the smaller direction bound is used. Normalization adds $3u/(1-2u)+\sqrt K\,2^{-1075}$, and the tensor product composes the factors finitely as $\prod_j(1+e_j)-1$ plus $\gamma_{d-1}$ for the product roundings. The result is capped at $\sqrt{N_\psi^2+1}$, the largest distance between the computed nonnegative state of norm at most $N_\psi$ and the exact unit state, about $\sqrt2$.
 
-Per variable, the initial-state records of `src/nwqlib/algorithms/qhd/initial_state.py` form these vectors and errors. The uniform state has entries $1/\sqrt K$, each one correctly rounded square root and one division, so each errs by at most $2u$. The classical start vector does not use these vectors and fills the equal product entry $1/\sqrt{K^d}$ directly (`UniformState.variable_amplitudes`). The kinetic ground state is the uniform vector on the periodic grid and $\sin(\pi(i+1)/(K+1))$ on the Dirichlet grids. There $\sin(\pi-\theta)=\sin\theta$ lets entry $i$ use the angle $\theta_i=\pi m_i/(K+1)$ with $m_i=\min(i+1,K-i)$, so $0<\theta_i\le\pi/2$. The computed angle has relative error at most $3u$ (`math.pi`, the product with the integer $m_i$ and the division by the integer $K+1$). A relative angle error $\eta$ changes $\sin\theta$ by the relative amount $\theta\cot\theta\,\eta$, and $0\le\theta\cot\theta<1$ on $(0,\pi/2]$, so with the one-ulp sine each entry errs by at most $5u$. The first-order 2-norm error of each vector is therefore $8u$ on the Dirichlet grids, $5u$ per entry and $3u$ for normalizing, and $2u$ on the periodic grid (`KineticGroundState.variable_amplitudes`, `variable_errors`). A Gaussian factor's exponents are shifted by their minimum before exponentiation, so its largest entry is exactly 1 before normalization (`GaussianState.variable_amplitudes`). Its 2-norm error bound against its exact direction is the direction bound of the computed amplitudes plus the rounding of the normalization, $3u/(1-2u)+\sqrt K\,2^{-1074}$, which charges the subnormal half-ulp $2^{-1075}$ above as the representable $2^{-1074}$, evaluated upward with the factor $1+2^{-40}$. The subnormal allowance is representable, and its addition to the far larger terms rounds like every other operation that the factor $1+2^{-40}$ counts. The bound can be infinite when some exponents overflow and the smallest exponent exceeds $2^{1020}$, or when the smallest exponent itself overflows and the grid points nearest the center are tied or nearly tied. Even with finite exponents, it can be infinite if both evaluations of `_gaussian_beta` overflow, or if the smaller result overflows when doubled or converted to units of $u$ (`GaussianState.variable_errors`).
+Per variable, the initial-state classes of `src/nwqlib/algorithms/qhd/initial_state.py` form these vectors and errors. The uniform state has entries $1/\sqrt K$, each one correctly rounded square root and one division, so each errs by at most $2u$. The classical start vector does not use these vectors and fills the equal product entry $1/\sqrt{K^d}$ directly (`UniformState.variable_amplitudes`). The kinetic ground state is the uniform vector on the periodic grid and $\sin(\pi(i+1)/(K+1))$ on the Dirichlet grids. There $\sin(\pi-\theta)=\sin\theta$ lets entry $i$ use the angle $\theta_i=\pi m_i/(K+1)$ with $m_i=\min(i+1,K-i)$, so $0<\theta_i\le\pi/2$. The computed angle has relative error at most $3u$ (`math.pi`, the product with the integer $m_i$ and the division by the integer $K+1$). A relative angle error $\eta$ changes $\sin\theta$ by the relative amount $\theta\cot\theta\,\eta$, and $0\le\theta\cot\theta<1$ on $(0,\pi/2]$, so with the one-ulp sine each entry errs by at most $5u$. The first-order 2-norm error of each vector is therefore $8u$ on the Dirichlet grids, $5u$ per entry and $3u$ for normalizing, and $2u$ on the periodic grid (`KineticGroundState.variable_amplitudes`, `variable_errors`). A Gaussian factor's exponents are shifted by their minimum before exponentiation, so its largest entry is exactly 1 before normalization (`GaussianState.variable_amplitudes`). Its 2-norm error bound against its exact direction is the direction bound of the computed amplitudes plus the rounding of the normalization, $3u/(1-2u)+\sqrt K\,2^{-1074}$, which counts the subnormal half-ulp $2^{-1075}$ above as the representable $2^{-1074}$, evaluated upward with the factor $1+2^{-40}$. The subnormal allowance is representable, and its addition to the far larger terms rounds like every other operation that the factor $1+2^{-40}$ counts. The bound can be infinite when some exponents overflow and the smallest exponent exceeds $2^{1020}$, or when the smallest exponent itself overflows and the grid points nearest the center are tied or nearly tied. Even with finite exponents, it can be infinite if both evaluations of `_gaussian_beta` overflow, or if the smaller result overflows when doubled or converted to units of $u$ (`GaussianState.variable_errors`).
 {: #qhd-initial-state-vectors }
 
 `state_mass_window(delta, D)` turns $\delta$ into the mass window
@@ -2198,43 +2198,43 @@ Per variable, the initial-state records of `src/nwqlib/algorithms/qhd/initial_st
 
 where $\tau$ is `NUMERICAL_RELATION_RTOL`, $(D+4)u$ covers the evaluations of $\lvert z\rvert^2$ with `np.abs` and their $D-1$ additions, and the QHD tie window of [QHD most probable point and tie window](ENGINEERING_CONSTANTS.md#qhd-most-probable-point-and-tie-window) uses the same $\delta$.
 
-The docstrings derive each term to first order in $u$ under two assumptions that SciPy's own error control makes. Its norm estimates are not below the spectral radius, and its two-term early-exit test (the paper's Eq. (3.15)) bounds the omitted Taylor tail in 2-norm. The truncated Taylor sum has backward error at most $uN$ (Eqs. (3.5)–(3.9)). An error made in Taylor term $j$ reaches the result through the rest of the finite sum, whose norm is at most $\sum_k\theta^kj!/(j+k)!$, and over all terms these factors total $\sum_{v=1}^mv\,\theta^{v-1}/v!\le e^\theta$, which gives the sparse-product coefficient. The remaining roundings of a substep total at most $(2\theta+1)e^\theta+m+6$, which is at most $m(2e^\theta+7)$ because SciPy's $\theta$ table has $\theta_m\le m/4$. The factor $e^{\bar\theta}$ is the per-substep $e^{\lVert A\rVert}$ of the paper's Lemma 4.1, and its Eq. (4.7) shows that for a normal matrix with a unitary exponential this factor exceeds what the problem's conditioning requires. $S$ bounds the number of matrix-vector products, because SciPy's cost minimization never chooses more products than degree 55 with $\lceil N/9.9\rceil$ substeps. Under the two assumptions the bound holds for every unit state and is correspondingly loose. The centering charge is first order and assumes $N$ also bounds the shifted matrix SciPy forms, which a huge scalar offset can violate.
+The docstrings derive each term to first order in $u$ under two assumptions that SciPy's own error control makes. Its norm estimates are not below the spectral radius, and its two-term early-exit test (the paper's Eq. (3.15)) bounds the omitted Taylor tail in 2-norm. The truncated Taylor sum has backward error at most $uN$ (Eqs. (3.5)–(3.9)). An error made in Taylor term $j$ reaches the result through the rest of the finite sum, whose norm is at most $\sum_k\theta^kj!/(j+k)!$, and over all terms these factors total $\sum_{v=1}^mv\,\theta^{v-1}/v!\le e^\theta$, which gives the sparse-product coefficient. The remaining roundings of a substep total at most $(2\theta+1)e^\theta+m+6$, which is at most $m(2e^\theta+7)$ because SciPy's $\theta$ table has $\theta_m\le m/4$. The factor $e^{\bar\theta}$ is the per-substep $e^{\lVert A\rVert}$ of the paper's Lemma 4.1, and its Eq. (4.7) shows that for a normal matrix with a unitary exponential this factor exceeds what the problem's conditioning requires. $S$ bounds the number of matrix-vector products, because SciPy's cost minimization never chooses more products than degree 55 with $\lceil N/9.9\rceil$ substeps. Under the two assumptions the bound holds for every unit state and is correspondingly loose. The centering term $N$ is first order and assumes that $N$ also bounds the shifted matrix SciPy forms, which a huge scalar offset can violate.
 
-On the one-variable $K=39$ grid of the QHD mass-window test, $(x-1/5)^2$ on $[-1,1]$ with two steps to $T=1$ from the default kinetic ground state, the `theory_flavor="schrodinger"` kernel's mass exceeds one by $3.0\times10^{-12}$ against a window of $3.2\times10^{-8}$, and the computed state differs from a 40-digit evaluation of the same two steps by $2.9\times10^{-12}$ in the 2-norm up to a global phase. From the uniform initial state the two figures are $3.4\times10^{-12}$ and $2.8\times10^{-12}$. Both runs were made with Python 3.12.14, SciPy 1.18.1 and mpmath 1.3.0 on macOS arm64.
+On the one-variable $K=39$ grid of the QHD mass-window test, $(x-1/5)^2$ on $[-1,1]$ with two steps to $T=1$ from the default kinetic ground state, the mass of the `theory_flavor="schrodinger"` evaluation exceeds one by $3.0\times10^{-12}$ against a window of $3.2\times10^{-8}$, and the computed state differs from a 40-digit evaluation of the same two steps by $2.9\times10^{-12}$ in the 2-norm up to a global phase. From the uniform initial state the two figures are $3.4\times10^{-12}$ and $2.8\times10^{-12}$. Both runs were made with Python 3.12.14, SciPy 1.18.1 and mpmath 1.3.0 on macOS arm64.
 
-The QHD classical kernel computes $N$ from its stored schedule and support tables (`method._generator_norms`) and records the mass window as the `probability_window` argument of its `KernelApplication`, the counterpart of the instruction count that a circuit's preparation record holds.
+The classical QHD evaluation computes $N$ from the Plan's schedule and support tables (`method._generator_norms`) and records the mass window as the `probability_window` argument of its `KernelApplication`, the counterpart of the instruction count recorded for a prepared circuit.
 
 ### Derivation: QHD operation sizes {#qhd-operation-sizes}
 
-`QHD.max_work=1_000_000_000` bounds known symbolic/table/action work, including every `expm_multiply` call of a classical evolution [charged](glossary.md#charge) with `_linalg_laws.expm_multiply_requirements`, and `QHD.max_bytes=10_000_000_000` bounds known arrays before selection or explicitly chosen construction. `QHDVerification` uses the same defaults for its separate explicit reference invocation. They exclude unknown SymPy/SciPy/Qiskit internal work and process RSS.
+`QHD.max_work=1_000_000_000` limits the work of symbolic expressions, tables and operator actions that can be counted in advance, including every `expm_multiply` call of a classical evolution, counted with `_linalg_laws.expm_multiply_requirements`. `QHD.max_bytes=10_000_000_000` limits the arrays of known size, before the construction is selected or before an explicitly chosen construction is built. `QHDVerification` uses the same defaults for the reference computation that it runs separately on request. Neither limit covers internal work of SymPy, SciPy or Qiskit that is not known in advance, or the resident memory of the process.
 
-When `QHDVerification` computes `minimum_success_mass` from observed counts or probabilities without a kept state, its byte charge omits histogram construction or loading, decoding and passing-weight storage at every readout width, so `QHDVerification.max_bytes` does not bound that step.
+When `QHDVerification` computes `minimum_success_mass` from observed counts or probabilities without a kept state, its byte count omits the construction or loading of the histogram, the decoding and the storage of the passing weights at every readout width, so `QHDVerification.max_bytes` does not bound that step.
 
-Planning charges each support table $K^{\lvert S\rvert}(N_S+\lvert S\rvert)$ units, one per node of its expanded expression and per coordinate at every grid tuple (`QHD._admit_symbolic_work`). Its bytes are $8E+8dK+H_{\rm tables}+\max(W_{\rm eval},I)$ for $E$ stored float64 entries, the centered coordinate vectors and the qualified table metadata $H_{\rm tables}$ (row "Support-table metadata and serialization allowances" of [Budgets and mechanical bounds](ENGINEERING_CONSTANTS.md#budgets-and-mechanical-bounds)), since table construction and identity serialization are successive phases. The construction workspace $W_{\rm eval}$ is the largest of the coordinate staging $40K$, the $9K^{\lvert S\rvert}$ bytes for one table's source array and finite-value mask while making its read-only copy, and its chunk charge
+Planning counts $K^{\lvert S\rvert}(N_S+\lvert S\rvert)$ work units for each support table, one per node of its expanded expression and per coordinate at every grid tuple (`QHD._admit_symbolic_work`). The bytes counted are $8E+8dK+H_{\rm tables}+\max(W_{\rm eval},I)$ for $E$ float64 table entries, the centered coordinate vectors and the table metadata allowance $H_{\rm tables}$ (row "Support-table metadata and serialization allowances" of [Budgets and mechanical bounds](ENGINEERING_CONSTANTS.md#budgets-and-mechanical-bounds)). The maximum appears because table construction and the serialization for the content hash are successive phases. The construction workspace $W_{\rm eval}$ is the largest of the coordinate staging $40K$, the $9K^{\lvert S\rvert}$ bytes for one table's source array and finite-value mask while its read-only copy is made, and the bytes of one evaluation block of size $b$,
 
 ```math
 B_{{\rm slab},S}(b)=8b(N_S+2)+(8\lvert S\rvert+64)b+256(N_S+2)+H_0,
 ```
 
-with the chunk $b_S$ chosen from the bytes left in `QHD.max_bytes` after reserving space for the initial state, schedule rows, compiled blocks, any binary-compilation arrays, the final support tables, the centered coordinate vectors and their metadata (`compiler.support_chunk_size`). The serialization workspace $I=H_{\rm json,arrays}+Q+q_{\max}+12J$ covers the first identity computation of the tables and the initial vectors, with $Q$ the sum and $q_{\max}$ the largest of their padded-base64 lengths and $J$ their JSON length (`method._support_table_bytes`). The evaluator term $8b(N_S+2)$ and the header allowances are engineering allowances ([Budgets and mechanical bounds](ENGINEERING_CONSTANTS.md#budgets-and-mechanical-bounds)). For $(x+y+z+w-1)^{10}$ at $K=16$ this is $1.7\times10^8$ units, and degree 9 needs $9.9\times10^7$.
+with the block size $b_S$ chosen from the bytes left in `QHD.max_bytes` after setting aside space for the initial state, schedule rows, compiled blocks, any binary-compilation arrays, the final support tables, the centered coordinate vectors and their metadata (`compiler.support_chunk_size`). The serialization workspace $I=H_{\rm json,arrays}+Q+q_{\max}+12J$ covers the first content-hash computation of the tables and the initial vectors, with $Q$ the sum and $q_{\max}$ the largest of their padded-base64 lengths and $J$ their JSON length (`method._support_table_bytes`). The block-evaluation term $8b(N_S+2)$ and the header allowances are engineering allowances ([Budgets and mechanical bounds](ENGINEERING_CONSTANTS.md#budgets-and-mechanical-bounds)). For $(x+y+z+w-1)^{10}$ at $K=16$ this is $1.7\times10^8$ units, and degree 9 needs $9.9\times10^7$.
 
-The `max_work` default is a fuse on counted planning categories. On $[-1,1]^4$ the degree-10 tables took 1.6 to 1.7 s to evaluate (Python 3.12.14 and SymPy 1.14.0 on an Apple M3 Max). Before expansion, `objective.expansion_term_charge` computes a nominal charge. For the grammar of numeric constants, symbols, Add, Mul and nonnegative integer Pow, atoms contribute one, sums add, products multiply and an m-th power of an n-term base has at most $\binom{n+m-1}{m}$ formal products. Coinciding monomials and cancellations can lower the count. Induction proves this polynomial term bound, but it does not bound symbolic operations, coefficient digits, temporary expressions or process memory. The 16-byte-per-term allowance has the same nominal scope. Function rewrites, combined denominators and Sum/Product range lengths are outside that guarantee, and the expanded-node table check occurs after expansion. For example, the default accepts $(x+y)^{1000000}$, whose middle binomial coefficients have about 301,000 decimal digits. General preprocessing containment remains [open](ROADMAP.md#qhd-objective-expansion-check).
+The default `max_work` is a safety limit on the counted planning categories. On $[-1,1]^4$ the degree-10 tables took 1.6 to 1.7 s to evaluate (Python 3.12.14 and SymPy 1.14.0 on an Apple M3 Max). Before expansion, `objective.expansion_term_charge` computes a nominal term count. For the grammar of numeric constants, symbols, Add, Mul and nonnegative integer Pow, atoms contribute one, sums add, products multiply and an m-th power of an n-term base has at most $\binom{n+m-1}{m}$ formal products. Coinciding monomials and cancellations can lower the count. Induction proves this polynomial term bound, but it does not bound symbolic operations, coefficient digits, temporary expressions or process memory. The 16-byte-per-term allowance has the same nominal scope. Function rewrites, combined denominators and Sum/Product range lengths are outside that guarantee, and the expanded-node table check occurs after expansion. For example, the default accepts $(x+y)^{1000000}$, whose middle binomial coefficients have about 301,000 decimal digits. A general limit on preprocessing remains [open](ROADMAP.md#qhd-objective-expansion-check).
 
-Every coefficient rule charges the step rows before any row exists, 2 units per midpoint step for its two point values or the schedule's `interval_work` per integrated step for its interval integrals (129 for the cubic schedule's quadrature and 2 for the closed forms of the other two), and `_STEP_BYTES` per step, and each compiled block occurrence is charged `_BLOCK_BYTES` (`QHD._admit_symbolic_work`, [Budgets and mechanical bounds](ENGINEERING_CONSTANTS.md#budgets-and-mechanical-bounds)).
+Every coefficient rule counts the step rows before any row exists, 2 units per midpoint step for its two point values or the schedule's `interval_work` per integrated step for its interval integrals (129 for the cubic schedule's quadrature and 2 for the closed forms of the other two), and `_STEP_BYTES` per step, and each occurrence of a compiled block counts `_BLOCK_BYTES` (`QHD._admit_symbolic_work`, [Budgets and mechanical bounds](ENGINEERING_CONSTANTS.md#budgets-and-mechanical-bounds)).
 
-Before any table work planning admits the evaluation of the initial state and its stored payload, one unit per grid point of each variable and
+Before any table work, planning checks the evaluation of the initial state and its saved vectors against the limits, counting one unit per grid point of each variable and
 
 ```math
 320dK+(8dK+120d+40)+(8dK+120d+64+204d)+4096(d+1)
 ```
 
-bytes (`src/nwqlib/algorithms/qhd/method.py::_initial_state_bytes`, `QHD.plan`). It is the only evaluation, because the reconstruction stores its vectors and error bound for the kernel, its windows and the native builder (`initial_state.evaluate`). This allowance is measured and specific to the implementation and runtime, Python 3.12.14, NumPy 2.5.2 and 64-bit CPython on macOS arm64, not a derived bound. The coefficient 320 per grid point (`_INITIAL_STATE_BYTES`) covers the evaluator's Python float lists and float64 vectors. The Gaussian state, which also forms its entry-error bounds, had a traced peak of about 277 bytes per point for one variable with $K$ from 4096 to $10^6$, and the kinetic ground state 73. That coefficient alone does not cover the fixed costs of small grids, where the Gaussian stage traced 1,505 bytes at $d=1$, $K=2$ against 640. The second term is the normalized float64 vectors and their tuple, the third the stored payload of $d$ separately owning float64 arrays of $K$ entries, counting data $8dK$, ndarray headers $112d$, their tuple $8d+40$ and one 24-byte error float, plus 204 bytes per array for its `FrozenArray` wrapper (`_FROZEN_ARRAY_BYTES`, [Budgets and mechanical bounds](ENGINEERING_CONSTANTS.md#budgets-and-mechanical-bounds)), and $4096(d+1)$ (`_INITIAL_STATE_OBJECT_BYTES`) an untuned allowance for Python and NumPy bookkeeping. The stage traced at most 0.80 of the allowance over Gaussian states and the kinetic ground state with $d$ from 1 to 3 and $K$ from 2 to 4096, up to $K=256$ at $d=3$ (`tests/test_qhd_workflow.py` keeps the small cases). It does not cover the complete `QHDReconstruction` constructor, and the table admission charges the identity serialization of the stored vectors. The same units open the running total of the table admission (`QHD._admit_symbolic_work`), whose final admission includes these bytes, so the per-Plan admissions that the augmented-Lagrangian and refinement bounds count already contain the initial state.
+bytes (`src/nwqlib/algorithms/qhd/method.py::_initial_state_bytes`, `QHD.plan`). It is the only evaluation, because the reconstruction keeps its vectors and error bound for the classical evaluation, its windows and the circuit construction (`initial_state.evaluate`). This allowance is measured and specific to the implementation and runtime, Python 3.12.14, NumPy 2.5.2 and 64-bit CPython on macOS arm64, not a derived bound. The coefficient 320 per grid point (`_INITIAL_STATE_BYTES`) covers the Python float lists and float64 vectors of the initial-state evaluation. The Gaussian state, which also forms its entry-error bounds, had a traced peak of about 277 bytes per point for one variable with $K$ from 4096 to $10^6$, and the kinetic ground state 73. That coefficient alone does not cover the fixed costs of small grids, where the Gaussian stage traced 1,505 bytes at $d=1$, $K=2$ against 640. The second term is the normalized float64 vectors and their tuple, the third the saved vectors, $d$ float64 arrays of $K$ entries that each own their data, counting data $8dK$, ndarray headers $112d$, their tuple $8d+40$ and one 24-byte error float, plus 204 bytes per array for its `FrozenArray` wrapper (`_FROZEN_ARRAY_BYTES`, [Budgets and mechanical bounds](ENGINEERING_CONSTANTS.md#budgets-and-mechanical-bounds)), and $4096(d+1)$ (`_INITIAL_STATE_OBJECT_BYTES`) an untuned allowance for Python and NumPy bookkeeping. The stage traced at most 0.80 of the allowance over Gaussian states and the kinetic ground state with $d$ from 1 to 3 and $K$ from 2 to 4096, up to $K=256$ at $d=3$ (`tests/test_qhd_workflow.py` keeps the small cases). It does not cover the complete `QHDReconstruction` constructor, and the table check counts the serialization of the saved vectors for their content hash. The same units start the running total of the table check (`QHD._admit_symbolic_work`), whose final check includes these bytes, so the per-Plan totals that the augmented-Lagrangian and refinement bounds count already contain the initial state.
 
-`ExecutionLimits` separately limits what one Run may prepare, execute and store.
+`ExecutionLimits` separately limits what one Run, an execution of a Plan, may prepare, execute and save.
 
-The augmented-Lagrangian layer admits its support-table checks and required original-expression numerical scans, together with its reserved round evaluations of $f$, $h$ and $g$, against `QHD.max_work` before the corresponding work. Each original-summand scan costs $K^{\lvert S_j\rvert}(N_j+\lvert S_j\rvert)$ units for its support $S_j$ and supplied tree size $N_j$, with one charge when structural coverage and the range check share it. An inconclusive addition bound can require a further admitted whole-term scan costing $K^{\lvert S\rvert}(N+\lvert S\rvert)$ units (`src/nwqlib/algorithms/qhd/constrained.py::_admit_layer_work`). The layer evaluates each support table on arrays in chunks that `QHD.max_bytes` admits beside a reservation for the term's tables $8\sum E$, the centered coordinates $8dK$, their metadata $H_0$ and the largest table copy $8\max E$, of which it keeps one table and the extrema at a time, with the chunk charge $B_{{\rm slab},S}(b)$ above (`src/nwqlib/algorithms/qhd/constrained.py::_support_tables`). Each original-summand scan is evaluated on arrays in chunks admitted the same way beside the coordinate vectors $8dK$ and $H_0$, streams its maximum and keeps no table, and a chunk whose array arithmetic signals a division by zero, an overflow or an invalid operation is evaluated as scalars (`src/nwqlib/algorithms/qhd/constrained.py::_domain_check`).
+Before the corresponding work, the augmented-Lagrangian layer counts its support-table checks and required numerical scans of the original expressions, together with the work it sets aside for the round evaluations of $f$, $h$ and $g$, against `QHD.max_work`. Each scan of an original summand costs $K^{\lvert S_j\rvert}(N_j+\lvert S_j\rvert)$ units for its support $S_j$ and supplied tree size $N_j$, counted once when structural coverage and the range check share it. An inconclusive addition bound can require a further scan of the whole term, also counted against the limit, costing $K^{\lvert S\rvert}(N+\lvert S\rvert)$ units (`src/nwqlib/algorithms/qhd/constrained.py::_admit_layer_work`). The layer evaluates each support table on arrays in blocks whose bytes fit within `QHD.max_bytes` beside the bytes set aside for the term's tables $8\sum E$, the centered coordinates $8dK$, their metadata $H_0$ and the largest table copy $8\max E$, of which it keeps one table and the extrema at a time, with the block bytes $B_{{\rm slab},S}(b)$ above (`src/nwqlib/algorithms/qhd/constrained.py::_support_tables`). Each scan of an original summand is evaluated on arrays in blocks sized the same way beside the coordinate vectors $8dK$ and $H_0$, accumulates its maximum block by block and keeps no table, and a block whose array arithmetic signals a division by zero, an overflow or an invalid operation is evaluated as scalars (`src/nwqlib/algorithms/qhd/constrained.py::_domain_check`).
 
-Each classical kernel law, `method.restricted_sizes` for `theory_flavor="schrodinger"` and for `theory_flavor="ir_product"` on the one-hot encoding, and `split_step.sizes` for `theory_flavor="split_step"`, charges forming the start vector from the stored amplitudes once per evolution, $W_{\rm start}=D$ for the uniform fill and $dK+\sum_{j=2}^dK^j+D$ for a product of the stored factors (`src/nwqlib/algorithms/qhd/initial_state.py::start_vector_work`). Its explicit arrays, at most $24D+8dK$ bytes, precede the evolution arrays and fit within both byte laws. The classical kernel with `theory_flavor="split_step"` charges
+Each size formula of a classical evaluation, `method.restricted_sizes` for `theory_flavor="schrodinger"` and for `theory_flavor="ir_product"` on the one-hot encoding, and `split_step.sizes` for `theory_flavor="split_step"`, counts the formation of the start vector from the recorded amplitudes once per evolution, $W_{\rm start}=D$ for the uniform fill and $dK+\sum_{j=2}^dK^j+D$ for a product of the recorded factors (`src/nwqlib/algorithms/qhd/initial_state.py::start_vector_work`). Its explicit arrays, at most $24D+8dK$ bytes, precede the evolution arrays and fit within both byte formulas. The split-step evaluation (`theory_flavor="split_step"`) counts
 
 ```math
 W_{\rm start}+D(d+M+7)+dK+N_s\bigl(2dLD+(2d+13)D+7dK+d+4\bigr)
@@ -2246,13 +2246,13 @@ units for $D=K^d$, the start vector's construction $W_{\rm start}$, $M$ support 
 64D+32(d+1)K+8T_{\max}+8N_s+1024K+4096(d+1)
 ```
 
-bytes for the largest table size $T_{\max}$ (`src/nwqlib/algorithms/qhd/split_step.py::sizes`), including the reductions and per-step charges of the state budget that the evolution observes, whose transform term $2dLD$ is a nominal proxy, not a count of the backend's operations. Neither depends on the schedule weights or the objective's range.
+bytes for the largest table size $T_{\max}$ (`src/nwqlib/algorithms/qhd/split_step.py::sizes`), including the reductions and per-step terms of the state budget that the evolution computes along its trajectory, whose transform term $2dLD$ is a nominal proxy, not a count of the backend's operations. Neither depends on the schedule weights or the objective's range.
 
-For the two-dimensional Ackley function on $[-5,5]^2$ mapped to the unit square, with $K=32$ on the default Dirichlet interior grid, 1000 midpoint steps and total time 10 (planned with Python 3.12.14 and SymPy 1.14.0 on macOS arm64, the quadratic schedule with $\gamma=0.3$ unless another schedule is named, and `max_work = 1e20` and `max_bytes = 1e12` so that planning reports each charge), the split-step charge is $4.7\times10^7$ units and the `theory_flavor="schrodinger"` kernel is charged $9.0\times10^8$ under the quadratic schedule and $8.9\times10^{13}$ under `ShiftedCubicSchedule(s=2e-4)`, or $1.5\times10^{16}$ with the integrated rule.
+For the two-dimensional Ackley function on $[-5,5]^2$ mapped to the unit square, with $K=32$ on the default Dirichlet interior grid, 1000 midpoint steps and total time 10 (planned with Python 3.12.14 and SymPy 1.14.0 on macOS arm64, the quadratic schedule with $\gamma=0.3$ unless another schedule is named, and `max_work = 1e20` and `max_bytes = 1e12` so that planning reports each count), the split-step evaluation counts $4.7\times10^7$ units and the `theory_flavor="schrodinger"` evaluation counts $9.0\times10^8$ under the quadratic schedule and $8.9\times10^{13}$ under `ShiftedCubicSchedule(s=2e-4)`, or $1.5\times10^{16}$ with the integrated rule.
 
 ## 13. Implementation and evidence index
 
-Code locations below are paths in the NWQLib repository. A name after a double colon is a function, class, or method defined in that file. The provenance abbreviations are R, **From a reference**, D, **Derived in NWQLib**, and I, **Improved from a reference**. The evidence column identifies source-defined validation checks in the repository. Proofs establish the analytic statements, while these checks test their implementation and premises on finite cases.
+Code locations below are paths in the NWQLib repository. A name after a double colon is a function, class, or method defined in that file. The Label column gives the origin of each result as R, **From a reference**, D, **Derived in NWQLib**, or I, **Improved from a reference**. The fourth column names the repository tests, or other evidence, that check each result. Proofs establish the analytic statements, while these checks test their implementation and premises on finite cases.
 
 | Result and statement | Label | Code | Source-defined check or evidence | Contribution |
 | --- | --- | --- | --- | --- |
@@ -2262,7 +2262,7 @@ Code locations below are paths in the NWQLib repository. A name after a double c
 | [4. SPE and RFE](#r4) | R | `src/nwqlib/algorithms/qpe/numerical.py::spe`, `src/nwqlib/algorithms/qpe/numerical.py::rfe` | `tests/test_qpe_domain_evidence.py`, `tests/test_qpe_correction.py` | Standard estimators with sign and target qualifications |
 | [5. RWPE](#r5) | R | `src/nwqlib/algorithms/qpe/numerical.py::rwpe_update`, `src/nwqlib/algorithms/qpe/numerical.py::rwpe_scale` | `tests/test_qpe_campaigns.py` | Standard Gaussian moment update |
 | [6. Coherent QPE](#r6) | R | `src/nwqlib/subroutines/qpe/coherent.py::build_coherent_qpe_circuit` | `tests/test_qpe_subroutines.py` | Standard circuit and readout theorem |
-| [7. Controlled powers](#r7) | D | `src/nwqlib/algorithms/qpe/powers.py::suzuki_step_cx`, `src/nwqlib/algorithms/qpe/powers.py::select_powers` | `tests/test_qpe_efficiency_contract.py`, controlled phase and CX checks | Constructor-specific exact law and pruning composition |
+| [7. Controlled powers](#r7) | D | `src/nwqlib/algorithms/qpe/powers.py::suzuki_step_cx`, `src/nwqlib/algorithms/qpe/powers.py::select_powers` | `tests/test_qpe_efficiency_contract.py`, controlled phase and CX checks | Exact CX count of this construction, combined with pruning |
 | [8. Chebyshev pencil](#r8) | R | `src/nwqlib/algorithms/lanczos/numerical.py::_projected_matrices` | `tests/test_lanczos.py::test_signed_centered_pencil_from_independent_moments` | Standard projected identities |
 | [9. Paired moments](#r9) | I | `src/nwqlib/algorithms/lanczos/numerical.py::chebyshev_moments` | `tests/test_lanczos.py`, independent moments and offset checks | Reduced operator applications from a known product identity |
 | [10. Moving-subspace derivative](#r10) | I | `src/nwqlib/algorithms/lanczos/numerical.py::_moment_energy_derivatives` | `tests/test_lanczos.py::test_regularized_sensitivity_rotates_the_kept_projector` | Explicit analytic derivative of the thresholded solve |
@@ -2280,54 +2280,54 @@ Code locations below are paths in the NWQLib repository. A name after a double c
 | [21. QSP conventions](#r21) | R | `src/nwqlib/subroutines/qsp/phases.py::wx_phases_to_reflection`, `src/nwqlib/subroutines/qsp/evolution.py::build_qsvt_circuit` | `tests/test_qsp_evolution.py`, zero-phase and reflection identities | Standard polynomial calculus |
 | [22. Norming correction](#r22) | I | `src/nwqlib/subroutines/qsp/phases.py::chebyshev_norming_sup_bound` | `tests/test_qsp_evolution.py::test_chebyshev_grid_norming_bound_covers_polynomial_suprema`, exact counterexample above | Correction with a minimal analytic counterexample |
 | [23. Phase Newton step](#r23) | I | `src/nwqlib/subroutines/qsp/phases.py::_symmetric_problem`, `src/nwqlib/subroutines/qsp/phases.py::_damped_newton` | `tests/test_qsp_evolution.py`, fitted coefficients and boundary targets | Explicit Jacobian and equivalence on an oversampled grid |
-| [24. QSP error budget](#r24) | D | `src/nwqlib/subroutines/qsp/evolution.py::_analytic_jacobi_anger_remainder`, `src/nwqlib/subroutines/qsp/evolution.py::qsp_evolution_error_terms` | `tests/test_qsp_evolution.py`, complete tail, child error, and exponential comparisons | Real-argument suffix, bounded finite-horizon selection and finite stage composition |
+| [24. QSP error budget](#r24) | D | `src/nwqlib/subroutines/qsp/evolution.py::_analytic_jacobi_anger_remainder`, `src/nwqlib/subroutines/qsp/evolution.py::qsp_evolution_error_terms` | `tests/test_qsp_evolution.py`, complete tail, input-encoding error, and exponential comparisons | Real-argument suffix, bounded finite-horizon selection and finite stage composition |
 | [25. LCHS identity](#r25) | R | `src/nwqlib/algorithms/lchs/providers.py::eq7_coefficient`, `src/nwqlib/algorithms/lchs/providers.py::low_somma_fhat_2` | `tests/test_lchs_providers.py`, kernel profiles | Standard representations |
 | [26. LCHS tail](#r26) | I | `src/nwqlib/algorithms/lchs/providers.py::eq7_tail_bound` | `tests/test_lchs_providers.py::test_closed_tail_bound_keeps_small_cutoff_domain_and_positive_underflow` | Finite closed form and extended cutoff domain |
-| [27. Gauss selector](#r27) | I | `src/nwqlib/algorithms/lchs/providers.py::_ellipse_rule` | `tests/test_lchs_providers.py::test_quadrature_work_limit_refuses_before_grid_allocation` | Analytic selector applicable at short dissipative times |
+| [27. Composite Gauss quadrature](#r27) | I | `src/nwqlib/algorithms/lchs/providers.py::_ellipse_rule` | `tests/test_lchs_providers.py::test_quadrature_work_limit_refuses_before_grid_allocation` | Analytic choice of panels, valid at short dissipative times |
 | [28. Source remainder](#r28) | I | `src/nwqlib/algorithms/lchs/inhomogeneous_theory.py::_duhamel_quadrature_error_bound` | `tests/test_lchs_numerics.py::test_duhamel_remainder_uses_physical_growth_and_exact_zero_routes` | Dimension-free vector remainder in original physical units |
 | [29. Structured SELECT](#r29) | D | `src/nwqlib/algorithms/lchs/time_independent_terms.py::_attach_affine_pauli_structure`, `src/nwqlib/algorithms/lchs/parameters.py::select_parameters` | `tests/test_lchs_qsp_source.py`, `tests/test_lchs_compiled_select.py` | Structure-dependent circuit reduction and source-time consistency |
-| [30. Output frames](#r30) | D | `src/nwqlib/algorithms/lchs/solution_error_budget.py::propagate_physical_error` | `tests/test_lchs_verification.py::test_refinement_propagates_all_physical_components_once_without_vector` | One physical budget, norm inequalities and sharp normalized-expectation trace-norm bridge |
+| [30. Output frames](#r30) | D | `src/nwqlib/algorithms/lchs/solution_error_budget.py::propagate_physical_error` | `tests/test_lchs_verification.py::test_refinement_propagates_all_physical_components_once_without_vector` | One physical budget, norm inequalities and a sharp trace-norm bound for the normalized expectation |
 | [31. Dilation](#r31) | D | `src/nwqlib/subroutines/block_encoding/core.py::_dense_dilation_encoding`, `src/nwqlib/subroutines/lcu/core.py::build_lcu_circuit` | `tests/test_block_encoding.py`, `tests/test_lcu_subroutines.py` | Singular-frame construction and compatible padding, based on standard LCU |
 | [32. Circulant certificate](#r32) | I | `src/nwqlib/subroutines/block_encoding/core.py::_detect_banded_pauli_structure`, `src/nwqlib/subroutines/block_encoding/banded.py::build_banded_block_encoding` | `tests/test_block_encoding.py::test_circulant_frobenius_certificate_rounds_outward` | Coefficient-domain certification including absent labels |
 | [33. TT-SVD fidelity](#r33) | I | `src/nwqlib/subroutines/state_preparation/mps.py::analyze_mps_state_compression` | `tests/test_mps_state_preparation.py` | Exact-arithmetic fidelity consequence of the discarded-weight argument |
 | [34. Multiplexors](#r34) | R | `src/nwqlib/subroutines/_multiplexors.py::append_control_diagonal_phases`, `src/nwqlib/subroutines/state_preparation/direct.py::_build_normalized_state_preparation` | `tests/test_multiplexors.py` | Standard exact synthesis identities |
-| [35. Dense-synthesis laws](#r35) | I | `src/nwqlib/subroutines/_dense_synthesis.py::dense_synthesis_gate_census`, `src/nwqlib/subroutines/_dense_synthesis.py::controlled_synthesis_size` | `tests/test_dense_synthesis.py`, `tests/test_synthesis_admission.py` | Upper bounds that cover skipped numerical optimizations and control routes |
-| [36. Product-formula steps](#r36) | I | `src/nwqlib/subroutines/trotterization/error_budget.py::_pauli_bound_coefficient_from_terms`, `src/nwqlib/subroutines/trotterization/error_budget.py::_smallest_step_count`, `src/nwqlib/algorithms/lchs/periodic.py::select_periodic_parameters` | `tests/test_trotterization.py`, `tests/test_lchs_periodic.py`, `tests/test_trotter_efficiency_contract.py`, `tests/test_qpe_efficiency_contract.py` | Full or relaxed Pauli-triangle coefficient with outward evaluation, exact integer selection for that coefficient, and a weighted periodic Strang specialization |
+| [35. Dense-synthesis bounds](#r35) | I | `src/nwqlib/subroutines/_dense_synthesis.py::dense_synthesis_gate_census`, `src/nwqlib/subroutines/_dense_synthesis.py::controlled_synthesis_size` | `tests/test_dense_synthesis.py`, `tests/test_synthesis_admission.py` | Upper bounds that hold when numerical optimizations are skipped, and for both ways of adding controls |
+| [36. Product-formula steps](#r36) | I | `src/nwqlib/subroutines/trotterization/error_budget.py::_pauli_bound_coefficient_from_terms`, `src/nwqlib/subroutines/trotterization/error_budget.py::_smallest_step_count`, `src/nwqlib/algorithms/lchs/periodic.py::select_periodic_parameters` | `tests/test_trotterization.py`, `tests/test_lchs_periodic.py`, `tests/test_trotter_efficiency_contract.py`, `tests/test_qpe_efficiency_contract.py` | Full or relaxed Pauli-triangle coefficient with outward evaluation, exact integer step count for that coefficient, and a weighted periodic Strang specialization |
 | [37. QHD grids](#r37) | R | `src/nwqlib/algorithms/qhd/kinetic.py::KineticCompiler`, `src/nwqlib/algorithms/qhd/split_step.py::kinetic_eigenvalues` | `tests/test_qhd_periodic.py`, `tests/test_qhd_workflow.py` | Standard finite-grid physics with explicit boundaries |
 | [38. Schedule integrals](#r38) | D | `src/nwqlib/algorithms/qhd/schedules.py::QuadraticSchedule.kinetic_integral`, `src/nwqlib/algorithms/qhd/schedules.py::CubicSchedule.kinetic_integral` | `tests/test_qhd_schedules.py` | Stable forms and a bounded positive quadrature |
 | [39. Time ordering](#r39) | D | `src/nwqlib/algorithms/qhd/evolution_bounds.py::_schedule_terms`, `src/nwqlib/algorithms/qhd/evolution_bounds.py::_coefficient_term` | `tests/test_qhd_resources.py` | Finite bound separating time ordering, quadrature, and coefficient error |
-| [40. Emitted QHD products](#r40) | I | `src/nwqlib/algorithms/qhd/evolution_bounds.py::evolution_bound`, `src/nwqlib/algorithms/qhd/evolution_bounds.py::_norm_inputs` | `tests/test_qhd_resources.py`, native/restricted product checks | Encoding-dependent specialization with internal link terms |
+| [40. Built QHD product steps](#r40) | I | `src/nwqlib/algorithms/qhd/evolution_bounds.py::evolution_bound`, `src/nwqlib/algorithms/qhd/evolution_bounds.py::_norm_inputs` | `tests/test_qhd_resources.py`, Qiskit-circuit and restricted product checks | Encoding-dependent specialization with internal link terms |
 | [41. Split-step error](#r41) | D | `src/nwqlib/algorithms/qhd/split_step.py::state_error`, `src/nwqlib/algorithms/qhd/split_step.py::evolve`, `src/nwqlib/algorithms/qhd/split_step.py::_kinetic_axis`, `src/nwqlib/algorithms/qhd/split_step.py::_potential_moment`, `src/nwqlib/algorithms/qhd/split_step.py::sizes` | `tests/test_qhd_split_step.py` | Conditional observed budget, scaled moments, and fixed-step work and storage |
-| [42. Running phase total](#r42) | I | `src/nwqlib/algorithms/qhd/validation.py::_normal_range`, `src/nwqlib/algorithms/qhd/potential.py::PotentialCompiler.select_occurrences`, `src/nwqlib/algorithms/qhd/method.py::_phase_ledger`, `src/nwqlib/algorithms/qhd/method.py::_native_phase_allowance`, `src/nwqlib/algorithms/qhd/binary.py::compile_binary_steps`, `src/nwqlib/algorithms/qhd/circuit_errors.py::binary_phase_allowance` | `tests/test_qhd_resources.py`, `tests/test_qhd_binary.py`, `tests/test_qhd_workflow.py` | Formation, omission, reconstruction, and native modular-phase allowances |
-| [43. Signed binary kinetic](#r43) | I | `src/nwqlib/algorithms/qhd/binary.py::signed_square_walsh`, `src/nwqlib/algorithms/qhd/binary.py::kinetic_walsh`, `src/nwqlib/algorithms/qhd/resources.py::circuit_resources`, `src/nwqlib/algorithms/qhd/method.py::_error_model` | `tests/test_qhd_binary.py`, `tests/test_qhd_resources.py`, `tests/test_qhd_split_step.py::test_spectral_and_finite_difference_energies_at_nyquist_and_low_momentum` | Signed-index correction, structural sparsity, and a distinct model-error obligation |
+| [42. Running phase total](#r42) | I | `src/nwqlib/algorithms/qhd/validation.py::_normal_range`, `src/nwqlib/algorithms/qhd/potential.py::PotentialCompiler.select_occurrences`, `src/nwqlib/algorithms/qhd/method.py::_phase_ledger`, `src/nwqlib/algorithms/qhd/method.py::_native_phase_allowance`, `src/nwqlib/algorithms/qhd/binary.py::compile_binary_steps`, `src/nwqlib/algorithms/qhd/circuit_errors.py::binary_phase_allowance` | `tests/test_qhd_resources.py`, `tests/test_qhd_binary.py`, `tests/test_qhd_workflow.py` | Formation, omission, reconstruction, and Qiskit modular-phase allowances |
+| [43. Signed binary kinetic](#r43) | I | `src/nwqlib/algorithms/qhd/binary.py::signed_square_walsh`, `src/nwqlib/algorithms/qhd/binary.py::kinetic_walsh`, `src/nwqlib/algorithms/qhd/resources.py::circuit_resources`, `src/nwqlib/algorithms/qhd/method.py::_error_model` | `tests/test_qhd_binary.py`, `tests/test_qhd_resources.py`, `tests/test_qhd_split_step.py::test_spectral_and_finite_difference_energies_at_nyquist_and_low_momentum` | Signed-index correction, structural sparsity, and a separate model-error term |
 | [44. Binary synthesis errors](#r44) | D | `src/nwqlib/algorithms/qhd/binary.py::walsh_admission`, `src/nwqlib/algorithms/qhd/binary.py::PhaseTable.synthesize`, `src/nwqlib/algorithms/qhd/circuit_errors.py::binary_angle_formation`, `src/nwqlib/algorithms/qhd/circuit_errors.py::kinetic_fd_summary_up`, `src/nwqlib/algorithms/qhd/binary.py::qft_error_bound` | `tests/test_qhd_binary.py`, `tests/test_qhd_resources.py` | Distinct coefficient, angle, omission, permutation, and transform error terms |
-| [45. Mode windows](#r45) | D | `src/nwqlib/_validation.py::probability_difference_window`, `src/nwqlib/algorithms/qhd/method.py::_host_window`, `src/nwqlib/algorithms/qhd/method.py::_readout_window`, `src/nwqlib/algorithms/qhd/theory.py::onehot_product_state_error` | `tests/test_qhd_readout.py`, `tests/test_qhd_split_step.py` | Direct probability-difference bound with explicit host-budget and subtraction scope |
+| [45. Mode windows](#r45) | D | `src/nwqlib/_validation.py::probability_difference_window`, `src/nwqlib/algorithms/qhd/method.py::_host_window`, `src/nwqlib/algorithms/qhd/method.py::_readout_window`, `src/nwqlib/algorithms/qhd/theory.py::onehot_product_state_error` | `tests/test_qhd_readout.py`, `tests/test_qhd_split_step.py` | Direct probability-difference bound with explicit scope for the classical budget and the subtraction |
 | [46. AL equations](#r46) | R | `src/nwqlib/algorithms/qhd/constrained.py::_effective_objective`, `src/nwqlib/algorithms/qhd/constrained.py::_normalized`, `src/nwqlib/algorithms/qhd/constrained.py::_update`, `src/nwqlib/algorithms/qhd/constrained.py::_original_multiplier` | `tests/test_qhd_augmented_lagrangian.py`, independent grid updates | Standard normalized PHR construction with exact-arithmetic scaling scope |
 | [47. AL stopping](#r47) | D | `src/nwqlib/algorithms/qhd/constrained.py::_stationarity`, `src/nwqlib/algorithms/qhd/constrained.py::solve_augmented_lagrangian` | `tests/test_qhd_augmented_lagrangian.py::test_feasible_complementary_can_stop_away_from_the_feasible_grid_minimum` | Finite-grid limitation and objective-gap bound |
 | [48. Conditional search invariance](#r48) | D | `src/nwqlib/algorithms/qhd/refinement.py::_level_problem`, `src/nwqlib/algorithms/qhd/_outer.py::range_bound` | `tests/test_qhd_refinement.py::test_search_model_levels_are_invariant_under_affine_maps_of_box_and_objective` | Affine invariance for corresponding tables and a homogeneous range rule, with a conditional numerical bound |
-| [49. Joint refinement mass](#r49) | I | `src/nwqlib/algorithms/qhd/refinement.py::_joint_mass_bound`, `src/nwqlib/algorithms/qhd/refinement.py::_next_box`, `src/nwqlib/algorithms/qhd/refinement.py::_axis_interval`, `src/nwqlib/algorithms/qhd/refinement.py::_joint_mass`, `src/nwqlib/algorithms/qhd/_coverage.py::bounds_from_counts`, `src/nwqlib/algorithms/qhd/_coverage.py::coverage` | `tests/test_qhd_refinement.py::test_joint_mass_bound_is_attained_and_is_neither_eta_nor_the_product`, `tests/test_qhd_refinement.py::test_selected_region_coverage_uses_both_bounds_and_preserves_numerical_limits` | Sharp marginal union bound and simultaneous finite-shot selected region coverage, including data selection and all configured levels |
+| [49. Joint refinement mass](#r49) | I | `src/nwqlib/algorithms/qhd/refinement.py::_joint_mass_bound`, `src/nwqlib/algorithms/qhd/refinement.py::_next_box`, `src/nwqlib/algorithms/qhd/refinement.py::_axis_interval`, `src/nwqlib/algorithms/qhd/refinement.py::_joint_mass`, `src/nwqlib/algorithms/qhd/_coverage.py::bounds_from_counts`, `src/nwqlib/algorithms/qhd/_coverage.py::coverage` | `tests/test_qhd_refinement.py::test_joint_mass_bound_is_attained_and_is_neither_eta_nor_the_product`, `tests/test_qhd_refinement.py::test_selected_region_coverage_uses_both_bounds_and_preserves_numerical_limits` | Sharp marginal union bound and simultaneous finite-shot coverage of the selected regions, valid under selection from the data and over all configured levels |
 | [50. Stall split](#r50) | D | `src/nwqlib/algorithms/qhd/refinement.py::_stall_split`, `src/nwqlib/algorithms/qhd/refinement.py::_tabulated_objective`, `src/nwqlib/algorithms/qhd/refinement.py::_refine` | `tests/test_qhd_refinement.py::test_stall_split_follows_the_end_mass_lemma_and_the_clearest_valley` | Stall condition and realized-prefix comparison using a fixed relative objective |
 | [51. AL/refinement composition](#r51) | D | `src/nwqlib/algorithms/qhd/constrained.py::_refined_choice`, `src/nwqlib/algorithms/qhd/refinement.py::refine_box` | `tests/test_qhd_augmented_lagrangian.py::test_refined_rounds_stay_within_the_distance_bound_to_the_kkt_point` | New combination bound with independently checkable inner premises |
 | [52. Clifford/T allocation](#r52) | D | `src/nwqlib/algorithms/qhd/resources.py::clifford_distance`, `src/nwqlib/algorithms/qhd/resources.py::synthesis_projection` | `tests/test_qhd_resources.py` | Finite replacement budget and optimal continuous allocation for a fixed cost model |
 | [53. One-hot preparation](#r53) | D | `src/nwqlib/algorithms/qhd/initial_state.py::append_amplitude_chain`, `src/nwqlib/algorithms/qhd/initial_state.py::chain_selection`, `src/nwqlib/algorithms/qhd/initial_state.py::_gaussian_beta`, `src/nwqlib/algorithms/qhd/initial_state.py::restricted_state_error`, `src/nwqlib/algorithms/qhd/circuit_errors.py::preparation_error` | `tests/test_qhd_workflow.py`, `tests/test_qhd_resources.py` | Structured preparation, error terms for shortened chains, and input-state bounds with integer dimension factors |
 | [54. Slack variables](#r54) | D | `src/nwqlib/algorithms/qhd/constrained.py::_inner_objective`, `src/nwqlib/algorithms/qhd/constrained.py::_inequality_range`, `src/nwqlib/algorithms/qhd/constrained.py::_slack_axis`, `src/nwqlib/algorithms/qhd/constrained.py::_branch`, `src/nwqlib/algorithms/qhd/constrained.py::_round_problem`, `src/nwqlib/algorithms/qhd/constrained.py::_choose`, `src/nwqlib/algorithms/qhd/constrained.py::_refined_choice`, `src/nwqlib/algorithms/qhd/constrained.py::plan_augmented_lagrangian`, with `src/nwqlib/algorithms/qhd/constrained_records.py::InnerRepresentation`, `src/nwqlib/algorithms/qhd/constrained_records.py::SlackAxis` and `src/nwqlib/algorithms/qhd/constrained_records.py::FormTrial` | `tests/test_qhd_augmented_lagrangian.py::test_minimizing_the_slack_grid_reproduces_the_phr_term_within_the_recorded_error_bound`, `tests/test_qhd_augmented_lagrangian.py::test_support_table_caps_are_exact_for_separable_constraints_and_bound_overlapping_supports`, `tests/test_qhd_augmented_lagrangian.py::test_forced_slack_rounds_keep_the_phr_update_at_the_projected_point`, the policy, joint-readout, refinement, preprocessing and archive checks in the same file, and `tests/test_qhd_resume.py::test_a_slack_round_resumes_with_its_committed_representation` | Standard slack elimination with cap and arithmetic conditions, finite-grid excess, support-table caps, projected PHR updates and the limits of joint slack evolution |
 | [55. Resource composition](#r55) | D | `src/nwqlib/resources/fold.py::_Fold`, `src/nwqlib/algorithms/qhd/resources.py::run_resources` | `tests/test_resource_fold.py`, `tests/test_resource_estimation_tiers.py`, `tests/test_qhd_resources.py` | Compositional semantics with explicit unknowns, shot multiplicities, and lifetimes |
-| [56. Error evidence](#r56) | D | `src/nwqlib/evidence/error_model.py::ErrorModel.assess` | `tests/test_error_model.py` | Mathematical obligations and provenance kept with their composition |
+| [56. Error composition](#r56) | D | `src/nwqlib/evidence/error_model.py::ErrorModel.assess` | `tests/test_error_model.py` | Mathematical premises and the source of each component recorded with their composition |
 | [57. Verification windows](#r57) | D | `src/nwqlib/_projected_eigensolver.py::gram_formation_allowance`, `src/nwqlib/_numerics.py::normalized_fidelity_with_window` | `tests/test_projected_eigensolver.py`, `tests/test_mps_state_preparation.py`, `tests/test_qhd_split_step.py` | Scale-aware checks with a specified numerical reference |
 
 ## 14. Open mathematical problems
 
-**Complete physical error budgets.** A successful scalar or circuit check does not close all components of a scientific error model. QLS still needs certified spectral premises and a complete treatment of approximate encodings and numerical phase synthesis for each route. LCHS needs all coefficient-preparation, source-preparation, quadrature, and simulation terms in the recovered physical frame. GCiM and Lanczos need bounds linking acquisition errors and overlap truncation to the desired full-space eigenvalue, with an independently established target-identification premise. These are proposals for further analysis, not consequences of a small projected residual.
+**Complete physical error budgets.** A successful scalar or circuit check does not close all components of a scientific error model. QLS still needs certified spectral premises and a complete treatment of approximate encodings and numerical phase synthesis for each execution path. LCHS needs all coefficient-preparation, source-preparation, quadrature, and simulation terms in the physical units of the recovered solution. GCiM and Lanczos need bounds linking measurement errors and overlap truncation to the desired full-space eigenvalue, with an independently established target-identification premise. These are proposals for further analysis, not consequences of a small projected residual.
 
 **QHD continuum and optimization error.** The finite-grid evolution bounds do not establish convergence to a continuous minimizer. A useful total budget must relate spatial discretization, boundary choice, finite evolution time, initial preparation, sampling, and the objective quality of the readout. A spectral kinetic substituted for finite differences needs a trajectory-dependent momentum bound or a suitable uniform model bound. Feasibility and complementarity stopping require additional inner-minimization and stationarity control before augmented-Lagrangian convergence results apply. Refinement can discard a global basin, even when its probability-mass calculation is exact.
 
-**Unavailable entries of the QHD circuit error budget.** The QHD circuit error budget separates kinetic-model replacement, evolution, coefficient formation, phase formation, pruning, approximate Fourier transforms, preparation, rotation synthesis, and physical execution. Missing terms cannot be interpreted as zero. Some classical-kernel roundoff budgets are first order and conditional on transform or elementary-function accuracy. A finite all-orders evaluation and a fully qualified transform error model would strengthen these entries. Exact dense synthesis also needs a global matrix-to-circuit rounding theorem covering numerical factorizations and every local replacement.
+**Unavailable entries of the QHD circuit error budget.** The QHD circuit error budget separates kinetic-model replacement, evolution, coefficient formation, phase formation, pruning, approximate Fourier transforms, preparation, rotation synthesis, and physical execution. Missing terms cannot be interpreted as zero. Some roundoff budgets of the classical evaluations are first order and conditional on transform or elementary-function accuracy. A finite all-orders evaluation and a transform error model proved for all lengths would strengthen these entries. Exact dense synthesis also needs a global matrix-to-circuit rounding theorem covering numerical factorizations and every local replacement.
 
-**Certified polynomial evaluation.** The corrected norming theorem supplies an analytic continuum bound from exact samples. Directed evaluation of the polynomial samples and of spectral enclosures would turn more numerical certificates into finite outward certificates. The degree-search limit and damped Newton fallback currently have finite stopping behavior, but no theorem that all accepted targets converge within the selected limits.
+**Certified polynomial evaluation.** The corrected norming theorem supplies an analytic continuum bound from exact samples. Directed evaluation of the polynomial samples and of spectral enclosures would turn more numerical certificates into finite outward certificates. The degree-search limit and damped Newton fallback currently have finite stopping behavior, but no theorem that all accepted targets converge within the chosen limits.
 
-**Adaptive statistical guarantees.** Pilot/main separation supports conditional moment statistics. It does not settle nonlinear Ritz bias, cutoff selection near rank changes, adaptive operator-pool screening, or selection among many compared plans. ADAPT's flat-energy stopping rule and QHD's valley score are finite search decisions without general optimality guarantees. Further results should name the target, selection history, and acquisition population they cover.
+**Adaptive statistical guarantees.** Pilot/main separation supports conditional moment statistics. It does not settle nonlinear Ritz bias, cutoff selection near rank changes, adaptive operator-pool screening, or selection among many compared plans. ADAPT's flat-energy stopping rule and QHD's valley score are finite search decisions without general optimality guarantees. Further results should name the target, the selection history and the sampled distribution they cover.
 
-**Resource laws beyond selected decompositions.** Logical gate counts, rotation estimates, and physical resource models have different assumptions. The leading Ross–Selinger term does not provide a finite T-count upper bound for the structured angles of a large QHD computation. A useful extension would jointly choose decompositions, precision allocation, and compilation while maintaining an explicit error budget. Compact work laws also need representation-specific guarantees whenever a backend's hidden workspace or control synthesis determines feasibility.
+**Resource models beyond the chosen decompositions.** Logical gate counts, rotation estimates, and physical resource models have different assumptions. The leading Ross–Selinger term does not provide a finite T-count upper bound for the structured angles of a large QHD computation. A useful extension would jointly choose decompositions, precision allocation, and compilation while maintaining an explicit error budget. Work formulas for compact programs also need representation-specific guarantees whenever a backend's hidden workspace or control synthesis determines feasibility.
 
 ## References
 

@@ -1,4 +1,4 @@
-"""Number-sector diagnostics of actual stored computational-basis counts."""
+"""Number-sector diagnostics of saved computational-basis counts."""
 
 from typing import ClassVar
 
@@ -24,9 +24,9 @@ class NumberSectorOptions(Record):
     pass it to `result.verify(checks=...)` or
     [`verify_number_sector`][nwqlib.evidence.sector.verify_number_sector].
     `name`, `particles` and `tolerance` are required. The checked value is
-    the fraction of stored complete-register shots whose bitstring does not
+    the fraction of saved complete-register shots whose bitstring does not
     have exactly N ones, on `[0, 1]`, against `tolerance`. It needs a Result
-    that stores complete computational-register counts, such as QHD with the
+    that holds complete computational-register counts, such as QHD with the
     one-hot encoding ([verification
     guide](../verification.md#measured-number-sector-leakage)).
 
@@ -60,7 +60,7 @@ class NumberSectorOptions(Record):
     def verification_checks(self, result):
         """Return a one-element tuple with the CheckSpec of observed leakage outside Hamming weight N.
 
-        The checked quantity is the fraction of stored complete-register
+        The checked quantity is the fraction of saved complete-register
         shots whose bitstring does not have exactly N ones, on the domain
         [0, 1], against ``tolerance``. The Result must supply its measured
         register width and count observations, and N may not exceed that
@@ -90,7 +90,7 @@ def _exact_count_sum(counts):
     Each count c is below 2**63 and equals (c >> 32) * 2**32 + (c & (2**32 - 1)).
     Each half is below 2**32, so a uint64 sum of fewer than 2**32 halves
     cannot wrap. The two sums are then combined as Python integers. A
-    larger population is summed as Python integers.
+    larger array of counts is summed as Python integers.
     """
     import numpy as np
 
@@ -102,7 +102,7 @@ def _exact_count_sum(counts):
 
 
 def verify_number_sector(result, *, options: NumberSectorOptions, max_integer_bits=DEFAULT_MAX_INTEGER_BITS):
-    """Run the number-sector check on a Result's stored counts, running no analysis or circuit again.
+    """Run the number-sector check on a Result's saved counts, running no analysis or circuit again.
 
     `result.verify(checks=options)` calls this for QHD. The particle number
     of an outcome is the number of set bits of its index, over all words
@@ -111,7 +111,7 @@ def verify_number_sector(result, *, options: NumberSectorOptions, max_integer_bi
     exact.
 
     Args:
-        result (Result): A Result that stores complete computational-register
+        result (Result): A Result that holds complete computational-register
             counts, with its Plan.
         options (NumberSectorOptions): The sector and tolerance.
         max_integer_bits (int): Bit limit of the exact arithmetic. Default
@@ -126,7 +126,7 @@ def verify_number_sector(result, *, options: NumberSectorOptions, max_integer_bi
     Raises:
         TypeError: If `options` is not a `NumberSectorOptions`.
         ValueError: If the Result supplies no complete-register counts,
-            `particles` exceeds the register width, the stored counts are
+            `particles` exceeds the register width, the saved counts are
             not unconditional counts of the whole register that sum to the
             returned shots, or an exact intermediate value needs more than
             `max_integer_bits` bits.

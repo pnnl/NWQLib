@@ -1,4 +1,4 @@
-"""Coherent quantum phase-estimation circuit helpers.
+"""Construction of the coherent quantum phase-estimation circuit.
 
 The construction is the QFT-based phase estimation of Cleve, Ekert,
 Macchiavello and Mosca, arXiv:quant-ph/9708016v1, Sec. 5. The builder
@@ -119,8 +119,9 @@ def build_coherent_qpe_circuit(
     binary64 rounding from its controlled matrix on n + 1 qubits, for n
     system qubits (see
     [Controlled dense unitaries](../../development/dense_synthesis.md#controlled-dense-unitaries)),
-    so the realized power differs from the computed one by the order of its
-    unitarity defect. Synthesizing one controlled power takes at most
+    so the power that the synthesized circuit implements differs from the
+    computed one by the order of its unitarity defect. Synthesizing one
+    controlled power takes at most
     ``(25/96) 4**(n+1) - 2**(n+1) + 4/3`` CX for ``n >= 2`` and order
     ``8**(n+1)`` classical arithmetic per power.
 
@@ -129,8 +130,8 @@ def build_coherent_qpe_circuit(
     one exact controlled synthesis on n + 1 qubits is compared with
     `max_work`. The bytes of six D-square complex128 arrays, as for the
     dense powers of the QPE Methods, plus the working bytes of one
-    synthesis and the stored circuit definitions from all m controlled
-    power syntheses are compared with `max_bytes`.
+    synthesis and the circuit definitions kept from all m controlled power
+    syntheses are compared with `max_bytes`.
     The default work limit is the QPE Methods' `max_work`.
 
     Args:

@@ -1,6 +1,6 @@
-"""Finite typed expression definitions with exact integer work.
+"""Finite typed expressions of a Program, evaluated with exact integer arithmetic or binary64 real arithmetic.
 
-No source is ever evaluated.
+No source code is ever evaluated.
 """
 
 from typing import Annotated, Literal
@@ -14,14 +14,14 @@ Value = StrictInt | Float64
 
 
 def walk_kept(value, reserve):
-    """Yield every Record, tuple and scalar reachable from value, charging each collection first.
+    """Yield every Record, tuple and scalar reachable from value, counting each collection first.
 
     ``reserve(n)`` is called with a Record's field count or a tuple's length
     before its children are pushed on the stack, so a ``reserve`` that
     raises rejects an over-budget collection by its length before it is
     iterated or copied. Program admission (``ir/validation.py::_Admission``)
     instead only counts in ``reserve`` and compares the total after the walk,
-    so its refusal reports the complete stored field inventory. A local ID
+    so its error reports the complete stored field inventory. A local ID
     string is yielded as data and never resolved, so a shared definition is
     not expanded.
     """
@@ -55,21 +55,22 @@ class AdmissionLimits(Record):
     Attributes:
         max_definitions: Default `1_000_000`. Positive limit on the stored
             definitions, expressions, parameters, registers, classical values and
-            signatures together. The declaration ceiling covers a sampled FixedGCIM
+            signatures together. This limit covers a sampled FixedGCIM
             plan with three basis states and a 20-qubit, 8,083-term molecular
             Hamiltonian in 1,285 measurement groups, with 11,565 circuits and 25,731
             declarations. It has over sixfold margin over the 161,691 declarations
             of singleton grouping (the Program inventory row of
             [Engineering constants](../ENGINEERING_CONSTANTS.md)). Stored-field and
             checking-work limits apply independently, and no space is reserved from
-            this ceiling alone.
+            this limit alone.
         max_depth: Default `128`, also the largest accepted value. Limit on the
             longest chain of references, which is also the recursion limit of the
             lifecycle check.
         max_steps: Default `100000`. Positive limit on the checking work units of
             one check, and separately on the number of stored fields.
         max_integer_bits: Default `4096`. Positive limit on the bit length of any
-            integer the check accepts or computes.
+            integer the check accepts. A sum or product computed during the
+            check can exceed it by one bit before the check rejects it.
     """
 
     # Reasons and revisit conditions: ENGINEERING_CONSTANTS.md, "Shared Program
@@ -141,7 +142,7 @@ class Parameter(Record):
 
 
 def number(value):
-    """Read an already admitted scalar without evaluating any external reference."""
+    """Read an already checked scalar without evaluating any external reference."""
     return value.value if isinstance(value, Float64) else value
 
 

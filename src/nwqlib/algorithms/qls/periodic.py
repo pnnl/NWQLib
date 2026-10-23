@@ -2,7 +2,8 @@
 
 ``S`` is the cyclic shift on ``2**q`` sites. The banded block encoding
 represents ``A`` from its three coefficients, so planning never forms a
-dense matrix and stays compact for wide metadata-only inputs.
+dense matrix and stays compact for wide inputs given only by the stencil
+parameters.
 """
 
 from dataclasses import replace
@@ -26,20 +27,20 @@ def _ceil_float(value):
 
 
 def select_periodic_encoding(operator, method):
-    """Select the compact positive periodic encoding with an outward-covered encoded gap.
+    """Choose the compact positive periodic encoding, with an outward bound on its encoded gap.
 
     NWQLib's derivation. For ``m > 0`` and ``d >= 0`` the exact spectrum is
     ``m + 2d (1 - cos(2 pi k / 2**q))``, so ``sigma_min = m`` and
     ``sigma_max = m + 4d``. For one qubit ``S = S^dagger = X`` and the two
     wrapped edges merge into ``(m + 2d) I - 2d X``. The encoding stores the
     rounded diagonal ``c0 = fl(m + 2d)`` and reports a rounded
-    normalization ``alpha``. In exact rational arithmetic on those stored
-    floats, ``|c0 - m - 2d| + |alpha - c0 - 2d|`` bounds
+    normalization ``alpha``. In exact rational arithmetic on those binary64
+    values, ``|c0 - m - 2d| + |alpha - c0 - 2d|`` bounds
     ``||A - alpha * block||`` and becomes the encoding error bound, and
     ``c0 - 2d - |alpha - c0 - 2d|`` bounds the smallest eigenvalue of
     ``alpha * block`` from below. The polynomial domain parameter is then
     ``alpha / min(m, that gap)``, rounded outward, so the polynomial covers
-    both the original spectrum and the actual encoded gap. The reported
+    both the original spectrum and the gap of the rounded encoding. The reported
     ``kappa_be`` stays ``alpha / m`` and the condition number
     ``(m + 4d) / m``. A supplied ``kappa`` must cover the same requirement.
     """

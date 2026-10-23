@@ -1,4 +1,4 @@
-"""Implementation registry for block-encoding subroutines."""
+"""Table of the block-encoding implementations, with their methods and capabilities."""
 
 from __future__ import annotations
 

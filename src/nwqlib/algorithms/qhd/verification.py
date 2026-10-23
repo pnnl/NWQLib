@@ -1,15 +1,16 @@
 """Explicit verification of a QHD result against finite-grid references (``QHDVerification``).
 
 ``grid_minimum`` evaluates the original objective once as an array on the
-selected grid and reports the gaps of the candidate and of the most probable
+Plan's grid and reports the gaps of the candidate and of the most probable
 point to the least evaluated binary64 value of that one reference table.
-A fidelity comparison runs one restricted host evolution, ``schrodinger``
+A fidelity comparison runs one restricted classical evolution, ``schrodinger``
 or ``ir_product``, and compares it with the stored state, restricted to the grid amplitudes of the one-hot or binary
-register. Every fact is conditioned on the selected finite grid or on the
+register. Every fact is conditioned on the Plan's finite grid or on the
 normalized valid state, and its relation text says whether the reference
-shares the producer's model, so that a replay by the same producer is not
-read as independent accuracy evidence. Work and bytes are admitted before
-any evaluation or evolution.
+shares the model of the computation that produced the result, so that a
+replay by the same computation is not read as independent accuracy
+evidence. Work and bytes are checked against the limits of
+``QHDVerification`` before any evaluation or evolution.
 """
 
 from math import fsum
@@ -31,10 +32,12 @@ from .objective import node_count
 def verify(plan, result, *, checks):
     """Run one ``QHDVerification`` and return ``(receipt, facts)``.
 
-    ``facts`` holds one receipt-witnessed fact per selected comparison, in
-    the order of ``checks.verification_checks(result)``, ready for
-    ``Certificate.with_verification`` with the same options. The receipt
-    also keeps the companion facts, such as the reference minimum and the
+    ``receipt`` is the ``VerificationReceipt``, the record of this
+    verification. ``facts`` holds one fact per requested comparison, attested
+    by that record (``witness_check_facts``), in the order of
+    ``checks.verification_checks(result)``, ready for
+    ``Certificate.with_verification`` with the same options. The record
+    also holds the companion facts, such as the reference minimum and the
     raw infidelity.
     """
     if type(checks) is not QHDVerification:
@@ -44,7 +47,7 @@ def verify(plan, result, *, checks):
 
 
 def verification_checks(options, result):
-    """Return one CheckSpec per selected comparison of ``options``.
+    """Return one CheckSpec per requested comparison of ``options``.
 
     ``grid_minimum`` checks the candidate's objective gap to the grid
     minimum, in the Problem's objective unit, against
@@ -78,7 +81,7 @@ def verification_checks(options, result):
 
 
 def _admit_product(plan, options):
-    """Reject an IR-product comparison when the Plan did not select that product."""
+    """Reject an IR-product comparison when planning did not compile that product."""
     if "ir_product_fidelity" in options.comparisons and not plan.reconstruction.compact_schedule_selected:
         raise ValueError("the IR product was not selected; create a new Plan to select it")
 
@@ -100,8 +103,8 @@ def _frame(plan, name, metric, comparison, relation, *, objective_unit=None):
     ``grid_minimum`` are conditioned on the selected finite grid, and facts
     of a fidelity comparison on the normalized valid one-hot state or the
     normalized binary register state, which holds only grid points. The
-    comparison's producer and reference relation completes the
-    conditioning.
+    relation between the computation that produced the result and the
+    reference completes the conditioning.
     """
     objective = metric in _OBJECTIVE_METRICS if objective_unit is None else objective_unit
     unit = plan.problem.evidence_unit if objective else Unit(symbol="1", dimension="dimensionless")
@@ -160,12 +163,12 @@ def _verify(plan, result, choice):
     point, and such a difference can change a minimum decision near a
     threshold.
     Objective-evaluation error is not bounded here. Each fidelity comparison runs one
-    restricted evolution and compares it with the stored state. A native
+    restricted evolution and compares it with the stored state. A circuit
     state is first restricted to its grid amplitudes in lexicographic order,
     its one-hot states (``decoding.onehot_register_indices``) or the whole
     binary register (``binary.lexicographic_register_array``),
     so the fidelity is conditional on the valid subspace. Work and bytes are
-    admitted before any evaluation or evolution.
+    checked before any evaluation or evolution.
     """
     import numpy as np
     from .method import _evolve_restricted
@@ -250,7 +253,7 @@ def _verify(plan, result, choice):
         """Append one framed fact of metric ``kind``, unknown when ``value`` is None.
 
         The frame's conditioning names the relation of its comparison, for
-        example a same-producer replay. The fact carries no assumptions,
+        example a replay by the same computation. The fact carries no assumptions,
         because an assumption would leave its check INCONCLUSIVE in
         ``Certificate.with_verification``.
         """
@@ -385,7 +388,7 @@ def _held_state_bytes(plan, result):
     """Return the bytes of the stored state that stay live during verification (``B_held``).
 
     The stored artifact's complex128 array, 16 bytes per entry, and, for a
-    native Plan, its restriction to the ``K**d`` grid amplitudes, another
+    circuit Plan, its restriction to the ``K**d`` grid amplitudes, another
     16D bytes. Without a stored state nothing is held.
     """
     if result.artifact is None:
@@ -398,21 +401,21 @@ def _held_state_bytes(plan, result):
 def _grid_minimum_bytes(d, k, nodes, *, max_bytes, held_bytes):
     """Return ``(chunk, grid_bytes)`` of the grid-minimum reference table, or ``(None, minimum)`` when refused.
 
-    Grid-minimum verification charges the selected original-expression
-    evaluator and its bounded coordinate/selection slabs. Fidelity
+    Grid-minimum verification counts the bytes of the original-expression
+    evaluator and its bounded coordinate and selection slabs. Fidelity
     references have their separate evolution costs, and simultaneous stored
     states remain included in the verification peak.
 
     For a slab of b full-grid points,
     ``B_grid(b) = 8dK + H_eval + W_eval,f(b) + (8d+96)b`` and
     ``W_grid = D(d+N_f+12)``. The generous constraint-free 96-byte wrapper
-    rate is shared with the constrained owner. It covers coordinate/index
+    rate is shared with ``constrained.constrained_grid_minimum``. It covers coordinate/index
     construction, the objective array, finite-real conversion,
     absolute/maximum/normalization temporaries, a mask and a ``where``
     result under a sequential evaluator schedule. A full D-entry objective
     table adds ``8D``. This table is the mutable evaluation output and is
-    never independently frozen, so with ``F = 8dK + 8D + H_eval`` and
-    ``S(b) = W_eval,f(b) + (8d+96)b`` the law is ``F + S(b)``.
+    never copied into a read-only array, so with ``F = 8dK + 8D + H_eval`` and
+    ``S(b) = W_eval,f(b) + (8d+96)b`` the byte formula is ``F + S(b)``.
     The axes are filled one scalar at a time into their final
     ``np.empty(K, dtype=np.float64)`` arrays, so only a bounded number of
     Python scalar temporaries are live, covered by ``H_eval``. With a stored
@@ -420,16 +423,16 @@ def _grid_minimum_bytes(d, k, nodes, *, max_bytes, held_bytes):
     reads the table and the state in slabs of at most b entries, so its
     growing temporaries stay within ``S(b)``. Adding the concurrently held
     data gives ``B_held + 8dK + 8D + H_eval + S(b) <= QHDVerification.max_bytes``.
-    Without a stored state, ``_observed_success_mass`` decodes each whole
-    histogram chunk of the observed counts or probabilities and keeps the
+    Without a stored state, ``_observed_success_mass`` decodes the whole
+    histogram of each observation chunk of counts or probabilities and keeps the
     divided passing weights of every chunk until the final ``fsum``. At every
-    readout width this law leaves out that storage, so ``max_bytes`` does not
+    readout width this formula leaves out that storage, so ``max_bytes`` does not
     bound that route.
 
     ``W_eval,f(b) = 8b(N_f+2)`` is an engineering allowance, not a derived
     bound: at most one slab-sized float64 temporary per expression node,
     plus the output and one broadcast input (``compiler.support_workspace``).
-    ``H_eval`` is the completed header inventory, ``H0 + 256 N_objects`` with
+    ``H_eval`` is the complete count of array headers, ``H0 + 256 N_objects`` with
     ``N_objects`` the ``N_f + 2`` evaluator arrays of ``support_workspace``,
     the d axes and their list, the table, the ``d + 3``
     coordinate/index/quotient arrays and the three conversion/validation
@@ -438,7 +441,7 @@ def _grid_minimum_bytes(d, k, nodes, *, max_bytes, held_bytes):
     selection slab, ``N_f + 2d + 16`` in all.
 
     With the rate ``a = 8(N_f+2) + 8d + 96`` and
-    ``R = max_bytes - B_held - F``, the largest admitted slab is
+    ``R = max_bytes - B_held - F``, the largest allowed slab is
     ``b = min(D, R // a)`` when ``R >= a``, and the minimum total byte limit
     for one-entry slabs is ``B_held + F + a``.
     """
@@ -459,8 +462,8 @@ def _observed_success_mass(plan, observations, table, minimum, tolerance):
 
     Each histogram is decoded by ``decoding.decode_histogram`` in stored
     entry order. Passing count weights are divided by the total returned
-    shots across all chunks; passing probability weights are divided by
-    the number of chunks. Invalid one-hot outcomes contribute no passing
+    shots across all chunks, and passing probability weights by the number
+    of chunks. Invalid one-hot outcomes contribute no passing
     weight and do not reduce either denominator. The divided weights are
     combined with ``fsum``.
     """
@@ -528,7 +531,7 @@ def _infidelity(left, right):
 
     ``F = |<x,y>|**2 / (<x,x> <y,y>)`` and ``window`` come from
     ``nwqlib._numerics.normalized_fidelity_with_window``, whose docstring
-    derives the window. The kernel raises when the computed F is not finite
+    derives the window. That function raises when the computed F is not finite
     or exceeds one by more than ``window``, so ``raw >= -window``. The
     computed F is never negative, so ``raw <= 1`` for every accepted input,
     and no upper check on ``raw`` is needed. ``1 - F`` is exact near one by

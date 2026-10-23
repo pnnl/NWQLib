@@ -41,21 +41,21 @@ def _qsp_outer_bytes(q: int, children) -> int:
     With ``V = m+b+q+1``, the table allowance is ``T = 64P(q+16)`` and
     the active classifier allowance is ``X = [128 L(2J) + 512]V + H0``,
     with L = ``integer_object_bytes`` and H0 = ``BOOKKEEPING_BYTES``.
-    The outer QSP gate adds both live child tables, the shared decomposition
-    payloads and matrix buffers to the larger sequential classifier
+    The outer QSP gate adds both child tables in memory, the shared
+    decomposition data and matrix buffers to the larger sequential classifier
     workspace:
 
         B_outer = max{B_dec(q, d), 96 d**2 + sum_c m_c (q+16) + sum_c T_c + max_c X_c}.
 
     The 96 d**2 are the L/H matrices (32 d**2) and a known-array reserve of
     64 d**2 for two completed dense child payloads and the current
-    conversion/norm copies. The labels the classifiers parse are borrowed
-    from the two decompositions, so no further m(q+16) is added. An empty
+    conversion/norm copies. The labels the classifiers parse are read in
+    place from the two decompositions, so no further m(q+16) is added. An empty
     child adds no classifier or table. For two full-support children
-    (m = d**2, b = d) this is the closed sufficient law
+    (m = d**2, b = d) this is the closed sufficient formula
     B_dec-or-96d**2 + 2m(q+16) + 2T + X: 42,168,320, 161,732,608,
     637,289,984 and 2,528,890,880 bytes at q = 4 to 7. It excludes norm
-    workspace of the vendor library, Python headers and later native
+    workspace of the vendor library, Python headers and later Qiskit
     synthesis.
     """
     from nwqlib.algorithms.lchs.time_independent_terms import _pauli_decomposition_requirements
@@ -88,11 +88,11 @@ def _kept_pauli_part(
 ) -> tuple[BlockEncodingPlan, int]:
     """Select an encoding of the kept Pauli operator and attach the explicit pruning error.
 
-    ``held_bytes`` are the caller's other live payloads, each counted once,
-    including the decomposition this child borrows. The child's tables and
-    classifier are admitted by ``_admit_pauli_plan`` against ``max_work``
+    ``held_bytes`` are the caller's other data in memory, each counted once,
+    including the decomposition this child reads. The child's tables and
+    classifier are checked by ``_admit_pauli_plan`` against ``max_work``
     before ``plan_block_encoding`` runs with the same work allowance and the
-    byte allowance left beside the other held payloads. A Pauli input
+    byte allowance left beside the other data held. A Pauli input
     selected for dense dilation adds its reconstruction, m*d**2, and a
     computed spectral norm, ``_dense_norm_work(d, False)``.
 
@@ -158,7 +158,7 @@ def _compiled_qsp_part_plans(
 
     Returns the L and H child plans, the pruned mass of an H child that
     pruning removed entirely (zero otherwise) and the max_select_work that
-    this gate's ledger leaves for the later SELECT stages.
+    this stage leaves for the later SELECT stages.
 
     L and H are pruned against one cutoff relative to the largest coefficient
     magnitude among their combined Pauli terms, so both children see the same
@@ -167,11 +167,11 @@ def _compiled_qsp_part_plans(
     pruned, that mass is returned separately, because the joint generator then
     has no H child to carry it.
 
-    The outer QSP gate adds both live child tables, the shared decomposition
-    payloads and matrix buffers to the larger sequential classifier
-    workspace (_qsp_outer_bytes, checked at the full envelope of d**2 terms
-    per child before decomposition). Each selected stage consumes one
-    remaining work budget, including any dense reconstruction and
+    The outer QSP gate adds both child tables in memory, the shared
+    decomposition data and matrix buffers to the larger sequential classifier
+    workspace (_qsp_outer_bytes, checked at the full bound of d**2 terms per
+    child before decomposition). Each stage draws on one remaining work
+    budget, including any dense reconstruction and
     singular-value normalization: the two decompositions
     (time_independent_terms._pauli_decomposition_requirements), 32*d**2 for
     the shared pruning and part selection, and for each nonempty child the
@@ -181,10 +181,10 @@ def _compiled_qsp_part_plans(
     child reconstructed as a dense matrix and _dense_norm_work(d, False)
     for a norm it computes. For two full-support children these add to
     654,924, 5,777,014, 60,033,772 and 735,289,238 units at q = 4 to 7, so
-    these preprocessing stages admit all four under the default
+    these preprocessing stages accept all four under the default
     max_select_work=1_000_000_000 and max_bytes=10_000_000_000. Later
     SELECT stages have separate remaining-work checks. An empty H child is
-    not classified. These units are admission proxies, not timings or
+    not classified. These units are proxies for the limit checks, not timings or
     equal-cost CPU operations.
     """
 
@@ -276,7 +276,7 @@ def _compiled_select_qsp_plan(
     max_bytes=DEFAULT_MAX_BYTES,
     max_degree=256,
 ) -> dict[str, Any]:
-    """Plan the selected joint-generator QSP construction without realization.
+    """Plan the joint-generator QSP construction without building the circuit.
 
     With D_L = diag(k_j) and D_H = I, the joint generator is the effective
     Hamiltonian sum_j |j><j| (x) (k_j*L + H) of Pocrnic et al.,
@@ -287,7 +287,7 @@ def _compiled_select_qsp_plan(
     The joint generator D_L (x) L + D_H (x) H has subnormalization
     alpha = max|D_L|*alpha_L + max|D_H|*alpha_H, so QSP simulates
     exp(-i*tau*x) at tau = alpha*T. The Jacobi-Anger degrees are chosen once
-    for epsilon_he and stored with the structural gate law.
+    for epsilon_he and saved with the structural gate-count formula.
     """
 
     from nwqlib.operators.access import _check_bytes
@@ -378,7 +378,7 @@ LCHS_QSP_PROJECTOR_FLIP_CX = (
 
 
 def _controlled_kind_cx(controls: int) -> dict[str, int]:
-    """CX of one gate of each census kind after Qiskit adds ``controls`` controls to it at once.
+    """CX of one gate of each gate kind after Qiskit adds ``controls`` controls to it at once.
 
     Qiskit's add_control unrolls a gate to its basis and replaces every
     basis gate by a multi-controlled gate (``apply_basic_controlled_gate`` in
@@ -416,13 +416,13 @@ def _controlled_kind_cx(controls: int) -> dict[str, int]:
 
 
 def _twice_controlled_kind_cx() -> dict[str, int]:
-    """CX of one gate of each census kind inside a gate that Qiskit controls once, then once more.
+    """CX of one gate of each gate kind inside a gate that Qiskit controls once, then once more.
 
     The compiled QSP SELECT controls each generator branch on the combine
     qubit, and the QSP pass that contains the generator on the parity qubit.
     The second add_control unrolls the first one's output and controls each
-    of its gates, so a gate costs the one-control price of its one-control
-    census. For example a CX costs 6*6 + 7*2 + 2*1 = 52 CX, where two
+    of its gates, so a gate costs the one-control price of its gate counts
+    after one control. For example a CX costs 6*6 + 7*2 + 2*1 = 52 CX, where two
     controls at once cost 14.
     """
     once = _controlled_kind_cx(1)
@@ -430,12 +430,12 @@ def _twice_controlled_kind_cx() -> dict[str, int]:
 
 
 def _direct_preparation_paths(num_qubits: int, *, complex_phases: bool) -> tuple[dict[str, int], ...]:
-    """Gate censuses of the constructions of ``_build_normalized_state_preparation`` on n qubits.
+    """Gate counts by kind of the constructions of ``_build_normalized_state_preparation`` on n qubits.
 
     The builder takes one of them. X gates prepare a basis state and H gates
     equal amplitudes, n gates at most either way. Qiskit's
     UniformSuperpositionGate prepares a uniform prefix, with the elementary
-    slots of ``_uniform_superposition_gate_slots``. The general tree has
+    gate positions of ``_uniform_superposition_gate_slots``. The general tree has
     ``2**n - 1`` RY and ``2**n - 2`` CX, and a complex state adds a phase
     diagonal with as many RZ and CX (``direct_preparation_cx_bound``).
     """
@@ -451,7 +451,7 @@ def _direct_preparation_paths(num_qubits: int, *, complex_phases: bool) -> tuple
 
 
 def _census_cx(census: Mapping[str, int], kind_cx: Mapping[str, int]) -> int:
-    """Price a gate census with the CX of one gate of each kind.
+    """Return the CX of gate counts by kind, given the CX of one gate of each kind.
 
     ``preparation_qubits`` stands for a positive-amplitude direct PREP on
     that many qubits and its inverse, priced at the costliest of the
@@ -476,7 +476,7 @@ def _controlled_direct_preparation_cx(num_qubits: int, controls: int) -> int:
 
 
 def _qsp_child_gate_census(child: Any) -> dict[str, int]:
-    """Upper bounds on the gates of one QSP child encoding by census kind, without realizing it.
+    """Upper bounds on the gates of one QSP child encoding by gate kind, without building it.
 
     The counts are those of the child circuit after Qiskit unrolls it to its
     add_control basis, which is how the SELECT controls it.
@@ -543,7 +543,7 @@ def _whole_matrix_children(qsp_plan, route: str) -> bool:
 
 
 def _controlled_dense_child_census(num_qubits: int) -> dict[str, int]:
-    """Census kinds of the whole-matrix control of a dense child on ``num_qubits`` qubits by the combine qubit.
+    """Gate counts by kind of the whole-matrix control of a dense child on ``num_qubits`` qubits by the combine qubit.
 
     The gates are those of ``_dense_synthesis.controlled_synthesis_gate_census``
     on the child's qubits and the control, with the global phase of that
@@ -661,7 +661,7 @@ def _twice_controlled_dense_counts(num_qubits: int) -> tuple[int, int, int]:
     the one-control gates that ``_ONE_CONTROL_UNROLLED_CENSUS`` lists after
     Qiskit unrolls them to its basis, with an RZ priced as the costliest
     rotation. The second control, with one control, unrolls those gates and
-    emits one instruction for each, except seven for an H (S, H, T, CX,
+    produces one instruction for each, except seven for an H (S, H, T, CX,
     Tdg, H and Sdg). Each P, U and rotation among them becomes a CP, CU or
     controlled rotation that holds its angles, the heavy instructions of
     ``gatewise_control_size``. The global phase adds one heavy gate and
@@ -681,14 +681,16 @@ def _twice_controlled_dense_counts(num_qubits: int) -> tuple[int, int, int]:
 
 
 def compiled_select_cx_projection(qsp_plan, *, route: str = "gatewise"):
-    """Upper bound on the CX of the compiled QSP SELECT leaf, as Qiskit 2.6.0 builds it.
+    """Upper bound on the CX of the compiled QSP SELECT block, as Qiskit 2.6.0 builds it.
 
-    The leaf (native.construct_select) is the coefficient phase diagonal on
-    the k address qubits, ``2**k - 2`` CX, followed by the QSP evolution of
-    evolution.build_qsp_evolution_encoding. That evolution is three half
-    steps joined by two reflections about the zero state of its N = b + 3
-    ancillas, where b is the joint generator's block ancilla count. A half
-    step controls its cosine pass and its sine pass on the parity qubit.
+    The block (native.construct_select) is the coefficient phase diagonal on
+    the k address qubits, with a CX bound of ``max(0, 2**k - 2)``, followed
+    by the QSP evolution of evolution.build_qsp_evolution_encoding. The
+    evolution applies the unamplified QSP block twice and its adjoint once,
+    interleaved with two reflections about the zero state of its N = b + 3
+    ancillas, where b is the joint generator's block ancilla count. The
+    unamplified block controls its cosine pass and its sine pass on the
+    parity qubit.
     Between them the two passes hold ``block_encoding_queries / 3``
     generator queries. A pass of degree d has d queries, d + 1 projector
     phases, one before the first query and one after each query, and two H
@@ -714,13 +716,13 @@ def compiled_select_cx_projection(qsp_plan, *, route: str = "gatewise"):
 
     Coefficient PREP and a source input preparation are priced elsewhere.
     The value is recorded as an estimate, because another Qiskit version
-    can control or lower these gates differently.
+    can control or decompose these gates differently.
 
     Returns:
         A dict with select_cx, the per-query generator_cx, projector_cx,
         reflection_cx, fixed_cx for the pass boundaries, reflections and
         coefficient diagonal, the query count, the ancilla count N and the
-        child censuses.
+        child gate counts.
     """
     from nwqlib.subroutines._mcx_counts import MCX_CX_BY_CONTROLS
     l_part, h_part, _ = qsp_plan["part_plans"]

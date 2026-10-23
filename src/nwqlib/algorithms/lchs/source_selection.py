@@ -1,4 +1,4 @@
-"""Admitted constant-source branch grids, without state PREP or evolution."""
+"""Constant-source branch grids that passed the limit checks, without state PREP or evolution."""
 
 from nwqlib._limits import DEFAULT_MAX_BYTES
 
@@ -15,17 +15,17 @@ class SourceBranchLayout:
     """Frozen coefficient/time grid and the physical applications it represents.
 
     Attributes:
-        coefficients: Complex slot coefficients, weight*exp(shift*elapsed)*c_j,
-            zero on padding slots. When exp(shift*T) exceeds binary64 every
-            slot is divided by 2**psd_recovery_exponent(shift, T), which the
+        coefficients: Complex address-slot coefficients, weight*exp(shift*elapsed)*c_j,
+            zero on padding address slots. When exp(shift*T) exceeds binary64
+            every address slot is divided by 2**psd_recovery_exponent(shift, T), which the
             recovery then carries.
-        k_values: k-node of each slot, zero on padding.
-        elapsed_times: Evolution time of each slot, T for the initial state and
+        k_values: k-node of each address slot, zero on padding.
+        elapsed_times: Evolution time of each address slot, T for the initial state and
             T - s_q for Duhamel node s_q.
-        branch_to_node: Physical branch index of each slot, or None for padding.
+        branch_to_node: Physical branch index of each address slot, or None for padding.
         branch_kinds: "initial" or "source" for each physical branch, which
             selects the input direction that branch prepares.
-        applications: (start_time, elapsed_time, |weight|, slots) per physical
+        applications: (start_time, elapsed_time, |weight|, address slots) per physical
             application, where weight is the initial norm or w_q*||b||.
         source_nodes: Gauss-Legendre Duhamel times s_q on [0, T].
         source_weights: Matching Gauss-Legendre weights w_q.
@@ -33,7 +33,7 @@ class SourceBranchLayout:
         source_norm: Physical norm of the constant source.
         kind_control: Address bit that selects initial or source preparation
             when both are present in a padded layout, otherwise None.
-        compact: Whether slots list physical branches consecutively without
+        compact: Whether the address slots list physical branches consecutively without
             power-of-two field padding (branch-controlled SELECT).
     """
 

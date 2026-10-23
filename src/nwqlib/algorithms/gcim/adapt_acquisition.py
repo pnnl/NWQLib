@@ -1,9 +1,9 @@
-"""ADAPT query construction, acquisition on the common Run, and the adaptive controller.
+"""ADAPT query construction, data collection through the common Run, and the ADAPT iteration.
 
-The controller is ADAPT-GCIM (Zheng et al. 2024, arXiv:2312.07691v3). Each
-query is acquired once through the Run that owns preparation, submission and
+The iteration is ADAPT-GCiM (Zheng et al. 2024, arXiv:2312.07691v3). Each
+query runs once through the Run, which handles preparation, submission and
 checkpoints, so resume retrieves the original work instead of repeating it.
-See docs/development/execution.md and docs/run_archives.md for that contract.
+See docs/development/execution.md and docs/run_archives.md for that guarantee.
 """
 
 from dataclasses import dataclass, field
@@ -66,7 +66,7 @@ from .pencil import (
 
 @dataclass
 class AdaptContext:
-    """Live state of one ADAPT controller.
+    """Live state of one ADAPT iteration.
 
     A run archive (``adapt_archive.save_context``) saves the state, action
     and gate caches, the shift rules, the compiler plans and the current
@@ -77,36 +77,38 @@ class AdaptContext:
         vectors: Classical prefix states keyed by generator chain, read-only once stored.
         h_columns: Classical ``(H - cI)|psi>`` (``_pair_scalars``) for chains
             used as a pair's right side.
-        preparations: Native composed preparations keyed by (chain, controlled, inverse).
-        gates: Native generator gates keyed by (pool index, angle, controlled, inverse).
-        reference_gates: Native reference preparation variants.
-        observations: Accepted observation chunk for each exact realization identity.
-        contribution_order: Chunk identities in first-collection order.
+        preparations: Composed Qiskit preparations keyed by (chain, controlled, inverse).
+        gates: Qiskit generator gates keyed by (pool index, angle, controlled, inverse).
+        reference_gates: Qiskit reference preparation variants.
+        observations: The observation chunk kept for each resolved query, keyed by its content hash.
+        contribution_order: Content hashes of the chunks in the order first collected.
         contribution_seen: Set view of ``contribution_order`` for membership tests.
         accepted: Current selected chain whose basis the caches must keep.
-        pencil: Latest published projected pencil.
+        pencil: Latest solved projected pencil.
         pencil_parameters: Chain that produced ``pencil``.
-        pencil_attempt: Controller analysis attempt that produced ``pencil``.
+        pencil_attempt: Analysis attempt of the iteration that produced ``pencil``.
         matrix_data: Current ``(H0, S, sampled, allowance)`` workspace between
-            acquisition and projection (``_matrix_from_observations``).
-            Snapshots and archives exclude it and rebuild it from observations.
+            data collection and projection (``_matrix_from_observations``).
+            Result copies and saved archives exclude it and rebuild it from
+            observations.
         pair_values: Values ``_read_values`` returned for each read pencil
-            query, with the preparation receipt of its chunk, keyed by the
+            query, with the preparation record of its chunk, keyed by the
             canonical chain pair, term and quadrature (``_matrix_entries``).
             Later matrix stages reuse them instead of reading the same
-            observations again. Snapshots and archives exclude them, and a
-            restored or reanalyzed context rebuilds them from observations.
+            observations again. Result copies and saved archives exclude
+            them, and a restored or reanalyzed context rebuilds them from
+            observations.
         rules: Resolved shift rule per selected pool index.
         compiler_plans: The quantum Plan's ``adapt.CompilerPlans`` map once
-            ``drive_adapt`` has adopted it, so checkpoints save the compiler
+            ``drive_adapt`` has taken it over, so checkpoints save the compiler
             plans built after the Plan archive was written. Before that, a
             reopened Run holds the saved ``(pool index, kind, active modes,
-            occupation blocks)`` entries here. Result snapshots store the
-            built entries (``ADAPT.snapshot_result_context``), which native
-            verification adopts.
+            occupation blocks)`` entries here. Result copies store the
+            built entries (``ADAPT.snapshot_result_context``), which
+            circuit-level verification uses.
 
-    The native caches (``gates``, ``preparations``, ``reference_gates``) hold
-    mutable Qiskit objects and stay private to the live Run. Result snapshots
+    The Qiskit caches (``gates``, ``preparations``, ``reference_gates``) hold
+    mutable Qiskit objects and stay private to the live Run. Result copies
     share only the immutable scientific entries.
     """
 
@@ -132,7 +134,7 @@ class AdaptContext:
 
 
 def basis_chains(selected):
-    """Return the ADAPT-GCIM working basis for the selected chain, in fixed order.
+    """Return the ADAPT-GCiM working basis for the selected chain, in fixed order.
 
     A chain ``((i_1, t_1), ..., (i_k, t_k))`` denotes the state
     ``exp(t_k A_{i_k}) ... exp(t_1 A_{i_1})|ref>``, applying its first entry
@@ -190,8 +192,8 @@ def _native_preparation(
     comes from ``build_generator_circuit`` with its compiler plan from the Plan's map, so
     every query of one Plan uses the same synthesis. The physical global
     phase of the reference is kept, because under control it becomes a
-    relative phase. ``max_direct_amplitudes`` is the lowering limit that the
-    reference preparation was admitted against.
+    relative phase. ``max_direct_amplitudes`` is the circuit-construction
+    limit that the reference preparation was checked against.
     """
     from qiskit import QuantumCircuit
     from nwqlib.subroutines.qiskit_compat import (
@@ -246,7 +248,7 @@ def _native_preparation(
 
 
 def _native_generator(index, theta, *, controlled, inverse, inputs, compiler_plans, context):
-    """The one actual generator factory used by queries and explicit verification."""
+    """The one generator-gate factory used by queries and explicit verification."""
     from nwqlib.subroutines.fermionic_circuits import build_generator_circuit
 
     key = (index, theta, controlled, inverse)
@@ -262,9 +264,9 @@ def _native_generator(index, theta, *, controlled, inverse, inputs, compiler_pla
 
 
 def construct_adapt(block, arguments, method_context):
-    """Finite registered native builder.
+    """Registered circuit builder for the finite ADAPT parameter space.
 
-    Its arguments are already admitted scalars.
+    Its arguments are scalars that were already checked.
     An exact ``pair`` prepares the phase-faithful joint state: a Hadamard and an
     X gate on ancilla qubit 0, the left preparation controlled on it, a second
     X and the right preparation controlled on it, so the zero branch holds the
@@ -277,7 +279,7 @@ def construct_adapt(block, arguments, method_context):
     ancilla Z expectation is then ``Re<psi_L|P|psi_R>``, or the imaginary part
     with S-dagger. ``screen`` and ``energy`` prepare the right chain on the
     system register. A sampled query appends the basis rotations of its QWC
-    group so every label in the group is read as a Z-parity.
+    group so every label in the group is measured as a Z-parity.
     """
     from qiskit import QuantumCircuit
     from nwqlib.subroutines.hamiltonian_evolution import apply_pauli_rotation, make_pauli_label
@@ -403,7 +405,7 @@ def construct_adapt(block, arguments, method_context):
 
 
 def _reference_vector(plan, context, counts):
-    """Return the cached normalized reference state, materializing it once per Run."""
+    """Return the cached normalized reference state, computing it once per Run."""
     if () not in context.vectors:
         from nwqlib.algorithms._eigen_inputs import state_direction
 
@@ -440,10 +442,10 @@ def _vector(items, plan, context, counts):
 
 
 def stream_ritz(basis, coefficients, reference_at, evolve, normalize, counts=None):
-    """Accumulate the Ritz state in ``basis_chains`` order and release a basis or prefix array after its final contribution and successor evolution.
+    """Accumulate the Ritz state in ``basis_chains`` order and free a basis or prefix array once it has contributed and its successor has been evolved.
 
     Product prefixes needed after the full-product contribution remain
-    available. Native verification evolves the same independently lowered
+    available. Circuit-level verification evolves the same independently built
     circuits, and the final state is normalized by the ``normalize`` callback.
 
     The nodes are the distinct prefixes of the basis chains. A node has one
@@ -513,7 +515,7 @@ def _ritz_state(selected, coefficients, reference_at, evolve, counts=None):
     ``|b_i>`` runs over ``basis_chains(selected)`` and ``c_i`` over
     ``coefficients`` in the same order. The sum is streamed by
     ``stream_ritz`` from the callbacks, which supply the classical or the
-    native states, and normalized by ``normalize_state_vector``. No
+    circuit-built states, and normalized by ``normalize_state_vector``. No
     Hamiltonian action is applied.
     """
     basis = basis_chains(selected)
@@ -531,7 +533,7 @@ def _classical_query_state(plan, context, counts, right, values):
     of ``right[j]`` (zero-based), where ``P`` is Pauli term ``insert_term`` of
     that generator and ``s = insert_sign``, and the remaining generators follow.
     ``optimization._generator_shift_rule`` derives why the energy difference
-    of the two signs is that term's derivative contribution. The native
+    of the two signs is that term's derivative contribution. The circuit
     query in ``construct_adapt`` applies the same factor.
     """
     insertion = int(number(values["insert_position"]))
@@ -605,9 +607,9 @@ def _screen_gradients(plan, context, counts, right, state):
     """Screen the normalized product state using its cached (H-cI) action.
 
     For anti-Hermitian A, Re<psi|A|psi> is zero, so 2 Re<(H-cI)psi|A psi>
-    equals <psi|[H,A]|psi>. The cache is keyed by the actual chain and
+    equals <psi|[H,A]|psi>. The cache is keyed by the chain and the
     processed Hamiltonian. A missing column is computed once with the same
-    offset-free action used by pair acquisition.
+    offset-free action used for the pair matrix elements.
 
     For real theta, Hermitian H and anti-Hermitian A,
     ``d/dtheta <exp(theta A)psi|H exp(theta A)psi>`` at 0 is
@@ -621,13 +623,13 @@ def _screen_gradients(plan, context, counts, right, state):
     that norm, and ``_vector`` normalizes after every generator exponential,
     so screening uses the normalized-state convention. The column
     ``context.h_columns[right]`` holds ``(H-cI)psi_right`` when a pair query
-    acquired it. It can be absent for a new chain, the initial screen, a
+    computed it. It can be absent for a new chain, the initial screen, a
     restored context or after ``_keep_current`` evicts states, and is then
     computed once (``_offset_free_column``). Changing from ``H psi`` to
     ``(H-cI) psi`` changes rounding and can change selection among nearly
-    tied gradients. The anti-Hermitian premise is exact admission of the
-    generator coefficients, not a tolerance that permits a Hermitian
-    component. Units are the Hamiltonian's energy unit per radian.
+    tied gradients. The anti-Hermitian assumption holds exactly for the
+    checked generator coefficients and is not a tolerance that permits a
+    Hermitian component. Units are the Hamiltonian's energy unit per radian.
 
     Selected generators are not screened again, following QuGCM
     ``adapt_gcim.py`` (c5efcb0), lines 303-398. With a fixed angle, reusing
@@ -778,16 +780,16 @@ def _classical_energy(plan, state, counts):
 
 
 def bind_classical(plan, inputs, reference):
-    """Bind the classical ADAPT host kernel to the Plan without computing anything.
+    """Bind the classical ADAPT routine to the Plan without computing anything.
 
-    Each classical query becomes one host-kernel invocation. ``binder``
+    Each classical query becomes one call of the routine. ``binder``
     attaches a parameter point to the Run's state and action caches, and
     ``invoke`` evaluates it. ``screen`` returns the gradients
     ``<[H, A_i]>``, ``pair`` one ``(S_ij, H_ij)`` pencil entry, ``energy``
     one product-state energy and ``residual`` one Ritz residual norm. The
-    returned application record counts the work actually performed:
-    reference materializations and generator exponentials on cache misses,
-    Hamiltonian and generator actions, and scalar products.
+    returned application record counts the work performed, which is the
+    reference constructions and generator exponentials on cache misses, the
+    Hamiltonian and generator actions, and the scalar products.
     """
     from .adapt import HOST
 
@@ -804,7 +806,7 @@ def bind_classical(plan, inputs, reference):
         name = realization.experiment
 
         def invoke():
-            """Evaluate one query's scalars and record the work actually performed."""
+            """Evaluate one query's scalars and record the work performed."""
             _keep_current(context, left, right)
             counts = dict(
                 reference_materializations=0,
@@ -873,7 +875,7 @@ def bind_classical(plan, inputs, reference):
             return output(answer, counts)
 
         def output(answer, counts):
-            """Return the query's selected scalars and its work record."""
+            """Return the query's requested scalars and its work record."""
             scalars = tuple(
                 ScalarValue(label=label, value=answer[label]) for label in declaration.scalars
             )
@@ -901,10 +903,10 @@ def bind_classical(plan, inputs, reference):
 class _PartialData(Exception):
     """Data that a decision needs are missing or unusable. ``pending`` names them.
 
-    Examples are an empty count population, a missing label or matrix
-    entry, and a gradient norm that overflows binary64. The controller stops
-    with ``partial_observation``, or ``uncertain_native_intent`` when the
-    message names an uncertain acquisition, and analyzes the data it has
+    Examples are an empty set of counts, a missing label or matrix
+    entry, and a gradient norm that overflows binary64. The ADAPT iteration
+    stops with ``partial_observation``, or ``uncertain_native_intent`` when
+    the message names a submission whose state is uncertain, and analyzes the data it has
     instead of guessing the missing values.
     """
 
@@ -915,8 +917,8 @@ class _PartialData(Exception):
 class _AcquisitionPending(Exception):
     """External work for a query is not complete. ``status`` is its provider or preparation state.
 
-    The controller checkpoints and returns, and a later resume retrieves the
-    same attempt.
+    The ADAPT iteration saves a checkpoint and returns, and a later resume
+    retrieves the same attempt.
     """
 
     def __init__(self, status):
@@ -950,8 +952,8 @@ def _point(
     value. Every parameter not supplied takes its canonical inactive value:
     -1 for pool, term and insertion indices, the experiment's register
     widths for ``control_width`` and ``readout_width``, and 0 otherwise. Equal
-    queries therefore resolve to one realization identity and reuse its
-    observation (``adapt._parameters``).
+    queries therefore resolve to the same parameter point with one content
+    hash and reuse its observation (``adapt._parameters``).
     """
     from nwqlib.core.records import Float64
 
@@ -1031,8 +1033,8 @@ def _pair_reduction_values(chunk):
 def _read_values(plan, point, chunk):
     """Return ``{label: value}`` for one query from its own observation chunk.
 
-    The chunk must belong to exactly this point and its unconditional
-    population. Classical chunks carry host scalars and exact quantum
+    The chunk must belong to exactly this point and hold its unconditional
+    counts. Classical chunks carry classical scalars and exact quantum
     chunks carry Pauli expectations, which are used as returned. For counts,
     the readout circuit has already rotated every label of the query's group
     to a product of ``Z`` on the label's support, so its estimate is the
@@ -1046,7 +1048,7 @@ def _read_values(plan, point, chunk):
     every stored index is one ``np.bitwise_count`` over the index array, or
     over the ``(entries, words)`` packed array for a readout wider than 64
     bits. The estimate is the exact integer ``total - 2 * odd`` divided once
-    by ``total``, where ``odd`` is the count mass with odd parity. Each count
+    by ``total``, where ``odd`` is the total count with odd parity. Each count
     is at most ``MAX_COUNT``, but a chunk's total is not, so ``total`` is a
     Python int. When it is at most ``MAX_COUNT``, every ``odd``, a sum of a
     subset of the nonnegative counts, fits in int64. Otherwise ``odd`` is
@@ -1134,17 +1136,18 @@ def _matrix_entries(plan, selected, available=()):
     """Yield ``((i, j), element, key, point)`` for every upper-triangle pencil entry.
 
     Each pair query is bound with its two chains in canonical (sorted) order,
-    so the same unordered pair of states reuses one realization across
-    iterations even when their basis positions change. When the canonical
-    order reverses (i, j), the consumer conjugates the amplitude by flipping
+    so the same unordered pair of states reuses one query and its observation
+    across iterations even when their basis positions change. When the canonical
+    order reverses (i, j), the matrix assembly conjugates the amplitude by flipping
     the sign of its imaginary part. Classical plans read all four H/S scalars
     from one query, exact quantum plans read ``(H0_ij, S_ij)`` from one
     weighted-pencil reduction per canonical chain pair (a diagonal pair only
     when the Hamiltonian has a nonidentity term), and sampled quantum plans
     have one query per ``MatrixElement``. In an exact quantum plan the
     diagonal of a chain that is, or was in an earlier round, the full chain
-    comes from that chain's shared full-chain query (``available`` holds
-    the realization identities already observed).
+    comes from that chain's shared query on the full product state
+    (``available`` holds the content hashes of the queries already
+    observed).
     ``key`` is ``(canonical left, canonical right, term, quadrature)``, which
     determines the query within one Plan, and ``point()`` resolves it.
     """
@@ -1189,17 +1192,18 @@ def _matrix_points(plan, selected, available=()):
 
 
 def _new_pencil_queries(selected, history, terms, *, exact=False):
-    """Return a lower bound on the quantum pencil queries of ``selected`` that no earlier stage acquired.
+    """Return a lower bound on the quantum pencil queries of ``selected`` that no earlier stage obtained.
 
     A pair query is bound to its two basis chains (``_matrix_points``), and
     every basis in ``history`` was analyzed, so all of its pair queries were
-    acquired. Only a pair of chains that both appear among the earlier bases
-    can have been acquired. With ``s`` such chains among the ``b`` current
-    ones, at least ``c(b) - c(s)`` queries are new, where ``c`` is the count
-    law ``pencil.matrix_element_count`` and ``terms`` the number of
-    nonidentity Pauli terms. The bound is exact whenever the earlier chains
-    that the current basis holds all belong to the previous basis, whose
-    pairs were all acquired. That holds without optimization, where each
+    obtained. Only a pair of chains that both appear among the earlier bases
+    can have been obtained. With ``s`` such chains among the ``b`` current
+    ones, at least ``c(b) - c(s)`` queries are new, where ``c`` is
+    ``pencil.pair_count`` for exact pair reductions and
+    ``pencil.matrix_element_count`` for sampled scalar queries, and ``terms``
+    is the number of nonidentity Pauli terms. The bound is exact whenever the
+    earlier chains that the current basis holds all belong to the previous
+    basis, whose pairs were all obtained. That holds without optimization, where each
     basis contains the one before it, and after an optimization unless an
     angle returned exactly to its value in an older basis. It costs O(b)
     per history record and forms no query.
@@ -1225,13 +1229,13 @@ def _matrix_from_observations(plan, selected, context, *, acquire=None, receipt=
     completed below the diagonal by conjugation. ``H0`` omits the identity
     term ``cI`` of the Hamiltonian, ``plan.reconstruction.identity_shift``.
     ``sampled`` is True when any entry came from shot counts. ``allowance``
-    bounds the error of a deterministic S, which the solve's negative-mode
-    test admits: the Gram formation error of classical inner products of
-    length 2**n, or for exact pair reductions the largest row sum of the
-    off-diagonal overlap entry bounds from each pair's receipt
+    bounds the error of a deterministic S that the solve's negative-mode
+    test allows. It is the Gram formation error of classical inner products
+    of length 2**n, or for exact pair reductions the largest row sum of the
+    off-diagonal overlap entry bounds from each pair's preparation record
     (``receipt(prepared_id)``, ``fixed_basis._exact_overlap_allowance``),
-    zero when a receipt or its state error is unavailable. With
-    ``acquire`` each missing query is acquired, otherwise only already
+    zero when a record or its state error is unavailable. With
+    ``acquire`` each missing query is run, otherwise only already
     collected observations are used and a missing one raises
     ``_PartialData``. Each observation is validated by ``_read_values``
     before it is used, and its values are kept in ``context.pair_values``,
@@ -1391,7 +1395,7 @@ def _pencil_from_observations(plan, selected, context, *, cutoff=None, receipt=N
 
 
 def _new_controller_state(controls):
-    """Return the initial checkpoint state of a fresh ADAPT controller.
+    """Return the initial checkpoint state of a new ADAPT iteration.
 
     The state is plain JSON so a Run checkpoint can store it. Its keys:
 
@@ -1416,12 +1420,13 @@ def _new_controller_state(controls):
       ``optimizer_restarts``, ``restart_pending``, ``optimizer_exhausted``:
       the active BFGS invocation, cumulative counters, restarts after resume
       and whether the evaluation limit ended the last optimization.
-    - ``energy_queries``, ``active_energy``: logical energy queries charged
-      to ``optimize_max_evaluations`` and the reserved query in progress.
+    - ``energy_queries``, ``active_energy``: logical energy queries counted
+      against ``optimize_max_evaluations`` and the query in progress that
+      was already counted.
     - ``analysis_attempts``, ``current_analysis_attempt``,
       ``analysis_in_progress``: projected-analysis bookkeeping for
       ``recover_adapt_analysis``.
-    - ``stop_reason``: controller outcome, ``running`` until a stop.
+    - ``stop_reason``: outcome of the iteration, ``running`` until a stop.
     - ``stage_start``: first contribution index of the next history record.
     """
     return dict(
@@ -1464,7 +1469,7 @@ def _flat_counter_update(flat_count, previous_energy, value, iteration, *, valid
     change from the reference-only basis (iteration 0) to the first
     two-state basis, so iteration 0 only records its energy. A change at or
     above ``tolerance`` resets the count. An unavailable energy (no value or
-    a solver refusal) also resets the count and forgets the previous energy,
+    a solver rejection) also resets the count and forgets the previous energy,
     because it interrupts the sequence of small changes.
     """
     if not valid:
@@ -1476,16 +1481,17 @@ def _flat_counter_update(flat_count, previous_energy, value, iteration, *, valid
 
 
 def _stopping_reason(state, options, reconstruction, count):
-    """Return the controller's stop reason after an analysis with ``count`` selections, or None.
+    """Return the stop reason of the ADAPT iteration after an analysis with ``count`` selections, or None.
 
     The rules are checked in this order: the optimizer's evaluation limit
     was reached, the residual norm met ``residual_norm_tolerance``
     (``residual_norm`` stopping only), every pool member is selected, the
-    iteration limit is reached, or the flat counter reached
+    iteration limit is reached, or the flat count is at least
     ``T = min(t_user, t_auto_fraction * unselected)`` (Zheng et al. (2024),
     arXiv:2312.07691v3, METHODS, p. 9, with ``T_auto`` 20% of the
-    unselected operators). The integer counter reaches a fractional ``T`` at
-    its ceiling. The reference-only analysis (``count == 0``) never stops on
+    unselected operators). ``T`` is recomputed at every analysis from the
+    current number of unselected generators, and for the integer count the
+    rule is ``flat_count >= ceil(T)``. The reference-only analysis (``count == 0``) never stops on
     the optimizer, residual or flat rules. None means screen the pool for
     the next generator.
     """
@@ -1540,9 +1546,10 @@ def _single_chunk(completed):
     """Return a query's observation: its one chunk, or the tuple of point chunks of a two-point query.
 
     A pair reduction has one point and returns its chunk. The exact shared
-    full-chain query has two points at one boundary, its weighted diagonal
-    reduction and its screening labels, and keeps both chunks in schedule
-    order. They share one acquisition and receipt.
+    query on the full product state has two points at one boundary, its
+    weighted diagonal reduction and its screening labels, and keeps both
+    chunks in schedule order. They share one data collection and preparation
+    record.
     """
     if isinstance(completed, tuple) and len(completed) == 1:
         (completed,) = completed
@@ -1555,11 +1562,11 @@ def _chunks(observation):
 
 
 def _observation_index(chunks):
-    """Index observations by realization, keeping the point chunks of one acquisition together.
+    """Index observations by resolved query, keeping the point chunks of one data collection together.
 
-    The first acquisition of a realization is kept, as for single chunks.
-    A later point chunk of that same acquisition joins it in collection
-    order, which is its schedule order.
+    The first data collection of a query is kept, as for single
+    chunks. A later point chunk of that same collection joins it in
+    collection order, which is its schedule order.
     """
     index = {}
     for chunk in chunks:
@@ -1575,40 +1582,40 @@ def _observation_index(chunks):
 
 
 def drive_adapt(plan, *, run, prepare_only=False):
-    """Run the ADAPT controller until it finishes, must wait for external work or, with ``prepare_only``, has prepared its first new query.
+    """Run the ADAPT iteration until it finishes, must wait for external work or, with ``prepare_only``, has prepared its first new query.
 
-    The controller is a checkpointed state machine. Its phases are
-    ``matrix`` (acquire every pencil entry of the current basis),
+    The iteration is a checkpointed state machine. Its phases are
+    ``matrix`` (obtain every pencil entry of the current basis),
     ``analysis`` (solve the pencil and record one ``AdaptRound``),
     ``residual`` (classical residual stopping only), ``decision`` (apply the
     stopping rules), ``screen`` (measure ``<[H, A_i]>`` for unselected
     generators and append the largest absolute gradient, with equal binary64
     absolute values going to the lowest pool index) and ``optimize`` (optional BFGS every ``optimize_every_m``
-    selections). The science follows ADAPT-GCIM, as described in the
+    selections). The science follows ADAPT-GCiM, as described in the
     ``ADAPT`` docstring.
 
     Invariants that make interruption safe:
 
     - Each phase checkpoint names the next scientific action. The saved state
-      holds the trajectory, the latest pencil and the pending frontier, while
+      holds the trajectory, the latest pencil and the pending queries, while
       raw observations stay in the Run.
     - A new query records its seed and checkpoint sequence before any external
       work. Resume retrieves that original attempt or preparation and never
-      creates a second population for the same point.
-    - Unresolved external work stops the controller with a pending or
+      draws a second set of shots for the same point.
+    - Unresolved external work stops the iteration with a pending or
       uncertain reason instead of retrying, so no preparation, submission or
       shot is duplicated.
-    - A logical energy query is charged to ``optimize_max_evaluations``
-      before its acquisitions start, and an identical point reuses collected
-      values without a new charge.
+    - A logical energy query is counted against ``optimize_max_evaluations``
+      before its circuits run, and an identical point reuses collected
+      values without being counted again.
     - SciPy BFGS has no resumable internal state. After resume it restarts
       from the best completed point and records the restart.
     - An interrupted projected analysis is not repeated automatically. It
       needs ``run.resume(reanalyze=True)`` (``recover_adapt_analysis``).
 
     Args:
-        plan: The ADAPT Plan that owns ``run``.
-        run: The Run whose journal, RNG and observations this controller uses.
+        plan: The ADAPT Plan of ``run``.
+        run: The Run whose run log, RNG and observations this iteration uses.
         prepare_only: Stop after preparing the first new query, without submission.
 
     Returns:
@@ -1699,8 +1706,8 @@ def drive_adapt(plan, *, run, prepare_only=False):
 
         The attempt is found by its saved identity or by the checkpoint
         sequence reserved before submission. A found attempt must carry this
-        query's exact realization, seed and prepared artifact, otherwise the
-        checkpoint and the Run disagree and ``ValueError`` is raised.
+        query's exact resolved parameter point, seed and ``PreparedArtifact``, otherwise
+        the checkpoint and the Run disagree and ``ValueError`` is raised.
         """
         event = (
             run.attempt_record(pending["attempt"])
@@ -1745,7 +1752,7 @@ def drive_adapt(plan, *, run, prepare_only=False):
         return "uncertain"
 
     def pending_completed():
-        """Collect every pending query whose original attempt has completed and remove it from the frontier."""
+        """Collect every pending query whose original attempt has completed and remove it from the pending set."""
         for pending in tuple(state["pending"]):
             event = pending_event(pending)
             if event is None or event.status != "completed":
@@ -1763,7 +1770,7 @@ def drive_adapt(plan, *, run, prepare_only=False):
     # Acquire each exact realization once, or resume its saved preparation/job.
     # Persist its seed before any external work can become visible.
     def acquire(point):
-        """Resume or create the acquisition for one exact realization and publish it once."""
+        """Resume or start the data collection for one resolved query and record its result once."""
         if point.content_id in context.observations:
             return context.observations[point.content_id]
         pending = next(
@@ -1839,7 +1846,7 @@ def drive_adapt(plan, *, run, prepare_only=False):
     def energy_points(theta, insertion):
         """Return the queries of one energy evaluation at angles ``theta``.
 
-        Classical plans need one host query. Exact quantum plans read every
+        Classical plans need one classical query. Exact quantum plans read every
         nonidentity label in one query, and sampled plans need one query per
         QWC energy group. A quantum plan for a scalar Hamiltonian needs none.
         """
@@ -1901,14 +1908,14 @@ def drive_adapt(plan, *, run, prepare_only=False):
     # Charge a new logical objective before its constituent acquisitions, while
     # reusing already collected values at an identical parameter point.
     def evaluate_energy(theta, *, insertion=None, role="objective", gradient=False):
-        """Return the product-state energy at ``theta``, charging a new point to the allowance.
+        """Return the product-state energy at ``theta``, counting a new point against the evaluation limit.
 
         This is the ``evaluate`` callback of ``optimize_product``. ``role`` is
         ``objective`` or ``derivative``, and ``insertion`` selects a
         Pauli-insertion derivative query. With ``gradient`` a classical query
         returns ``(energy, gradient)`` of one energy-and-gradient evaluation,
-        so ``optimize_max_evaluations`` counts distinct acquired parameter
-        points and an energy and gradient at the same point share one charge.
+        so ``optimize_max_evaluations`` counts distinct evaluated parameter
+        points, and an energy and gradient at the same point are counted once.
         Raises ``_EvaluationBudgetExhausted`` when a new point would exceed
         ``optimize_max_evaluations``.
         """
@@ -1928,7 +1935,7 @@ def drive_adapt(plan, *, run, prepare_only=False):
         return complete_saved_energy(gradient)
 
     def complete_saved_energy(gradient=False):
-        """Acquire the reserved energy query, if any, and return its value (``finish_energy``)."""
+        """Run the energy query that was already counted, if any, and return its value (``finish_energy``)."""
         request = state["active_energy"]
         if request is None:
             return
@@ -1950,12 +1957,12 @@ def drive_adapt(plan, *, run, prepare_only=False):
         return analyzed
 
     def stop(reason):
-        """Record a final controller outcome and checkpoint it."""
+        """Record a final outcome of the iteration and checkpoint it."""
         state.update(stop_reason=reason, phase="complete", pending_labels=[])
         save()
 
     def receipt(prepared_id):
-        """Return this Run's preparation receipt of an exact chunk, or None when it has none."""
+        """Return this Run's preparation record of an exact chunk, or None when it has none."""
         try:
             return run.prepared_artifact(prepared_id)
         except ValueError:
@@ -1964,7 +1971,7 @@ def drive_adapt(plan, *, run, prepare_only=False):
     # Assemble the current H/S pencil from acquired matrix elements and publish
     # one projected-energy decision with the exact basis and observation range.
     def project_current():
-        """Solve the acquired projected pencil and checkpoint its basis-specific decision."""
+        """Solve the obtained projected pencil and checkpoint its basis-specific decision."""
         nonlocal revision
         selected = selected_tuple()
         state["analysis_in_progress"] = True
@@ -2314,8 +2321,8 @@ def drive_adapt(plan, *, run, prepare_only=False):
 def _optimizer_rules(plan, generators, context):
     """Resolve and cache one derivative rule per selected generator.
 
-    The rule must come from the same admitted generator and compiler plan
-    that the native queries execute, otherwise the measured derivative would
+    The rule must come from the same checked generator and compiler plan
+    that the circuit queries use, otherwise the measured derivative would
     describe another unitary. Rules are cached by pool index in the method
     context and saved with it, so resume reuses them.
     """
@@ -2343,7 +2350,7 @@ def _optimizer_rules(plan, generators, context):
 
 
 def prepare_adapt(plan, *, run):
-    """Prepare the controller's first new query through the saved frontier, without submission."""
+    """Prepare the first new query of the ADAPT iteration from the saved pending queries, without submitting it."""
     if run.plan is not plan:
         raise ValueError("ADAPT preparation requires its original Plan")
     return drive_adapt(plan, run=run, prepare_only=True)
@@ -2398,8 +2405,8 @@ def _matched_query_chunks(plan, data):
     """Yield every chunk of ``data`` after validating its association with its own query and readout.
 
     This is ``_eigen_support.matched_chunks`` for ADAPT's queries, which also
-    include the two-point shared full-chain query: a point chunk of a
-    trajectory with several points carries its point's one-point readout
+    include the two-point shared query on the full product state. A point
+    chunk of a trajectory with several points carries its point's one-point readout
     (``ObservationSpec.point_observations``), which is compared instead of
     the whole schedule.
     """
@@ -2429,13 +2436,13 @@ def _matched_query_chunks(plan, data):
 
 
 def analyze_adapt(plan, data, *, settings):
-    """Read the saved adaptive trajectory and, for a new cutoff, solve its acquired pencil again.
+    """Read the saved adaptive trajectory and, for a new cutoff, solve its obtained pencil again.
 
-    The history, selections and stop reason come from the saved controller
+    The history, selections and stop reason come from the saved iteration
     state as they were decided. With ``settings={"overlap_cutoff": c}`` the
     pencil of the value basis (``value_selected``, ``value_theta``) is solved
-    again from its saved observations at cutoff ``c``. Nothing is acquired
-    and the history is not rewritten.
+    again from its saved observations at cutoff ``c``. No circuit runs and
+    the history is not rewritten.
     """
     from .adapt import METHOD
 

@@ -1,4 +1,4 @@
-"""QLS as actual selected preparation, query, projector and readout bodies.
+"""QLS circuits built from the chosen state preparation, queries, projectors and readout.
 
 The inverse route runs the real-part QSVT pass ([GSLW] arXiv:1806.01838v1,
 Corollary 18) of the rescaled odd polynomial on the selected encoding of
@@ -8,12 +8,12 @@ solution is read from the lower half. The shortcut routes apply the even
 kernel-reflection polynomial to Dalzell's ``G_t = Q_b' A_t``
 (arXiv:2406.12086v2, Eqs. (8)-(11)), directly or through its Hermitian
 dilation. Their circuits follow the pattern of Dalzell App. A: ``A_t`` by
-one controlled query plus a predicate-controlled ``RY`` with amplitude
+one controlled query plus an ``RY`` controlled on a bit condition, with amplitude
 ``1/t`` (App. A.2, Fig. 4), ``b'`` with one extra coordinate qubit
 (App. A.3 and A.6), and ``Q_b'`` by unpreparing ``b'``, flagging the
 all-zero state and preparing again (App. A.1 and A.4). Projector phases
 use ``e^{i phi (2 Pi - 1)}`` of [MRTC] arXiv:2105.02859v5, Eq. (27).
-Resource estimation, inspection and native lowering all read the one
+Resource estimation, inspection and circuit construction all read the one
 Program built here.
 """
 
@@ -96,11 +96,11 @@ from .primary_records import (
 
 @dataclass(frozen=True)
 class BaseEncoding:
-    """Selected encoding of ``A/alpha`` bound to its exact inputs for native construction.
+    """Chosen encoding of ``A/alpha``, bound to its exact inputs for circuit construction.
 
-    ``validate`` rejects a payload whose operator, dense source or SVD no
-    longer belongs to the selected original input, so a native query is
-    never built from different data than the Plan selected.
+    ``validate`` rejects encoding data whose operator, dense source or SVD no
+    longer belongs to the original input of the Plan, so a query circuit is
+    never built from data other than those the Plan chose.
     """
 
     selected: SelectedBlock
@@ -124,11 +124,11 @@ class BaseEncoding:
 
 
 def _native_encoding(base):
-    """Construct the native base encoding once per Run.
+    """Build the circuit of the base encoding once per Run.
 
-    A dense-dilation selection with a selected original SVD reuses those
-    frames. For a padded system the dummy coordinates get identity frames
-    and singular value ``alpha``, which is the exact SVD of the padded
+    A dense-dilation encoding planned with the original SVD reuses its
+    factors. For a padded system the dummy coordinates get identity
+    singular vectors and singular value ``alpha``, which is the exact SVD of the padded
     ``alpha * I`` block, so no padded decomposition is computed.
     """
     base.validate()
@@ -167,13 +167,14 @@ def _native_encoding(base):
 
 @dataclass(frozen=True)
 class Query:
-    """Payload of one query leaf of the QLS Program.
+    """Data of one query operation of the QLS Program.
 
     Attributes:
-        base: The selected encoding of ``A/alpha`` or the selected RHS
-            preparation that the leaf calls.
-        control_count: Number of valued controls added to that call. The
-            control state and the adjoint flag are call arguments.
+        base: The chosen encoding of ``A/alpha`` or the chosen RHS
+            preparation that the operation calls.
+        control_count: Number of controls, each with its control value,
+            added to that call. The control state and the adjoint flag are
+            call arguments.
         route: Dense control route of those controls
             (``qiskit_compat.controlled``), the QLS Method's
             ``dense_control_route`` for a planned dense-dilation encoding and
@@ -186,7 +187,7 @@ class Query:
 
 
 def _query_circuit(block, arguments, method_context):
-    """Realize the bound base encoding with its actual valued controls and adjoint flag."""
+    """Build the circuit of the bound base encoding with its controls, control values and adjoint flag."""
     from qiskit import QuantumCircuit
     from nwqlib.subroutines.qiskit_compat import controlled, inverse_realized_gate
 
@@ -243,9 +244,9 @@ def _query_circuit(block, arguments, method_context):
 
 
 def _gate_circuit(block, arguments, method_context):
-    """Realize one primitive leaf as a circuit on its ports, controls first.
+    """Build one elementary gate as a circuit on its qubits, controls first.
 
-    The payload is ``(kind, control_count, control_state)``. ``kind`` is
+    The block data ``block._payload`` is ``(kind, control_count, control_state)``. ``kind`` is
     ``x``, ``h``, ``z``, ``ry``, ``rz`` or ``global_phase``. Rotations and
     the global phase take their angle from the call's ``angle`` argument.
     """
@@ -277,17 +278,17 @@ def _gate_circuit(block, arguments, method_context):
 
 
 def _primitive_cx_law(kind, control_count):
-    """Return ``(cx, exact)`` for one primitive leaf, or ``None`` when no CX law applies.
+    """Return ``(cx, exact)`` for one elementary gate, or ``None`` when no CX formula applies.
 
-    ``cx`` is the CX count of the leaf and ``exact`` tells whether it is
-    the leaf's exact inventory or an estimate. An uncontrolled primitive is
+    ``cx`` is the CX count of the gate and ``exact`` tells whether it is
+    the gate's exact count or an estimate. An uncontrolled primitive is
     a one-qubit gate or a global phase and uses no CX. A singly controlled
     X is exactly one CX. A multi-controlled X with ``2 <= k <= 64`` controls
     takes the CX count of Qiskit 2.6.0's synthesis of that gate from
     ``MCX_CX_BY_CONTROLS``, recorded as an estimate because another
     Qiskit version can synthesize it differently. A larger k, and controlled
-    H, Z, RY, RZ and global phase, have no CX law here, so a CX fold that
-    meets one reports the total as unknown.
+    H, Z, RY, RZ and global phase, have no CX formula here, so a CX total
+    that includes one is reported as unknown.
     """
     if not control_count:
         return 0, True
@@ -317,7 +318,7 @@ def _leaf(
     base_semantics=None,
     construction_work=None,
 ):
-    """Bind one QLS primitive with its port order, phase contract and scoped cost metadata."""
+    """Bind one QLS operation with its qubit order, phase convention and cost data with their scope."""
     source = Source(
         name="qls." + kind,
         version="2",
@@ -363,14 +364,14 @@ def _leaf(
 
 
 def _query_leaf(base, *, kind, controls, basis, route="gatewise"):
-    """Select a parameterized base query and reuse only applicable per-query resource evidence.
+    """Create a parameterized base query and reuse only the per-query resource evidence that applies to it.
 
     Only an uncontrolled query of the encoding of ``A/alpha`` carries a CX
-    law. It is the planned family's ``block_encoding_per_query_cx``, or the
-    uncontrolled, non-adjoint CX law recorded by a supplied native encoding,
-    and the adjoint query has the same inventory. Controlled queries and
-    RHS-preparation queries carry no CX law, because NWQLib has no model of
-    their controlled synthesis.
+    formula. It is the planned family's ``block_encoding_per_query_cx``, or
+    the uncontrolled, non-adjoint CX formula recorded by a supplied encoding
+    circuit, and the adjoint query has the same gate count. Controlled
+    queries and RHS-preparation queries carry no CX formula, because NWQLib
+    has no model of their controlled synthesis.
     """
     selected = base.selected if isinstance(base, BaseEncoding) else base
     width = sum(port.width for port in selected.record.signature.quantum) + controls
@@ -441,15 +442,15 @@ def _observable_terms(problem, output, *, max_bytes):
     """Return the observable of a scalar output as real Pauli terms ``((label, c), ...)``.
 
     Vector and sample outputs return ``()``. Finite Pauli input is used as
-    stored. A dense observable ``O`` is embedded as ``P O P`` in the padded
+    given. A dense observable ``O`` is embedded as ``P O P`` in the padded
     coordinate register, where ``P`` projects onto the original
     coordinates, and decomposed by the Pauli block transform
     ``pauli_coefficients``, which omits only exact zeros. The readout
     evaluates these terms on the coordinate qubits. A Hermitian
     observable has real Pauli coefficients, so a nonzero imaginary part is
-    rejected. Planning uses these rows for the exact reduction's bound
-    terms and the sampled groups only. The reconstruction keeps the
-    reference or table of ``_observable_fields``.
+    rejected. Planning uses these rows only for the terms of the exact
+    reduction and for the sampled groups. The reconstruction keeps the
+    reference or table that ``_observable_fields`` returns.
     """
     if not isinstance(output, (QuadraticForm, NormalizedExpectation)):
         return ()
@@ -479,10 +480,10 @@ def _observable_fields(output, terms):
 
     A finite Pauli observable is kept by reference (``observable_input``).
     Its packed table stays with the observable input. A dense observable's
-    ``pauli_coefficients`` table has distinct labels: its identity
-    coefficient is stored as ``observable_identity``, and its non-identity
+    ``pauli_coefficients`` table has distinct labels. Its identity
+    coefficient is saved as ``observable_identity``, and its non-identity
     labels with nonzero coefficient, in table order, as
-    ``observable_labels`` with their coefficients in a ``FrozenArray``.
+    ``observable_labels``, with their coefficients in a ``FrozenArray``.
     """
     if not isinstance(output, (QuadraticForm, NormalizedExpectation)):
         return {}
@@ -500,10 +501,11 @@ def _observable_fields(output, terms):
 
 
 def _canonical_terms(terms, width):
-    """Return observable rows as the reduction binds them: the summed identity first, then the nonzero non-identity rows in table order.
+    """Return the observable rows in the form the reduction uses, with the summed identity first and then the nonzero non-identity rows in table order.
 
-    Planning and the stored-observable rebuild both pass through this one
-    form, so the reduction parameters of a Plan and of its reload agree.
+    Planning and the rebuild of the saved observable both use this one
+    form, so the reduction parameters of a Plan and of its reloaded copy
+    agree.
     """
     identity = sum(c for label, c in terms if all(axis == "I" for axis in label))
     head = [("I" * width, float(identity))] if identity != 0 else []
@@ -512,10 +514,10 @@ def _canonical_terms(terms, width):
 
 
 def _stored_terms(rec, output, *, max_bytes):
-    """Return the canonical rows of the stored scalar observable, without a new decomposition.
+    """Return the canonical rows of the saved scalar observable, without a new decomposition.
 
     A Pauli observable is read from its referenced packed table (one
-    ``labels()`` expansion) and a dense observable from its stored identity
+    ``labels()`` expansion) and a dense observable from its saved identity
     coefficient, labels and coefficients. NormSquared and non-scalar outputs
     have no rows.
     """
@@ -536,7 +538,7 @@ def _stored_terms(rec, output, *, max_bytes):
 
 
 def _readout(method, output, terms, rec, *, shots):
-    """Select the QLS readout acquisitions and charge QWC grouping to ``max_work``.
+    """Choose the QLS readout settings and count the qubit-wise commuting (QWC) grouping against ``max_work``.
 
     Returns ``(settings, groups, comparisons)``. A vector output reads its
     amplitudes and Samples one counts setting. With ``shots=None`` a scalar
@@ -544,15 +546,16 @@ def _readout(method, output, terms, rec, *, shots):
     NormSquared measures its physical mass. A Pauli observable measures one
     counts setting per first-fit qubit-wise commuting group of its nonzero
     non-identity labels, whose label is the group's accumulated basis. A
-    padded normalized output adds the unrotated ``physical_mass`` setting
-    unless a group basis without X or Y already measures every coordinate
-    unrotated, in which case that group supplies the physical-prefix mass.
-    An observable without non-identity terms has one identity group for its
-    selected population. ``groups`` lists each group setting's member
-    labels. The grouping comparisons are admitted tile by tile against
-    ``max_work``, which QLS applies to each planning phase, such as the
-    polynomial fit and the encoding construction, separately.
-    ``comparisons`` is the actual evaluated count.
+    padded normalized output adds the computational-basis ``physical_mass``
+    setting unless a group basis without X or Y already measures every
+    coordinate in the computational basis, in which case that group
+    supplies the physical-prefix mass. An observable without non-identity
+    terms has one identity group for its selected shots. ``groups`` lists
+    each group setting's member labels. The grouping comparisons are
+    checked tile by tile against ``max_work``, which QLS applies to each
+    planning phase, such as the polynomial fit and the encoding
+    construction, separately. ``comparisons`` is the number of comparisons
+    evaluated.
     """
     identity = "I" * len(rec.coordinates) or "I"
     projection = rec.original_dimension != 1 << len(rec.coordinates)
@@ -575,7 +578,7 @@ def _readout(method, output, terms, rec, *, shots):
 
 
 def _layout(rec, solver):
-    """Return the circuit width, coordinate qubits and readout predicates.
+    """Return the circuit width, coordinate qubits and readout conditions.
 
     Wire order: 0 is the real-pass pair qubit, 1 the QSP signal qubit, then
     the encoding ancillas (and, for shortcuts, the ``A_t`` flag and the
@@ -609,12 +612,13 @@ def _layout(rec, solver):
 
 
 def _counts_bits(rec, setting):
-    """Physical qubits measured into a setting's compact classical prefix.
+    """Return the qubits measured into a setting's compact classical prefix.
 
     Success and condition bits come first in their declared order. A group
     then measures the coordinates in its basis support, in coordinate order.
-    Samples, physical_mass and the first unrotated group of padded input
-    measure every coordinate. That unrotated group supplies the prefix mass.
+    Samples, physical_mass and the first computational-basis group of padded
+    input measure every coordinate. That group supplies the physical-prefix
+    mass.
     First-fit QWC grouping has at most one group with an I/Z-only basis.
     The Program declares the largest such prefix once. Bits beyond this
     setting's prefix stay at their initial classical zero value.
@@ -635,10 +639,10 @@ def _counts_width(rec):
 
 
 def _counts_program_bytes(rec):
-    """Extra logical Program allowance for distinct measurement maps.
+    """Return the extra byte allowance of the Program for distinct measurement maps.
 
-    One 1024-byte qualified record allowance covers each distinct Measure,
-    each layout Sequence and each child reference. The existing Program
+    A 1024-byte allowance per record covers each distinct Measure, each
+    layout Sequence and each reference to a sub-operation. The existing Program
     allowance already covers its shared classical declarations and wires.
     This is a CPython record allowance, not a process RSS bound.
     """
@@ -652,13 +656,13 @@ def _program(method, problem, output, shots, rec, base, preparation, terms=None)
 
     The body prepares the input (``b`` for the inverse, ``|e_n>`` and the
     dilation basis state for the shortcuts), applies the real-part QSVT
-    pass with the selected reflection-convention phases, and ends with the
-    readout. Every child is a named call with explicit ports and
-    arguments, so resource folding, inspection, lowering and archive
-    comparison all read the same Program. The wire map is in ``_layout``.
+    pass with the chosen reflection-convention phases, and ends with the
+    readout. Every sub-operation is a named call with explicit qubits and
+    arguments, so resource summation, inspection, circuit construction and
+    the comparison of saved archives all read the same Program. The wire map is in ``_layout``.
 
     With ``shots=None``, a scalar observable is evaluated from one
-    simulation of the selected coherent circuit. The readout fixes the
+    simulation of the circuit without measurement. The readout fixes the
     method's success and physical-condition bits and excludes dummy
     coordinates. A Pauli observable with L terms then needs O(LN) classical
     work on the N-coordinate encoded system. The normalized expectation
@@ -667,28 +671,29 @@ def _program(method, problem, output, shots, rec, base, preparation, terms=None)
     Exact readout has no finite-shot error, while circuit, observable-action
     and normalization rounding remain separate error contributions.
     Normalized outputs are unavailable at zero physical mass. That one
-    experiment is the coherent body without parity tails and one
-    ``projected_moments`` reduction at its end, whose parameters bind the
-    success bits, condition bits, coordinate order, original dimension and
-    stored observable rows (``terms``, or the stored observable when None).
+    experiment is the circuit without measurement or parity networks, with
+    one ``projected_moments`` reduction at its end, whose parameters fix
+    the success bits, condition bits, coordinate order, original dimension
+    and observable rows (``terms``, or the saved observable when None).
 
     Sampled observable readout groups qubit-wise-commuting Pauli terms into
-    shared local bases. ``shots`` is the number of shots per selected
-    group. Terms in a group share outcomes, so uncertainty calculations use
-    the weighted group outcome and its covariance. Grouping reduces the
+    shared local bases. ``shots`` is the number of shots per group. Terms in
+    a group share outcomes, so uncertainty calculations use the weighted
+    group outcome and its covariance. Grouping reduces the
     number of settings. Its variance at fixed total shots depends on the
     state, coefficients and allocation. A padded normalized output also
-    acquires its physical-coordinate mass in an unrotated basis. QLS admits
-    each QWC candidate tile against ``max_work``, which caps each QLS
-    planning phase separately, and separately admits grouping arrays and
-    Program payloads. The shared coherent body is stored once. Each group
-    setting rotates X coordinates by H and Y coordinates by S† then H, one
-    selected one-site block per coordinate and axis shared by all groups,
-    with no parity network, and measures its support and valued selectors
-    into a compact prefix of one shared classical layout. Samples,
-    physical_mass and the unrotated group supplying a padded prefix mass
-    measure all coordinates.
-    Unmeasured suffix bits stay at their initial zero value.
+    measures its physical-coordinate mass in the computational basis. QLS
+    checks each tile of QWC comparisons against ``max_work``, which limits
+    each QLS planning phase separately, and separately checks the grouping
+    arrays and the Program data. The shared circuit before measurement is
+    stored once. Each group setting rotates X coordinates by H and Y
+    coordinates by S† then H, with one single-qubit operation per coordinate
+    and axis shared by all groups and no parity network, and measures its
+    support and its selector bits into a compact prefix of one shared
+    classical layout. Samples, physical_mass and the computational-basis
+    group that supplies the physical-coordinate mass of a padded system
+    measure all coordinates. Unmeasured trailing bits stay at their initial
+    zero value.
     """
     from nwqlib.amplitudes import AmplitudeReadout
     from .method import _array_output
@@ -758,13 +763,13 @@ def _program(method, problem, output, shots, rec, base, preparation, terms=None)
     gate_blocks = {}
 
     def gate(name, kind, target, *, controls=(), angle=None):
-        """Call a primitive ``kind`` on ``target`` with valued controls.
+        """Call an elementary gate ``kind`` on ``target`` with controls and their values.
 
         ``controls`` is a tuple of ``(wire, value)`` pairs, and the control
-        state packs value ``i`` into bit ``i``. One leaf is selected per
+        state packs value ``i`` into bit ``i``. One operation is created per
         ``(kind, control count, control state)``, so the Program lists each
-        distinct primitive once, and ``angle`` is bound per call. The leaf
-        carries the CX law of ``_primitive_cx_law``.
+        distinct gate once, and ``angle`` is bound per call. The operation
+        carries the CX formula of ``_primitive_cx_law``.
         """
         values = sum(value << i for i, (_, value) in enumerate(controls))
         key = kind, len(controls), values
@@ -841,7 +846,7 @@ def _program(method, problem, output, shots, rec, base, preparation, terms=None)
     def query(name, kind, bits, *, controls=(), adjoint=False):
         """Call the encoding of ``A/alpha`` (``original_A``) or the RHS preparation (``rhs``).
 
-        One leaf is selected per ``(kind, control count)``. The control
+        One operation is created per ``(kind, control count)``. The control
         state and the adjoint flag are call arguments.
         """
         key = kind, len(controls)
@@ -865,13 +870,13 @@ def _program(method, problem, output, shots, rec, base, preparation, terms=None)
         """Query the encoding of ``A/alpha``, or of its Hermitian dilation.
 
         Without an embedding this is one ``original_A`` call. For the
-        dilation of a non-Hermitian inverse, with ``U`` the selected encoding
+        dilation of a non-Hermitian inverse, with ``U`` the chosen encoding
         of ``A/alpha``, the calls ``U^dagger`` controlled on the embedding
         qubit at 0, then ``U`` controlled on it at 1, then an X on it give
         ``W = |0><1| (x) U + |1><0| (x) U^dagger``. With the embedding qubit
         as the highest coordinate bit, the block of ``W`` is
         ``[[0, A], [A^dagger, 0]] / alpha``. ``W`` is Hermitian as a full
-        unitary, so its adjoint is the same body, relative phase included,
+        unitary, so its adjoint is the same circuit, relative phase included,
         and ``adjoint`` is ignored.
         """
         if embedding is None:
@@ -918,7 +923,7 @@ def _program(method, problem, output, shots, rec, base, preparation, terms=None)
     def complement(name, *, controls=()):
         """Block-encode ``Q_b' = I - |b'><b'|`` on the ``Q_b'`` flag (wire ``2 + a + 1``).
 
-        The body is ``U_b'`` times an X on the flag, controlled on the
+        The circuit is ``U_b'`` times an X on the flag, controlled on the
         all-zero state of the system and augmented coordinates, times
         ``U_b'^dagger`` (Dalzell arXiv:2406.12086v2, App. A.1, Fig. 3, with
         ``b`` replaced by ``b'`` as in App. A.4). It flips the flag exactly on
@@ -1156,9 +1161,9 @@ def _program(method, problem, output, shots, rec, base, preparation, terms=None)
 def plan_quantum(
     method, problem, *, output, shots, rng, reconstruction, encoding, encoded_operator, rhs, svd
 ):
-    """Solve the selected QSP phases and build the matching RHS preparation, query body and readout.
+    """Solve the QSP phases of the chosen polynomial and build the matching RHS preparation, query circuit and readout.
 
-    The phases realize ``Re P = polynomial / rescale``. Their residual norming
+    The phases implement ``Re P = polynomial / rescale``. Their residual norming
     bound becomes ``phase_error``, which explicit verification adds to the
     polynomial allowance. Phase solving is the only numerical optimization
     here and runs once, within ``max_qsp_evaluations`` and ``max_bytes``.
@@ -1239,15 +1244,16 @@ def plan_quantum(
 
 
 def _acquisitions(plan, data):
-    """Join each selected experiment to its one completed acquisition before reduction.
+    """Match each planned experiment to its one completed measurement before reduction.
 
-    Every chunk must match its Plan, Run, realization, setting, bindings and
-    a completed trace event, so analysis never combines data from another
-    selection or reuses one acquisition for two settings. The exact
-    reduction's one point chunk joins its producing receipt's trajectory
-    declaration, and its completed event names that one-point acquisition.
-    A counts chunk holds the shared layout whose width is the largest
-    measured prefix. _selection checks its setting's zero suffix and remaps
+    Every observation chunk must match its Plan, Run, built circuit,
+    setting, bindings and a completed trace event, so analysis never
+    combines data from another plan or reuses one measurement for two
+    settings. The single chunk of the exact reduction matches the readout
+    declared in the record of the preparation that produced it, and its
+    completed event names that one-point measurement. A counts chunk holds
+    the shared layout whose width is the largest measured prefix.
+    ``_selection`` checks the zero trailing bits of its setting and maps the
     physical selectors and parity support into that prefix.
     """
     from nwqlib.execution import ObservationView
@@ -1303,19 +1309,20 @@ def _acquisitions(plan, data):
 
 
 def projected_moments(data, chunk):
-    """Saved statistics of the exact reduction, validated against its producing receipt.
+    """Return the saved statistics of the exact reduction, checked against the record of the preparation that produced them.
 
-    The native width is that of the bound declaration (its coordinates and
-    valued selectors partition the native wires), so the populations come
-    from the declaration and not from the payload.
+    The circuit width is that of the bound declaration (its coordinates and
+    selector bits partition the circuit's qubits), so the amplitude counts
+    come from the declaration and not from the saved data.
 
-    The projected kernel bounds the masses it forms from saved amplitudes with
-    its scaled two-pass allowance. It resolves only the receipt's
-    amplitude-derived masses label. Mass validation uses the resulting
-    qualified saved-state budget (``PreparedArtifact.saved_state_error``,
-    host phase product included), or the producing receipt's propagated
-    window (``saved_state_probability_window``) when another premise remains
-    unavailable. Acquisition and publication use this same pair.
+    The projected reduction routine bounds the masses it forms from saved
+    amplitudes with its scaled two-pass error allowance. It uses only the
+    record's label for amplitude-derived masses. Mass validation uses the
+    resulting error bound of the saved state
+    (``PreparedArtifact.saved_state_error``, including the classical phase
+    product), or the propagated probability window of the producing record
+    (``saved_state_probability_window``) when another assumption remains
+    unavailable. The measurement and the reported result use this same pair.
     """
     import json
 
@@ -1341,14 +1348,14 @@ def projected_moments(data, chunk):
 
 
 def _exact_outputs(reduction, recovery, output):
-    """Publish an exact scalar output from its saved reduction pairs.
+    """Form an exact scalar output from its saved reduction pairs.
 
     Returns ``(scalar_value, numerator, norm_squared, physical_scale,
     unavailable)``. With p the saved physical mass and q the saved moment,
-    NormalizedExpectation publishes q/p (``pair_ratio``), QuadraticForm
+    NormalizedExpectation gives q/p (``pair_ratio``), QuadraticForm
     Gamma² q and NormSquared Gamma² p (``recover_scaled_pair``), each with
     ``norm_squared`` Gamma² p. The physical scale is sqrt(p) composed with
-    the recovery Gamma: for p = (m, e) the root is sqrt(m) * 2**(e/2) when
+    the recovery Gamma. For p = (m, e) the root is sqrt(m) * 2**(e/2) when
     e is even and sqrt(2m)/2 * 2**((e+1)/2) when e is odd, so Gamma² is
     never formed in binary64. With zero physical mass a normalized quantity
     is unavailable, and a physical quadratic form or norm is zero. Analysis
@@ -1393,10 +1400,10 @@ def _selection(rec, chunk, setting, *, classical_width):
     Returns (bits, counts, success, selected, physical). bits are classical
     outcome indices. physical is None when padded coordinates were rotated
     or were not all measured. Unpadded physical selection equals selected.
-    Unused suffix bits must be zero. The single-word limit applies to the
-    shared classical width, not to physical qubit numbers.
-    The caller supplies its known setting and the width computed once for
-    the whole acquisition family.
+    Unused trailing bits must be zero. The single-word limit applies to the
+    shared classical width, not to physical qubit numbers. The caller
+    supplies its known setting and the width computed once for all settings
+    of the measurement.
     """
     if chunk.setting != setting.name:
         raise ValueError("QLS counts differ from their selected setting")
@@ -1433,17 +1440,17 @@ def _selection(rec, chunk, setting, *, classical_width):
 
 
 def _counts_statistics(plan, chunks, rows):
-    """Reduce the counts acquisitions of a sampled Plan into its published statistics.
+    """Reduce the counts of a sampled Plan into the statistics of its Result.
 
-    Returns the ``QLSAnalysis`` fields of the mass acquisition, the group
+    Returns the ``QLSAnalysis`` fields of the mass measurement, the group
     moments of a Pauli observable and the sample arrays of a Samples
-    output. The mass acquisition is the unrotated ``physical_mass`` setting
-    when present, otherwise for padded input the first group whose basis
+    output. The mass measurement is the computational-basis
+    ``physical_mass`` setting when present, otherwise for padded input the first group whose basis
     has no X or Y, otherwise the first setting. The physical-slice mass is
     not formed from a rotated coordinate outcome of padded input. ``rows``
     are the canonical observable rows.
 
-    One group count table supplies every term parity: the parity of label j
+    One group count table supplies every term parity. The parity of label j
     is ``(-1)**popcount(outcome & support_j)`` after support_j is remapped
     from physical coordinates to this setting's measured-bit positions,
     and the success and condition flags are separate from the coordinate
@@ -1452,7 +1459,7 @@ def _counts_statistics(plan, chunks, rows):
     contribution is then exactly its coefficient. Otherwise every returned
     shot is kept with its selected indicator, the identity term ``c_I p_B``
     is assigned once to the first group, and a padded normalized output
-    divides by the physical-prefix mass of the mass acquisition.
+    divides by the physical-prefix mass of the mass measurement.
     """
     from math import fsum
     from nwqlib.core.records import FrozenArray
@@ -1535,10 +1542,10 @@ def _counts_statistics(plan, chunks, rows):
 
 
 def _sampled_outputs(plan, rows, physical, groups, physical_selected):
-    """Publish a sampled output from its counts statistics.
+    """Form a sampled output from its counts statistics.
 
     Returns ``(scalar_value, numerator, norm_squared, unavailable)``.
-    ``physical`` is the physical-slice mass of the mass acquisition,
+    ``physical`` is the physical-slice mass of the mass measurement,
     ``groups`` the ``QLSGroupMoments`` of ``_counts_statistics`` and
     ``physical_selected`` its selected physical-prefix count. The norm
     squared is Gamma² times the physical mass (``physical_moment``). A
@@ -1612,9 +1619,9 @@ def _published_frames(plan, scale):
 def _vector_publication(chunk):
     """Return a quantum Solution's or StateVector's ``(artifact, unavailable)``.
 
-    The Result publishes the first artifact of its acquisition chunk and no
-    unavailability reason. Without an artifact it publishes the chunk's
-    first unavailability reason, if any. Analysis calls this.
+    The Result takes the first saved array of its observation chunk and no
+    reason for unavailability. Without a saved array it takes the chunk's
+    first reason for unavailability, if any. Analysis calls this.
     """
     if chunk.artifacts:
         return chunk.artifacts[0], None
@@ -1622,15 +1629,15 @@ def _vector_publication(chunk):
 
 
 def analyze_quantum(plan, data):
-    """Reduce acquired QLS populations into the requested vector, physical scalar or conditional samples.
+    """Reduce the measured QLS data to the requested vector, physical scalar or conditional samples.
 
-    Exact scalar QLS outputs use one acquisition's success mass,
-    physical-slice mass and projected observable moment. Their comparison
+    Exact scalar QLS outputs use the success mass, physical-slice mass and
+    projected observable moment of one simulation. Their comparison
     with per-setting readout accounts for both arithmetic routes and, for
     padded full-block numerators, the dummy-coordinate coupling. Binary
     recovery is applied after the scalar statistics are formed.
 
-    Exact scalar readout evaluates the stored Pauli observable on the
+    Exact scalar readout evaluates the Pauli form of the observable on the
     success-and-physical slice v, returning ``p=v†v`` and
     ``q=v† O_tilde v``. Normalized output is q/p for positive p. A dense
     observable is zero extended before coefficient conversion. Its

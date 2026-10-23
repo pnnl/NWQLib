@@ -81,7 +81,7 @@ def _allocate(total: int, weights: np.ndarray, *, minimum: int = 2) -> np.ndarra
 
     Shares are proportional to weights, as in Oumarou et al., arXiv
     2603.15552v1, Eq. (60). Where the paper floors each share and sets a
-    one-shot minimum, this function first reserves the minimum per setting,
+    one-shot minimum, this function first sets aside the minimum per setting,
     splits the rest in proportion to the weights and spends the total
     exactly. The shots left after flooring go one each to the largest
     fractional shares, lower index first on ties. Two shots make the
@@ -111,7 +111,7 @@ def _allocate(total: int, weights: np.ndarray, *, minimum: int = 2) -> np.ndarra
 
 
 def _apply_pilot_floor(allocation: np.ndarray, pilot_shots: np.ndarray):
-    """Reserve feasible pilot information, preserving nonbinding allocations.
+    """Give every setting a feasible floor of main-stage shots, keeping nonbinding allocations.
 
     A pilot sensitivity near zero, possibly from sampling noise alone, would
     otherwise leave that moment with almost no main-stage shots. Each
@@ -124,7 +124,7 @@ def _apply_pilot_floor(allocation: np.ndarray, pilot_shots: np.ndarray):
 
     Args:
         allocation: Integer main-stage shots per setting from _allocate.
-        pilot_shots: Integer shots each setting actually returned in the pilot.
+        pilot_shots: Integer shots each setting returned in the pilot.
 
     Returns:
         (allocation, floor, binding): the final main-stage shots per setting,
@@ -153,18 +153,18 @@ def _apply_pilot_floor(allocation: np.ndarray, pilot_shots: np.ndarray):
 
 
 def _assemble_moments(reconstruction, statistics) -> tuple[np.ndarray, np.ndarray]:
-    """Place known and acquired moments and their sample-mean variances by degree.
+    """Place known and obtained moments and their sample-mean variances by degree.
 
     Args:
         reconstruction: LanczosReconstruction with the known moments and the
-            acquired degrees.
+            obtained degrees.
         statistics: MomentStatistics aligned with reconstruction.moment_indices.
 
     Returns:
         (moments, variances), two float64 arrays of length 2m indexed by
         degree. A variance is (second_moment - mean**2)/(shots - 1), the
         unbiased estimate of the sample-mean variance. It is zero for a known
-        moment or an exact probability, and NaN for a one-shot population.
+        moment or an exact probability, and NaN for a moment from one shot.
     """
     moments = np.zeros(2 * reconstruction.krylov_dimension)
     variances = np.zeros_like(moments)
@@ -186,7 +186,7 @@ def _overlap_regularization_record(
 ):
     """Return the dict that records how the overlap cutoff was chosen.
 
-    The sensitivity allocation stores it as allocation evidence, and
+    The sensitivity allocation records it as allocation evidence, and
     reconstruct copies the source, bound and RMS into LanczosResult. Its
     gram_input_tolerance entry is the input part of the solver's allowance
     for a slightly negative deterministic Gram eigenvalue.
@@ -233,7 +233,7 @@ def _resolve_overlap_cutoff(requested, m, *, sampled, variances=None,
     lower tail as in Eq. (1.4), p. 13, gives P(|mu_hat-mu| >= e) <=
     2 exp(-n e^2/2) per moment. A union bound over the r moments at
     delta/r each gives the simultaneous error
-    e=sqrt(2*log(2*r/delta)/n_min), where n_min is the smallest population.
+    e=sqrt(2*log(2*r/delta)/n_min), where n_min is the smallest shot count.
     Since S_ij=(mu_(i+j)+mu_|i-j|)/2,
     ||Delta S||_2 <= ||Delta S||_F <= m*e. The confidence policy cuts at twice
     this bound, so Weyl places each kept population eigenvalue above m*e.
@@ -245,14 +245,14 @@ def _resolve_overlap_cutoff(requested, m, *, sampled, variances=None,
         m: Trial dimension.
         sampled: Whether the moments are finite-shot estimates.
         variances: Sample-mean variance per degree (length 2m), or None.
-        moment_shots: Population per degree, 0 for a known moment and None
+        moment_shots: Shot count per degree, 0 for a known moment and None
             when unavailable.
         failure_probability: delta of the Hoeffding bound.
         policy: ``empirical`` or ``confidence``.
         noise_multiplier: Positive scale applied to the empirical RMS.
 
     Returns:
-        (cutoff, record). cutoff is None when the selected policy lacks its
+        (cutoff, record). cutoff is None when the requested policy lacks its
         data. record is the _overlap_regularization_record dict.
     """
     if not 0 < failure_probability < 1:
@@ -329,8 +329,8 @@ def _resolve_overlap_cutoff(requested, m, *, sampled, variances=None,
 def _sensitivity_weights(reconstruction, statistics, options):
     """Return main-stage allocation weights from the pilot's regularized solve.
 
-    Variance formula and its premises. Let the main stage estimate each
-    acquired moment mu_k from n_k fresh shots with per-shot variance v_k, and
+    Variance formula and its assumptions. Let the main stage estimate each
+    measured moment mu_k from n_k fresh shots with per-shot variance v_k, and
     let g_k=dE/dmu_k. The pilot outcomes fix n_k before any main shot is
     taken. Conditional on the pilot, n_k is therefore a fixed sample size,
     and if the main shots are independent of the pilot and of each other, the
@@ -363,7 +363,7 @@ def _sensitivity_weights(reconstruction, statistics, options):
         options: The Lanczos Method, read for its overlap cutoff settings.
 
     Returns:
-        (weights, evidence). weights has one nonnegative entry per acquired
+        (weights, evidence). weights has one nonnegative entry per measured
         moment, uniform ones after any fallback. evidence is a JSON-ready dict
         with the fallback reason, the cutoff record, the pilot Ritz value and
         the derivatives when available.
@@ -472,7 +472,7 @@ def _moment_energy_derivatives(result, hamiltonian, overlap, cutoff):
     Its lowest kept Ritz value is kappa and its coefficient vector
     is c = V_R y, normalized by c^dagger S c = 1.
 
-    For fixed rank and a simple selected Ritz value, differentiation gives
+    For fixed rank and a simple lowest kept Ritz value, differentiation gives
     ``d kappa = c^dagger(dK-kappa*dS)c
                  + 2 Re[(dV_R y)^dagger(K-kappa*S)c]``.
     The kept projection of the residual vanishes. With
@@ -489,7 +489,7 @@ def _moment_energy_derivatives(result, hamiltonian, overlap, cutoff):
     Contracting these arrays with the matrix gradients gives each
     normalized moment derivative. Only kept/discarded gaps occur, so
     overlap degeneracies within either block require no division.
-    The formula requires no cutoff crossing and a simple selected Ritz
+    The formula requires no cutoff crossing and a simple lowest kept Ritz
     value. The caller checks pilot stability before using it.
 
     Args:
@@ -559,11 +559,11 @@ def restore_ritz_values(values, center, alpha):
 
 
 def _moment_payload(reconstruction, statistics):
-    """Return the stored moment and variance tuples, each of length 2m, by degree.
+    """Return the moment and variance tuples recorded in a Result, each of length 2m, by degree.
 
-    Known moments carry variance 0. An acquired degree carries its pooled
+    Known moments carry variance 0. An obtained degree carries its pooled
     mean and MomentStatistics.variance, which is None for exact data or a
-    one-shot population. A degree without data stays None in both tuples.
+    moment from one shot. A degree without data stays None in both tuples.
     No pencil is built, so archive validation can call this cheaply.
     """
     moments = [None] * (2 * reconstruction.krylov_dimension)
@@ -584,25 +584,26 @@ def admit_projected_analysis(
     """Raise ValueError if ``solves`` projected analyses of trial dimension m exceed the limits.
 
     One analysis is what reconstruct does after the moments are assembled.
-    Its envelope depends on m alone, so Lanczos.plan calls this before any
-    acquisition, and reconstruct calls it again for the limits it receives.
+    Its size bound depends on m alone, so Lanczos.plan calls this before any
+    moment is obtained, and reconstruct calls it again for the limits it
+    receives.
     For the sensitivity pilot, Lanczos.plan passes ``solves=2``. The pilot
     solves the same pencil and then differentiates the solve
     (_moment_energy_derivatives), and each of the two costs one analysis's
     work. The derivative keeps (K, S) and the solve's Ritz and overlap
     eigenvector matrices besides its own m-by-m temporaries, so one byte
-    envelope covers both.
+    bound covers both.
 
     512*m*m bytes, the size of 32 complex128 m-by-m arrays, bound the
     projected arrays alive at once. They include the six index maps and
     moment gathers, K and S with their complex and Hermitian copies, the
     overlap eigenvectors, the Lowdin orthogonalizer, the effective
-    Hamiltonian and its eigenvectors, and the stored S and physical H.
+    Hamiltonian and its eigenvectors, and the S and physical H recorded in the Result.
     128*m bytes cover the length-2m moment, variance, spectrum and
     coefficient vectors. In the work of one analysis, 16*m**3 covers the two
     Hermitian eigensolves and the congruence X^dagger H X, and 32*m*m the
     gathers and Hermitian checks. docs/ENGINEERING_CONSTANTS.md registers
-    this envelope, and docs/CODE_TOUR.md, "Byte and work budgets", explains
+    this bound, and docs/CODE_TOUR.md, "Byte and work budgets", explains
     the units.
     """
     from nwqlib.operators.access import _check_bytes
@@ -638,15 +639,15 @@ def reconstruct(
     missing moment leaves the result partial, with no Ritz value. Otherwise
     the cutoff is resolved, the normalized pencil (K, S) is solved by
     thresholding and the Ritz values are restored as center+alpha*x. The
-    physical pencil center*S+alpha*K is stored only when representable, and
-    the normalized solve does not depend on it.
+    physical pencil center*S+alpha*K is recorded only when representable,
+    and the normalized solve does not depend on it.
 
-    This numerical kernel does not mint observations. The caller preserves the
-    provenance of the supplied statistics.
+    This numerical routine creates no observations. The caller keeps the
+    record of where the supplied statistics came from.
 
     Args:
         reconstruction: LanczosReconstruction of the Plan.
-        statistics: Dict from acquired degree to pooled MomentStatistics.
+        statistics: Dict from obtained degree to pooled MomentStatistics.
         cutoff: Caller's fixed overlap cutoff, or None for the policy.
         sampled: Whether the moments are finite-shot estimates.
         max_bytes: Byte limit for the projected arrays.
@@ -749,11 +750,11 @@ def reconstruct(
 def recurrence_requirements(operator, m, *, affine=False):
     """Return (bytes, work) that chebyshev_moments will need, before any vector exists.
 
-    Callers check both against their limits before the reference state is
-    materialized. bytes counts the peak live arrays (docs/CODE_TOUR.md, "Byte
-    and work budgets"). work counts the m operator applications and the
-    vector passes of the recurrence. affine selects the matrix path, which
-    first forms (A - center*I)/alpha as a copy of the stored matrix.
+    Callers check both against their limits before the reference state
+    vector is built. bytes counts the peak live arrays (docs/CODE_TOUR.md,
+    "Byte and work budgets"). work counts the m operator applications and
+    the vector passes of the recurrence. affine selects the matrix path,
+    which first forms (A - center*I)/alpha as a copy of the input matrix.
     """
     from nwqlib.operators.inputs import _matvec_requirements
 
@@ -806,10 +807,11 @@ def chebyshev_moments(
 
     Only explicit classical execution calls this. Quantum analysis never
     does. The caller chooses this O(m * matvec_work), O(dimension)
-    computation and supplies its work cap. The logical byte envelope is the
-    kept recurrence frontier plus one complete shared action envelope
-    (including Pauli conversion/chunk space), not a cumulative sum of
-    allocations over all m calls or a peak RSS bound. No quantum access is
+    computation and supplies its work cap. The logical byte bound covers the
+    recurrence vectors kept at once plus the complete bound of one shared
+    operator action (including the Pauli conversion workspace), not a
+    cumulative sum of allocations over all m calls or a bound on peak
+    resident memory. No quantum access is
     inferred from the classical action.
 
     The recurrence v_(k+1)=2Kv_k-v_(k-1) gives v_k=T_k(K)|psi>. The product
@@ -820,7 +822,7 @@ def chebyshev_moments(
     Args:
         operator: Matvec access. Pauli access must already be K, and its
             action ignores center and alpha. Dense, CSR or CSC access is the
-            original A, and the kernel applies K=(A-center*I)/alpha.
+            original A, and the routine applies K=(A-center*I)/alpha.
         reference: Normalized float64 or complex128 state of the operator
             dimension.
         m: Trial dimension.

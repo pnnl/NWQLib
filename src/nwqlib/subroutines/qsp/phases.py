@@ -140,7 +140,7 @@ class _QSPEvaluationsExhausted(ValueError):
 
 
 def _real_coefficients(values: Any, *, max_degree: int, max_bytes: int) -> np.ndarray:
-    """Admit the finite real vector before any polynomial or optimizer work."""
+    """Check that the target is a finite real vector before any polynomial or optimizer work."""
     max_degree = integer(max_degree, "max_degree", 0)
     try:
         count = len(values)
@@ -217,7 +217,7 @@ def chebyshev_norming_sup_bound(
     Sunderhauf et al., arXiv:2507.15537v1 Eq. (25), state this factor for
     equidistant x points, where it is not valid. Equispaced angles give
     the required nodes x_j=cos(theta_j), not an equispaced x grid.
-    Ehlich--Zeller, doi:10.1007/BF01111276, Satz 1, treats equidistant x
+    Ehlich and Zeller, doi:10.1007/BF01111276, Satz 1, treat equidistant x
     nodes separately. The QLS
     guide gives an exact-rational counterexample to the Eq. (25) extension.
 
@@ -250,8 +250,9 @@ def _chebyshev_polynomial_norming_data(
     ``f(x_j) = sum_k c_k T_k(x_j)`` at those nodes, and ``bound`` the
     Ehlich-Zeller upper bound on ``sup_{[-1, 1]} |f|`` from
     ``chebyshev_norming_sup_bound``. The phase solver keeps ``grid`` and
-    ``values`` as its final verification grid, so its admission bound and
-    its acceptance residual are evaluated on the same nodes.
+    ``values`` as its final verification grid, so the bound it checks before
+    the solve and the residual it uses for acceptance are evaluated on the
+    same nodes.
     """
 
     coefficients = _real_coefficients(chebyshev_coefficients, max_degree=max_degree, max_bytes=max_bytes)
@@ -361,7 +362,8 @@ def wx_phases_to_reflection(phases: Any) -> tuple[np.ndarray, float]:
 
     The shifts are those of [MRTC] arXiv:2105.02859v5, App. A.2, Eq. (A5),
     except that the
-    ``i^d`` factor is returned as a global phase (see the module docstring).
+    ``i^d`` factor is returned as a global phase (see the conversion
+    identities in the module description).
 
     Args:
         phases (array_like): Wx phase vector `(phi_0, ..., phi_d)` with
@@ -641,7 +643,8 @@ def solve_symmetric_qsp_phases(
             across both starts, polish steps and line searches.
         max_bytes (int): Default 10 GB (decimal, `10_000_000_000` bytes).
             Bound on known simultaneous numerical arrays. It does not
-            measure process memory, vendor workspaces or elapsed time.
+            measure process memory, the internal workspace of external
+            libraries or elapsed time.
         limit_name (str): Default `"max_evaluations"`. Name of the caller's
             option that sets `max_evaluations`, used in the error messages.
 

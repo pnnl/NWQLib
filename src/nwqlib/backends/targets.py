@@ -1,9 +1,10 @@
-"""Stored builtin target declarations, independent of all provider SDKs.
+"""Built-in target declarations, independent of all provider SDKs.
 
-These are versioned package declarations, not refreshed device specifications.
-A DeviceProfile supplies their runtime/build provenance and freshness. Missing
-instruction and readout inventories remain unknown. Coarse capabilities alone
-are not a complete execution certification.
+These declarations ship with the package version and are not device
+specifications refreshed from a provider. A DeviceProfile supplies their
+runtime and build sources and their validity window. Instruction and readout
+lists that a target does not declare remain unknown. Coarse capabilities alone
+do not establish that an execution is supported.
 """
 
 from nwqlib.backends.capabilities import BackendCapability, BackendTarget
@@ -27,8 +28,8 @@ checks that read these fields report `"unknown"`, so the capability axis of
 an assessment with this target cannot be `"feasible"` until `revise` declares
 them. Use it as `DeviceConfiguration(target=...)` for exact readouts, and use
 [`AER_COUNTS_TARGET`][nwqlib.backends.targets.AER_COUNTS_TARGET] for sampled
-shots. It is a stored declaration that imports no SDK, not a live device
-inventory.
+shots. It is a fixed declaration that imports no SDK, not a description of a
+live device.
 """
 AER_COUNTS_TARGET = BackendTarget(
     name="aer_counts",
@@ -45,5 +46,5 @@ and `program_nodes` unknown. The capability checks that read these fields
 report `"unknown"`, so the capability axis of an assessment with this target
 cannot be `"feasible"` until `revise` declares them. Use it as
 `DeviceConfiguration(target=...)` for a Plan with sampled shots. It is a
-stored declaration that imports no SDK, not a live device inventory.
+fixed declaration that imports no SDK, not a description of a live device.
 """

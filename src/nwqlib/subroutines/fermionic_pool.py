@@ -194,13 +194,13 @@ RAW_GENERATOR_SOURCE = Source(
 
 
 def _check_generator_work(max_bytes, max_products, *, payload_bytes=0, work=0):
-    """Check one named generator kernel's known arrays and scalar products."""
+    """Check the known arrays and scalar products of one named generator routine against the limits."""
     _check_bytes(payload_bytes, max_bytes, "fermionic generator")
     _check_products(work, max_products)
 
 
 def _snapshot_generator(generator, *, max_bytes=DEFAULT_INPUT_BYTES, max_products=1_000_000_000):
-    """Admit named raw fields before traversal/copy, returning an immutable snapshot.
+    """Check the named raw fields before traversing or copying them, and return an immutable copy.
 
     Only builtin finite tuples and lists are accepted, and iterators are never
     consumed. Arbitrary instance attributes are not scientific input fields
@@ -291,7 +291,7 @@ def _snapshot_generator(generator, *, max_bytes=DEFAULT_INPUT_BYTES, max_product
 
 
 def _generator_reference(generator, *, max_bytes=DEFAULT_INPUT_BYTES, max_products=1_000_000_000):
-    """Hash an admitted snapshot in the generator/1 encoding, with signed zeros written as +0.
+    """Hash a checked copy in the generator/1 encoding, with signed zeros written as +0.
 
     Sorted-key compact UTF-8 JSON keeps row/operator order, exact indices,
     and finite binary64 [real, imaginary] coefficients. The hash identifies
@@ -343,7 +343,7 @@ def enumerate_spin_adapted_gsd_pool(n_spatial_orbitals: int) -> tuple[FermionicG
     ``P = n (n + 1) / 2`` spatial pairs for ``n`` orbitals, the pool has at
     most ``P`` singles and ``P (P + 1)`` doubles, because each pair of pairs
     contributes at most one triplet and one singlet. Operators that vanish
-    identically are skipped, so the actual count is smaller.
+    identically are skipped, so the returned pool is smaller.
 
     Args:
         n_spatial_orbitals: Number of spatial orbitals ``n``. The generators
@@ -536,9 +536,9 @@ def enumerate_qeb_sd_pool(reference_occupations) -> tuple[FermionicGenerator, ..
 def enumerate_ceo_ovp_pool(reference_occupations) -> tuple[FermionicGenerator, ...]:
     """Enumerate the one-variational-parameter coupled exchange operators (OVP-CEO) of a reference.
 
-    MVP-CEOs are deliberately not represented: they need per-component
-    parameters inside one selected generator, while ADAPT-GCiM records one
-    rotation parameter per selected operator.
+    MVP-CEOs are deliberately not represented, because they need a separate
+    parameter for each component of one selected generator, while ADAPT-GCiM
+    records one rotation parameter per selected operator.
 
     The pool holds the single qubit excitations, then for each opposite-spin
     quadruple the plus and minus combinations of the direct and crossed
@@ -676,8 +676,7 @@ def _reference_pool_size(family, reference_occupations) -> int:
     quadruple, ``o_up o_dn v_up v_dn``. The CEO enumerator emits a plus and a
     minus member per opposite-spin quadruple and six per same-spin quadruple,
     the sums and differences of the three pairs of its three qubit
-    excitations. ``test_reference_pool_size_matches_enumeration`` compares
-    these counts with the enumerators.
+    excitations.
     """
     _, occupied, virtual = _occupation_sets(reference_occupations)
     o = tuple(sum(1 for mode in occupied if mode % 2 == spin) for spin in (0, 1))
@@ -704,7 +703,7 @@ def _pauli_generator(
     """Wrap a qubit-excitation Pauli sum as a pool member without fermionic terms.
 
     QEB and CEO generators have no Jordan-Wigner parity strings, so they are
-    stored only as their coalesced Pauli sum, with coefficients at or below
+    stored only as their Pauli sum, with equal labels summed and coefficients at or below
     ``GENERATOR_COEFFICIENT_CUTOFF`` removed. Unlike ``_generator``, no
     normalization is applied. The coefficients are those of Yordanov et al.,
     arXiv:2011.10540v2, Eqs. (17)-(18), or of their sums and differences.
@@ -779,10 +778,10 @@ def _same_spin_qubit_excitations(
 
 
 def _native_ladder_sum(terms, num_qubits, *, mapping, max_bytes=DEFAULT_INPUT_BYTES, labels=False):
-    """Map ordered ladder terms to a coalesced Pauli ``OperatorInput``.
+    """Map ordered ladder terms to a Pauli ``OperatorInput`` with equal labels summed.
 
     ``mapping`` is ``jw`` (Jordan-Wigner, Eq. (E8)) or ``z_free`` (qubit
-    ladders without parity strings). The complete mapping byte law of
+    ladders without parity strings). The complete mapping byte formula of
     ``mapping_requirements`` is checked before the first product. Returns the
     operator.
     """
@@ -798,7 +797,7 @@ def _ladder_expansion_terms(terms, num_qubits, *, mapping, coefficient_cutoff=GE
 
     All contributions to a label are summed before the absolute
     ``coefficient_cutoff`` is applied to the sum. ``_fermion_terms_to_pauli``
-    adds the SDK conversion.
+    adds the conversion to a Qiskit ``SparsePauliOp``.
     """
     native = _native_ladder_sum(terms, num_qubits, mapping=mapping, max_bytes=max_bytes, labels=True)
     labels = native.pauli_terms().labels(max_bytes=max_bytes)
@@ -807,7 +806,7 @@ def _ladder_expansion_terms(terms, num_qubits, *, mapping, coefficient_cutoff=GE
 
 
 def _sum_paulis(paulis):
-    """Coalesce several Pauli sums label by label and drop coefficients at or below the cutoff."""
+    """Add several Pauli sums label by label and drop coefficients at or below the cutoff."""
     return tuple((p, c) for p, c in combine_terms(term for pauli in paulis for term in pauli)
                  if abs(c) > GENERATOR_COEFFICIENT_CUTOFF)
 
@@ -916,10 +915,10 @@ def _taylor_steps(coefficients, theta) -> int:
     order. The count is ``max(1, ceil(2 * |theta| * sum_k |c_k|))``, or 0
     when ``|theta| * sum_k |c_k|`` is zero. The Pauli 1-norm bounds ``||A||``,
     because each Pauli word has norm 1, so the step ``h = theta / steps``
-    has ``||hA|| <= 1/2``, the premise of the remainder bound beside
+    has ``||hA|| <= 1/2``, the assumption of the remainder bound beside
     ``GENERATOR_TAYLOR_DEGREE``. The coefficient sum avoids a state-space
     operator-norm computation. ``apply_generator_exponential`` and ADAPT's
-    work law (``adapt_records._exponential_action_work``) both call this
+    work formula (``adapt_records._exponential_action_work``) both call this
     function with the same stored coefficients, so they count the same
     steps.
     """
@@ -1217,7 +1216,7 @@ def _normal_ordered_operator(
     *,
     coefficient_cutoff: float = GENERATOR_COEFFICIENT_CUTOFF,
 ) -> dict[NormalTerm, complex]:
-    """Coalesce before pruning, keeping O(contributions) scalar workspace."""
+    """Sum equal terms before removing small coefficients, with O(contributions) scalar workspace."""
     coefficient_buckets: dict[NormalTerm, array] = {}
     for coefficient, ops in terms:
         for normal_ops, normal_coefficient in _normal_ordered_term(

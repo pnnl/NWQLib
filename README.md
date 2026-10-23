@@ -2,7 +2,7 @@
 
 [![PyPI](https://img.shields.io/pypi/v/nwqlib.svg)](https://pypi.org/project/nwqlib/)    [![Python](https://img.shields.io/badge/python-3.12%2B-blue.svg)](https://pypi.org/project/nwqlib/)    [![License](https://img.shields.io/badge/license-BSD--2--Clause-blue.svg)](https://github.com/pnnl/NWQLib/blob/main/LICENSE)    [![Documentation](https://img.shields.io/badge/docs-pnnl.github.io%2FNWQLib-blue.svg)](https://pnnl.github.io/NWQLib/)    [![DOI](https://zenodo.org/badge/DOI/10.5281/zenodo.23074265.svg)](https://doi.org/10.5281/zenodo.23074265)
 
-NWQLib applies quantum algorithms to scientific problems. You state the problem and choose a method, and NWQLib plans the construction, runs it on the backend you choose and returns the result with its resource counts and what is known about its error. Circuits are built with Qiskit.
+NWQLib applies quantum algorithms to scientific problems. You state the problem and choose a method, and NWQLib plans the circuit construction, runs it on the backend you choose and returns the result with its resource counts and what is known about its error. Circuits are built with Qiskit.
 
 Documentation: <https://pnnl.github.io/NWQLib/>
 
@@ -39,7 +39,7 @@ print(result.solution)
 [ 0.96006038-1.54102084e-12j -0.00513885+3.61167323e-13j]
 ```
 
-The default returns an approximation of the physical solution using nine qubits in total. [Install and first result](https://pnnl.github.io/NWQLib/quickstart/) compares it with an independent reference and shows how to change the approximation. Each method accepts its own input forms and conversions, which its algorithm guide describes.
+With its default settings, LCHS returns an approximation of the physical solution using nine qubits in total. [Install and first result](https://pnnl.github.io/NWQLib/quickstart/) compares it with an independent reference and shows how to change the approximation. Each method accepts its own input forms and conversions, which its algorithm guide describes.
 
 The [example notebooks](https://github.com/pnnl/NWQLib/tree/main/examples) solve complete scientific problems from input to result, error and circuit cost: molecular ground-state energy, a linear system, linear dynamics and optimization. One more notebook estimates the resources of a linear system, heat flow, two spin chains and a GCiM trial basis at 80 to 100 system qubits, where the largest circuit, LCHS for heat flow, has 109 qubits in total. It also estimates one QHD step on a three-variable grid of 32 points per variable, which takes 96 qubits in the one-hot encoding. The [examples guide](https://pnnl.github.io/NWQLib/examples/) points you to the notebook that matches your problem. The [mathematics page](https://pnnl.github.io/NWQLib/mathematics/) states the bounds, resource formulas and error budgets that NWQLib uses, each with its proof or source and the code that implements it.
 

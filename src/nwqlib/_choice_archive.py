@@ -5,23 +5,25 @@ session and does not certify the saved evidence. Method code chooses its data
 and binds its own constructors.
 
 Loading checks layout, not contents. The array headers of native state and
-operator inputs (``read_state``, ``read_operator``) and of published Result arrays
+operator inputs (``read_state``, ``read_operator``) and of saved Result arrays
 (``saved_evidence.load_data``) are checked against their declared shape, dtype,
-byte order, size and contiguity, and a mismatch always rejects. That check costs
-only the header, and a wrong header would make every later read wrong. Arrays that
-a Method writes through its own archive hook are mapped as stored, and that Method
-owns their checks. Array contents are not scanned, hashed or normalized. They load
-as read-only memory maps, so opening a large archive does not read every payload.
+byte order, size and contiguity, and a mismatch is always rejected. That check
+costs only the header, and a wrong header would make every later read wrong.
+Arrays that a Method writes through its own archive hook are mapped as saved,
+and that Method is responsible for their checks. Array contents are not
+scanned, hashed or normalized. They load as read-only memory maps, so opening
+a large saved folder does not read every payload.
 
-Saving a Result or a Run copy charges every file to the folder's file-byte
-allowance. Files written through ``ArchiveFiles``, and the pages that the backup
-of a durable Run's journal copies, are charged before they are written. SQLite
-allocates the pages of a commit during the commit, so the pages that a commit
-adds to the journal of a Run copy are charged right after that commit
-(``_run_archive.save``). A durable Run charges the writes to its own folder to
-its stored-data total. The Result and Run loaders open a folder without an
-allowance (``max_bytes=None``) and charge nothing for reading, because each file
-was charged when it was written and saved folders are treated as read-only
+Saving a Result or a Run copy counts every file against the folder's file-byte
+limit. Files written through ``ArchiveFiles``, and the pages that the backup of
+the run log of a Run with a folder copies (``run.sqlite``, the SQLite file in
+which a Run records each step), are counted before they are written.
+SQLite allocates the pages of a commit during the commit, so the pages that a
+commit adds to the run log of a Run copy are counted right after that commit
+(``_run_archive.save``). A Run with a folder counts the writes to its own folder
+against its saved-data total. The Result and Run loaders open a folder without
+a limit (``max_bytes=None``) and count nothing for reading, because each file
+was counted when it was written and saved folders are treated as read-only
 (docs/saved_evidence.md, "Saved folders are read-only").
 
 Executable code is never chosen by saved text. ``method_class`` resolves only
@@ -59,7 +61,7 @@ def _json_scalar(value):
 
 
 def _array_layout(array, shape, dtype, byte_order):
-    """Check a stored header without scanning, casting or normalizing its data."""
+    """Check a saved header without scanning, casting or normalizing its data."""
     import numpy as np
     expected = np.dtype(dtype)
     if byte_order in ("little", "big"):
@@ -70,10 +72,10 @@ def _array_layout(array, shape, dtype, byte_order):
 
 
 class _LimitedWriter:
-    """Charge each write to the archive's byte allowance before it reaches the file.
+    """Count each write against the folder's byte limit before it reaches the file.
 
     QPY's writer needs ``tell`` and ``seek``, so those pass through unchanged. A
-    write that would exceed the allowance raises before any byte of it is written.
+    write that would exceed the limit raises before any byte of it is written.
     """
 
     def __init__(self, stream, archive):
@@ -155,10 +157,10 @@ class ArchiveFiles:
         self._pending_bytes = 0
 
     def reserve(self, size):
-        """Charge ``size`` bytes before they are written, or read under an allowance.
+        """Count ``size`` bytes before they are written, or before they are read in a folder with a limit.
 
-        The charge goes to this folder's own allowance when it has one, and to
-        the Run's stored-data total when a Run bound ``_on_reserve``.
+        The bytes count against this folder's own limit when it has one, and
+        against the Run's saved-data total when a Run bound ``_on_reserve``.
         """
         if type(size) is not int or size < 0:
             raise ValueError("archive byte count must be a nonnegative integer")
@@ -183,7 +185,7 @@ class ArchiveFiles:
 
     @contextmanager
     def writer(self, name):
-        """Open a new file in exclusive-create mode behind a byte-charging writer.
+        """Open a new file in exclusive-create mode behind a writer that counts its bytes against the limit.
 
         Mode ``xb`` fails if the file exists, so a file that a committed row
         names is never overwritten.
@@ -217,17 +219,17 @@ class ArchiveFiles:
                 del self._noise_models[key]
 
     def _begin_cache_files(self):
-        """Start recording the files and bytes of one cache delta (see ``_finish_cache_files``)."""
+        """Start recording the files and bytes of one checkpoint's cache changes (see ``_finish_cache_files``)."""
         if self._pending_files is not None:
             raise ValueError("an archive already has an unfinished cache delta")
         self._pending_files, self._pending_bytes = [], 0
 
     def _finish_cache_files(self, *, committed):
-        """End one cache delta and return its new file names and charged bytes.
+        """End one checkpoint's cache changes and return the names of the new files and their counted bytes.
 
-        After a failed commit the delta's new files are deleted. Only a Run
-        writes cache deltas that can fail, and it refunds the returned bytes
-        to its stored-data total.
+        After a failed commit the new files are deleted. Only a Run writes
+        cache changes that can fail, and it removes the returned bytes from
+        its saved-data total.
         """
         names, size = self._pending_files, self._pending_bytes
         self._pending_files, self._pending_bytes = None, 0
@@ -264,7 +266,7 @@ class ArchiveFiles:
         return path
 
     def write_json(self, name, data):
-        """Stream ``data`` as JSON, charging each encoded part before it is written.
+        """Stream ``data`` as JSON, counting each encoded part against the limit before it is written.
 
         NaN and infinity are refused, so every saved number reads back finite.
         """
@@ -275,7 +277,7 @@ class ArchiveFiles:
             stream.write(b"\n")
 
     def read_json(self, name):
-        """Read one JSON file, charging its size against the folder allowance first."""
+        """Read one JSON file, counting its size against the folder's limit first."""
         with self.read_path(name).open(encoding="utf-8") as stream:
             return json.load(stream)
 
@@ -298,8 +300,8 @@ class ArchiveFiles:
     def read_array(self, name):
         """Map a saved NPY file read-only without reading or checking its values.
 
-        A folder opened with an allowance charges the file size before mapping
-        (``read_path``). A truncated file or a bad NPY header fails here with the
+        A folder opened with a limit counts the file size against it before
+        mapping (``read_path``). A truncated file or a bad NPY header fails here with the
         entry path. A caller that owns a declaration checks the header against it.
         """
         if name is None:
@@ -321,7 +323,7 @@ class ArchiveFiles:
         return array
 
     def write_numpy_json(self, name, data):
-        """Save SDK-owned JSON containers with ndarray leaves in exact NPY files.
+        """Save JSON containers produced by an SDK, with their ndarray leaves in exact NPY files.
 
         Array paths are separate from user dictionaries, so no reserved SDK key
         or interpretation of gate names, units or complex entries is required.
@@ -414,7 +416,7 @@ class ArchiveFiles:
         return circuit
 
     def write_instruction(self, name, instruction):
-        """Use a one-operation QPY circuit for a cached native instruction."""
+        """Save a cached native instruction as a QPY circuit of one operation."""
         previous = self._written_instructions.get(id(instruction))
         if previous is not None:
             return previous[1]
@@ -428,8 +430,8 @@ class ArchiveFiles:
     def _unused_name(self, name):
         """Return a name derived from ``name`` that no file in the folder has.
 
-        While a cache delta is open (``_begin_cache_files``) the name starts
-        with ``CACHE_FILE_PREFIX``, which marks a file that reopening deletes
+        While a checkpoint's cache changes are being recorded
+        (``_begin_cache_files``), the name starts with ``CACHE_FILE_PREFIX``, which marks a file that reopening deletes
         when no committed row names it (``_run_archive.restore_caches``).
         """
         self.file(name)
@@ -454,7 +456,7 @@ class ArchiveFiles:
     def write_state(self, name, state):
         """Save a state input, its preparation and its circuit, and return its description.
 
-        The vector and its normalized direction are stored as given, without
+        The vector and its normalized direction are saved as given, without
         normalizing them again, so scale and phase survive exactly. When the
         two arrays have the same dtype, shape and bytes (a unit-norm vector is
         its own direction), one array is written and the direction names its
@@ -570,7 +572,7 @@ class ArchiveFiles:
     def read_operator(self, data):
         """Restore an operator after checking every array header against its manifest.
 
-        Each representation has a fixed envelope. Dense needs a ``(D, D)``
+        Each representation has a fixed layout. Dense needs a ``(D, D)``
         float64 or complex128 array. CSR/CSC needs one-dimensional values, signed
         32 or 64-bit indices of the same length and ``D + 1`` index pointers with
         ``indptr[0] == 0`` and ``indptr[-1]`` equal to the value count. Pauli needs
@@ -578,7 +580,7 @@ class ArchiveFiles:
         coefficients. A periodic stencil restores its parameters and checks its
         declared width. In every case the payload bytes must equal the declared size.
         Individual sparse indices and coefficient values are not scanned. The
-        restored object wraps the memory-mapped arrays without copying them: a
+        restored object wraps the memory-mapped arrays without copying them. A
         sparse matrix is built empty with the declared shape, and its three
         arrays are then set to the mapped ones, so SciPy does not check or
         convert the saved indices.
@@ -780,7 +782,7 @@ def method_class(name, supplied=None):
 
 
 def save_plan(plan, files):
-    """Save selected data through the Method's hook, with its class name."""
+    """Save the Plan's chosen data through the Method's hook, with the Method's class name."""
     writer = getattr(plan.method, "save_archive", None)
     if not callable(writer):
         raise TypeError(f"{type(plan.method).__name__} requires callable save_archive(plan, files) "
@@ -790,9 +792,9 @@ def save_plan(plan, files):
 
 
 def load_plan(data, files, *, method=None):
-    """Restore the selected Plan through the Method's hook, without planning again.
+    """Restore the saved Plan through the Method's hook, without planning again.
 
-    The Method restores its selected construction data from the saved files.
+    The Method restores the data of its chosen construction from the saved files.
     """
     cls = method_class(data["method"], method)
     reader = getattr(cls, "load_archive", None)

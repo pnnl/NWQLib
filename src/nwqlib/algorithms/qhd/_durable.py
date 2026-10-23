@@ -1,12 +1,12 @@
-"""Durable directories of the QHD augmented-Lagrangian layer and of box refinement.
+"""Saved run directories of the QHD augmented-Lagrangian layer and of box refinement.
 
-``solve_augmented_lagrangian(..., directory=...)`` and ``refine_box(..., directory=...)`` create every inner
-Run durably under one directory, through ``prepare(..., directory=...)``, and rewrite a small outer record
+``solve_augmented_lagrangian(..., directory=...)`` and ``refine_box(..., directory=...)`` save every inner
+Run under one directory, through ``prepare(..., directory=...)``, and rewrite a small outer record
 after each completed round or level. ``resume_augmented_lagrangian`` and ``resume_box_refinement`` continue
 from it. The directory holds
 
     controller.json                  the outer record
-    controller.json.lock             the directory's controller lock
+    controller.json.lock             the directory's lock
     problem.pickle                   the live SymPy input, written once
     noise-model.json                 the noise model of a noisy Aer backend, written once, with its NPY arrays
     iterations/<k>/run/              the Run of round k of the augmented-Lagrangian layer
@@ -19,15 +19,15 @@ Each refinement level also keeps ``tables.json`` beside its ``run/`` directory, 
 count, the refinement's constant C when it is rational and, for the search model, the unscaled support tables.
 This applies both to ``levels/<z>/`` and to ``iterations/<k>/levels/<z>/``.
 
-The outer record keeps the run's arguments, which never change, and its committed state. The arguments
+The outer record keeps the run's arguments, which never change, and its saved state. The arguments
 include the configuration of the one backend of every inner Run. For the augmented-Lagrangian layer they also include the
 constraint preprocessing and the check counts of its setup, which resume reads instead of evaluating the
 support tables and summand scans again (``constrained._setup``). The state is the completed rounds, the inner
-representation that the round in progress selected (augmented Lagrangian only, committed before its first
+representation chosen for the round in progress (augmented Lagrangian only, saved before its first
 inner Run so that resume reuses it), the completed levels of the refinement in progress together with a stop
 that its last level already decided, and the final record once the run has terminated. A round or level enters it only after it has completed. Each
-inner Run keeps its own lifecycle and journal (``nwqlib._prepared_execution.Run``), so the outer record names
-the Runs by identity and repeats none of their counters or observations.
+inner Run keeps its own lifecycle and run log (``nwqlib._prepared_execution.Run``), so the outer record names
+the Runs by identifier and repeats none of their counters or observations.
 
 Commit rule. ``Directory.commit`` writes the new record to a temporary file in the directory and moves it
 over the previous record with ``os.replace``, which replaces a file atomically within one filesystem, so an
@@ -36,15 +36,15 @@ rule covers an interrupted process (an exception, a keyboard interrupt or a kill
 loss, the scope that the Run archives have too (docs/prepared_execution.md).
 
 Backend. A backend configuration holds no noise model, and ``AerBackend.from_noise_model`` draws a new
-binding identity on every call. In a new process ``load_run`` accepts ``AerBackend(noise_model_id=...)``
-with the saved identity, and that backend is unbound, so no public backend object both matches the saved
+binding identifier on every call. In a new process ``load_run`` accepts ``AerBackend(noise_model_id=...)``
+with the saved identifier, and that backend is unbound, so no public backend object both matches the saved
 Runs and carries their model. ``Directory.create`` therefore stores the configuration and writes a bound
 model once, in the form in which ``Run.save`` stores it (``_run_archive._noise_model_data``), with its errors
 and basis gates. Before any work, ``Directory.bind`` compares the backend given to resume with that
 configuration and, for an unbound noisy backend, binds the saved model to its own copy for the Runs that
 resume creates, as ``load_run`` binds a Run's saved model to the reopened Run's copy.
 
-Stored data. The files of the outer directory are not charged against ``max_data_bytes``. That limit caps
+Stored data. The files of the outer directory are not counted against ``max_data_bytes``. That limit caps
 what the inner Runs record (``nwqlib.execution.ExecutionLimits``), and each Run receives the remainder of the
 whole run (``_outer.round_limits``). ``problem.pickle`` and ``noise-model.json`` hold the caller's inputs and
 are written once. ``controller.json`` holds the arguments and the records of the completed rounds and levels,
@@ -55,8 +55,8 @@ round or level, so the bytes written over a run grow with the square of their nu
 keeps one copy.
 
 ``tables.json`` of each refinement level holds generated table-stage data. Its stored size is its UTF-8 file
-length, so the total grows with the number of levels and their table sizes. These are outer files, outside
-the inner Runs' ``max_data_bytes``. Their save and load memory is checked against the level Method's
+length, so the total grows with the number of levels and their table sizes. These are files of the outer
+directory, outside the inner Runs' ``max_data_bytes``. Their save and load memory is checked against the level Method's
 ``max_bytes``. No limit caps the total size of the outer directory.
 """
 
@@ -81,9 +81,9 @@ RESUME = {"constrained": "resume_augmented_lagrangian", "refinement": "resume_bo
 
 @contextmanager
 def _controller(path):
-    """Hold the directory's exclusive controller lock while one call continues it.
+    """Hold the directory's exclusive lock while one call continues it.
 
-    The lock is a nonblocking ``flock`` on ``controller.json.lock``, as a Run holds one on its journal
+    The lock is a nonblocking ``flock`` on ``controller.json.lock``, as a Run holds one on its run log
     (``_run_journal.LocalJournal``). A second process that continues the same directory at the same time
     fails here, before it reads the outer record, instead of rewriting that record after the first. The
     kernel releases the lock when the process ends, so a lock file left by an interruption blocks nothing.
@@ -122,7 +122,7 @@ def run_backend(backend, execution):
 
     ``Run`` selects local Aer when a quantum Run gets no backend
     (``nwqlib._prepared_execution.Run``), so the resolved backend has the
-    configuration that each inner Run records in its journal header.
+    configuration that each inner Run records in the header of its run log.
     """
     if backend is None and execution == "quantum":
         from nwqlib.backends.connection import AerBackend
@@ -139,24 +139,24 @@ def _noisy(backend):
 
 
 class Directory:
-    """One durable run directory with its fixed settings, the committed state it saved, and its Run folders.
+    """One run directory with its fixed settings, its saved state and its Run folders.
 
     Attributes:
         path: The directory.
         kind: ``"constrained"`` or ``"refinement"``, which fixes the format.
         settings: The run's arguments as JSON, written once, with the configuration of the inner Runs'
             backend under ``backend``.
-        saved: The committed state read by ``open``, as JSON with the keys ``iterations`` and
+        saved: The saved state read by ``open``, as JSON with the keys ``iterations`` and
             ``representation`` (augmented Lagrangian only), ``levels``, ``blocked`` and ``record``. Empty
             for a new directory.
         backend: The backend of the inner Runs that this call creates or continues, set by ``create`` and
             by ``bind``.
         end_at_unfinishable: Whether a reopened Run that cannot finish without new work ends the run
             (``unrecoverable``). A resume call sets it from its argument, and it is False otherwise.
-            This option handles an unfinishable continuation after a Run has reopened. A headerless
-            folder fails during reopen and is not handled by ``end_at_unfinishable``. Reopen does not
-            remove or recreate that folder automatically. Before a completed round or level exists,
-            an inner failure still propagates.
+            This option handles an unfinishable continuation after a Run has reopened. A Run folder
+            without a run-log header fails during reopening and is not handled by
+            ``end_at_unfinishable``. Reopening does not remove or recreate that folder. Before a
+            completed round or level exists, an inner failure still propagates.
     """
 
     def __init__(self, path, kind, settings, saved):
@@ -176,10 +176,10 @@ class Directory:
         ``Directory.backend`` and its configuration ``settings["backend"]``. The model bound to a noisy
         ``AerBackend`` is written to ``noise-model.json`` as ``_run_archive._noise_model_data`` forms it,
         its errors from ``NoiseModel.to_dict`` with NPY arrays and its basis gates, which select the Aer
-        target that a circuit is lowered to. That is the form in which ``Run.save`` stores it and
+        target for which a circuit is compiled. That is the form in which ``Run.save`` stores it and
         ``_run_archive._load_noise_model`` rebuilds it. An unbound noisy backend raises before the
         directory is created. The directory must not exist (``require_new``), as for
-        ``prepare(..., directory=...)``, and missing parents are created. The controller lock is held until
+        ``prepare(..., directory=...)``, and missing parents are created. The directory's lock is held until
         the context ends.
         """
         from nwqlib._choice_archive import ArchiveFiles
@@ -204,9 +204,9 @@ class Directory:
     @classmethod
     @contextmanager
     def open(cls, path, kind):
-        """Hold the controller lock of an existing directory and read its outer record.
+        """Hold the lock of an existing directory and read its outer record.
 
-        The stored format identifies the controller's layer.
+        The stored format identifies the layer that wrote the directory.
         """
         from nwqlib._choice_archive import ArchiveFiles
 
@@ -229,9 +229,9 @@ class Directory:
         otherwise put Runs of two backends in one run, which the outer record could not show. A noisy
         ``AerBackend`` that still holds its bound model, the original backend in the original process, is
         used as it is. For an unbound one, such as ``AerBackend(noise_model_id=...)`` with the original
-        identity in a new process, the model saved by ``create`` is rebuilt with its errors and basis gates
+        identifier in a new process, the model saved by ``create`` is rebuilt with its errors and basis gates
         (``_run_archive._load_noise_model``) and bound to a copy of ``backend``, so the Runs that resume
-        creates are lowered to the Aer target of the original Runs. A model that cannot be rebuilt raises
+        creates are compiled for the Aer target of the original Runs. A model that cannot be rebuilt raises
         here, before any work.
         """
         backend = run_backend(backend, self.settings["execution"])
@@ -270,9 +270,9 @@ class Directory:
 
         ``iterations`` replaces the completed rounds (augmented Lagrangian only), which a commit without
         it keeps, and clears the representation of the round in progress, since the completed round
-        holds its own. ``representation`` is the ``InnerRepresentation`` that the round in progress
-        selected, committed before its first inner Run so that resume reuses it instead of selecting
-        again, and a commit without it keeps the committed one. ``levels`` are the completed levels of
+        holds its own. ``representation`` is the ``InnerRepresentation`` chosen for the round in
+        progress, written before its first inner Run so that resume reuses it instead of choosing
+        again, and a commit without it keeps the saved one. ``levels`` are the completed levels of
         the refinement in progress and ``blocked`` the ``(termination, failure)`` pair that its last
         level decided, or None. ``record`` is the final record once the run has terminated. It holds
         every round and level, so the other keys are then left empty.
@@ -298,7 +298,7 @@ class Directory:
 
 @dataclass(frozen=True)
 class Frontier:
-    """The durable part of one refinement, namely its directory, its level folders and its committed levels.
+    """The saved state of one refinement, namely its directory, its level folders and its saved levels.
 
     The name follows the execution frontier of docs/glossary.md, the resumable state of a Run, and
     applies it to a refinement, whose resumable state is its completed levels and the stop that the last
@@ -344,22 +344,22 @@ def live_problem(stored, objects):
 
 
 def header_committed(folder):
-    """Whether the Run folder ``folder`` holds a committed journal header, or raise when its journal cannot be read.
+    """Whether the Run folder ``folder`` holds a written run-log header, or raise when its run log cannot be read.
 
-    ``Run.__init__`` creates the folder, then its journal ``run.sqlite``, then the selected inputs with
-    ``run.json`` (``_run_archive.initialize``), and commits the journal header last. Nothing is prepared or
-    acquired before the header commit. A headerless folder can nevertheless contain stored input files
+    ``Run.__init__`` creates the folder, then its run log ``run.sqlite``, then the chosen inputs with
+    ``run.json`` (``_run_archive.initialize``), and writes the run-log header last. Nothing is prepared or
+    executed before the header is written. A folder without a header can nevertheless contain stored input files
     and data bytes, which ``closed_trace`` accounts for separately. A process stopped after
     ``run.json`` and before the header leaves such a folder, and so does a Run whose creation raised there,
-    for example when ``max_data_bytes`` cannot hold its header rows. ``load_run`` refuses it. The journal is
+    for example when ``max_data_bytes`` cannot hold its header rows. ``load_run`` refuses it. The run log is
     opened as a Run opens it (``_run_journal.LocalJournal``), which takes its lock and lets SQLite roll back
     an interrupted transaction, and only the presence of a header row is read, so no row size cap applies.
 
-    There are three outcomes. True: the header row is present. False: the folder holds no journal, or the
-    journal was read and holds no header row, which includes a journal whose schema was inspected and has
-    no tables yet, since ``LocalJournal`` creates the file before the first transaction creates its tables.
-    Otherwise the journal could not be read, for example while another connection holds an exclusive SQLite
-    lock on it, another controller holds the Run, or the disk reports an I/O error, and the ``sqlite3.Error``
+    There are three outcomes. True means that the header row is present. False means that the folder holds
+    no run log, or that the run log was read and holds no header row, which includes a run log whose schema
+    was inspected and has no tables yet, since ``LocalJournal`` creates the file before the first transaction
+    creates its tables. Otherwise the run log could not be read, for example while another connection holds an exclusive SQLite
+    lock on it, another process holds the Run open, or the disk reports an I/O error, and the ``sqlite3.Error``
     or ``OSError`` of that read propagates. A failed read is no evidence that the folder holds no work, so
     ``closed_trace`` then records unknown counts and ``reopen`` keeps the folder.
     """
@@ -396,9 +396,9 @@ def reopen(folder, *, backend, progress):
     folder for this round or level, so its Run solves the round's or level's problem from its random
     stream, and resume takes the Plan from the Run without planning again. The reopened Run reports to
     ``progress``, the callback of the resume call. When ``load_run`` raises, a note says whether the folder
-    holds work, decided by its journal header (``header_committed``). Only a journal that was read and holds
-    no header lets the note suggest removing the folder. When the journal cannot be read, the note says so
-    and that the folder may hold committed work.
+    holds work, decided by its run-log header (``header_committed``). Only a run log that was read and holds
+    no header lets the note suggest removing the folder. When the run log cannot be read, the note says so
+    and that the folder may hold saved work.
     """
     import sqlite3
 
@@ -431,19 +431,19 @@ def closed_trace(folder, backend):
     """Return ``(trace, reason)`` for the Run of a round or level whose preparation raised.
 
     ``prepare`` closes its Run when the preparation raises, so the layer never holds that Run object
-    (``_outer.run_counts``). ``folder`` is the Run folder of a durable round or level, or None without a
-    durable directory, when the layer cannot read the counters and the reason says so. A durable Run keeps
-    its counters in its journal, and ``load_run`` reopens the closed folder without planning, preparing or
-    acquiring, so its trace gives the work that the failed round or level recorded, attempts of every
+    (``_outer.run_counts``). ``folder`` is the Run folder of a saved round or level, or None without a
+    run directory, when the layer cannot read the counters and the reason says so. A saved Run keeps
+    its counters in its run log, and ``load_run`` reopens the closed folder without planning, preparing or
+    executing, so its trace gives the work that the failed round or level recorded, attempts of every
     status included. The reason then says that the raised preparation does not establish a built circuit,
     which ``_outer.law_count`` needs. A folder that does not exist means that ``prepare`` raised before
-    creating the Run, which spent nothing, so both are None and the counts are zero. A folder whose journal
-    was read and holds no committed header (``header_committed``) has no recorded counters, but nothing was
-    prepared or acquired before the header, so the counts are known zeros apart from the stored data. The
+    creating the Run, which spent nothing, so both are None and the counts are zero. A folder whose run log
+    was read and holds no header (``header_committed``) has no recorded counters, but nothing was
+    prepared or executed before the header, so the counts are known zeros apart from the stored data. The
     result is then an ``_outer.HeaderlessRun`` with the stored bytes of the folder's files apart from the
-    journal, counted as a reopened Run counts them (``_run_archive.stored_file_bytes``), and the reason is
+    run log, counted as a reopened Run counts them (``_run_archive.stored_file_bytes``), and the reason is
     None. When the folder's files cannot be read those bytes are unknown, with the error as their reason.
-    When the journal itself cannot be read, the folder may hold a committed header and charged work, so the
+    When the run log itself cannot be read, the folder may hold a written header and counted work, so the
     trace is None and the reason names the error, which makes every count unknown (``_outer.run_counts``).
     """
     import sqlite3
@@ -474,17 +474,17 @@ def closed_trace(folder, backend):
 def unrecoverable(error, directory, *, end=False):
     """Whether ``error`` of a reopened Run's continuation must propagate, with a note if so.
 
-    Two outcomes that an interruption leaves in a Run cannot finish without new charged work.
+    Two outcomes that an interruption leaves in a Run cannot finish without new counted work.
     ``Run.resume`` raises ``RunFailed`` with status ``uncertain`` for an attempt whose outcome no route can
-    bring back, such as an interrupted local acquisition or classical evolution, or a lost acknowledgement
+    bring back, such as an interrupted local measurement or classical evolution, or a lost acknowledgement
     that the backend cannot reconcile (``Run._raise_unrecoverable_outcome``).
-    ``_prepared_execution.PreparationNotRebuilt`` reports a local preparation that has a charge but no
-    receipt, because it failed or was interrupted (``_prepared_execution._unbuilt``, raised by
+    ``_prepared_execution.PreparationNotRebuilt`` reports a local preparation that was counted but has no
+    preparation record, because it failed or was interrupted (``_prepared_execution._unbuilt``, raised by
     ``execute_static`` before any new submission and by ``_prepare_static_item`` for its own item). Their
-    charges stay spent, the Run repeats neither, and resume never gives a round or level a second Run.
+    counted work stays spent, the Run repeats neither, and resume never gives a round or level a second Run.
     The outer run therefore cannot pass this round or level. By default the error propagates instead of
-    ending the run as ``inner_failed``. The outer record keeps its committed rounds and levels unchanged,
-    while the Run keeps the step charged and records an interrupted attempt as uncertain, so a later
+    ending the run as ``inner_failed``. The outer record keeps its saved rounds and levels unchanged,
+    while the Run keeps the step counted and records an interrupted attempt as uncertain, so a later
     resume can still use an original outcome that becomes retrievable, for example a job that the backend
     can reconcile later.
 
@@ -494,14 +494,14 @@ def unrecoverable(error, directory, *, end=False):
     and records the error's type and text as the failure. Before anything has completed the error still
     propagates, as any first failure does. A local process that stopped during an evolution never
     delivers a late outcome, so without this choice the completed rounds could not be returned as a
-    result. Ending the run neither repeats nor replaces the step, whose charge stays spent.
+    result. Ending the run neither repeats nor replaces the step, whose counted work stays spent.
 
     Every other error of a continued Run is one that an uninterrupted run can meet at the same point,
     and the layers record it as they do there. The exception is an interruption between an inner
     failure and the next commit of the outer record, after which the reopened Run can report that
     failure in another form, for example a preparation that raised as ``PreparationNotRebuilt``.
 
-    ``directory`` is the durable directory, which the note names.
+    ``directory`` is the run directory, which the note names.
     """
     from nwqlib._prepared_execution import PreparationNotRebuilt
     from nwqlib.execution import RunFailed
@@ -518,9 +518,9 @@ def unrecoverable(error, directory, *, end=False):
 
 
 def saved_result(folder, *, backend):
-    """Return the Result of a committed round or level from its Run folder.
+    """Return the Result of a saved round or level from its Run folder.
 
-    ``load_run`` opens the Run without planning or acquiring, and it is closed again at once.
+    ``load_run`` opens the Run without planning or executing, and it is closed again at once.
     """
     from nwqlib.scientist import load_run
 

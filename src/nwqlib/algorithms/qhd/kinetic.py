@@ -25,11 +25,11 @@ class KineticCompiler:
     Per variable the operator is ``-(1/2) L`` with ``L = (A - 2I)/h**2`` as in
     Remark 6 of the same paper, where A is the adjacency matrix of the grid's
     links (``OneHotGrid.links``). On the Dirichlet grids the links form a
-    chain, the stencil of that paper's Eqs. (F.7)/(F.9). On the periodic grid they form a
-    cycle, so ``-(1/2) L`` is the circulant matrix with diagonal ``1/h**2``
-    and ``-1/(2 h**2)`` at ``(i, i +- 1 mod K)``, and the hopping sum
-    including the wrap link is Eq. (12) of Liu et al., arXiv:2607.16996v1,
-    Sec. III C. On the one-hot subspace
+    chain, the stencil of that paper's Eqs. (F.7)/(F.9). On the periodic
+    grid they form a cycle, so ``-(1/2) L`` is the circulant matrix with
+    diagonal ``1/h**2`` and ``-1/(2 h**2)`` at ``(i, i +- 1 mod K)``, and the
+    hopping sum including the wrap link is Eq. (12) of Liu et al.,
+    arXiv:2607.16996v1, Sec. III C. On the one-hot subspace
     ``(X_i X_j + Y_i Y_j)/2`` acts as ``|e_i><e_j| + h.c.``, a direct
     two-qubit calculation with no paper source, so each link carries the
     coefficient ``-kinetic_weight/(4 h**2)`` on XX and on YY. The hopping
@@ -38,8 +38,8 @@ class KineticCompiler:
     ``2*duration*coefficient``, which equals the duration times the stencil
     off-diagonal ``-kinetic_weight/(2 h**2)``. The stencil diagonal
     ``kinetic_weight/h**2`` of each variable is the same on every one-hot
-    state, so it is a global phase, which the compiler adds to its physical
-    phase ledger instead of emitting a gate
+    state, so it is a global phase, which the compiler adds to its running
+    phase total instead of applying a gate
     (``compiler.QHDCompiler._record_kinetic_global_phase``, which cites the
     papers that drop it as well).
 
@@ -88,21 +88,22 @@ class KineticCompiler:
     ) -> tuple[PauliEvolutionBlock, ...]:
         """Return Pauli-evolution blocks for the kinetic operator.
 
-        Range admission (``validation._normal_range``) happens before
+        The range check (``validation._normal_range``) happens before
         pruning. The coefficient ``c_h = fl(-a/fl(fl(4 h) h))``, the doubled
         duration ``fl(2 t)``, the stored angle ``ell = fl(fl(2 t) c_h)`` and
-        the native parameter ``2 ell`` must be finite, and the coefficient and
-        angle normal. The duration t is positive, so the angle is zero only for a
-        zero weight a, which emits nothing, and any other zero would be range
-        loss, which is refused with its remedy
+        the circuit's gate parameter ``2 ell`` must be finite, and the
+        coefficient and angle normal. The duration t is positive, so the angle
+        is zero only for a zero weight a, which adds no block, and any other
+        zero would be range loss, which is rejected with its remedy
         (``validation._kinetic_range_error``), since it depends only on the
         grid and the schedule. With ``dt = 1e308``, the full-duration hopping
         layer overflows at ``fl(2 t)`` even when the exact product ``2 t c_h``
-        with a small normal coefficient is moderate, so the refusal requests a
-        shorter ``total_time``. This evaluation order is the one the native
-        parameter repeats (``pauli_evolution._hopping_parameter``), whose
-        equality with the stored angle makes the hopping-parameter entry of
-        the error ledger zero.
+        with a small normal coefficient is moderate, so the error message
+        requests a shorter ``total_time``. The circuit construction repeats
+        this evaluation order and doubles the result to form the gate
+        parameter (``pauli_evolution._hopping_parameter``), so half of a
+        finite gate parameter equals the stored angle exactly, which makes the
+        ``gate_parameters`` entry of the error sources zero.
         """
 
         blocks: list[PauliEvolutionBlock] = []

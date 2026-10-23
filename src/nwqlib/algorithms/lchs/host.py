@@ -1,4 +1,4 @@
-"""Finite classical LCHS acquisition and exact initial-condition identities."""
+"""Finite classical LCHS evaluation and exact initial-condition identities."""
 
 from math import fsum
 from dataclasses import replace
@@ -30,12 +30,12 @@ def plan_initial(method,problem,*,output,execution,shots,rng,zero):
     """Plan the no-evolution case, zero elapsed time or all physical inputs zero.
 
     The solution is the initial vector itself, so no quadrature, eigensolve
-    or SELECT is selected. A known vector and its norm are answered from the
-    ingested input without acquisition. A classical observable of an explicit
-    vector uses one recorded host computation. Samples, quantum observables
-    and compact states acquire through the actual initial-state PREP. A
-    compact zero state has no normalized PREP, so a requested physical zero
-    array is materialized once and unit outputs are undefined.
+    or SELECT is planned. A known vector and its norm are answered from the
+    input without data collection. A classical observable of an explicit
+    vector uses one recorded classical computation. Samples, quantum
+    observables and compact states use the initial-state PREP followed by
+    the requested amplitude, exact scalar or sampled readout. A compact zero state has no normalized PREP, so a requested physical
+    zero array is formed once and unit outputs are undefined.
     """
     state = problem.initial_state
     scale = state.preparation.physical_scale
@@ -96,9 +96,9 @@ def _initial_acquisition(method,problem,rec,*,output,shots,rng):
 
 
 def analyze_initial(plan,data):
-    """Interpret a no-evolution Plan from its acquisition or its ingested input.
+    """Interpret a no-evolution Plan from its readout data or its input.
 
-    Without acquired chunks, the requested scalar comes from the input's
+    Without observation chunks, the requested scalar comes from the input's
     physical scale, and the algorithmic_approximation and sampling facts are
     exact zero because no approximation or sampling took place.
     """
@@ -131,7 +131,7 @@ def analyze_initial(plan,data):
 
 
 def _initial_kernel(method,problem,output,kind):
-    """Declare actual initial-output work from input metadata, without action.
+    """Declare the work of the initial output from input metadata, without evaluating it.
 
     ``kind`` is ``initial_observable`` or ``initial_zero_vector``. For
     ``initial_zero_vector``, ``plan_initial`` has checked that the initial
@@ -175,17 +175,17 @@ def _initial_kernel(method,problem,output,kind):
 
 
 def _initial_application(kind,dimension,work):
-    """Return the one receipt of a no-evolution host kernel, which records its dimension and declared work.
+    """Return the one record of a no-evolution classical routine, with its dimension and declared work.
 
-    It is fixed at planning, so the kernel declares its bytes for the Run's
-    output reservation.
+    It is fixed at planning, so the routine declares its bytes among the
+    bytes that the Run sets aside for outputs.
     """
     return KernelApplication(name=kind,implementation=METHOD,
         arguments=(Binding(parameter='dimension',value=dimension),Binding(parameter='size_units',value=work)))
 
 
 def _plan_initial_host(method,problem,rec,*,output,execution,shots,rng,kind):
-    """Plan one host computation for a no-evolution output of the given kind.
+    """Plan one classical computation for a no-evolution output of the given kind.
 
     kind is ``initial_observable`` (an observable of the supplied vector) or
     ``initial_zero_vector`` (a requested physical zero array).
@@ -204,10 +204,10 @@ def _plan_initial_host(method,problem,rec,*,output,execution,shots,rng,kind):
 
 
 def _execute_initial_output(plan,kernel):
-    """Run the declared no-evolution kernel and return its KernelOutput.
+    """Run the declared no-evolution classical routine and return its KernelOutput.
 
     Because u(T) = u(0), the physical norm squared comes directly from the
-    ingested scale of u(0). ``initial_observable`` adds the requested
+    input scale of u(0). ``initial_observable`` adds the requested
     observable moment of the supplied vector in the declared frame.
     ``initial_zero_vector`` returns the zero array of the original dimension.
     The recorded application states the dimension and the declared work.
@@ -232,18 +232,19 @@ def _execute_initial_output(plan,kernel):
 
 
 def plan_classical(method,problem,data,*,output,rng):
-    """Declare the bounded finite LCHS/Duhamel host action and requested physical outputs.
+    """Declare the bounded finite LCHS/Duhamel classical action and requested physical outputs.
 
-    Classical execution evaluates the same selected finite recipe that the
+    Classical execution evaluates the same planned finite sum that the
     quantum route would, not an exact reference. Dense nodes form one
     Hermitian eigensystem per node and reuse it for every application
     (time_independent_terms.spectral_lchs_sum). Product-formula nodes use the
-    Pauli actions selected once by host_pf.select_actions. The whole repeated work
-    and workspace are admitted before the kernel is declared, and the kernel
-    input includes selected_identity, so a saved host Plan is tied to these
-    exact numbers. The Plan's kernel, k-quadrature and product-formula facts
+    Pauli actions chosen once by host_pf.select_actions. The whole repeated
+    work and workspace are checked against the limits before the classical
+    routine is declared, and the routine input includes selected_identity
+    (the content hash of the planned data), so a saved classical Plan is tied
+    to these exact numbers. The Plan's kernel, k-quadrature and product-formula facts
     are the application sums that execution later records, computed from
-    the same selected records (_planned_applications) without a host action.
+    the same planned records (_planned_applications) without a classical action.
     Unlike a quantum Plan, it has no preparation or QSP stages.
     """
     from .inhomogeneous_theory import duhamel_quadrature
@@ -334,7 +335,7 @@ def plan_classical(method,problem,data,*,output,rng):
 
 
 def _classical_work(data,elapsed,starts):
-    """Finite dense-exact host size law of the streamed spectral sum.
+    """Size formula of the classical dense-exact spectral sum, evaluated node by node.
 
     starts holds the start time s of each application, 0 for the initial
     state and the Duhamel node for a source application, each applied over
@@ -346,7 +347,7 @@ def _classical_work(data,elapsed,starts):
 
     Returns:
         The counts recorded in the reconstruction, whose size_units is the
-        work, and the phase bytes of the streamed sum beyond its live inputs.
+        work, and the phase bytes of the sum beyond its inputs in memory.
     """
     from .time_independent_terms import _spectral_host_requirements
     dimension,nodes = len(data.initial),data.quadrature.k_nodes
@@ -364,10 +365,10 @@ def _classical_work(data,elapsed,starts):
 
 
 def bind_host(plan,data):
-    """Bind the Plan's single host kernel to its executor.
+    """Attach the Plan's single classical routine to its executor.
 
-    A no-evolution Plan runs its declared initial-output kernel. Otherwise the
-    executor evaluates the selected finite LCHS sum from data.
+    A no-evolution Plan runs its declared initial-output routine. Otherwise the
+    executor evaluates the planned finite LCHS sum from data.
     """
     kernel, = plan.construction.kernels
     if plan.reconstruction.mode in ('initial','zero'):
@@ -376,7 +377,7 @@ def bind_host(plan,data):
 
 
 class _HostApplication(NamedTuple):
-    """One application of the selected finite propagator on the host.
+    """One application of the planned finite propagator in classical evaluation.
 
     Attributes:
         start: Time at which the input enters, 0 for the initial state.
@@ -403,16 +404,16 @@ class _HostApplication(NamedTuple):
 
 
 def _planned_applications(method,problem,rec,data):
-    """Yield the selected host applications in execution order, without evolving anything.
+    """Yield the planned classical applications in execution order, without evolving anything.
 
     The initial state comes first when it is nonzero, then one application
     per Duhamel node, the order of host_pf.select_actions and
-    selected_grid._specifications. Every record comes from planning
-    selections: the provider bounds and PSD shift in lchs_quadrature_summary,
-    and for a product formula each node's stored step record, summed by
-    _trotter_budget_quadrature_terms. Planning publishes its component facts
+    selected_grid._specifications. Every record comes from planning, namely
+    the kernel-quadrature bounds and PSD shift in lchs_quadrature_summary
+    and, for a product formula, each node's saved step record, summed by
+    _trotter_budget_quadrature_terms. Planning reports its component facts
     from these, and execution records the same ones. Yielding one
-    application at a time keeps one set of node records alive.
+    application at a time keeps one set of node records in memory.
     """
     from .time_independent_terms import lchs_quadrature_summary, _trotter_budget_quadrature_terms
     elapsed = problem.elapsed_time
@@ -439,14 +440,14 @@ def _planned_applications(method,problem,rec,data):
 
 
 def _component_names(method):
-    """Return the application-weighted component stages of the selected backend."""
+    """Return the application-weighted component stages of the chosen backend."""
     return ('kernel_approximation','k_quadrature')+(('trotter_synthesis',) if method.hamiltonian_evolution_backend!='dense_exact' else ())
 
 
 def _application_facts(method,problem,rec,planned):
-    """Return the physical component facts of one host application.
+    """Return the physical component facts of one classical application.
 
-    application_stage_bounds multiplies each stored operator-level bound by
+    application_stage_bounds multiplies each recorded operator-level bound by
     the input weight |w|*||u|| and the PSD recovery exp(shift*elapsed). A
     stage without a usable value is unknown with its stage reason, for
     example missing_stage:trotter_synthesis for a fixed step count.
@@ -470,7 +471,7 @@ def _summed_components(method,problem,application_facts):
     """Sum each component over all applications.
 
     plan_classical passes the facts of the planned applications, and
-    analyze_classical passes those of the acquired ones, so both records use
+    analyze_classical passes those of the evaluated ones, so both records use
     one rule. A component is concrete only when every application reports a concrete
     value for it. Otherwise it is unknown with the first unknown
     application's reason, since a missing term is not zero.
@@ -504,15 +505,15 @@ def _duhamel_component(problem,rec):
 
 
 def _application(method,problem,rec,index,planned):
-    """Return the receipt of one host application, which records its schedule and component facts.
+    """Return the record of one classical application, with its schedule and component facts.
 
     The arguments (start and elapsed time, source role, weight and recovery
     scale) are the schedule that selected_grid checks against the Plan. The
-    per-node step records and routes are in the Plan's host actions, beside
-    the stored node table from which rotations are formed at application
-    time. Execution applies them there, and selected_grid and
-    refinement read the step counts there, so a receipt does not grow with
-    the k-node count. Planning builds the same receipts to
+    per-node step records and routes are in the Plan's classical actions,
+    beside the saved node table from which rotations are formed at
+    application time. Execution applies them there, and selected_grid and
+    refinement read the step counts there, so the record does not grow with
+    the k-node count. Planning builds the same records to
     declare their bytes (SelectedKernel.application_bytes).
     """
     raw,start = planned.raw,planned.start
@@ -531,7 +532,7 @@ def _application(method,problem,rec,index,planned):
 
 
 def _carried_recovery(recovery,shift,elapsed):
-    """Compose into recovery the power of two 2**e that the host arrays omit.
+    """Compose into recovery the power of two 2**e that the classical arrays omit.
 
     The arrays hold each PSD recovery exp(shift*elapsed_a) divided by 2**e,
     with e = psd_recovery_exponent(shift, elapsed), which is zero while
@@ -547,7 +548,7 @@ def _carried_recovery(recovery,shift,elapsed):
 
 
 def _evolve(plan,data):
-    """Evaluate the selected finite LCHS/Duhamel sum on the padded host vector.
+    """Evaluate the planned finite LCHS/Duhamel sum on the padded classical vector.
 
     Returns the evolved unit initial direction (homogeneous) or the physical
     vector (constant source), the recovery still to apply, and one
@@ -588,9 +589,9 @@ def _evolve(plan,data):
 
 
 def _evolve_pauli_actions(plan,data):
-    """Stream each selected node action and preserve its source-time recovery.
+    """Apply each planned node action in turn and keep its source-time recovery.
 
-    Each application's rotations are formed from the stored node table at
+    Each application's rotations are formed from the saved node table at
     its elapsed time, one position at a time (host_pf.application_actions).
     """
     from .host_pf import application_actions, apply_node
@@ -620,7 +621,7 @@ def _evolve_pauli_actions(plan,data):
 
 
 def _execute(plan,kernel,data):
-    """Run the declared host kernel and return only the requested outputs.
+    """Run the declared classical routine and return only the requested outputs.
 
     The padded vector is cut to the original coordinates before any statistic
     is formed, so dummy coordinates never enter a norm or observable.
@@ -643,12 +644,12 @@ def _execute(plan,kernel,data):
 
 
 def analyze_classical(plan,data,chunks):
-    """Interpret one host acquisition and sum its per-application component facts.
+    """Interpret one classical evaluation and sum its per-application component facts.
 
-    Each listed component is the sum of the acquired applications' own
+    Each listed component is the sum of the evaluated applications' own
     facts (_summed_components, the rule planning used), and is unknown unless
     every application supplied a concrete value. The Duhamel component does
-    not depend on the acquisition, so the planned fact is kept: exact zero
+    not depend on the evaluation, so the planned fact is kept: exact zero
     for a zero source and otherwise unknown until explicit refinement.
     """
     chunk, = chunks.values()

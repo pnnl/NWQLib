@@ -1,5 +1,6 @@
-"""Supplied real factor polynomials, with explicit bounded Jordan–Wigner conversion.
+"""Double-factorized Hamiltonians with real supplied factors, and their Jordan–Wigner conversion.
 
+The conversion is checked against byte and product limits before it runs.
 The input defines E0 + dΓ(T) + sum(dΓ(V diag(w) V.T)**2)/2. It does
 not assert that the supplied columns are orthogonal or reconstruct a molecule.
 """
@@ -107,8 +108,8 @@ def _error_frame(manifest, output, scope):
 class DFConversionReceipt(Record):
     """Record of one `FactorizedHamiltonian.to_pauli` conversion: its input, output and counts.
 
-    `DFConversion.receipt` holds it. It stores the metadata of both sides,
-    not the factors or the Pauli terms. With n spatial orbitals and at least
+    `DFConversion.receipt` holds it. It holds the metadata of the input and
+    the output, not the factors or the Pauli terms. With n spatial orbitals and at least
     one factor, the conversion forms `1 + 2n**2 + 4n**4` fermionic strings
     and `1 + 8n**2 + 64n**4` Pauli rows before identical words are summed.
     The fields below are read-only.
@@ -160,12 +161,12 @@ class DFConversionReceipt(Record):
 
     @model_validator(mode="after")
     def _association(self):
-        """Bind a loaded or new receipt to one conversion without replaying it.
+        """Check that a loaded or new record describes one conversion, without repeating it.
 
-        The output must be the ingested Hermitian Pauli operator at width 2n,
-        the raw populations must equal the counts of the contraction and
-        mapping, the counters must reach the raw-table floor, and the
-        conversion error must stay unknown in its full-operator frame.
+        The output must be the Hermitian Pauli operator at width 2n, the raw
+        row counts must equal the counts of the contraction and mapping, the
+        counters must be at least the size of the raw tables, and the
+        conversion error must stay unknown in its full-operator error frame.
         """
         n = self.input.orbital_basis.dimension
         # Check the width's bit length without creating another exponential integer.
@@ -224,10 +225,10 @@ class DFConversion:
     work_fact: Fact
 
     def __post_init__(self):
-        """Require the operator, receipt and work fact to name one conversion.
+        """Require the operator, conversion record and work fact to name one conversion.
 
         A work fact from another conversion, or an operator from another
-        receipt, would attach cost or provenance to the wrong Pauli input.
+        record, would attach a cost or an origin to the wrong Pauli input.
         """
         if not isinstance(self.operator, OperatorInput) or self.operator.manifest != self.receipt.output:
             raise ValueError("DF conversion operator belongs to another receipt output")
@@ -368,7 +369,8 @@ def ingest_df(shifted_one_body, factors, *, constant_energy, orbital_basis: Basi
             `10_000_000_000`).
 
     Returns:
-        hamiltonian (FactorizedHamiltonian): The stored factorized form.
+        hamiltonian (FactorizedHamiltonian): The Hamiltonian in factorized
+            form.
 
     Raises:
         TypeError: If `orbital_basis`, `source` or `factors` has another type,
@@ -424,11 +426,11 @@ def ingest_df(shifted_one_body, factors, *, constant_energy, orbital_basis: Basi
 
 
 def _populations(n, has_factors):
-    """Return raw Fermion rows and raw JW rows emitted by ``_rows``.
+    """Return the numbers of raw fermionic rows and raw JW rows that ``_rows`` yields.
 
-    Rows: one constant, ``2*n**2`` spin-diagonal one-body strings and
+    The rows are one constant, ``2*n**2`` spin-diagonal one-body strings and
     ``4*n**4`` two-body strings (four spin pairs). A string of p ladder
-    operators maps to ``2**p`` Pauli rows before coalescing.
+    operators maps to ``2**p`` Pauli rows before identical words are summed.
     """
     quartic = 4*n**4 if has_factors else 0
     return 1+2*n*n+quartic, 1+8*n*n+16*quartic
@@ -509,11 +511,12 @@ def _rows(one_body, gram, pair_index, constant):
 
 
 def _publish(manifest, operator, rows, mapped, sizes):
-    """Bind the Pauli output to its factor input with a receipt and work fact.
+    """Return the Pauli output with the conversion record and work fact that link it to its factor input.
 
-    The conversion error stays unknown in the full-operator frame because no
-    independently justified enclosure of the binary64 contraction error
-    exists. The work fact is concrete and names this receipt.
+    The conversion error stays unknown in the full-operator error frame
+    because no independently justified enclosure of the binary64
+    contraction error exists. The work fact is concrete and names this
+    conversion record.
     """
     scope = _scope(manifest, operator.manifest)
     frame = _error_frame(manifest, operator.manifest, scope)

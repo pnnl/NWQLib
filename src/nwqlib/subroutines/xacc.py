@@ -1,4 +1,4 @@
-"""Bounded XACC fermionic input, mapped literally to Jordan–Wigner Paulis."""
+"""XACC fermionic operators with at most four ladder operators per term, mapped as written to Jordan–Wigner Paulis."""
 
 from __future__ import annotations
 
@@ -46,8 +46,9 @@ def parse_xacc(text: str, *, num_modes: int, coefficient_cutoff: float = 0.0) ->
     expansion and supplies padding. The caller supplies it as a bound on the
     input, and it is not a local-simulation limit. UTF-8 text may have an
     initial byte-order mark.
-    Electron count, spin ordering, and reference occupations are separate
-    caller metadata: none can be inferred from this syntax.
+    The caller supplies the electron count, spin ordering and reference
+    occupations separately, because none of them can be inferred from this
+    syntax.
 
     Args:
         text (str): XACC text.
@@ -81,10 +82,11 @@ def parse_xacc(text: str, *, num_modes: int, coefficient_cutoff: float = 0.0) ->
 def read_xacc(path: str | PathLike[str], *, num_modes: int, coefficient_cutoff: float = 0.0) -> SparsePauliOp:
     """Read a UTF-8 XACC file and map it to a qubit Hamiltonian, as [`parse_xacc`][nwqlib.subroutines.xacc.parse_xacc] does for text.
 
-    Lines stream into coefficient buckets for stable normal-order summation,
-    then the merged polynomial is mapped with Jordan-Wigner and stable Pauli
-    summation. Buckets keep O(R) coefficients for R input terms and O(T)
-    coefficients for T merged terms (bounded degree four), and no
+    Lines are read one at a time, and the coefficient contributions of each
+    distinct normal-ordered term are kept for stable summation. The merged
+    polynomial is then mapped with Jordan-Wigner and stable Pauli summation.
+    These contribution lists hold O(R) coefficients for R input terms and
+    O(T) coefficients for T merged terms (bounded degree four), and no
     statevector or dense operator is constructed.
 
     Args:

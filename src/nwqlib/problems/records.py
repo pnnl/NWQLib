@@ -37,10 +37,11 @@ OptionalUnit = Annotated[Unit | None, BeforeValidator(_unit)]
 
 
 def _operator(value):
-    """Admit live operator data, or read a saved description as a metadata-only handle.
+    """Convert operator data to an OperatorInput, or read a saved description as an OperatorInput that holds metadata only.
 
-    A saved description carries no native data, so the handle it yields
-    refuses numerical access. An archive restores data access separately.
+    A saved description carries no numerical data, so the object it gives
+    raises an error on numerical access. A saved Result or Run restores
+    data access separately.
     """
     from nwqlib.operators.inputs import OperatorInput, operator_input
     if type(value) is dict and "manifest" in value:
@@ -49,9 +50,9 @@ def _operator(value):
 
 
 def _hermitian_refusal(name, operator, matrix_remedy=""):
-    """Return the refusal for an operator whose coalesced input is not exactly Hermitian.
+    """Return the error message for an operator that is not exactly Hermitian after identical terms are summed.
 
-    For a canonical Pauli sum, exact Hermiticity means that every coalesced
+    For a canonical Pauli sum, exact Hermiticity means that every summed
     coefficient is real, and its Hermitian part keeps every Pauli row with
     the real part of its coefficient. ``matrix.conj().T`` is not the adjoint
     of a Qiskit ``SparsePauliOp``, and a default-tolerance ``simplify()`` can
@@ -65,7 +66,7 @@ def _hermitian_refusal(name, operator, matrix_remedy=""):
 
 
 def _state(value):
-    """Admit live state data, or read a saved description as a metadata-only handle."""
+    """Convert state data to a StateInput, or read a saved description as a StateInput that holds metadata only."""
     from nwqlib.problems.inputs import StateInput, state_input
     if type(value) is dict and "manifest" in value:
         return StateInput.from_record(value)
@@ -89,12 +90,12 @@ Pass one of these forms:
   `ingest_*` function of `nwqlib.operators`
 
 The field keeps the representation it receives and does not convert sparse
-or Pauli input to a dense matrix. Accepting the input is limited to 10 GB
+or Pauli input to a dense matrix. Converting the input is limited to 10 GB
 (decimal) of known bytes. Pass `operator_input(value, max_bytes=...)` to set
-another limit. A saved description, a dict with a `manifest` entry, gives a
-handle with metadata only, which refuses numerical access. Loading a saved
-archive restores the data. See [Supply operators and
-states](../inputs.md).
+another limit. A saved description, a dict with a `manifest` entry, gives an
+input object with metadata only, which raises an error on numerical access.
+Loading a saved Result or Run restores the data. See [Supply
+inputs](../inputs.md).
 """
 StateData = Annotated[Any, BeforeValidator(_state), PlainSerializer(_input_record)]
 """State or vector accepted by a Problem field, such as `Expectation.state` or `LinearSystem.b`.
@@ -109,17 +110,17 @@ Pass one of these forms:
   function of `nwqlib.problems`
 
 The field keeps the vector's magnitude and phase. A circuit is copied without
-simulating or synthesizing it. Accepting the input is limited to 10 GB
+simulating or synthesizing it. Converting the input is limited to 10 GB
 (decimal) of known bytes. Pass `state_input(value, max_bytes=...)` to set
-another limit. A saved description, a dict with a `manifest` entry, gives a
-handle with metadata only, which refuses numerical access. Loading a saved
-archive restores the data. See [Supply operators and
-states](../inputs.md).
+another limit. A saved description, a dict with a `manifest` entry, gives an
+input object with metadata only, which raises an error on numerical access.
+Loading a saved Result or Run restores the data. See [Supply
+inputs](../inputs.md).
 """
 
 
 class SymbolicDescription(Record):
-    """A portable expression description, with no executable expression binding."""
+    """A saved description of a SymPy expression, as text that is never evaluated as code."""
 
     expression: Text
     display: Text
@@ -157,10 +158,11 @@ def squared_unit(unit):
 
 
 class _ScientificModel(Record):
-    """Immutable user input without interchange version or ancestry arguments.
+    """Immutable scientific input without the ``schema_version`` and ``parent_id`` arguments of other records.
 
-    The enclosing archive owns its format version. A changed scientific input
-    has its own content identity, so it needs no user-managed revision chain.
+    The saved folder that contains it records the format version. A changed
+    scientific input has its own content hash, so it needs no chain of
+    revisions.
     """
 
     schema_version: ClassVar[int] = 1
@@ -170,7 +172,7 @@ class _ScientificModel(Record):
         """Return a validated copy with ``changes``, without a parent link.
 
         Unlike ``Record.revise``, the result records no ``parent_id``. A
-        changed scientific input is a new input with its own identity.
+        changed scientific input is a new input with its own content hash.
         """
         values = {name: getattr(self, name) for name in type(self).model_fields}
         return type(self).model_validate({**values, **changes})
@@ -239,7 +241,7 @@ class ProblemRecord(_ScientificModel):
     def to_record(self):
         """Return the JSON description of the Problem.
 
-        The numerical data stay in the input handles.
+        The numerical data stay in the input objects.
         """
         return self.model_dump(mode="json", exclude_computed_fields=True)
 
@@ -670,13 +672,14 @@ def _variable_names(variables):
 
 
 def _admit_box(variables, bounds, expressions):
-    """Admit one ``lower < upper`` interval per uniquely named variable.
+    """Check one ``lower < upper`` interval per uniquely named variable.
 
     ``expressions`` pairs each symbolic expression of the problem with the
-    name used in messages, starting with the objective. Live SymPy input also
+    name used in messages, starting with the objective. SymPy input also
     requires Symbol variables and expressions whose free symbols are all
-    variables. Saved descriptions skip those checks because they carry no
-    executable expression. Mixing live and saved forms rejects.
+    variables. Saved descriptions skip those checks because they hold no
+    expression that can be evaluated. A mixture of SymPy and saved forms is
+    rejected.
     """
     if not variables or len(variables) != len(bounds):
         raise ValueError("bounds must contain one finite interval for every ordered variable")
@@ -776,7 +779,7 @@ class Optimization(ProblemRecord):
 
 
 def _residual(value, field, position):
-    """Return the stored residual of one live constraint, h in ``h = 0`` or g in ``g <= 0``.
+    """Return the residual of one SymPy constraint, h in ``h = 0`` or g in ``g <= 0``.
 
     ``field`` is ``"equalities"`` or ``"inequalities"``. An equality is an
     expression h or ``Eq(a, b)``, stored as ``a - b``. An inequality is an
@@ -840,7 +843,7 @@ class ConstrainedOptimization(ProblemRecord):
 
     The stored constraints are residual expressions with the conventions
     `h_i(x) = 0` for equalities and `g_j(x) <= 0` for inequalities, the
-    form of problem (4.1) in Birgin and Martinez, *Practical Augmented
+    form of problem (4.1) in Birgin and Martínez, *Practical Augmented
     Lagrangian Methods for Constrained Optimization*, SIAM 2014,
     doi:10.1137/1.9781611973365, with the box as its set Omega. The QHD
     augmented-Lagrangian layer follows that book, so a residual here enters
@@ -1189,8 +1192,8 @@ class StateVector(OutputRecord):
     the magnitude of the solution, in the Problem's `unit`. With `"unit"` it
     has length 1 and is dimensionless. Its error metric is the l2 norm of
     the difference, or with `global_phase="modulo_global_phase"` the l2 norm
-    after the global phases are aligned. Full amplitudes are a simulator
-    readout, not a hardware measurement.
+    after the global phases are aligned. Full amplitudes come from a
+    simulator, not from a hardware measurement.
 
     Attributes:
         kind: Fixed `"state_vector"`, the record's type name in its JSON form.

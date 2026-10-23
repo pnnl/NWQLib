@@ -14,7 +14,7 @@ def is_unitary(matrix: Any, *, atol: float = 1.0e-8) -> bool:
     fixes the scale of the matrix, so the window is dimensionless. The
     default ``1e-8`` is an untuned window registered in
     docs/ENGINEERING_CONSTANTS.md. Revisit with another precision, larger
-    admitted dimensions or a derived arithmetic error bound.
+    accepted dimensions or a derived arithmetic error bound.
     """
 
     array = np.asarray(matrix, dtype=complex)

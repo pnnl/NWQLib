@@ -1,4 +1,4 @@
-"""Internal shared owners for single-target multiplexors.
+"""Shared constructions of single-target multiplexors.
 
 A multiplexor with ``k`` select qubits applies ``U_j`` to one target qubit
 when the select register holds ``j`` (Shende, Bullock and Markov,
@@ -17,8 +17,8 @@ encodings and LCHS SELECT share three constructions from this module:
 
 Qiskit's uniformly controlled rotations and ``UCGate`` use target-first
 qubit order: ``[target, control_0, ..., control_{a-1}]``, where
-``control_0`` is the least-significant table-index bit.  The append helpers
-below own that convention, validate the participating qubits, and pad short
+``control_0`` is the least-significant table-index bit.  The append functions
+below apply that convention, validate the participating qubits, and pad short
 tables to the full control-basis size.
 
 The pinned exact arbitrary-unitary path is
@@ -47,12 +47,12 @@ import numpy as np
 
 @dataclass(frozen=True)
 class AffineAngleTable:
-    """Affine angle law for a complete multiplexor table and its check.
+    """Affine angle formula for a complete multiplexor table and its check.
 
-    The law is ``angle(b) = offset + sum_q coefficients[q] * b_q`` over the
-    address bits ``b_q`` of basis index ``b``, with ``q = 0`` the
+    The formula is ``angle(b) = offset + sum_q coefficients[q] * b_q`` over
+    the address bits ``b_q`` of basis index ``b``, with ``q = 0`` the
     least-significant control. Rotations about one axis add their angles, so
-    such a table needs no multiplexor. ``append_affine_rotation`` realizes it
+    such a table needs no multiplexor. ``append_affine_rotation`` builds it
     with one unconditional rotation and one singly controlled rotation per
     nonzero coefficient.
 
@@ -60,10 +60,10 @@ class AffineAngleTable:
         offset: Angle applied for every address, in radians.
         coefficients: Angle added when address bit ``q`` is one, in radians.
         max_residual: Largest absolute difference between the supplied
-            complete table and the law, in radians.
-        tolerance: Binary64 roundoff window for that comparison. The law
+            complete table and the formula, in radians.
+        tolerance: Binary64 roundoff window for that comparison. The formula
             describes the table only when ``max_residual <= tolerance``, and
-            the consumer makes that decision.
+            the caller makes that decision.
     """
 
     offset: float
@@ -195,7 +195,7 @@ def append_uniformly_controlled_rz(
 
 
 def _rotation_multiplexor(angles: Sequence[float], *, axis: Literal["y", "z"]) -> Gate:
-    """Lower a complete angle table by the Walsh transform and cyclic Gray code.
+    """Decompose a complete angle table by the Walsh transform and cyclic Gray code.
 
     Implements Mottonen et al. (quant-ph/0407010v1), Sec. II, Fig. 2 and
     Eq. (3). The target receives ``2**k`` rotations separated by CX gates.
@@ -208,7 +208,7 @@ def _rotation_multiplexor(angles: Sequence[float], *, axis: Literal["y", "z"]) -
     top control. For address ``c``, rotation ``i`` therefore acts with sign
     ``(-1)**popcount(c & g(i))``, and the signed angles sum to ``alpha_c``.
     The sign flip ``X R(theta) X = R(-theta)`` holds for the Y and Z axes
-    only, which is why only RY and RZ tables use this lowering. An exact-zero
+    only, which is why only RY and RZ tables use this decomposition. An exact-zero
     transformed angle omits its rotation but keeps the CX skeleton, so a
     table with ``k >= 1`` controls always costs ``2**k`` CX (Shende et al.,
     quant-ph/0406176v5, Theorem 8).
@@ -347,11 +347,13 @@ def project_unitary_table_dependencies(
 def local_pauli_dependencies(x: np.ndarray, z: np.ndarray, system_bit: int) -> tuple[int, ...]:
     """Return the address bits on which one system qubit's local Pauli letters depend.
 
-    ``x`` and ``z`` are the packed Pauli masks of an admitted table, uint64 of
-    shape ``(m, words)``, qubit zero first (bit j of word j // 64 is system
-    qubit j, as ``operators._pauli._pauli_masks`` numbers them). For address
-    k < m define ``c_k = x_k,j + 2 z_k,j``, representing I, X, Z, Y by 0, 1, 2,
-    3, and pad to P = 2**a addresses, a = bit_length(m - 1), with zero. The
+    ``x`` and ``z`` are the packed Pauli masks of a validated table, uint64
+    arrays of shape ``(m, words)`` in which system qubit j is bit ``j % 64``
+    of word ``j // 64``, with qubit zero first, as
+    ``operators._pauli._pauli_masks`` numbers the qubits. Let ``x_k,j`` and ``z_k,j`` be the bits of qubit
+    j = ``system_bit`` extracted from row k. For address k < m define
+    ``c_k = x_k,j + 2 z_k,j``, representing I, X, Z, Y by 0, 1, 2, 3, and pad
+    to P = 2**a addresses, a = bit_length(m - 1), with zero. The
     map from these codes to canonical local Pauli matrices is injective under
     entrywise equality, so
 
@@ -453,7 +455,7 @@ def append_control_diagonal_phases(
     With no controls the single branch phase is applied as the circuit
     global phase.
 
-    The lowering is the recursion of Shende et al. (quant-ph/0406176v5),
+    The decomposition is the recursion of Shende et al. (quant-ph/0406176v5),
     Theorem 7. On the least-significant remaining qubit,
     ``diag(exp(i phi_0), exp(i phi_1)) = exp(i (phi_0 + phi_1) / 2) RZ(phi_1 - phi_0)``
     in Qiskit's ``RZ(theta) = exp(-i theta Z / 2)`` convention. Each level is
@@ -521,23 +523,24 @@ def affine_angle_table_values(
 
 
 def _affine_angle_tolerance(offset: float, coefficients: Sequence[float]) -> float:
-    """Return the binary64 window for comparing a table with its affine law.
+    """Return the binary64 window for comparing a table with its affine formula.
 
     The window is ``gamma_m * S`` with ``S = |offset| + sum_q |coefficients[q]|``,
     ``gamma_m = m * eps / (1 - m * eps)``, ``m = 2k + 1`` for ``k`` controls
     and machine epsilon ``eps = 2**-52``, twice the unit roundoff ``u``. S
-    bounds the magnitude of every entry of the law.
+    bounds the magnitude of every entry of the formula.
 
     ``affine_angle_table_values`` forms an entry as the offset plus the sum
     of the coefficients of its set bits. That is at most k rounded additions
-    and no products, so the reconstruction differs from the exact law by at
-    most ``k u S / (1 - k u)``. The window is more than four times that bound.
-    The remainder absorbs the rounding in the supplied table, which its
-    producer computed by its own arithmetic. For the LCHS product-formula
-    tables, the registry row in docs/ENGINEERING_CONSTANTS.md counts both
-    computations' roundings and shows that the window covers them to first
-    order in u. A larger residual rejects the affine law. Revisit with
-    changed arithmetic, another table producer or supported precision.
+    and no products, so the reconstruction differs from the exact formula by
+    at most ``k u S / (1 - k u)``. The window is more than four times that
+    bound. The remainder absorbs the rounding in the supplied table, which
+    the code that built it computed by its own arithmetic. For the LCHS
+    product-formula tables, the registry row in docs/ENGINEERING_CONSTANTS.md
+    counts both computations' roundings and shows that the window covers
+    them to first order in u. A larger residual rejects the affine formula.
+    Revisit with changed arithmetic, another source of tables or another
+    supported precision.
     """
     control_qubits = len(coefficients)
     operations = max(1, 2 * control_qubits + 1)
@@ -553,10 +556,10 @@ def certify_affine_angle_table(
     offset: float,
     coefficients: Sequence[float],
 ) -> AffineAngleTable:
-    """Compare an independently derived affine law with a complete table.
+    """Compare an independently derived affine formula with a complete table.
 
     The result reports the residual and its roundoff window without deciding.
-    The LCHS structured SELECT accepts the law only when
+    The LCHS structured SELECT accepts the formula only when
     ``max_residual <= tolerance`` for every occurrence table.
     """
 
@@ -588,14 +591,14 @@ def append_affine_rotation(
     *,
     axis: Literal["y", "z"],
 ) -> None:
-    """Lower an affine table to one rotation plus active bit controls.
+    """Build an affine table as one rotation plus active bit controls.
 
     Rotations about one axis commute and add their angles, so
     ``R(offset + sum_q c_q b_q) = R(offset) * prod_q R(c_q)**b_q``. The
     ``2**k``-entry multiplexor therefore becomes at most one unconditional
     rotation (no CX) and one singly controlled rotation per nonzero
-    coefficient (two CX each, ``affine_rotation_resource_law``). The caller supplies a law whose
-    residual it has already accepted.
+    coefficient (two CX each, ``affine_rotation_resource_law``). The caller
+    supplies a formula whose residual it has already accepted.
     """
     from nwqlib.subroutines.qiskit_compat import controlled
     from qiskit.circuit.library import RYGate, RZGate
@@ -619,7 +622,7 @@ def multiplexor_resource_law(
     *,
     control_qubits: int,
 ) -> dict[str, int]:
-    """Return native rotation-multiplexor/diagonal slots and basis-CX counts.
+    """Return the table entries, gate counts and basis-CX counts of a rotation multiplexor or a diagonal.
 
     The counts describe the constructors in this module before transpiler
     optimization. A rotation multiplexor with ``k >= 1`` controls uses
@@ -657,7 +660,7 @@ def projected_unitary_resource_law(effective_control_count: int) -> dict[str, in
     ``UCGate(up_to_diagonal=False, mux_simp=False)`` synthesis with ``k``
     effective controls. The multiplexor up to a diagonal uses ``2**k - 1``
     CX, and the diagonal that completes it uses
-    ``2 * (2**k - 1) = 2**(k + 1) - 2`` CX, the diagonal law of
+    ``2 * (2**k - 1) = 2**(k + 1) - 2`` CX, the diagonal count of
     ``multiplexor_resource_law`` at width ``k + 1``. They describe the SDK
     construction rather than a paper bound, so a change in Qiskit's UCGate
     synthesis requires rechecking them.
@@ -676,7 +679,7 @@ def projected_unitary_resource_law(effective_control_count: int) -> dict[str, in
 
 
 def affine_rotation_resource_law(affine: AffineAngleTable) -> dict[str, int]:
-    """Return structural and exact basis-CX counts for affine lowering.
+    """Return structural and exact basis-CX counts of the affine construction.
 
     The offset is one unconditional rotation without CX. Each nonzero
     coefficient is one singly controlled rotation, the singly multiplexed
@@ -697,22 +700,23 @@ def product_formula_select_resource_law(
     *,
     implementation: Literal["multiplexor", "structured"] = "multiplexor",
 ) -> dict[str, Any]:
-    """Return the resolved product-formula SELECT structural census.
+    """Return the structural counts of the resolved product-formula SELECT.
 
     The input is the immutable LCHS product-formula plan.  ``Any`` avoids a
-    module cycle: the plan type lives in ``algorithms.lchs.select_synthesis``,
-    whose circuit builders already depend on this multiplexor owner.
+    module cycle, because the plan type lives in
+    ``algorithms.lchs.select_synthesis``, whose circuit builders already
+    depend on this module.
 
     Counts describe SELECT only.  In particular, ``arbitrary_rotation_count``
-    is the raw SELECT rotation-slot count (UCRZ table entries plus independent
-    control-diagonal phases), not a fault-tolerant T-count and not a PREP
-    count.  PREP is priced separately by the resource estimator.
+    is the raw count of SELECT rotation angles (UCRZ table entries plus
+    independent control-diagonal phases), not a fault-tolerant T-count and
+    not a PREP count.  The resource estimator counts PREP separately.
 
     Each occurrence of a Pauli rotation with support ``w`` adds ``2 (w - 1)``
     CX for the parity ladder that the SELECT builder enters before the
-    rotation and undoes after it. The ``"structured"`` census applies only to
-    a plan whose affine certificate is eligible and replaces each complete
-    UCRZ table with its affine lowering.
+    rotation and undoes after it. The ``"structured"`` counts apply only to
+    a plan whose affine certificate is eligible and replace each complete
+    UCRZ table with its affine construction.
     """
 
     padded_branches = int(plan.padded_node_count)

@@ -1,4 +1,4 @@
-"""Explicit Pauli and sparse structural bounds from the supplied binary64 data."""
+"""Norm and spectral bounds of Pauli and sparse operators, computed exactly from the supplied binary64 data."""
 
 from fractions import Fraction
 from typing import Literal
@@ -179,7 +179,7 @@ class OperatorFactReport(Record):
 
 
 def _options(operator):
-    """Return the scans that apply to an admitted Hermitian input with native data, or none."""
+    """Return the bound computations available for a Hermitian input object that holds its data, or none."""
     if operator.structure != "hermitian" or operator._data is None:
         return ()
     manifest = operator.manifest
@@ -196,10 +196,10 @@ def _options(operator):
 
 
 def _scalar_frontier(count):
-    """Byte allowance for the exact integers that a scan over ``count`` entries keeps alive at once.
+    """Byte allowance for the exact integers that a pass over ``count`` entries keeps alive at once.
 
-    The allowance is 32 integer slots of ``3174 + bit_length(count)`` bits.
-    Both the bit width and the slot count are derived below.
+    The allowance is 32 integers of ``3174 + bit_length(count)`` bits.
+    Both the bit width and the number of integers are derived below.
     """
     # Finite binary64 values share denominator 2**1074 and magnitude <2**1024.
     # A sum of count values therefore needs at most 2098+bit_length(count)
@@ -230,7 +230,7 @@ def _pauli_values(raw, num_qubits):
     ``||H|| <= sum_P |c_P|`` and places the spectrum in
     ``[c_I - sum_{P != I} |c_P|, c_I + sum_{P != I} |c_P|]``. The stored
     binary64 coefficients are summed as exact fractions, so the bounds hold
-    for the admitted operator without rounding. Returns the values and the
+    for the operator as stored, without rounding. Returns the values and the
     derived scalar-operation count.
     """
     full = center = centered = Fraction(0)
@@ -251,7 +251,7 @@ def _pauli_values(raw, num_qubits):
 
 
 def _sparse_values(operator, max_bytes):
-    """Exact rational Gershgorin bounds of an admitted Hermitian CSR/CSC matrix.
+    """Exact rational Gershgorin bounds of a Hermitian CSR/CSC input object.
 
     By the Gershgorin circle theorem every eigenvalue lies in some interval
     ``[a_ii - R_i, a_ii + R_i]`` with ``R_i = sum_{j != i} |a_ij|``. For a
@@ -294,10 +294,10 @@ def _sparse_values(operator, max_bytes):
 
 
 def _publish(operator, unit, scope, selected, values, *, entries, input_bytes, operations):
-    """Publish one scan's exact values as framed facts with a fresh receipt.
+    """Return one computation's exact values as framed facts, with a new record of the computation.
 
-    Each call creates a new acquisition identity, so a repeated scan is a new
-    acquisition and never relabels earlier work. The identity coefficient is
+    Each call creates a new ``acquisition_id``, so a repeated computation
+    gets its own record and never relabels earlier work. The identity coefficient is
     an exact read of the input and the other quantities are certified bounds.
     """
     scalars = {name: Rational(numerator=value.numerator, denominator=value.denominator)

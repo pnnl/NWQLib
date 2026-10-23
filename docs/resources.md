@@ -58,7 +58,7 @@ t                  None  unavailable
 
 Replace `A`, `b`, the observable and `shots` with your own. The [QLS guide](algorithms/qls.md#plan-and-estimate-beyond-simulation) plans and estimates a structured system with `2**40` unknowns in the same way.
 
-`estimate` reads the counting rules of the planned construction. It builds no circuit, transpiles nothing, calls no backend and does not choose another construction. A logical estimate is therefore distinct from an inventory of a prepared circuit ([Inspect a prepared circuit](#explicit-native-inspection)), from execution and from provider billing. LCHS can also count representative circuits of its construction ([LCHS guide](algorithms/lchs.md#resource-inspection)).
+`estimate` combines the costs declared by the planned construction. A cost rule (`ResourceLaw`) states a count for a specified resource context. `estimate` builds no circuit, transpiles nothing, calls no backend and does not choose another construction. A logical estimate is therefore distinct from an inventory of a prepared circuit ([Inspect a prepared circuit](#explicit-native-inspection)), from execution and from provider billing. LCHS can also count representative circuits of its construction ([LCHS guide](algorithms/lchs.md#resource-inspection)).
 
 ## Read the labels {#meaning-of-each-quantity}
 
@@ -70,7 +70,7 @@ Each count is a `ResourceQuantity`. It holds the metric, its value with unit, co
 | `upper_bound` | The true count is at most this value, with the same caveat as `exact`. |
 | `estimate` | Derived from observed data, an empirical prediction or a numerical estimate, such as the synthesis model in the example above. |
 | `conditional` | Holds only under a stated assumption, such as shots run one after another. |
-| `unavailable` | No applicable counting rule exists. `fact.reason` names what is missing. |
+| `unavailable` | The count cannot be determined from the construction's declared costs. `fact.reason` names what is missing. |
 
 An unavailable count is never replaced by zero, because a zero would present an incomplete estimate as a cheap and complete one. A missing gate, synthesis, workspace or probability rule each keeps its own reason.
 
@@ -87,7 +87,7 @@ logical_width at logical_device: 4 count [conditional]
   conditions: independent acquisitions share workspace only under the required serial schedule
 ```
 
-A reported peak width or memory assumes that the circuit executions of a measurement batch, every shot of every circuit, run one after another and reuse the same qubits and memory. Provider jobs are a separate count, and one job can run many shots. With the default `ResourceContext(batch_schedule="unspecified")`, such a peak is `conditional` and has `required_schedule="serial_acquisitions"`, so it is not an unconditional fit. `ResourceContext(basis="cx", batch_schedule="serial")` declares that schedule. The width above then reads `4 count [exact]`, and the required schedule stays recorded for execution to follow. Peaks of data that stay resident for the whole workload, and a single circuit run once, carry no schedule condition.
+A reported peak width or memory assumes that the circuit executions of a measurement batch, every shot of every circuit, run one after another and reuse the same qubits and memory. Provider jobs are a separate count, and one job can run many shots. With the default `ResourceContext(batch_schedule="unspecified")`, such a peak is `conditional` and has `required_schedule="serial_acquisitions"`, so it is not an unconditional fit. `ResourceContext(basis="cx", batch_schedule="serial")` declares that schedule. The width above then reads `4 count [exact]`, and the required schedule stays recorded for execution to follow. Peaks of data that stay in memory for the whole workload, and a single circuit run once, carry no schedule condition.
 
 For exact arithmetic, read `fact.value`, a `Rational` (`numerator`, `denominator`) or a `Float64` (`value`). A symbolic count names a formula in `workload.expressions` (`fact.symbol`), and an unavailable count has no value. Counts are real and nonnegative. Exact counts are integers, except `expected_operations`, and estimates and upper bounds may be fractional.
 
@@ -107,7 +107,7 @@ Gate, shot and setting counts are totals over the workload and have no location.
 
 `workload.quantity("logical_width")` without `location=` raises `ValueError` and lists the locations available for that metric. `workload.quantities` lists every metric and location.
 
-Each register of a `Program`, NWQLib's description of a circuit as named steps, declares its location and role (system, clean ancilla or dirty ancilla). Allocating, releasing and reusing registers determine the peaks. Declared extra quantum workspace is included, and unknown clean or dirty ancilla requirements stay unknown. A classical register stays live from its definition until the experiment ends. The width in qubits is not converted into state-vector bytes. [Will it fit in memory?](profiles.md#will-it-fit-in-memory) gives that conversion.
+Each register of a `Program`, NWQLib's description of a circuit as named steps, declares its location and role (system, clean ancilla or dirty ancilla). Allocating, releasing and reusing registers determine the peaks. Declared extra quantum workspace is included, and unknown clean or dirty ancilla requirements stay unknown. A classical register stays allocated from its definition until the experiment ends. The width in qubits is not converted into state-vector bytes. [Will it fit in memory?](profiles.md#will-it-fit-in-memory) gives that conversion.
 
 ## Choose the gate basis {#selected-laws-and-logical-bases}
 
@@ -115,13 +115,13 @@ Each register of a `Program`, NWQLib's description of a circuit as named steps, 
 
 A CX count is a formula or an estimate from the rules of the planned blocks. It is not a count of gates in a built circuit and does not include hardware routing. A block without a CX rule leaves the total unavailable, and a CX bound supplies no T, rotation, depth or workspace counts. The [source map](#source-map) lists the published counts behind these rules.
 
-A Toffoli count and a T decomposition are alternative bases, and neither is converted into the other. An arbitrary rotation gets no fixed T count without its synthesis precision (`precision=`) and synthesis rule (`synthesis=`). A fault-tolerant counting rule can give a conditional estimate for a block without an executable circuit.
+A Toffoli count and a T decomposition are alternative bases, and neither is converted into the other. An arbitrary rotation gets no fixed T count without its synthesis precision (`precision=`) and synthesis rule (`synthesis=`). A fault-tolerant cost rule can give a conditional estimate for a block without an executable circuit.
 
-A one-qubit phase is classified by its stored angle. An angle of 0, ±pi/2, ±pi, ±3pi/2 or ±2pi is a Clifford gate, and ±pi/4 is a T or T-inverse gate. The comparison is exact, so an angle near these values stays an arbitrary rotation. For example, a controlled preparation of `[i, 0]` is an S gate on its control, with zero non-Clifford depth.
+A one-qubit phase is classified by its recorded angle. An angle of 0, ±pi/2, ±pi, ±3pi/2 or ±2pi is a Clifford gate, and ±pi/4 is a T or T-inverse gate. The comparison is exact, so an angle near these values stays an arbitrary rotation. For example, a controlled preparation of `[i, 0]` is an S gate on its control, with zero non-Clifford depth.
 
 ## Count shots, settings and exact evaluations {#count-shots-settings-and-exact-evaluations}
 
-Methods measure through measurement batches (`nwqlib.ir.MeasurementBatch`). A batch runs its body, the circuit it repeats, under one or more settings. A setting is one experiment point with a label and parameter values, such as one measurement basis. Settings are independent experiments, and the batch's `repetitions` sets how many times each one runs. A terminal batch measures its settings. Its readout kind (`observation_kind`) is `counts` for sampled shots, `pauli_expectation` or `probabilities` for exact statistics, `trajectory` for one exact evaluation of the body read at its observation points, `estimated_observable` for a provider's estimate, whose shots stay unavailable, or `None` when unknown. An outer batch repeats the batches inside it. Repetitions multiply the work of the batch body, and unknown repetitions leave the work unknown.
+Methods measure through measurement batches (`nwqlib.ir.MeasurementBatch`). A batch runs its body, the circuit it repeats, under one or more settings. A setting is one experiment point with a label and parameter values, such as one measurement basis. Settings are independent experiments, and the batch's `repetitions` sets how many times each one runs. A terminal batch measures its settings. Its readout kind (`observation_kind`) is `counts` for sampled shots, `pauli_expectation` or `probabilities` for exact statistics, `trajectory` for one exact evaluation of the body read at its observation points, `estimated_observable` for a provider's estimate, whose shots stay unavailable, or `None` when unknown. The kinds `pauli_expectation`, `probabilities` and `trajectory` are exact readout, which a simulator computes without shot sampling, subject to numerical rounding. An outer batch repeats the batches inside it. Repetitions multiply the work of the batch body, and unknown repetitions leave the work unknown.
 
 | Count | What it counts |
 | --- | --- |
@@ -132,13 +132,13 @@ Methods measure through measurement batches (`nwqlib.ir.MeasurementBatch`). A ba
 | `root_setting_declarations` | Settings declared by a `Program` whose root is a measurement batch. Absent for other roots. |
 | `root_repetitions` | Repetitions of that root batch's body, before the readout counts of the batches inside it. |
 
-A QHD plan with `execution="quantum"` uses one measurement setting named `qhd`. A counts measurement with `S` repetitions counts `S` shots, one setting and zero exact evaluations. An exact probability or amplitude readout counts zero shots, one setting and one exact evaluation. A kept-amplitude readout takes its size from the amplitude declaration of the experiment.
+A QHD plan with `execution="quantum"` uses one measurement setting named `qhd`. A counts measurement with `S` repetitions counts `S` shots, one setting and zero exact evaluations. An exact probability or amplitude readout counts zero shots, one setting and one exact evaluation. A readout that keeps the state amplitudes takes its size from the experiment's declaration of those amplitudes.
 
 For example, an outer batch with one setting repeats, three times, an inner batch with two settings of two shots each. The estimate reports 12 shots, 6 setting visits, 2 distinct settings, 1 root setting declaration and 3 root repetitions. Steps in sequence and `Repeat` pass these readout counts on to the enclosing `Program`. With exact readout and one repetition per inner setting instead, it reports 0 shots and 6 exact evaluations. Unknown values propagate as follows:
 
 - Unknown inner repetitions never become exactly counted outer readouts.
 - A known readout kind proves the other count exactly zero, even when the repetitions are unknown.
-- An unknown readout kind with positive repetitions keeps the body work but leaves both readout counts unknown.
+- An unknown readout kind with positive repetitions still counts the work of the body but leaves both readout counts unknown.
 - Zero repetitions give zero work.
 - Distinct settings across a parameter range of an outer batch stay unknown, and no range is enumerated.
 - An unresolved control or repetition can make `unique_settings` an upper bound.
@@ -153,7 +153,7 @@ The `memory` count at a location is the peak of declared bytes there. A block's 
 
 Missing block or classical workspace leaves `memory` unavailable. When some declared workspace is known, `known_memory` gives the known part, and `input_bytes`, `analysis_bytes`, `io_bytes`, `materialization_bytes` and `stored_bytes` give the known parts by purpose.
 
-`ResourceContext(capacities=...)` stores device limits for a later assessment. `estimate` compares no count with a device and claims no fit. [Check device fit and run time](profiles.md) makes that comparison, location by location.
+`ResourceContext(capacities=...)` records device limits for a later assessment. `estimate` compares no count with a device and claims no fit. [Check device fit and run time](profiles.md) makes that comparison, location by location.
 
 ## Save and reload an estimate {#save-and-reload-an-estimate}
 
@@ -202,16 +202,16 @@ Inspection reads the existing circuit and names it by its content hash. It submi
 
 Nonempty `transpile_options` compiles one separate copy and counts that. The original circuit and readout stay unchanged. Simulator saves are removed from the copy before compiling, so its counts have no save entries. These observed counts are distinct from the formulas of the estimate, from representative samples and from physical models.
 
-`prepared.circuits` creates detached copies of every circuit, and `prepared.circuit(index)` copies one. Use the indexed inspection above to count without those copies.
+`prepared.circuits` creates independent copies of every circuit, and `prepared.circuit(index)` copies one. Use the indexed inspection above to count without those copies.
 
-`max_operations=100000` bounds the inspected and compiled operations, and `max_bytes=10_000_000_000` bounds the known option, inventory and copy data. Options must be finite scalars, lists or dictionaries without cycles, nested at most 64 deep. The output of a compilation that expands beyond `max_operations` is refused after compiling. These limits do not bound compiler workspace, existing SDK data or process memory, which stay unknown.
+`max_operations=100000` bounds the inspected and compiled operations, and `max_bytes=10_000_000_000` bounds the known bytes of the options, the operation counts and the circuit copy. Options must be finite scalars, lists or dictionaries without cycles, nested at most 64 deep. The output of a compilation that expands beyond `max_operations` is refused after compiling. These limits do not bound the compiler workspace, the data Qiskit already holds or the process memory, which stay unknown.
 
 ## How the estimator counts {#how-the-estimator-counts}
 
 <a id="fold-a-selected-construction"></a>
 <a id="composition-stored-structure-and-lifetimes"></a>
 
-The estimator's bookkeeping, meaning how a counting rule is matched to a block, how sequences, parallel steps, repetitions and register lifetimes combine, how readout bytes are set aside and how its own work is limited, is described in [Resource estimate bookkeeping](development/execution.md#resource-estimate-bookkeeping).
+How the estimator matches declared costs to a block and its resource context, how it combines sequences, parallel steps, repetitions and register lifetimes, how it sets aside readout bytes and how it limits its own work is described in [Resource estimate bookkeeping](development/execution.md#resource-estimate-bookkeeping).
 
 ## Source map
 
@@ -227,5 +227,5 @@ NWQLib's own counting rules (how counts combine, how unknowns propagate, readout
 | Signed Pauli SELECT uses at most 3q(L-1)+max(0,L-2) CX, with L = 2^a labels | NWQLib derivation from the rows above | Docstring of the code | `blocks.selection.signed_pauli_cx_bound` |
 | Pauli readout basis uses the SELECT bound without the sign diagonal | NWQLib derivation | Docstring of the code | `blocks.selection.pauli_readout_cx_bound` |
 | Controlled direct PREP bound | NWQLib derivation | ENGINEERING_CONSTANTS.md, "Controlled direct PREP slot bound" | `_preparation_laws.direct_preparation_controlled_cx_bound` |
-| Contiguous-uniform fast-path gate positions. With M = sum of 2^(l_j) over j = 0..k, the preparation uses one RY, k X, l_0 H, l_k-l_0 open controlled H and k-1 open controlled RY, where a controlled H needs one CX and a controlled RY two | Shukla and Vedula, arXiv:2306.11747v2, which Qiskit `UniformSuperpositionGate` implements. The per-gate expansions (two H and four phase gates around the CX of a controlled H, two RY with the two CX of a controlled RY, two X per open control) are Qiskit 2.6.0's gate definitions | Algorithm 1 (p. 4), gate counts in Sec. 2.5 (p. 14) and CX constructions in Fig. 6 (pp. 15-16) | `_preparation_laws._uniform_superposition_gate_slots` |
+| Gate positions of the uniform superposition over M contiguous basis states. For M that is not a power of two, M = sum of 2^(l_j) over j = 0..k with l_0 < ... < l_k and k >= 1, and the preparation uses one RY, k X, l_0 H, l_k-l_0 open controlled H and k-1 open controlled RY, where a controlled H needs one CX and a controlled RY two. For M = 2^r, the preparation uses r H gates | Shukla and Vedula, arXiv:2306.11747v2, which Qiskit `UniformSuperpositionGate` implements. The per-gate expansions (two H and four phase gates around the CX of a controlled H, two RY with the two CX of a controlled RY, two X per open control) are Qiskit 2.6.0's gate definitions | Algorithm 1 (p. 4), gate counts in Sec. 2.5 (p. 14) and CX constructions in Fig. 6 (pp. 15-16) | `_preparation_laws._uniform_superposition_gate_slots` |
 | Work limit of an estimate | NWQLib engineering limit | ENGINEERING_CONSTANTS.md, "Shared Program admission limits" | `resources.records.FOLD_WORK_PER_ADMISSION_STEP` |

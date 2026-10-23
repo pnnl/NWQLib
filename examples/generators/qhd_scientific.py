@@ -3,7 +3,7 @@
 #
 # Zeguan Wu and coauthors test quantum Hamiltonian descent (QHD) with box refinement and an augmented-Lagrangian (AL) outer loop ([arXiv:2605.12066v1](https://arxiv.org/abs/2605.12066v1), Sec. VI). On smaller grids, this notebook asks whether refinement finds the narrow minimum of a shifted Ackley function and whether the AL loop finds a constrained Rastrigin basin.
 #
-# As in the paper, the optimization runs are classical evolutions of the grid model with exact probabilities, and Section 6 runs one 4-qubit circuit of the same construction.
+# As in the paper, the optimization runs are classical evolutions of the grid model that compute the probabilities without shot sampling, and Section 6 runs one 4-qubit circuit of the same construction.
 #
 # Install with `python -m pip install "nwqlib[aer,notebook]"`. To work on NWQLib itself, run `python -m pip install -e ".[aer,notebook]"` in a clone of the repository instead. The notebook evolves 8- and 10-qubit models classically, simulates one 4-qubit circuit and runs in about 51 s on an Apple M3 Max with 36 GiB of memory (Python 3.12.14, Qiskit 2.6.0, Aer 0.18.0).
 #
@@ -256,7 +256,7 @@ show_table([(row["ftol"], row["objective"], row["distance"], row["successes"], r
 #
 # The distance 0.01 therefore corresponds to a gap of about 0.18, so the gap target 0.2 and the distance target 0.01 ask for about the same accuracy, far inside the basin.
 #
-# After the collapsed helpers, one cell defines the problem and computes the known optimum for the evaluation. The next runs the three AL runs and SLSQP, in about 47 s.
+# After the collapsed helpers, one cell defines the problem and computes the known optimum for the evaluation. The next performs the three AL runs and the SLSQP starts, in about 47 s.
 
 # %% jupyter={"source_hidden": true}
 # Helpers for the constrained comparison: independent NumPy evaluations of the problem, the SLSQP baseline, a
@@ -420,7 +420,7 @@ show_al_figure(rastrigin_runs, slsqp, al_options.feasibility_tolerance, RASTRIGI
 #
 # (b) The gap $f-f^*$ of the feasible round points on a logarithmic axis, with the gap target and the gap of the best SLSQP point. Points of different $Z$ are offset slightly along the round axis.
 #
-# (c) The normalized violation and complementarity of the run with the most levels per round, on an axis that is linear below $10^{-9}$ so that exact zeros are visible. All QHD points come from classical evolution with exact probabilities.
+# (c) The normalized violation and complementarity of the run with the most levels per round, on an axis that is linear below $10^{-9}$ so that exact zeros are visible. All QHD points come from classical evolution with probabilities computed without shot sampling.
 #
 # The table compares the best feasible point of each run with SLSQP, the known optimum and the paper's published result on a 64 × 64 grid. The gap and the distance are measured from $f^*$ and $x^*$, and $g_1, g_2$ are evaluated with NumPy at the returned point.
 
@@ -450,7 +450,7 @@ show_al_verdict(summaries, RASTRIGIN_TARGETS, al_options)
 #
 # ## 3. How many shots find a good point
 #
-# **The runs above read exact probabilities and used no shots. On hardware each shot returns one grid point of the binary register.**
+# **The runs above used exact readout, reading computed probabilities without shot sampling, with numerical rounding. On hardware each shot returns one grid point of the binary register.**
 #
 # For a fixed state, such as the output of a fixed circuit, let $p$ be the unconditional probability of a specified success event. $S$ independent repetitions all miss it with probability $(1-p)^S$, so the probability of at least one success is $P_S=1-(1-p)^S$.
 #
@@ -460,7 +460,7 @@ show_al_verdict(summaries, RASTRIGIN_TARGETS, al_options)
 #
 # The uniform distribution on the same grid shows how much the evolution concentrated the probability, although this comparison gives the uniform distribution the refined box for free. The 1,000 shots are one multinomial draw from each state with a fixed seed, not shots of a circuit.
 #
-# These probabilities are conditional on the exact-readout boxes and multipliers, which came from exact distributions. They are not the success probability of a run whose boxes and multipliers are chosen from finite shots.
+# These probabilities are conditional on the exact-readout boxes and multipliers, which came from distributions computed without shot sampling. They are not the success probability of a run whose boxes and multipliers are chosen from finite shots.
 
 # %% jupyter={"source_hidden": true}
 # Helpers for the measurement budget: the state of a selected level, its success probability and the figure.
@@ -553,9 +553,9 @@ show_table(shot_rows, headers=("State", "Success event", "One shot, p", "Uniform
 show_shot_figure(curves)
 
 # %% [markdown]
-# **Figure 3.** $P_S=1-(1-p)^S$ for the two selected states, conditional on the exact-readout boxes and multipliers. The success events are those of the table. A dotted line at zero marks an event that no point of the final grid meets.
+# **Figure 3.** $P_S=1-(1-p)^S$ for the two states of the table, conditional on the exact-readout boxes and multipliers. The success events are those of the table. A dotted line at zero marks an event that no point of the final grid meets.
 #
-# When no feasible grid point of a state lies in a success event, no number of shots from that state reaches the event. The grid spacing of the last level sets that limit, and only a finer final grid, from more levels or more points per variable, moves it.
+# When no feasible grid point of a state lies in a success event, no number of shots from that state reaches the event. Which events a state can reach depends on the points of its final grid, so moving the box or changing the grid can make an event reachable. More refinement levels or more points per variable can help but do not guarantee that the new grid meets the event.
 #
 # ## 4. What these runs establish
 #
@@ -630,9 +630,9 @@ display(HTML(f"<p><strong>{escape(lead)}</strong></p><ul>"
 # **Planning checks the work of every solve before any evolution, and a refusal names the limit and the amount to set.**
 #
 # - **Input.** A real SymPy objective, its variables and one finite interval per variable. Constraints are written as `g <= 0` (Section 10).
-# - **Output.** A point in the original coordinates and its objective, read from exact probabilities here.
+# - **Output.** A point in the original coordinates and its objective, read from probabilities computed without shot sampling here.
 # - **Size.** $d$ variables with $K$ grid points each use $d\log_2K$ qubits. The classical evolution stores $K^d$ amplitudes, and its counted work grows about as the number of steps times $K^d\log_2K$.
-# - **Limit.** `QHD(max_work=...)` caps the work of each solve. The default, 1,000,000,000, covers the 32 × 32 levels of Section 2.
+# - **Limit.** `QHD(max_work=...)` limits the work of each planned stage of a solve. Work is a nominal measure of classical computation that NWQLib derives from the problem sizes by formula ([work units](../docs/glossary.md#work-units)). It combines estimates such as one unit for each node of the symbolic expression evaluated at each table entry and a nominal cost for each Fourier transform of the split-step evolution, and it is neither a uniform count of scalar operations nor a time. The default, 1,000,000,000, covers the 32 × 32 levels of Section 2.
 #
 # The cell repeats the first Rastrigin call with `max_work` set to 100,000,000 for this demonstration (the default is 1,000,000,000). Planning refuses it before any evolution, and the message names the amount. The remedy is the default `max_work`, which the runs of Section 2 use.
 
@@ -679,7 +679,7 @@ show_table(cost_rows, headers=("Run", "QHD solves", "Steps per solve", "Evolutio
 # - **Work units** are a planning quantity, not seconds. The time column is measured on this computer.
 # - **Not estimated:** physical qubits, error correction, run time on hardware and price.
 #
-# **A 4-qubit circuit of the same construction.** `estimate` predicts the CX count and an upper bound on the arbitrary rotations from the resource formulas of the selected construction, without building the circuit.
+# **A 4-qubit circuit of the same construction.** `estimate` predicts the CX count and an upper bound on the arbitrary rotations from the resource formulas of this construction, without building the circuit.
 #
 # The cell plans one QHD solve of the Ackley objective itself on the original box, without refinement and the normalization of the search model, on a 4 × 4 binary grid with 8 steps and total time 0.5.
 #
@@ -787,7 +787,7 @@ show_table([(levels, summaries[levels]["solves"], summaries[levels]["gap"], summ
 #
 # **The runs are noiseless, and every count is a logical count.**
 #
-# The optimization runs read exact probabilities, the shots of Section 3 are drawn from exact states, and the 4-qubit circuit is read out exactly. The local simulator also runs circuits with a noise model ([Local Aer](../docs/aer.md)), and [Choose a backend](../docs/backends.md) lists the other backends.
+# The optimization runs read probabilities computed without shot sampling and subject to numerical rounding. The shots of Section 3 are drawn from those computed distributions, and the 4-qubit circuit uses exact readout. The local simulator also runs circuits with a noise model ([Local Aer](../docs/aer.md)), and [Choose a backend](../docs/backends.md) lists the other backends.
 #
 # ## 10. Your own objective
 #
@@ -878,7 +878,7 @@ print(f"point {my_result.candidate}, objective {my_result.objective:.3g}, "
 #
 # the Powell–Hestenes–Rockafellar form for inequalities (Rockafellar, [doi:10.1007/BF01580138](https://doi.org/10.1007/BF01580138)), starting from the original box in every round. A refined AL round chooses the completed level with the least recorded relative $L_k$.
 #
-# Within a level, best-observed selection minimizes the evaluated solved table over observed positive valid support. A mode or mean rule selects a different quantity, and this notebook reads the mode, the most probable grid point. These rules do not certify a mathematical grid minimum.
+# Within a level, the best-observed rule takes the grid point with the least tabulated value of the level's objective among the valid points observed with positive probability. A mode or mean rule selects a different quantity, and this notebook reads the mode, the most probable grid point. These rules do not certify a mathematical grid minimum.
 #
 # At the chosen point the method sets $\mu_{k+1,j}=\max(0,\mu_{k,j}+\rho_kg_j)$. It doubles $\rho$ unless the constraint measure of Algorithm 4.1 of Birgin and Martínez ([doi:10.1137/1.9781611973365](https://doi.org/10.1137/1.9781611973365)) fell to at most a quarter of its previous value.
 #
@@ -1049,11 +1049,11 @@ show_table([("Python", platform.python_version()), ("NumPy", np.__version__), ("
 #
 # The configuration of this notebook was selected with Python 3.12.14, NumPy 2.5.2 and SciPy 1.18.1 on one laptop. The numbers below are from that study and are not executed here.
 #
-# An independently written propagator, a two-dimensional NumPy FFT with separately assembled energies, schedule weights and PHR potential, reproduced every level of the selected runs. Historical time-resolution comparisons use their recorded experiment revision and fixed boxes.
+# An independently written propagator, a two-dimensional NumPy FFT with separately assembled energies, schedule weights and PHR potential, reproduced every level of these runs. The time-resolution comparisons used fixed boxes and the experiment revision recorded with them.
 #
-# Step-doubling differences are empirical checks of that finite model, not rigorous continuous-time error bounds. A new execution can change adaptive boxes, selected points, numerical windows or the work that planning accepts, and needs its own revision and timing.
+# Step-doubling differences are empirical checks of that finite model, not rigorous continuous-time error bounds. A new execution can change adaptive boxes, selected points, numerical windows or the work that planning counts, and needs its own record of revision and timing.
 #
-# <details><summary>Time-step checks of the selected runs</summary>
+# <details><summary>Time-step checks of these runs</summary>
 #
 # | Check | Ackley, K = 16, 2,048 steps | Rastrigin, K = 32, Z = 4, 8,192 steps |
 # | --- | --- | --- |
@@ -1065,7 +1065,7 @@ show_table([("Python", platform.python_version()), ("NumPy", np.__version__), ("
 #
 # </details>
 #
-# The fixed-box checks meet the selection criterion, a total-variation change below 10⁻³ on doubling the steps. Complete reruns check the adaptive runs.
+# The fixed-box checks meet the criterion by which the configuration was chosen, a total-variation change below 10⁻³ on doubling the steps. Complete reruns check the adaptive runs.
 #
 # With 16,384 steps, the Rastrigin runs with Z = 1 and Z = 3 keep all their boxes and points, with largest distribution changes of 1.0 × 10⁻⁴ and 2.2 × 10⁻⁴.
 #
@@ -1095,9 +1095,9 @@ show_table([("Python", platform.python_version()), ("NumPy", np.__version__), ("
 #
 # Between 16,384 and 32,768 steps the Z = 3 run keeps all 30 boxes and subproblems, but a level's distribution still changes by total variation 4.2 × 10⁻³. That is above the 10⁻³ criterion, so the time resolution of the 64 × 64 model is unresolved at that cost.
 #
-# These runs were made with `max_work=5_000_000_000`. A historical configuration can need a larger current allowance after a change to the work formulas.
+# These runs were made with `max_work=5_000_000_000`. A configuration from an earlier study can need a larger `max_work` after a change to the work formulas.
 #
-# Plan it again and choose the limit from the work that planning now counts for each stage, as an accepted plan records it or a refusal reports it. A refusal names the stage, its counted work and the exceeded limit. To repeat one, for example the 32,768-step run with Z = 3:
+# Plan it again and choose the limit from the work that planning now counts for each stage, as a plan records it or a refusal reports it. A refusal names the stage, its counted work and the exceeded limit. To repeat one, for example the 32,768-step run with Z = 3:
 #
 # ```python
 # k64 = solve_augmented_lagrangian(

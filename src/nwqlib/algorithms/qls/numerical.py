@@ -1,9 +1,9 @@
 """Dense spectral estimates and polynomial actions of the classical QLS model.
 
 Planning, the explicit ``execution="classical"`` model and explicit
-verification call these kernels. Each acts on the encoded matrix
+verification call these routines. Each acts on the encoded matrix
 ``A/alpha``, through the original spectral factors or through a shortcut's
-augmented ``G_t`` and its Hermitian dilation, with the selected Chebyshev
+augmented ``G_t`` and its Hermitian dilation, with the chosen Chebyshev
 coefficients, the classical counterpart of the QSVT circuit that
 ``algorithms/qls/quantum.py`` builds.
 """
@@ -27,9 +27,10 @@ def _extreme_singular_values(matrix: np.ndarray, *, hermitian: bool, events) -> 
 
     The matrix is first scaled by a power of two, which is exact in binary64
     and keeps extreme magnitudes away from overflow and underflow. The
-    endpoints are scaled back exactly. ``hermitian`` is the caller's exact
-    admitted Hermiticity metadata (``operator.structure == "hermitian"``),
-    so no conjugate-transpose copy is formed to test it again.
+    endpoints are scaled back exactly. ``hermitian`` is the exact
+    Hermiticity recorded for the input (``operator.structure ==
+    "hermitian"``), so no conjugate-transpose copy is formed to test it
+    again.
 
     For Hermitian input, ``eigvalsh`` computes all eigenvalues of the
     binary-scaled matrix, and the endpoints are their minimum and maximum
@@ -37,7 +38,8 @@ def _extreme_singular_values(matrix: np.ndarray, *, hermitian: bool, events) -> 
     singular value of an indefinite matrix is an interior eigenvalue
     magnitude. Squaring A would lose the small eigenvalues and square its
     condition number. Any other matrix uses a singular-values-only SVD.
-    The caller, ``host_planning._spectrum``, admits the work and bytes.
+    The caller, ``host_planning._spectrum``, checks the work and bytes
+    against the limits.
     """
 
     scaled, exponent = binary_scaled_matrix(matrix)
@@ -63,7 +65,7 @@ def inverse_polynomial_action(left, values, rhs_direction, *, alpha, coefficient
     polynomial action still needs spectral information for its distinct
     matrix G_t.
 
-    Relation: with encoding scale alpha, the library's dilation is
+    Relation: with encoding normalization alpha, the library's dilation is
     ``H = [[0, A/alpha], [A†/alpha, 0]]`` and
     ``P(H) = [[0, U P(Sigma/alpha) V†], [V P(Sigma/alpha) U†, 0]]``.
     Conjugating by ``diag(U, V)`` gives ``[[0, S], [S, 0]]``, whose even
@@ -87,11 +89,11 @@ def inverse_polynomial_action(left, values, rhs_direction, *, alpha, coefficient
         values: Singular values or signed eigenvalues, in the original scale.
         rhs_direction: Unit RHS direction ``b_hat`` on the d original
             coordinates.
-        alpha: Selected encoding normalization.
-        coefficients: Selected odd Chebyshev coefficients divided by the
+        alpha: Normalization of the chosen encoding.
+        coefficients: Chosen odd Chebyshev coefficients divided by the
             polynomial's rescale.
         right_h: ``V†`` of the original SVD, or None for a Hermitian
-            eigensystem, whose right frame is ``left`` itself.
+            eigensystem, whose right factor is ``left`` itself.
     """
     coordinates = np.conjugate(left.T @ np.conjugate(rhs_direction))
     transformed = np.polynomial.chebyshev.chebval(values / alpha, coefficients) * coordinates
@@ -109,9 +111,10 @@ def linear_model_weights(left, rhs_direction):
     ``||x_bar_sigma||**2 = sum_j w_j / (f(sigma)**2 + [1 - f(sigma)**2] (sigma_j/alpha)**2)``.
     ``left`` is ``U`` of the original SVD, or the eigenvectors ``V`` of a
     Hermitian original, whose weights ``|V† b_hat|**2`` have the same
-    magnitudes as those of the signed SVD frame ``U = V diag(sign lambda)``.
-    The direction is normalized with ``stable_vector_norm``, and the frame is
-    not conjugated as a matrix.
+    magnitudes as those of the left singular vectors
+    ``U = V diag(sign lambda)``. The direction is normalized with
+    ``stable_vector_norm``, and the factor matrix is not conjugated as a
+    whole.
     """
     normalized = normalized_vector(rhs_direction, stable_vector_norm(rhs_direction))
     coordinates = np.conjugate(left.T @ np.conjugate(normalized))
@@ -119,7 +122,7 @@ def linear_model_weights(left, rhs_direction):
 
 
 def projected_augmented_inplace(augmented, b_prime, tile=PROJECTOR_ROW_TILE):
-    """Overwrite an owned augmented ``A_t`` with ``G_t = A_t - b'(b'† A_t)``.
+    """Overwrite an augmented ``A_t`` in place with ``G_t = A_t - b'(b'† A_t)``.
 
     Form G_t by subtracting the rank-one matrix b′(b′†A_t) from A_t, using
     the normalized augmented RHS b′. This evaluates the same projector
@@ -130,12 +133,12 @@ def projected_augmented_inplace(augmented, b_prime, tile=PROJECTOR_ROW_TILE):
     ``b'``, ``G_t = (I - b'b'†) A_t = A_t - b'(b'† A_t)`` by distributivity,
     with no Hermiticity or invertibility requirement on ``A_t``. ``b'`` is
     normalized again, as ``projector_complement_matrix`` does, so the
-    selected projector of the rounded input is preserved. The update is
+    projector of the rounded input is unchanged. The update is
     applied in row tiles of length ``r = min(a, tile)``, so the
     outer-product temporary holds ``16 r a`` bytes. Tiling changes storage,
     not the per-entry multiply and subtract. Rounding differs from the
     projector-matrix product, so the equivalence is algebraic, not bitwise.
-    A zero or nonfinite projector vector rejects.
+    A zero or nonfinite projector vector is rejected.
     """
     b = np.asarray(b_prime, dtype=np.complex128)
     norm = np.linalg.norm(b)
@@ -172,8 +175,8 @@ def shortcut_matrix(matrix, rhs_direction, *, t_value):
     ``A_t`` doubles the dimension and places ``1/t`` at the first new
     coordinate ``e_n`` (the one-qubit padding of Dalzell arXiv:2406.12086v2,
     App. A.6), and ``b' = (b + e_n)/sqrt(2)``. ``projected_augmented_inplace``
-    applies the projector to the freshly built ``A_t``, which this function
-    owns, so neither a copy nor the complement projector matrix is formed.
+    applies the projector to the freshly built ``A_t``, which no other code
+    uses, so neither a copy nor the complement projector matrix is formed.
     No circuit is built and no target solve is performed.
     """
     augmented = dalzell_augmented_matrix(matrix, t_value)
@@ -242,8 +245,8 @@ def project_shortcut_branch(branch, *, system_dimension, dilation_offset=0):
 def _rhs_direction(rhs):
     """Return the unit RHS direction ``b/||b||`` as a dense vector.
 
-    A stored vector is used as is. Occupation and product preparations are
-    expanded once for the selected classical work.
+    A vector input is used as is. Occupation and product preparations are
+    expanded once for the classical computation.
     """
     if rhs.reference.representation == "vector":
         return rhs._direction

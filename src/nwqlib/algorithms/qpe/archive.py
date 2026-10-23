@@ -1,4 +1,4 @@
-"""Save actual selected QPE inputs, powers and existing numerical caches."""
+"""Save the QPE inputs and powers that a Plan uses, and the numerical caches already computed."""
 
 from nwqlib.blocks.selection import SelectedBlock, _preparation_circuit
 from . import powers
@@ -7,15 +7,15 @@ from .records import QPEReconstruction
 
 
 def save(method, plan, files):
-    """Persist selected power payloads by constructor kind, sharing the original target data.
+    """Save the data of each power block by constructor kind, sharing the original target data.
 
     Only constructor kinds and their scalar parameters are written. A dense
-    power must reference the bound base matrix (the target for a Hamiltonian,
-    the selected polar base for a unitary, which the archive stores once) and a
-    product-formula step must use the reconstruction's Pauli terms, so the
-    archive holds one copy of each operator. The format label names this payload layout
-    (``qpe/<estimator>/8``), and load rejects any
-    other label instead of converting it.
+    power must refer to the base matrix attached to the Plan (the target for
+    a Hamiltonian, the polar factor for a unitary, which the archive saves
+    once) and a product-formula step must use the Plan's Pauli terms, so the
+    archive holds one copy of each operator. The format label names this
+    layout (``qpe/<estimator>/8``), and load rejects any other label instead
+    of converting it.
     """
     data = plan._native["input"]
     payloads = []
@@ -60,7 +60,7 @@ def save(method, plan, files):
 
 
 def load(method_type, saved, files):
-    """Bind the saved QPE inputs and known constructors without rebuilding powers."""
+    """Attach the saved QPE inputs and known constructors to the Plan without rebuilding powers."""
     if saved["format"] != f"qpe/{method_type.estimator}/8":
         raise ValueError("unsupported QPE archive format")
     fields = dict(saved["method"])
@@ -113,7 +113,7 @@ def load(method_type, saved, files):
 
 
 def save_context(context, files):
-    """Write the Run's existing spectral context: target identity, eigensystem, reference and weights.
+    """Write the Run's spectral context: target reference, eigensystem, reference state, weights.
 
     Nothing is computed, so a context without an eigensystem is saved without
     one and a reopened Run continues from exactly what it had.

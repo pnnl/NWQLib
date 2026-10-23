@@ -1,6 +1,6 @@
 """Helpers shared by the eigenvalue methods and ExpectationMethod.
 
-They build the one-kernel classical construction and the unknown-error model
+They build the classical construction with its one routine and the unknown-error model
 of an eigenvalue Plan, and check that observed chunks match their Plan points.
 """
 
@@ -14,28 +14,28 @@ from nwqlib.evidence.records import Fact
 
 
 def host_construction(source, inputs, labels, *, work, description, frames=None, admission=None):
-    """Declare one classical host kernel and the one Experiment that runs it.
+    """Declare one classical routine and the one Experiment that runs it.
 
     Classical execution of Lanczos, FixedGCIM and Expectation has no quantum
     Program. Its Plan instead holds a one-node Program whose ClassicalStage
-    names a SelectedKernel. The Method binds the kernel's Python function
-    after planning.
+    names a SelectedKernel, the classical routine. The Method binds the
+    routine's Python function after planning.
 
     Args:
-        source: Source record of the Method that owns the kernel.
-        inputs: InputRefs the kernel reads. Repeated identities are kept once.
-        labels: Names of the scalars the kernel returns, in order.
-        work: Declared work of one invocation, stored as the kernel's invocation_work.
-        description: Short statement of what the kernel computes, stored in the observation's ``padding`` field.
+        source: Source record of the Method that provides the routine.
+        inputs: InputRefs the routine reads. Repeated content hashes are kept once.
+        labels: Names of the scalars the routine returns, in order.
+        work: Declared work of one call, stored as the routine's invocation_work.
+        description: Short statement of what the routine computes, stored in the observation's ``padding`` field.
         frames: Scalar frame per label, ``unit`` for every label when None.
-        admission: ``(option, max_steps)`` of a Method that sets its Programs' admission
-            ceiling, such as ``("FixedGCIM.max_admission_steps", 10_000_000)``. None
-            uses the shared ``AdmissionLimits`` default.
+        admission: ``(option, max_steps)`` of a Method that sets the planning-work
+            limit of its Programs, such as ``("FixedGCIM.max_admission_steps", 10_000_000)``.
+            None uses the shared ``AdmissionLimits`` default.
 
     Returns:
         (construction, experiments): the SelectedConstruction and a
         one-element tuple with the ``acquisition`` Experiment that observes
-        host_scalars under labels.
+        the classical scalars ``host_scalars`` under labels.
     """
     kernel = SelectedKernel(
         name="acquisition",
@@ -70,7 +70,7 @@ def host_construction(source, inputs, labels, *, work, description, frames=None,
 
 
 def eigen_error_model(plan, source):
-    """Declare unresolved error sources in the requested original-input eigenvalue frame."""
+    """Declare unresolved error sources for the requested eigenvalue of the original input, in its error frame."""
     frame = plan.output.frame(plan.problem)
     names = (
         "native_preparation",
@@ -114,16 +114,16 @@ def eigen_error_model(plan, source):
 def matched_chunks(plan, data):
     """Yield ``(chunk, construction)`` for each observed chunk after checking that it matches its Plan point and declared readout.
 
-    Each chunk's point is selected once, through the Plan's construction
-    memo. The Experiment and SelectedConstruction it returns give the
+    Each chunk's point is resolved once, through the Plan's construction
+    cache. The Experiment and SelectedConstruction it returns give the
     realization, the setting label and the declared readout, so the point is
     not resolved a second time. A single-endpoint chunk must carry exactly
     the declared readout. A trajectory point chunk carries the one-point
-    readout of its point and the identity of the whole declaration. It must
-    name a declared point, carry exactly that point's one-point readout and
-    name the declaration's identity. Points of one trajectory can share a
-    one-point readout, so the chunk's boundary must also equal the boundary
-    its preparation receipt resolved for that point. The trace join checks
+    readout of its point and the content hash of the whole declaration. It
+    must name a declared point, carry exactly that point's one-point readout
+    and name the declaration's content hash. Points of one trajectory can
+    share a one-point readout, so the chunk's boundary must also equal the
+    boundary its preparation record resolved for that point. The trace join checks
     its point chunk key.
     """
     if data.trace.plan_id != plan.content_id:
@@ -167,8 +167,8 @@ def _declared_readout(selected, construction):
     This is ``Realization.resolved_observation`` for a caller that already
     holds the point's Experiment and SelectedConstruction: a direct
     experiment keeps its declaration, and a batch experiment resolves its
-    batch against an admission of the construction's Program, binding an
-    amplitude declaration to that construction's identity.
+    batch against the checked form of the construction's Program, binding an
+    amplitude declaration to that construction's content hash.
     """
     from nwqlib.ir.validation import _Admission
 

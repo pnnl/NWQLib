@@ -1,11 +1,12 @@
-"""An explicit snapshot of selected data, durable execution and live caches.
+"""Saving and reopening a Run folder, with its chosen input data, its run log and its in-memory caches.
 
 A Run folder holds ``run.json`` (format, the name of the selection file and the
-limits in force when the folder was written), the selection file, the journal
-``run.sqlite`` with its lock file, the Plan's selected input files, and cache
-files written through ``ArchiveFiles`` (QPY for native instructions and circuits,
+limits in force when the folder was written), the selection file, the run log
+``run.sqlite`` (the SQLite file in which the Run records each step) with its
+lock file, the Plan's input files, and cache
+files written through ``ArchiveFiles`` (QPY for backend instructions and circuits,
 NPY arrays, and JSON such as a bound noise model with NPY leaves). A Method's own
-cache hooks choose among these formats. Cache rows in the journal point to cache
+cache hooks choose among these formats. Cache rows in the run log point to cache
 files by name.
 
 Checkpointing a cache follows a write, commit, delete order:
@@ -17,25 +18,26 @@ Checkpointing a cache follows a write, commit, delete order:
    name with no existing file (``ArchiveFiles._unused_name``), opened in
    exclusive-create mode. A committed row never points to a file that is being
    rewritten. An object already written in this session reuses its file.
-3. Commit rows. The new and deleted cache rows join the caller's journal
+3. Commit rows. The new and deleted cache rows join the caller's run-log
    transaction (``write_caches``).
 4. Delete files. After the commit, ``finish_caches`` deletes files touched by
-   the delta that no row references any more. ``run.json``, the selection file
-   and the files the selection references are registered as permanent, and
-   pruning skips them.
+   these changes that no row references any more. ``run.json``, the selection
+   file and the files the selection references are registered as permanent,
+   and deletion skips them.
 
-Interruption between steps 2 and 3 leaves unpublished files, and between steps
-3 and 4 can leave superseded files. Reopening deletes unreferenced files in the
-reserved cache namespace under the controller lock, before it counts the stored
-file bytes. Input files and committed cache dependencies remain protected. The
-recovery contract concerns process interruption and does not cover power loss.
-A failed commit deletes the new files, refunds their byte charge and restores the
-previous dictionary values.
+An interruption between steps 2 and 3 leaves uncommitted files, and one between
+steps 3 and 4 can leave superseded files. Reopening deletes unreferenced files
+with the reserved cache prefix while it holds the Run's exclusive lock, before it
+counts the saved file bytes. Input files and committed cache dependencies remain
+protected. This recovery covers an interrupted process and does not cover power
+loss. A failed commit deletes the new files, removes their bytes from the data
+count and restores the previous dictionary values.
 
-Loading restores these rows as they are, registering a prepared handle's
-circuit file and decoding it at the handle's first native use. It does not plan,
-lower, transpile, simulate or analyze. Published arrays are read from the journal
-at their first use, once per payload.
+Loading restores these rows as they are, registering the circuit file of each
+prepared circuit (``PreparedHandle``) and decoding it when the circuit is first
+submitted or inspected. It does not plan, lower, transpile, simulate or analyze.
+Saved observation arrays are read from the run log at their first use, once per
+payload.
 """
 
 from contextlib import closing
@@ -64,7 +66,7 @@ _TRANSIENT_BACKEND = {"aer_preparations", "noise_model", "service", "device", "j
 
 
 class _CacheEntries(dict):
-    """Record changed native-cache keys at their ordinary dictionary mutations.
+    """Record the keys of a native cache that ordinary dictionary operations change.
 
     Each mutation stores the key in the Run's shared ``changes`` map and, on its
     first change since the last commit, the previous value in ``previous``. A
@@ -154,8 +156,8 @@ def bind_caches(run):
 class _CacheDelta:
     """One checkpoint's cache rows and the bookkeeping to commit or undo them.
 
-    ``records`` and ``deleted`` join the journal transaction. ``changes`` are the
-    tracked mutations the delta covers, ``keys`` the new row identities,
+    ``records`` and ``deleted`` join the run-log transaction. ``changes`` are the
+    tracked mutations this checkpoint covers, ``keys`` the new row keys,
     ``references`` the files each written row points to, and the two flags say
     whether the method and frontier rows were rewritten.
     """
@@ -170,7 +172,7 @@ class _CacheDelta:
 
 
 def validate_provenance(plan, forecast, allocation):
-    """Check supplied resource provenance without evaluating or selecting it."""
+    """Check that a supplied forecast and allocation belong to the Plan, without evaluating or choosing them."""
     if allocation is not None:
         from nwqlib.backends.profiles import Allocation
         if type(allocation) is not Allocation:
@@ -215,7 +217,7 @@ def _frontier(run, files):
 
 
 def _method_frontier(run, files):
-    """The live method context in its own row, rewritten only when the Method's caches change."""
+    """The current method context in its own row, rewritten only when the Method's caches change."""
     state, plan = run._state, run.plan
     context = state["method_context"]
     if context is not None:
@@ -250,14 +252,14 @@ def _cache_entry(token, value, files, name):
 
 
 def _copy_cache_files(run, files):
-    """Copy the files that a durable Run's committed cache rows name into ``files``.
+    """Copy the files that the committed cache rows of a Run with a folder name into ``files``.
 
     This applies when every cache change is committed, so the rows in the
-    journal describe the live caches. Each file whose name has the reserved
+    run log describe the in-memory caches. Each file whose name has the reserved
     cache prefix is hard-linked, or copied where a link is not possible,
-    under the same name and charged to the new folder's allowance, so the
-    rows of the journal copy stay valid unchanged. A row that names a file
-    outside the cache namespace needs that file among the ones the new
+    under the same name and counted against the new folder's byte limit, so the
+    rows of the copied run log stay valid unchanged. A row that names a file
+    without the cache prefix needs that file among the ones the new
     folder's selection wrote. Returns False, having copied nothing, when a
     change is uncommitted or such a file is absent. The caller then writes
     the caches again.
@@ -333,7 +335,7 @@ def _load_noise_model(data):
     model received that error, so the rebuilt basis equals the saved one.
     Gate constructors consume the saved parameters. Converting just a gate name
     to a fixed unitary would discard parameterized rotations. No new channel or
-    full-system matrix is constructed beyond QuantumError's own admission.
+    full-system matrix is constructed beyond the checks of QuantumError itself.
     """
     from qiskit import QuantumCircuit
     from qiskit.circuit import Instruction
@@ -391,15 +393,15 @@ def _load_caches(run, rows, files):
 
     Definitions, lowered Aer sources, the active frontier and the method
     context come back from their files. A prepared handle comes back with its
-    receipt, readout items and setting, and its circuit file is registered
-    without being read: the circuit is decoded and the backend's native
-    object rebuilt at the handle's first native use (submission or
+    preparation record, readout items and setting, and its circuit file is
+    registered without being read. The circuit is decoded and the backend's
+    native object rebuilt at the handle's first native use (submission or
     inspection, ``PreparedHandle._restore_native``), as after
     ``Run.release_native``. A saved Aer noise model is
     rebuilt and bound to a copy of the backend configuration, which becomes
     ``run.backend``, so the backend object that the caller passed to ``load``
-    keeps the model it holds. A missing file rejects at load, and invalid QPY
-    rejects when it is read, so the Run is not rebuilt around the gap. The
+    keeps the model it holds. A missing file is rejected at load, and invalid
+    QPY when it is read, so the Run is not rebuilt around the gap. The
     change records are cleared at the end, so the next checkpoint writes only
     later changes.
     """
@@ -509,19 +511,19 @@ def _write_manifest(run, files):
 
     The selection holds the Method name and the record returned by its archive
     hook, including the Plan and selected data. The manifest holds the format,
-    selection filename and limits. A copy records current limits, while its
-    journal header keeps the initial limits and the original Plan identity.
+    selection filename and limits. A copy records current limits, while the
+    header of its run log keeps the initial limits and the original Plan identity.
     Return the selection filename and its record for ``archive_selection``.
 
-    ``ArchiveFiles.write_json`` charges each part of a file before writing
-    it, so a ``max_data_bytes`` refusal in the middle of a file leaves the
+    ``ArchiveFiles.write_json`` counts each part of a file against the byte
+    limit before writing it, so a ``max_data_bytes`` refusal in the middle of a file leaves the
     parts written so far. ``run.json`` is therefore written as
     ``run.json.partial`` and then renamed with ``os.replace``, which
     replaces a file atomically within one filesystem. A refusal or an
     interruption during the write leaves no ``run.json``, and ``load`` then
     reports a Run whose creation stopped before its manifest. The partial
     file stays, as it would after an interruption, and counts among the
-    folder's stored file bytes (``stored_file_bytes``).
+    folder's saved file bytes (``stored_file_bytes``).
     """
     from nwqlib._choice_archive import save_plan
     from nwqlib._run_journal import RUN_FORMAT
@@ -537,12 +539,12 @@ def _write_manifest(run, files):
 
 
 def initialize(run):
-    """Save the selected input once before a durable backend can start work.
+    """Save the chosen input once, before the backend of a Run with a folder can start work.
 
-    The Method's archive hook writes the selected data, the selection file
+    The Method's archive hook writes the chosen data, the selection file
     (normally ``selection.json``) holds the selection that names it, and
     ``run.json`` names the selection file. All are registered as permanent
-    files, which cache pruning skips. Their bytes count toward
+    files, which the deletion of cache files skips. Their bytes count toward
     ``max_data_bytes``.
     """
     files = ArchiveFiles(run.directory, None)
@@ -554,11 +556,11 @@ def initialize(run):
 
 
 def _bind_capacity(run, files):
-    """Charge every archive file write to the Run's stored-data total before it happens.
+    """Count every file write in the Run folder against the Run's saved-data total before it happens.
 
-    The Run folder is opened without an allowance of its own, so
-    ``max_data_bytes``, which also counts the journal and the published
-    arrays, is the one limit on these writes.
+    The Run folder is opened without a byte limit of its own, so
+    ``max_data_bytes``, which also counts the run log and the saved
+    observation arrays, is the one limit on these writes.
     """
     def reserve(size):
         run.check_capacity(data_bytes=size)
@@ -596,14 +598,15 @@ def _initialize_file_refs(run, files):
 
 
 def restore_caches(run, files, selection):
-    """Load committed cache owners, then reclaim their unpublished files.
+    """Load the committed cache entries, then delete the cache files that no committed row references.
 
-    The caller holds the journal's exclusive lock. Reading the current owners
+    The caller holds the Run's exclusive lock. Reading the current entries
     first registers all referenced NPY/QPY files, including ndarray leaves
-    of SDK JSON, through ArchiveFiles.read_path. A lazy loader must register
-    dependencies now, without reading their payloads. Only the reserved cache namespace is collectible. Orphan
-    contents are never parsed, and immutable Plan inputs remain protected.
-    The sizes of the files left in the folder, apart from the journal, become
+    of SDK JSON, through ArchiveFiles.read_path. A loader that defers reading must register
+    dependencies now, without reading their payloads. Only files with the
+    reserved cache prefix can be deleted. Unreferenced files are never parsed,
+    and the immutable Plan inputs remain protected.
+    The sizes of the files left in the folder, apart from the run-log files, become
     ``external_bytes``, to which later writes add (``_bind_capacity``).
     """
     from nwqlib._choice_archive import CACHE_FILE_PREFIX
@@ -621,22 +624,22 @@ def restore_caches(run, files, selection):
 
 
 def stored_file_bytes(path):
-    """Return the total size of the files in the Run folder ``path``, apart from the journal files.
+    """Return the total size of the files in the Run folder ``path``, apart from the run-log files.
 
-    These are the files that ``ArchiveFiles`` charges to the Run's
-    stored-data total when it writes them (``_bind_capacity``).
-    ``restore_caches`` counts a reopened Run's stored files this way, and
+    These are the files that ``ArchiveFiles`` counts against the Run's
+    saved-data total when it writes them (``_bind_capacity``).
+    ``restore_caches`` counts a reopened Run's saved files this way, and
     ``qhd._durable.closed_trace`` the files of a Run whose creation raised
-    before it committed its journal header.
+    before it committed the header of its run log.
     """
     return sum(item.stat().st_size for item in Path(path).iterdir()
                if item.is_file() and item.name not in _JOURNAL_FILES)
 
 
 def cache_record(run):
-    """Serialize only changed owner keys and the changed active frontier.
+    """Serialize only the changed cache keys and the changed active frontier.
 
-    New files are written here, before the journal commit, under names that no
+    New files are written here, before the run-log commit, under names that no
     committed row uses. An in-memory Run has no archive files and returns the
     tracked changes only, so ``finish_caches`` can clear or undo them. If
     serialization fails, ``finish_caches`` deletes the new files and restores
@@ -684,13 +687,13 @@ def cache_record(run):
 
 
 def finish_caches(run, delta, *, committed):
-    """Complete a cache delta after its journal transaction succeeded or failed.
+    """Complete a checkpoint's cache changes after their run-log transaction succeeded or failed.
 
-    After a failure, the delta's new files are deleted, their byte charge is
-    refunded and each changed dictionary entry, including the parameter
-    specializations, returns to its value before the delta. After a success, the
-    per-file reference counts move to the new rows, and only files touched by this
-    delta that no row references any more are deleted. Deleting files only after
+    After a failure, the new files are deleted, their bytes are removed from
+    the data count and each changed dictionary entry, including the parameter
+    specializations, returns to its earlier value. After a success, the
+    per-file reference counts move to the new rows, and only files touched by these
+    changes that no row references any more are deleted. Deleting files only after
     the commit means a process crash can leave extra files but never a row without
     its file.
     """
@@ -749,7 +752,7 @@ def finish_caches(run, delta, *, committed):
 
 
 def write_caches(run, records=(), *, deleted=(), **kwargs):
-    """Commit ``records`` together with the pending cache delta in one Run transition."""
+    """Commit ``records`` together with the pending cache changes in one transaction of the run log."""
     delta = cache_record(run)
     try:
         encoded = run._write((*records, *delta.records), deleted=(*deleted, *delta.deleted), **kwargs)
@@ -761,7 +764,7 @@ def write_caches(run, records=(), *, deleted=(), **kwargs):
 
 
 def release_native(run):
-    """Keep the current frontier. Release only saved, fully collected handles."""
+    """Release the native circuits of saved, fully collected handles, keeping the active frontier."""
     state = run._state
     files = state.get("archive_files")
     released, kept = [], []
@@ -810,7 +813,7 @@ def result_record(result, run):
     """Return the saved row of a Run's Result.
 
     The row holds the Result, the number of limit amendments its trace holds
-    and its stored-data byte count. The trace's amendments and limits must be
+    and its saved-data byte count. The trace's amendments and limits must be
     the first amendments of the Run and the limits they produce.
     """
     trace = result.data.trace
@@ -825,31 +828,31 @@ def result_record(result, run):
 
 
 def save(run, *, path):
-    """Save this exact frontier. The copy of an in-memory execution gets its own journal.
+    """Save the Run's current state, from which it can resume. The copy of an in-memory Run gets its own run log.
 
     Saving is allowed only at a returned boundary, that is, after a public Run
-    call has returned, with no outcome being published and no static item being
-    prepared or submitted. A durable Run is copied with SQLite's backup API, which
-    gives a consistent snapshot of the live journal. When its cache rows are
+    call has returned, with no outcome being saved and no static item being
+    prepared or submitted. A Run with a folder is copied with SQLite's backup
+    API, which gives a consistent copy of the open run log. When its cache rows are
     committed, the files they name are copied (hard-linked where possible)
     under the same names and the rows stay as they are, so no cached QPY
     object is decoded or encoded again (``_copy_cache_files``). Otherwise the
-    copy's cache rows are rewritten to point to newly written files, and
-    released native handles are loaded again so that they can be written. An
-    in-memory Run writes its header, limits, amendments, RNG, receipts, events,
-    observations with their collection order, checkpoint, arrays and Result into
-    the new journal in one transaction. On any failure the new folder is
-    removed. The live Run's journal, files and counters are unchanged either
-    way.
+    copy's cache rows are rewritten to point to newly written files, and the
+    native circuits of released handles are loaded again so that they can be
+    written. An in-memory Run writes its header, limits, amendments, RNG,
+    preparation records, events, observations with their collection order,
+    checkpoint, arrays and Result into the new run log in one transaction. On
+    any failure the new folder is removed. The open Run's run log, files and
+    counters are unchanged either way.
 
-    Every file of the new folder is charged to a file-byte allowance of
-    ``max_data_bytes``. The files that ``ArchiveFiles`` writes are charged before
-    they are written. The journal copy of a durable Run is charged by its page
-    count before the backup writes those pages. SQLite allocates the pages of a
+    Every file of the new folder is counted against a file-byte limit equal to
+    ``max_data_bytes``. The files that ``ArchiveFiles`` writes are counted before
+    they are written. The copied run log of a Run with a folder is counted by its
+    page count before the backup writes those pages. SQLite allocates the pages of a
     commit during the commit, so the pages that the commit of the rewritten
-    cache rows adds are charged right after it, and the new journal of an
-    in-memory Run is charged by its file size right after its one commit. A
-    charge beyond the allowance removes the new folder like any other failure.
+    cache rows adds are counted right after it, and the new run log of an
+    in-memory Run is counted by its file size right after its one commit. An
+    amount beyond the limit removes the new folder like any other failure.
     """
     from nwqlib._run_journal import RUN_FORMAT, LocalJournal
     from nwqlib._prepared_execution import Run
@@ -938,20 +941,21 @@ def save(run, *, path):
 
 
 def load(path, *, backend, method=None, progress=None):
-    """Open the same durable execution, under its original exclusive lock.
+    """Reopen a saved Run under its original exclusive lock.
 
     The Plan is restored through the Method's archive hook and must reproduce the
-    saved Plan identity. The journal is then opened by ``Run._restore``, cache rows
+    saved Plan identity. The run log is then opened by ``Run._restore``, cache rows
     are restored as saved (a prepared handle's circuit is decoded at its first
-    native use), published arrays are read from the journal at their first use,
-    and a saved Result is attached to the journal's trace with the cap prefix
-    and byte counter it captured. The Result keeps its own identity and
+    native use), saved observation arrays are read from the run log at their
+    first use, and a saved Result is attached to the trace of the run log with
+    the part of the amendment history and the byte counter that it captured.
+    The Result keeps its own identity and
     observations, but events and submissions that the Run revised after the
     Result, for example through a later cancellation and its refresh, appear in
-    that trace with their later status. Nothing is planned, lowered, acquired or
-    analyzed. The folder is opened without a file-byte allowance, because every
-    file in it was charged when it was written. After loading, each file write
-    is charged to the Run's stored-data total (``_bind_capacity``).
+    that trace with their later status. Nothing is planned, lowered, run or
+    analyzed. The folder is opened without a file-byte limit, because every
+    file in it was counted when it was written. After loading, each file write
+    is counted against the Run's saved-data total (``_bind_capacity``).
     ``progress`` is the reopened Run's progress callback.
     """
     from nwqlib._choice_archive import load_plan

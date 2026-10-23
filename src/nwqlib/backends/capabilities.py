@@ -3,7 +3,8 @@
 A target states what it supports at three levels. Coarse capabilities name an
 execution kind. ``readouts``, ``artifacts`` and ``program_nodes`` name the
 exact observation kinds and inputs it accepts. ``instructions`` names the exact
-primitive or selected kernel, transform and width. For each of these
+primitive gate or chosen block implementation, its control or adjoint form and
+its width. For each of these
 collections, None means unknown and an empty tuple means none, so profile assessment
 (``backends.assessment``) can tell an undeclared subset from an unsupported one.
 A coarse capability never certifies a readout or instruction that the target
@@ -159,9 +160,9 @@ class BackendTarget(Record):
     def _sets(self):
         """Reject duplicate declarations and store set-like fields in sorted order.
 
-        Sorting gives equal declarations one content identity, so a stored
-        target compares equal however its sets were written. The basis gate
-        tuple keeps its given order, and instruction entries sort by identity.
+        Sorting gives equal declarations one content hash, so a saved target
+        compares equal however its sets were written. The basis gate tuple
+        keeps its given order, and instruction entries sort by content hash.
         """
         for name in ("capabilities", "native_basis_gates", "artifacts", "readouts", "readout_features",
                      "reducers", "program_nodes"):

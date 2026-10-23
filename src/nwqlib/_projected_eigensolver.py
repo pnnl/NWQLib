@@ -2,8 +2,8 @@
 
 These operations act only on projected matrices. They do not construct basis
 states, evaluate operators, or certify physical accuracy of sampled estimates.
-FixedGCIM, ADAPT and Lanczos all reduce their acquired (H, S) pairs here, so
-the admission rules, rank cutoff and reported diagnostics mean the same thing
+FixedGCIM, ADAPT and Lanczos all reduce their obtained (H, S) pairs here, so
+the input checks, rank cutoff and reported diagnostics mean the same thing
 in every projected method.
 """
 
@@ -147,8 +147,9 @@ def entrywise_gram_allowance(entry_errors):
     error E. Its spectral norm equals its spectral radius, bounded by the
     induced infinity norm, so ||E||_2 <= max_i sum_j e_ij. Each binary64
     entry is summed exactly and the largest sum is converted upward.
-    This adds no assumption of statistical independence. The caller owns
-    the entry bounds, diagonal convention and completeness checks.
+    This adds no assumption of statistical independence. The caller is
+    responsible for the entry bounds, diagonal convention and completeness
+    checks.
     """
     from fractions import Fraction
 
@@ -167,7 +168,7 @@ def entrywise_gram_allowance(entry_errors):
 
 
 def _as_square_pencil(hamiltonian_matrix, overlap_matrix):
-    """Admit matching nonempty square matrices before any preprocessing."""
+    """Require matching nonempty square matrices before any preprocessing."""
     h_matrix = np.asarray(hamiltonian_matrix, dtype=complex)
     s_matrix = np.asarray(overlap_matrix, dtype=complex)
     if (
@@ -184,7 +185,7 @@ def _overlap_norm_squared(coefficients, overlap, overlap_magnitudes, roundoff_fa
     """Return c^dagger S c when it is a positive real number up to roundoff, else None.
 
     For Hermitian S the exact value is real. The computed imaginary part is
-    admitted when it is at most roundoff_factor * a.T @ A @ a, with
+    allowed when it is at most roundoff_factor * a.T @ A @ a, with
     a=|Re c|+|Im c| and A=overlap_magnitudes=|Re S|+|Im S|. A nonfinite value,
     a nonpositive real part or a larger imaginary part returns None.
     """
@@ -233,7 +234,7 @@ def _solve_projected_pencil(
     the overlap eigenvalues strictly above the threshold, as here. Their
     Theorem 2.7 (p. 14) analyzes its stability under noise in H and S. Zheng et al.
     (2024), arXiv:2312.07691v3, Appendix F, Eqs. (F1)-(F3), apply the same
-    positive-eigenvalue truncation to GCIM pencils. The absolute cutoff
+    positive-eigenvalue truncation to GCiM pencils. The absolute cutoff
     discards each direction whose overlap eigenvalue is at most the caller's
     ``overlap_eigenvalue_cutoff`` (default
     ``DEFAULT_OVERLAP_EIGENVALUE_CUTOFF``, 1e-12), which decides the kept
@@ -242,7 +243,7 @@ def _solve_projected_pencil(
 
     A deterministic Gram matrix is positive semidefinite, so a negative
     eigenvalue beyond roundoff means the input is not a Gram matrix and the
-    solve is refused. A sampled overlap can be indefinite, so that path keeps
+    pencil is rejected. A sampled overlap can be indefinite, so that path keeps
     only the positive directions above the cutoff.
 
     An identity term c_I*I of the operator contributes c_I*S to H and c_I to
@@ -262,7 +263,7 @@ def _solve_projected_pencil(
             null directions from ``S``.
         symmetrize_matrices: Whether to Hermitian-symmetrize ``H`` and ``S``
             after the raw matrices pass the Hermitian check within roundoff.
-        overlap_input_tolerance: Absolute spectral admission allowance for the
+        overlap_input_tolerance: Absolute spectral allowance for errors of the
             input representation, independent of the positive rank cutoff. Its
             default zero assumes only matrix arithmetic roundoff. A caller
             declaring a numerical resolution must document it and not call it
@@ -276,9 +277,9 @@ def _solve_projected_pencil(
             arithmetic.
         _sampled_overlap: Keep only the positive directions of a sampled ``S``
             above the cutoff instead of rejecting a deterministic Gram matrix
-            with a negative mode beyond its admission tolerance.
+            with a negative mode beyond its allowed tolerance.
         _keep_overlap_eigenvectors: Keep the already computed overlap
-            eigenbasis for internal consumers that differentiate the
+            eigenbasis for internal callers that differentiate the
             regularized solve. Ordinary solves do not keep it.
 
     Returns:
@@ -419,7 +420,7 @@ def _sampled_pencil_diagnostics(
     """Compare a sampled positive-subspace Ritz value with an operator enclosure.
 
     The enclosure and its relative comparison window are supplied by the
-    consumer. The comparison does not certify physical accuracy, and it reuses
+    caller. The comparison does not certify physical accuracy, and it reuses
     the existing eigensolve without further solves. For exact H and S every
     Ritz value lies in ``[lambda_min, lambda_max]`` of the operator, which any
     valid enclosure contains. Sampled matrices carry no such guarantee, so a

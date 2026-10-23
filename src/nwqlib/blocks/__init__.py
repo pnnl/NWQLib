@@ -1,4 +1,7 @@
-"""SDK-free selected blocks with an explicit bounded Qiskit lowering seam."""
+"""Circuit blocks with their selected definitions, and `lower_qiskit`, which builds their Qiskit circuit.
+
+Selecting a block imports no quantum SDK.
+"""
 
 from .records import BlockSemantics, PauliEncoding, Primitive, SelectedConstruction, SelectedDefinition, SelectedKernel
 from .selection import (

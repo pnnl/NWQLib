@@ -1,4 +1,4 @@
-"""Finite ADAPT input processing and actual commutator selection."""
+"""Finite ADAPT input processing and the choice of commutator terms."""
 
 from dataclasses import dataclass, field
 from functools import lru_cache
@@ -38,12 +38,12 @@ def _symmetry_evidence(
     exact_symmetry: bool,
     pauli_qubits: int = 0,
 ) -> dict[str, Any]:
-    """Record admission evidence, using ``correction=None`` for verified exact symmetry.
+    """Record the evidence of the input check, using ``correction=None`` for verified exact symmetry.
 
     The relative correction ``||correction||_F / ||original||_F`` is compared
     with ``tolerance`` through ``frexp`` mantissas and exponents, so neither
-    overflow nor underflow of an intermediate can change the admission
-    decision. For a Pauli sum on ``pauli_qubits`` qubits the absolute
+    overflow nor underflow of an intermediate can change the outcome of the
+    check. For a Pauli sum on ``pauli_qubits`` qubits the absolute
     Frobenius norm is ``2**(pauli_qubits/2)`` times the coefficient 2-norm,
     because ``Tr(P_i^dagger P_j) = 2**pauli_qubits delta_ij``. The ratio needs
     no such factor.
@@ -142,8 +142,8 @@ class AdaptInputs:
     ``hamiltonian`` and ``pool`` are the processed operators that queries act
     on, and ``members`` keep each generator's raw identity, symmetry evidence
     and ``[H, A_i]`` terms. ``terms`` are the kept Hamiltonian Pauli terms and
-    ``dropped_l1`` is the L1 mass of the pruned Hamiltonian coefficients. ``groups`` and
-    ``energy_groups`` are the QWC readout groups for screening and energy
+    ``dropped_l1`` is the sum of the absolute values of the removed Hamiltonian coefficients.
+    ``groups`` and ``energy_groups`` are the QWC measurement groups for screening and energy
     queries, as indices into ``adapt_records.screen_labels`` and
     ``adapt_records.energy_labels``. For a classical plan that keeps a dense or sparse matrix,
     ``host_identity_shift`` is its mean diagonal c and
@@ -184,16 +184,16 @@ class AdaptInputs:
 def array_record_bytes(raw_lengths, header_bounds, *, fixed_json,
                        index_entries=0, label_count=0, group_count=0,
                        other_live=0):
-    """Admit the live array payloads, immutable snapshots, group indices and the selected identity encoding of the ADAPT reconstruction.
+    """Check the bytes of the live arrays, their immutable copies, the group indices and the chosen content-hash encoding of the ADAPT reconstruction.
 
     Each array contributes its dtype-dependent byte length and dtype/shape
     header, including empty arrays. Fields stored as individual Pauli records
-    are charged separately and enter here as other live bytes.
+    are counted separately and enter here as other live bytes.
 
     Let ``R_j`` be the rows of array table j and ``b_j`` its raw bytes per
     row, ``B_j = R_j*b_j`` and ``B = sum_j B_j``. With binary arrays encoded
-    as base64 strings (``FrozenArray``'s JSON form), one source/working array
-    and one immutable snapshot at most, and ordinary record serialization
+    as base64 strings (``FrozenArray``'s JSON form), at most one source or
+    working array and one immutable copy, and ordinary record serialization
     holding the base64 strings, complete JSON text and UTF-8 bytes,
 
         J = J_fixed + sum_j [4 ceil(B_j/3) + H_j] + J_indices,
@@ -202,8 +202,8 @@ def array_record_bytes(raw_lengths, header_bounds, *, fixed_json,
     where ``J_fixed`` includes the enclosing reconstruction's remaining
     JSON fields and collection delimiters, including empty collections,
     as well as each array-bearing table record's fixed fields.
-    ``H_j`` is an upper bound for that array field's actual
-    dtype/shape/key JSON and ``J_indices <= I*(digits(max(U-1,0))+1)+2G+2``
+    ``H_j`` is an upper bound for the JSON of that array field's dtype, shape
+    and key, and ``J_indices <= I*(digits(max(U-1,0))+1)+2G+2``
     for ``I`` nonnegative indices into ``U`` labels stored in ``G`` nested
     tuples. Two raw copies contribute ``2B``. Three simultaneous
     JSON/base64 text forms and one transient encoding form are covered by
@@ -211,8 +211,8 @@ def array_record_bytes(raw_lengths, header_bounds, *, fixed_json,
     immutable tuples are formed. The bound does not include Python object
     headers, so it is not a ``tracemalloc`` or RSS bound. Hashing canonical
     bytes incrementally, transferring an already immutable array, or
-    streaming serialization can lower this peak, but requires the
-    corresponding owner to establish the smaller schedule. A hex codec
+    streaming serialization can lower this peak, but only when the code that
+    does so establishes the smaller schedule. A hex codec
     replaces the base64 length by ``2B_j``.
     """
     raw = sum(raw_lengths)
@@ -239,12 +239,13 @@ def _commutator_record_fixed_json(num_qubits):
     """Return the fixed JSON of one ``[H, A_i]`` table record beyond its two array headers.
 
     This is one table's share of ``J_fixed`` in ``array_record_bytes``, the
-    actual fixed JSON including empty tables: the member's ``commutator``
-    key and the ``PauliArrays`` record's own fields (schema version, parent
-    identity and the sha256 content identity), measured on the empty table
-    with the same spaced ``json.dumps`` as ``_array_header_bytes``. These
-    fields do not depend on the row count. The two array headers, which do,
-    are ``_array_header_bytes`` at the actual shapes.
+    fixed JSON as written, including empty tables. It holds the member's
+    ``commutator`` key and the ``PauliArrays`` record's own fields (schema
+    version, parent content hash and the sha256 content hash), measured on
+    the empty table with the same spaced ``json.dumps`` as
+    ``_array_header_bytes``. These fields do not depend on the row count. The
+    two array headers, which do, are ``_array_header_bytes`` at the shapes of
+    the table.
     """
     empty = PauliArrays.from_rows((), num_qubits)
     return len(json.dumps({"commutator": empty.model_dump(mode="json")})) - (
@@ -282,7 +283,7 @@ def label_cache_bytes(q, row_counts, pool_size, energy_count, max_selections,
     (a ``frozenset(removed)`` key, a value pair, a sorted label tuple and a
     label frozenset). It is never serialized, so no base64 or JSON
     multiplier applies, and it is added once, as other live storage, to the
-    reconstruction's array and encoding charge (``array_record_bytes``).
+    reconstruction's array and encoding bytes (``array_record_bytes``).
     This is a qualified CPython object-memory allowance on the checked
     64-bit CPython 3.12.14 build, not a bound on all Python heap allocations
     or process RSS.
@@ -295,11 +296,11 @@ def label_cache_bytes(q, row_counts, pool_size, energy_count, max_selections,
     plans: clearing before insertion only when the stored count exceeds
     the limit permits limit + 1 entries.
 
-    Engineering envelopes are ``T(n) = 64 + 8n`` for a tuple,
+    The engineering allowances are ``T(n) = 64 + 8n`` for a tuple,
     ``H(n) = 256 + 128n`` for a set, frozenset or active dictionary, and
     ``I_K = 32 + 4 ceil(max(1, bit_length(K))/30)`` for a selected pool
     index. A decoded row costs q + 168 bytes, including its label, float,
-    row tuple and member-tuple slot. The kept cache and construction
+    row tuple and its entry in the member tuple. The kept cache and construction
     allowances are
 
         B_kept = 4096 + T(K) + 64K + (q + 168)R + T(R) + T(L) + H(A)
@@ -308,8 +309,8 @@ def label_cache_bytes(q, row_counts, pool_size, energy_count, max_selections,
         X_build = 320R + 32L + (160 + I_K)J + 128A,
         B_cache = B_kept + 65536 + max(X_decode, X_build).
 
-    ``X_decode`` prices ``PauliArrays.rows()``'s member-sized ``tolist``
-    lists, builder capacity and a label join. ``X_build`` prices set
+    ``X_decode`` covers ``PauliArrays.rows()``'s member-sized ``tolist``
+    lists, builder capacity and a label join. ``X_build`` covers set
     formation, sorting, tuple and frozenset construction, key construction
     and dictionary growth. The 65,536 bytes cover fixed Python and NumPy
     call and iterator bookkeeping. docs/ENGINEERING_CONSTANTS.md lists this
@@ -334,16 +335,16 @@ def label_cache_bytes(q, row_counts, pool_size, energy_count, max_selections,
 
 
 def restored_cache_reservation(rec, *, sampled):
-    """Return the count-based reservation a restored quantum Plan passes before its first cache decode.
+    """Return the count-based byte allowance that a restored quantum Plan checks before its first cache decode.
 
-    It is reconstructed from the stored commutator row shapes, members and
-    group sizes of ``rec``, with no rerun of commutators, chemistry or
-    selection: the commutator tables' array and encoding charge
+    It is the commutator tables' array and encoding bytes
     (``array_record_bytes`` with the table records' fixed JSON) plus the
     decoded label cache (``label_cache_bytes``) as other live storage, and
-    the group-index charges of a sampled Plan. The pool-member, Pauli-row
-    and reconstruction-metadata allowances that preparation also charged
-    are not reconstructed here.
+    the group-index bytes of a sampled Plan. It is reconstructed from the
+    stored commutator row shapes, members and group sizes of ``rec``, with
+    no rerun of commutators, chemistry or selection. The pool-member,
+    Pauli-row and reconstruction-metadata allowances that preparation also
+    counted are not reconstructed here.
     """
     q = rec.num_qubits
     kept_rows = [len(member.commutator.coefficients.array) for member in rec.pool
@@ -365,7 +366,7 @@ def restored_cache_reservation(rec, *, sampled):
 def _reconstruction_fixed_json(fields, *, pool_size, term_count):
     """Bound the fresh reconstruction's JSON outside pool, term and group payloads.
 
-    ``fields`` contains its actual remaining constructor fields. Record
+    ``fields`` contains its remaining constructor fields. Record
     metadata is serialized once, including arbitrary supplied text. The
     empty lists supply their keys and brackets. Spaced list separators and
     the Record identity wrapper are added without visiting their payloads.
@@ -406,7 +407,7 @@ _COMMUTATOR_TILE = 1 << 14
 
 
 def pauli_array_conversion_requirements(rows, q, *, tile=1024):
-    """Return ``(work, peak bytes, raw bytes)`` of converting J coalesced packed rows to ``PauliArrays``.
+    """Return ``(work, peak bytes, raw bytes)`` of converting J packed rows with distinct labels to ``PauliArrays``.
 
     Here J = ``rows``, q is the number of qubits, W = ceil(q/64) is the
     number of 64-bit words per mask, and C = ``tile``.
@@ -414,8 +415,8 @@ def pauli_array_conversion_requirements(rows, q, *, tile=1024):
     ``h = ceil(log2 max(1, J))``, the live phases are decoding (packed input
     P, code and coefficient outputs B, two uint64 tile vectors 16t), sorting
     and permuting (P, unsorted and sorted outputs 2B, indirect permutation
-    8J) and immutable publication and validation (P, working outputs and
-    snapshots 2B, validator scratch at most ``J*q + 40J``), so
+    8J) and immutable output and validation (P, working outputs and their
+    immutable copies 2B, validator scratch at most ``J*q + 40J``), so
 
         B_conv = P + max{B + 16t, 2B + 8J, 2B + Jq + 40J} + 65536.
 
@@ -429,7 +430,7 @@ def pauli_array_conversion_requirements(rows, q, *, tile=1024):
 
     These are defined accounting units, not literal NumPy instruction counts.
     ``65536`` is the CPython/NumPy engineering allowance for fixed overhead,
-    not an arbitrary-allocator theorem.
+    not a bound that holds for every memory allocator.
     """
     if type(rows) is not int or rows < 0 or type(q) is not int or q < 1:
         raise ValueError("invalid Pauli array dimensions")
@@ -446,17 +447,17 @@ def pauli_array_conversion_requirements(rows, q, *, tile=1024):
 
 
 def _packed_to_pauli_arrays(x, z, coefficients, q, *, tile=1024):
-    """Publish coalesced packed rows with real coefficients as a sorted ``PauliArrays`` record.
+    """Return packed rows with distinct labels and real coefficients as a sorted ``PauliArrays`` record.
 
     Each printed character reads its bit from high qubit to low qubit and
-    stores the int64 code ``c = (x_bit XOR z_bit) + 2*z_bit``: the pairs
+    stores the int64 code ``c = (x_bit XOR z_bit) + 2*z_bit``, so the pairs
     ``(x, z) = (0, 0), (1, 0), (1, 1), (0, 1)`` give 0, 1, 2, 3, that is
     I, X, Y, Z. Rows are then sorted lexicographically with their
     coefficients by a heapsort of fixed-size row keys, whose bytes compare
     in code-row order because every code is one of 0 to 3. The input rows
     are distinct canonical keys, so sort stability is irrelevant here. No
-    label string is materialized. The caller admits
-    ``pauli_array_conversion_requirements`` before this call.
+    label string is formed. The caller checks
+    ``pauli_array_conversion_requirements`` against the limits before this call.
     """
     rows = len(coefficients)
     labels = np.empty((rows, q), dtype=np.int64)
@@ -485,7 +486,7 @@ def _packed_to_pauli_arrays(x, z, coefficients, q, *, tile=1024):
 
 
 def _commutator_arrays(h, a, *, cutoff, ledger, held, max_bytes, max_products, admit_rows):
-    """Return ``[H, A]`` as ``PauliArrays`` and its dropped coefficient mass, from packed tables.
+    """Return ``[H, A]`` as ``PauliArrays`` and the sum of its dropped coefficient magnitudes, from packed tables.
 
     For canonical Pauli strings ``P_a P_h = (-1)**s_ha P_h P_a``, hence
     ``[P_h, P_a] = (1 - (-1)**s_ha) P_h P_a``, zero when ``s_ha = 0`` and
@@ -501,44 +502,44 @@ def _commutator_arrays(h, a, *, cutoff, ledger, held, max_bytes, max_products, a
     because A is anti-Hermitian. All surviving pairs with the same output
     label are accumulated before the cutoff, which is algebraically
     identical to the two ordered products and their subtraction by
-    bilinearity. In the accepted ADAPT route H has real coefficients and A
+    bilinearity. After the ADAPT input checks, H has real coefficients and A
     purely imaginary ones, so each contribution is real. The Hermiticity
-    check and ``commutator_dropped_l1`` stay at the coalesced output. Empty
+    check and ``commutator_dropped_l1`` apply to the summed output. Empty
     H or A, commuting pairs, identity strings and complete cancellation all
     give zero without an invented residual. ``stable_complex_sum`` uses
     ``fsum``, not arbitrary-precision addition. Changing multiplication,
     doubling and accumulation order relative to the product-and-cancel
     route can change the last bits or an intermediate overflow decision, so
-    agreement holds where both constructions' finite arithmetic premises
-    hold. Finite pair products and coalesced sums are required, and no
-    individual pair contribution is pruned (Zheng et al.,
-    arXiv:2312.07691v3, commutator screen; Higham, Accuracy and Stability of
-    Numerical Algorithms, 2nd ed., doi:10.1137/1.9780898718027).
+    agreement holds where the finite-arithmetic assumptions of both
+    constructions hold. Finite pair products and finite summed outputs are
+    required, and no individual pair contribution is pruned (Zheng et al.,
+    arXiv:2312.07691v3, commutator screen, and Higham, Accuracy and Stability
+    of Numerical Algorithms, 2nd ed., doi:10.1137/1.9780898718027).
 
-    Commutator construction tests bounded packed pair tiles, stores only
-    anticommuting products and coalesces the complete survivor population
-    before publication. One work ledger covers every pool member, and byte
-    admission includes completed member tables, the current survivor
-    population and its sort/snapshot workspace. With L rows of H, T rows of
-    A, ``P = L*T`` tested pairs, C anticommuting survivors, J coalesced
-    rows, W packed words and tiles of at most b pairs (the pair index is
-    flattened, so a tile need not hold a whole row),
+    Commutator construction tests bounded tiles of packed pairs, stores only
+    anticommuting products and sums all surviving products with equal labels
+    before returning them. One work total covers every pool member, and the
+    byte check includes completed member tables, the current surviving
+    products and their sorting and copying workspace. With L rows of H, T
+    rows of A, ``P = L*T`` tested pairs, C anticommuting surviving products,
+    J output rows after summing, W packed words and tiles of at most b pairs
+    (the pair index is flattened, so a tile need not hold a whole row),
 
         B_tile = (64W + 128)b,    B_coalesce(C) = (80W + 128)C + 65536,
         W_j = P(W + 1) + C(12W + 16) + (2W + 2)C ceil(log2 max(2, C)).
 
-    ``B_coalesce`` reserves five populations of packed X/Z data (raw,
-    sortable keys, gathered keys, output and output snapshot) and 128C for
+    ``B_coalesce`` allows five copies of packed X/Z data (raw, sortable keys,
+    gathered keys, output and immutable output copy) and 128C for
     complex coefficients, their gathered and output copies, sort, inverse
     and first-position indices, head masks and group order. ``ledger`` is
     the one running work total shared by all pool members, a one-element
-    list. ``admit_rows(J)`` runs the caller's record admission
-    for the J published rows before their conversion. Each pair tile is
-    admitted before it is tested, each tile's
-    worst-case survivors are reserved before they are appended, and the sort
-    and output stages are admitted once C is known. ``held`` is the byte
-    count already live, including earlier published tables ``8J_i(q+1)``.
-    The packed survivors then convert to the published int64 code table
+    list. ``admit_rows(J)`` runs the caller's record check for the J output
+    rows before their conversion. Each pair tile is checked before it is
+    tested, the bytes of each tile's worst-case surviving products are set
+    aside before they are appended, and the sort and output stages are
+    checked once C is known. ``held`` is the byte count already in memory,
+    including earlier output tables ``8J_i(q+1)``. The packed surviving
+    products then convert to the output int64 code table
     (``pauli_array_conversion_requirements``), with the conversion peak
     ``B_conv`` added under the same maximum.
     """
@@ -632,18 +633,16 @@ def _pool_enumeration_requirements(candidates, num_qubits):
     """Return ``(bytes, work)`` for enumerating ``candidates`` built-in pool members on ``num_qubits`` qubits.
 
     Every built-in member has at most 12 normal-ordered ladder strings of at
-    most four operators and at most 48 coalesced Pauli rows. A triplet double
+    most four operators and at most 48 Pauli rows after equal labels are
+    summed. A triplet double
     of Zheng et al., arXiv:2312.07691v3, Eq. (E3), on four distinct orbitals
     reaches both. Its six base terms and their adjoints are 12 strings on six
     distinct four-mode sets, and the Jordan-Wigner image of the
     anti-Hermitian pair on one set has 8 Pauli rows.
-    ``test_pool_enumeration_law_covers_every_builtin_member`` measures the
-    bytes, strings and comparisons of every member of the four families and
-    checks that this law covers them.
 
-    Bytes. The enumerated pool stays alive while each member is admitted, so
-    each candidate is charged what ``_snapshot_generator`` charges for the
-    largest member: ``q + 64`` per Pauli row, ``48 + 48 * 4 = 240`` per
+    Bytes. The enumerated pool stays in memory while each member is checked,
+    so each candidate is counted with what ``_snapshot_generator`` counts for
+    the largest member, ``q + 64`` per Pauli row, ``48 + 48 * 4 = 240`` per
     four-operator string, and 206 for the family name and index tuples
     (64 plus the at most 14 characters of a built-in family name, and 16
     per index of at most four spatial and four spin-orbital indices). The
@@ -651,13 +650,14 @@ def _pool_enumeration_requirements(candidates, num_qubits):
     ``mapping_requirements`` for its 12 strings, are added once.
 
     Work. Per candidate, the work term of ``mapping_requirements`` for 12
-    four-operator strings with label output, the law whose byte term
+    four-operator strings with label output, the formula whose byte term
     ``_ladder_expansion_terms`` checks for each member, and 168 comparisons
     for normal ordering. A spin-adapted candidate is normal-ordered twice,
     in ``_skip_zero_base`` and in ``_generator``, with at most 84
     comparisons each time. The count depends only on the order pattern of
     the spatial indices, and every pattern of four indices occurs with four
-    spatial orbitals, so the test's exhaustive count there is the maximum.
+    spatial orbitals, so an exhaustive count over four spatial orbitals gives
+    the maximum.
     """
     q = num_qubits
     _, mapping_bytes, mapping_work = mapping_requirements((4,) * 12, num_modes=q, labels=True)
@@ -666,10 +666,10 @@ def _pool_enumeration_requirements(candidates, num_qubits):
 
 
 def _generator_record_bytes(generators):
-    """Return the generator-record term of the ADAPT reconstruction record law.
+    """Return the generator-record term of the byte formula of the ADAPT reconstruction record.
 
     Planning (``prepare_adapt_inputs``) and the classical archive reload
-    (``adapt_actions.restored_record_allowance``) both charge this term.
+    (``adapt_actions.restored_record_allowance``) both count this term.
     """
     return 3 * sum(2048 + 128 * len(generator.fermion_terms)
                    + 16 * sum(len(ops) for _, ops in generator.fermion_terms)
@@ -679,17 +679,17 @@ def _generator_record_bytes(generators):
 
 def prepare_adapt_inputs(hamiltonian, reference, method, *, execution, shots,
                          original_dimension, original_hamiltonian, reference_requirements):
-    """Admit the finite generator pool and select Hamiltonian/commutator readout terms.
+    """Check the finite generator pool and choose the Hamiltonian and commutator terms to measure.
 
     A named pool is enumerated only after its candidate count passes the byte
-    and product caps. Every generator is projected onto its anti-Hermitian
+    and product limits. Every generator is projected onto its anti-Hermitian
     part within ``input_symmetry_tolerance`` and must agree with its stored
     fermion terms. A Hamiltonian with Pauli access, which every quantum plan
     has, must have exactly real Pauli coefficients. Coefficients at or below
-    ``pauli_coefficient_cutoff`` are removed with their L1 mass recorded.
-    Only a quantum plan forms each ``[H, A_i]``, whose labels its screening
-    queries read, and only a quantum plan with ``shots`` forms the QWC
-    readout groups. A classical plan screens with generator actions on the
+    ``pauli_coefficient_cutoff`` are removed, and the sum of their absolute
+    values is recorded. Only a quantum plan forms each ``[H, A_i]``, whose
+    labels its screening queries measure, and only a quantum plan with
+    ``shots`` forms the QWC measurement groups. A classical plan screens with generator actions on the
     state and forms neither. A classical plan with
     dense or sparse access keeps the original matrix and forms no Pauli
     decomposition. Its pair queries then remove the mean diagonal

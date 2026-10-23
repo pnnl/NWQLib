@@ -1,9 +1,9 @@
-"""Checks of stored projected quantities, and the receipt step shared by most verifications.
+"""Checks of saved projected quantities, and the verification-record step shared by most checks.
 
 `_publish` and `witness_check_facts` bind check values to a
-VerificationReceipt for the projected, energy-shift and number-sector checks
-and for the QLS, QPE and QHD verifications. Nothing here acquires data or
-solves an eigenproblem.
+VerificationReceipt, the verification record, for the projected,
+energy-shift and number-sector checks and for the QLS, QPE and QHD
+verifications. Nothing here takes measurements or solves an eigenproblem.
 """
 
 from dataclasses import dataclass
@@ -19,14 +19,14 @@ from .records import Evidence, Fact
 
 @dataclass(frozen=True)
 class ProjectedDiagnostics:
-    """The stored diagnostics of a projected eigenvalue solve: overlap matrix, its spectrum and two error values.
+    """The saved diagnostics of a projected eigenvalue solve: overlap matrix, its spectrum and two error values.
 
     `result.projected_diagnostics()` returns it for a Lanczos, FixedGCIM or
     ADAPT Result, and the checks of
     [`ProjectedVerificationOptions`][nwqlib.evidence.verification.ProjectedVerificationOptions]
     read it. It holds values the solve already produced, in the Method's
     own coordinates, so getting it runs no solve, reconstruction or
-    decomposition. A value the Result did not store is `None`. The fields
+    decomposition. A value the Result did not save is `None`. The fields
     below are read-only.
 
     Attributes:
@@ -74,16 +74,16 @@ class ProjectedVerificationOptions(Record):
     `name`, `comparisons` and `tolerance` are required. Each criterion is a
     dimensionless value on `[0, inf)`, compared with `tolerance` as an
     acceptance threshold. Nothing is repaired, and the values are read from
-    what the Result already stores (`result.projected_diagnostics()`), so no
+    what the Result already holds (`result.projected_diagnostics()`), so no
     solve runs again:
 
-    - `overlap_normalization`: the stored absolute error of the coefficient
+    - `overlap_normalization`: the saved absolute error of the coefficient
       vector's normalization in the overlap (Gram) matrix S.
     - `gram_psd_deficit`: `max(0, -min(spectrum))` of the raw overlap
       spectrum, before positive-subspace filtering.
     - `gram_hermiticity`: the largest absolute real or imaginary component of
-      `S - S†` of the stored overlap matrix.
-    - `projected_backward_error`: the stored backward error of the
+      `S - S†` of the saved overlap matrix.
+    - `projected_backward_error`: the saved backward error of the
       projected generalized eigenproblem, on the normalized pencil (K, S)
       for Lanczos and on the physical pencil (H, S) for FixedGCIM and ADAPT.
       Equal thresholds mean different things for the two, so compare values
@@ -121,7 +121,7 @@ class ProjectedVerificationOptions(Record):
 
         Each check is a dimensionless scalar on the domain [0, inf) compared
         with ``tolerance``. ``overlap_normalization`` and
-        ``projected_backward_error`` read stored scalars,
+        ``projected_backward_error`` read saved scalars,
         ``gram_psd_deficit`` is ``max(0, -min(spectrum))`` of the raw overlap
         spectrum before positive-subspace filtering, and ``gram_hermiticity``
         is the largest absolute real or imaginary component of ``S - S†``.
@@ -181,12 +181,12 @@ def _hermiticity(matrix, arithmetic):
 
 
 def _publish(result, options, checks, metrics, *, max_integer_bits=DEFAULT_MAX_INTEGER_BITS):
-    """Bind each performed scalar check to one new receipt, preserving raw facts.
+    """Bind each computed scalar check value to one new verification record, keeping the raw facts.
 
-    Each raw fact is first assembled against its check so that a
-    definition-invalid value raises before a receipt exists. Every returned
-    fact with a value is then witnessed by the receipt and records the
-    options identity and its CheckSpec identity, which
+    Each raw fact is first evaluated against its check, so that a value
+    outside the quantity's definition raises before the record exists.
+    Every returned fact with a value is then witnessed by the record and
+    holds the content hashes of the options and of its CheckSpec, which
     Certificate.with_verification and assemble_check compare. A fact without
     a value keeps no evidence and attaches as INCONCLUSIVE.
     """
@@ -213,14 +213,14 @@ def _publish(result, options, checks, metrics, *, max_integer_bits=DEFAULT_MAX_I
 
 
 def witness_check_facts(receipt, result, checks):
-    """Return the fact that answers each CheckSpec, witnessed by the completed ``receipt``.
+    """Return the fact that answers each CheckSpec, witnessed by the completed verification record ``receipt``.
 
-    Each returned fact is the receipt's raw application fact named like its
-    check. A fact with a value receives evidence that cites the receipt, the
-    Result, the options that produced it and the CheckSpec it answers.
-    Certificate.with_verification and assemble_check compare these fields
-    before they give PASS or FAIL. A raw fact inside the receipt cannot carry
-    them, because it exists before the receipt's content identity does. A
+    Each returned fact is the raw fact in the record that carries its
+    check's name. A fact with a value receives evidence that cites the
+    record, the Result, the options that produced it and the CheckSpec it
+    answers. Certificate.with_verification and assemble_check compare these
+    fields before they give PASS or FAIL. A raw fact inside the record cannot
+    carry them, because it exists before the record's content hash does. A
     fact without a value keeps no evidence and attaches as INCONCLUSIVE.
 
     Returns:
@@ -243,7 +243,7 @@ def witness_check_facts(receipt, result, checks):
 
 
 def verify_projected(result, *, options: ProjectedVerificationOptions, max_integer_bits=DEFAULT_MAX_INTEGER_BITS):
-    """Run the projected checks on a Result's stored diagnostics, without solving again.
+    """Run the projected checks on a Result's saved diagnostics, without solving again.
 
     `result.verify(checks=options)` calls this for Lanczos, FixedGCIM and
     ADAPT. The Result must supply `projected_diagnostics()`. The criteria
@@ -260,7 +260,7 @@ def verify_projected(result, *, options: ProjectedVerificationOptions, max_integ
         verification (tuple): `(receipt, facts)`: the `VerificationReceipt`
             of this computation, and one
             [`FramedFact`][nwqlib.evidence.error_model.FramedFact] per
-            criterion that cites it. A criterion whose stored value is
+            criterion that cites it. A criterion whose saved value is
             missing gives an unknown fact.
 
     Raises:

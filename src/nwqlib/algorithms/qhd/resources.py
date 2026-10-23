@@ -1,14 +1,15 @@
-"""Fault-tolerant resource laws of the QHD circuit and its separate error sources.
+"""Fault-tolerant resource counts of the QHD circuit and its separate error sources.
 
-A Plan with native execution already publishes its CX law, and a binary Plan
-also a rotation law that counts rotation gates before angle classification
+A Plan with quantum execution already records its CX count as a cost rule
+(``ResourceLaw``), and a binary Plan also a rotation count that includes
+every rotation gate before angle classification
 (``method.QHD._select_binary_native``). This module adds three things that a
 user planning for fault-tolerant hardware needs without compiling a
 paper-scale circuit:
 
-- the number of arbitrary rotations of the emitted circuit, counted from its
-  stored blocks and preparation (``rotation_population``), which planning
-  publishes for the one-hot encoding as a ``ResourceLaw`` with metric
+- the number of arbitrary rotations of the built circuit, counted from the
+  Plan's blocks and preparation (``rotation_population``), which planning
+  records for the one-hot encoding as a ``ResourceLaw`` with metric
   ``arbitrary_rotations``, and the same classification of the computed
   angles of a binary circuit (``_binary_population``).
 - for an explicit total synthesis budget, the Clifford replacements that the
@@ -18,33 +19,34 @@ paper-scale circuit:
   (``circuit_resources``), and the totals of an augmented-Lagrangian run or a
   box refinement over its circuits and shots (``run_resources``).
 
-The laws count a stated decomposition, not a compiler output. Each emitted
-gate is expanded by its Qiskit 2.6.0 definition, or by NWQLib's own
-phase-diagonal multiplexor, into Clifford gates and single-axis rotations
-(``Rz``, ``Ry``, the phase gate ``P(phi) = exp(i phi/2) Rz(phi)``), before any
-cross-gate simplification or routing. A single-axis rotation whose binary64
-angle equals a stored conventional Clifford angle is not counted, one that
-equals the stored ``pi/4`` or ``-pi/4`` is an exact T gate, and every other
+The counts describe a stated decomposition, not a compiler output. Each
+gate of the built circuit is expanded by its Qiskit 2.6.0 definition, or by
+NWQLib's own phase-diagonal multiplexor, into Clifford gates and
+single-axis rotations (``Rz``, ``Ry``, the phase gate
+``P(phi) = exp(i phi/2) Rz(phi)``), before any cross-gate simplification or
+routing. A single-axis rotation whose binary64 angle equals the binary64
+value of a conventional Clifford angle is not counted, one that equals the
+binary64 value of ``pi/4`` or ``-pi/4`` is an exact T gate, and every other
 nonzero angle is an arbitrary rotation (``resources.records.CLIFFORD_ANGLES``
-and ``T_ANGLES``, the classification of the library's resource fold). The
-comparison is exact, so it describes the emitted binary64 angles. Nothing is
-counted as Clifford because it is near a Clifford angle. That choice is the
-budgeted replacement of ``synthesis_projection``, which describes an
-approximated construction and says so.
+and ``T_ANGLES``, the classification of the library's resource totals). The
+comparison is exact, so it describes the binary64 angles of the built
+circuit. Nothing is counted as Clifford because it is near a Clifford angle.
+That choice is the budgeted replacement of ``synthesis_projection``, which
+describes an approximated construction and says so.
 
 Liu et al., arXiv:2607.16996v1, Sec. VI A, count ``Rz`` gates after Qiskit's
 optimization level 0 and replace every rotation within an angle threshold of
 0, ``+-pi/2`` or ``pi`` by a Clifford for their encoding comparison. Their
 analysis script (``experiments/res_ana/analyze_periodic_qasm_stats.py`` of
 the authors' repository) sets that threshold to ``1e-12``. That fixed rule
-serves one census. Its error per replacement is about ``5e-13``, but its
-total grows with the number of replacements and is charged to no budget.
+serves one count. Its error per replacement is about ``5e-13``, but its
+total grows with the number of replacements and is counted in no budget.
 NWQLib therefore derives its threshold from the user's synthesis budget
-instead, so every replacement it makes is paid for in the same error ledger,
-and the emitted count uses no tolerance at all. The same authors divide a
-total synthesis budget ``1e-4`` evenly over the remaining rotations of each
-benchmark circuit (Sec. VI B). The even split is kept as the rule, because
-it minimizes the logarithmic synthesis cost for a fixed rotation population
+instead, so every replacement it makes is counted in that same budget, and
+the count of the built circuit uses no tolerance at all. The same authors
+divide a total synthesis budget ``1e-4`` evenly over the remaining rotations
+of each benchmark circuit (Sec. VI B). The even split is kept as the rule, because
+it minimizes the logarithmic synthesis cost for a fixed number of rotations
 (``synthesis_projection``). Their numerical budget is a benchmark choice, so
 NWQLib has no default budget and the user states one.
 """
@@ -117,7 +119,7 @@ def _mcx_rotations(controls):
 def _normal_scaling(magnitude, s, name):
     """For positive ``magnitude``, raise unless ``magnitude * 2**-s`` is finite
     and at least ``2**-1022``, compared by exponents without scaling.
-    Zero is admitted only when ``s <= 1021``.
+    Zero is accepted only when ``s <= 1021``.
 
     With ``magnitude = m 2**e``, ``0.5 <= m < 1`` (``frexp``),
     ``magnitude >= 2**(s - 1022)`` holds exactly when ``e - 1 >= s - 1022``.
@@ -128,35 +130,36 @@ def _normal_scaling(magnitude, s, name):
 
 
 def _projector_slots(block, wraps):
-    """Return ``(slots, fixed_arbitrary, fixed_t)`` of one emitted number-projector block.
+    """Return ``(slots, fixed_arbitrary, fixed_t)`` of one number-projector block of the built circuit.
 
     The block applies ``exp(-i a (prod n - I/2**s))`` on s qubits as the
     phase ``P(-a)`` on the all-ones state (``pauli_evolution.append_number_projector_phase``).
-    ``slots`` maps rotation magnitudes to their multiplicities: each
-    parameter-dependent angle, an exact power-of-two scaling of the stored
-    angle a, and from s = 6 the fixed angles of the CRX gates.
+    ``slots`` maps rotation magnitudes to their multiplicities. Its keys are
+    the magnitudes of the parameter-dependent angles, each an exact
+    power-of-two scaling of the stored angle a, and from s = 6 those of the
+    fixed angles of the CRX gates.
 
-    - s = 1: ``P(-a)``, one slot at ``|a|``.
-    - s = 2: ``CP(-a)`` lowers to two CX and three phases at ``+-a/2``.
+    - s = 1: ``P(-a)``, one rotation at ``|a|``.
+    - s = 2: ``CP(-a)`` decomposes into two CX and three phases at ``+-a/2``.
     - 3 <= s <= 5 with ``MCPhaseGate``: Qiskit's ``synth_mcp_noaux_v24``
-      emits MCRZ gates with ``k = s - 1, ..., 1`` controls and one final
+      produces MCRZ gates with ``k = s - 1, ..., 1`` controls and one final
       phase. With ``lambda_k = -a/2**(s - 1 - k)``, an MCRZ with ``k >= 2``
       controls has four rotations at ``+-lambda_k/4``, magnitude
       ``|a|/2**(s + 1 - k)``, and two MCX gates on each of ``ceil(k/2)`` and
       ``floor(k/2)`` controls (``_mcx_rotations``). The CRZ (k = 1) has two
       rotations and the final phase one, all three at ``|a|/2**(s - 1)``.
-      The parameter slots number ``4 s - 5``.
+      The parameter-dependent rotations number ``4 s - 5``.
     - s >= 6 with ``MCPhaseGate``: Qiskit's ``synth_mcp_noaux_sp22`` with
       ``n = s - 1`` controls applies ``2 n - 1`` CP and ``2 (n - 1)**2`` CRX
       gates. The CP angles are ``+-a/2**k`` for ``k = 1, ..., n - 1``, once
-      per sign, and ``a/2**(n - 1)`` once more. A CP lowers to three phases
-      at half its angle, so the CP slots are six at ``|a|/2**m`` for
-      ``m = 2, ..., s - 2`` and nine at ``|a|/2**(s - 1)``, ``6 s - 9`` in
-      total. The CRX angles are fixed: ``+-pi`` once per sign and
-      ``+-pi/2**j``, ``2 (n - j) - 1`` times per sign, for
-      ``j = 1, ..., n - 2``. A CRX lowers to two RY at half its angle
+      per sign, and ``a/2**(n - 1)`` once more. A CP decomposes into three
+      phases at half its angle, so the CP gates give six rotations at
+      ``|a|/2**m`` for ``m = 2, ..., s - 2`` and nine at ``|a|/2**(s - 1)``,
+      ``6 s - 9`` in total. The CRX angles are fixed: ``+-pi`` once per sign
+      and ``+-pi/2**j``, ``2 (n - j) - 1`` times per sign, for
+      ``j = 1, ..., n - 2``. A CRX decomposes into two RY at half its angle
       between Clifford gates, so the CRX at ``+-pi/2**j`` add
-      ``4 (2 (n - j) - 1)`` slots at ``pi/2**(j + 1)``, in total
+      ``4 (2 (n - j) - 1)`` rotations at ``pi/2**(j + 1)``, in total
       ``8 s - 20`` exact T gates (j = 1) and ``4 ((s - 3)**2 - 1)``
       arbitrary rotations. The CRX at ``+-pi`` add only Clifford gates.
     - 4 <= s <= 6 with the phase-diagonal multiplexor: the phase is first
@@ -173,16 +176,17 @@ def _projector_slots(block, wraps):
     rotations of the multi-controlled X gates, the ``+-pi/8`` phases and
     the T gates. Otherwise both are zero.
 
-    Range admission (``validation._normal_range``). The nonzero angle a
+    Range check (``validation._normal_range``). The nonzero angle a
     needs ``|a| 2**-s >= 2**-1022``, which also covers the smallest
-    parameter-dependent rotation magnitude of the P, CP or MCPhase lowering,
-    ``|a|/2**(s - 1)`` for s >= 3, ``|a|`` for s = 1 and ``|a|/2``
-    for s = 2, and the native compensation magnitude ``|a|/2**s``.
-    A nonzero wrapped phase lambda of the phase-diagonal provider needs
+    parameter-dependent rotation magnitude of the P, CP or MCPhase
+    decomposition, ``|a|/2**(s - 1)`` for s >= 3, ``|a|`` for s = 1 and
+    ``|a|/2`` for s = 2, and the compensation magnitude ``|a|/2**s`` of the
+    Qiskit circuit. A nonzero wrapped phase lambda of the phase-diagonal
+    construction (``provider="diagonal_synthesis"``) needs
     ``|lambda| 2**-s >= 2**-1022`` for its repeated means and final child
-    phase. Every scaling is then an exact power-of-two scaling of a normal
-    number. Otherwise this raises, at planning and when the census is
-    formed again.
+    phase. Every scaling is then an exact power-of-two scaling of
+    a normal number. Otherwise this raises, at planning and when the rotation
+    classification is performed again.
     """
     s, a = len(block.support), abs(block.angle)
     _normal_scaling(a, s, f"the angle {block.angle!r} of the number projector on {s} qubits")
@@ -217,7 +221,7 @@ def _projector_slots(block, wraps):
 
 
 class RotationPopulation(Record):
-    """The arbitrary rotations and exact T gates of one emitted QHD circuit.
+    """The arbitrary rotations and exact T gates of one built QHD circuit.
 
     Attributes:
         magnitudes: ``(|angle|, multiplicity)`` of the arbitrary rotations,
@@ -236,46 +240,49 @@ class RotationPopulation(Record):
 
 
 def rotation_population(reconstruction, preparation):
-    """Classify every single-axis rotation of the emitted one-hot circuit, from its stored blocks and preparation.
+    """Classify every single-axis rotation of the built one-hot circuit, from the Plan's blocks and preparation.
 
-    The count reads the emitted construction, so rotations that
-    ``rotation_threshold`` removed are absent (their bound is the pruning
-    entry of the error ledger, not a proved zero), and exact-zero angles
-    emit nothing. Per block kind:
+    The classification reads the circuit as built, so rotations that
+    ``rotation_threshold`` removed are absent (their error is bounded by the
+    ``rotation_pruning`` entry of the error sources, not proved zero), and
+    exact-zero angles add no gate. Per block kind:
 
     - Fused hopping ``XXPlusYYGate(theta)`` on one link, with theta twice
       the stored angle ``fl(2 dt c)`` (``pauli_evolution._hopping_parameter``):
       Qiskit's definition holds two ``Ry(-theta/2)`` between Clifford gates
       and two ``Rz(+-beta)`` at ``beta = 0``, and halving theta returns the
-      stored angle exactly, so the link has two slots at the stored
+      stored angle exactly, so the link has two rotations at the stored
       ``|angle|``.
     - Number projector: ``_projector_slots``.
     - Structured one-hot preparation, the amplitude chain
       (``initial_state.append_amplitude_chain``): an X per register and, per
-      emitted link, one ``CRY(theta_m)`` whose definition holds
+      chain link in the circuit, one ``CRY(theta_m)`` whose definition holds
       ``Ry(theta_m/2)`` and ``Ry(-theta_m/2)`` and two CX, followed by a CX.
       The angles come from ``initial_state.chain_angles``. For the uniform
       state the last link has ``theta = 2 atan2(r, r) = pi/2``, so its two
       rotations are exact T gates, and a zero amplitude before a positive
       tail gives ``theta = pi``, two Cliffords. ``preparation`` is
-      ``QHD.initial_state_preparation``. ``"none"`` prepares nothing, and the
-      caller has no law for ``"qiskit_state_preparation"``.
+      ``QHD.initial_state_preparation``. ``"none"`` prepares nothing, and
+      ``"qiskit_state_preparation"`` has no rotation count, so the caller
+      does not pass it.
 
-    Each slot is then classified by its binary64 magnitude against the
-    stored conventional angles (module docstring). The work is one pass over
-    the stored blocks and the ``d K`` preparation amplitudes.
+    Each rotation is then classified by its binary64 magnitude against the
+    binary64 values of the conventional angles (module docstring). The work
+    is one pass over the Plan's blocks and the ``d K`` preparation
+    amplitudes.
 
-    Range admission. Planning forms this census for every one-hot Plan with
-    a rotation law, and it raises when a scaling leaves the normal binary64
-    range: a projector (``_projector_slots``) or a chain parameter
-    ``theta/2``, which must be normal (``validation._normal_range``), though
-    the Gaussian amplitudes themselves need not be. The selections of
-    planning keep both in range (``potential.PotentialCompiler.select_occurrences``,
+    Range check. Planning performs this classification for every one-hot
+    Plan with a recorded rotation count, and it raises when a scaling leaves
+    the normal binary64 range: a projector (``_projector_slots``) or a chain
+    parameter ``theta/2``, which must be normal
+    (``validation._normal_range``), though the Gaussian amplitudes
+    themselves need not be. The occurrences and chain links that planning
+    keeps lie in range (``potential.PotentialCompiler.select_occurrences``,
     ``initial_state.chain_selection``), so the check confirms that the
-    census reads the same selection. The hopping angle is
-    admitted by its producer (``kinetic.KineticCompiler``). Every slot is
-    then an exact power-of-two scaling of a normal stored angle, so the
-    count is exact for the stated decomposition.
+    classification reads the same ones. The hopping angle is checked where
+    it is formed (``kinetic.KineticCompiler``). Every rotation angle is then an
+    exact power-of-two scaling of a normal stored angle, so the count is
+    exact for the stated decomposition.
     """
     from .initial_state import chain_angles
 
@@ -314,16 +321,16 @@ def rotation_population(reconstruction, preparation):
 
 
 def _dense_diagonal_angles(phases):
-    """Return the nonzero ``Rz`` angles that ``append_control_diagonal_phases`` emits for one phase table.
+    """Return the nonzero ``Rz`` angles that ``append_control_diagonal_phases`` appends for one phase table.
 
     The helper (``subroutines._multiplexors``) wraps every phase to
     ``(-pi, pi]`` with ``angle(exp(i phase))`` and then, level by level on
-    the least-significant remaining qubit, emits one ``Rz`` multiplexor on the
+    the least-significant remaining qubit, appends one ``Rz`` multiplexor on the
     pairwise differences and keeps the pairwise means, whose multiplexor has
     the Gray-code angles ``gray_code_rotation_angles`` of the differences and
     omits an exactly zero angle. The same NumPy operations on the same values
     reproduce those angles bit for bit, so no circuit is built. An all-zero
-    table and a table on no qubit emit no rotation. The work is
+    table and a table on no qubit give no rotation. The work is
     ``O(n 2**n)`` for n qubits.
     """
     from nwqlib.subroutines._multiplexors import gray_code_rotation_angles
@@ -341,19 +348,20 @@ def _dense_diagonal_angles(phases):
 
 
 def merge_angles(slots, angles, occurrences=1):
-    """Add the absolute values of one block's emitted nonzero angles, times ``occurrences``, to ``slots``.
+    """Add the absolute values of one block's nonzero angles in the built circuit, times ``occurrences``, to ``slots``.
 
-    All census angles are finite binary64 numbers. Their absolute values are
+    All classified angles are finite binary64 numbers. Their absolute values are
     exact. ``np.unique`` groups equal values and returns the exact
     multiplicity of each group. This is precisely the multiset used by
     ``Counter(abs(angle) for angle in angles)``, including merging +0 and -0
-    if zeros are present. The producers exclude zero angles. NaNs would make
-    Python dictionary behavior and NumPy grouping different, and are outside
-    the admitted population. The merge costs Python work proportional to
-    distinct magnitudes per block. ``np.unique`` normally sorts, so its work
-    is O(N log N) comparisons in the general case, and its arrays are charged
-    (``_admit_inspection``). ``_binary_population`` sorts the final
-    magnitudes, so insertion order has no effect on its
+    if zeros are present. The functions that form the angles exclude zero
+    angles. NaNs would make Python dictionary behavior and NumPy grouping
+    different, and NaN angles lie outside the inputs this function supports.
+    The merge costs Python work proportional to distinct magnitudes per
+    block. ``np.unique`` normally sorts, so its work is O(N log N)
+    comparisons in the general case, and its arrays are counted against the
+    byte limit (``_admit_inspection``). ``_binary_population`` sorts the
+    final magnitudes, so insertion order has no effect on its
     ``RotationPopulation``.
     """
     magnitudes, counts = np.unique(np.abs(np.asarray(angles, dtype=np.float64)), return_counts=True)
@@ -362,7 +370,7 @@ def merge_angles(slots, angles, occurrences=1):
 
 
 def _distinct_blocks(steps):
-    """Return ``(((block, occurrences), ...), kinetic)``: each distinct stored binary block and its count.
+    """Return ``(((block, occurrences), ...), kinetic)``: each distinct binary block of the Plan and its count.
 
     Blocks are equal when their kind, variables, exponent and synthesis are,
     which fixes the construction within one ``binary.BinaryModel``.
@@ -379,11 +387,11 @@ def _distinct_blocks(steps):
 
 
 def _unique_work(entries):
-    """Return ``W_unique(N) = 2N ceil(log2 max(2, N)) + 8N``, the comparison-visit charge of grouping N angles.
+    """Return ``W_unique(N) = 2N ceil(log2 max(2, N)) + 8N``, the comparison visits counted for grouping N angles.
 
-    A conservative comparison-visit charge for a qualified introsort or
-    merge-sort owner of ``np.unique``, an O(N log N) accounting envelope with
-    an explicit sort premise (``_census_sizes``).
+    A conservative count of comparison visits for ``np.unique`` when it
+    sorts with a qualified introsort or merge sort, an O(N log N) upper
+    bound that states this assumption on the sort (``_census_sizes``).
     """
     entries = int(entries)
     return 2 * entries * (max(2, entries) - 1).bit_length() + 8 * entries
@@ -392,40 +400,41 @@ def _unique_work(entries):
 def _dense_census_bytes(entries):
     """Return ``D_dense(E) = H0 + 112E + (16 + L(n)) floor(E/2)`` for a dense phase table of ``E = 2**n`` entries.
 
-    A sufficient envelope for ``_dense_diagonal_angles``,
+    A sufficient byte bound for ``_dense_diagonal_angles``,
     including its returned Python list, excluding the input phase array
     already held by the construction:
 
     1. ``np.asarray(phases, dtype=float)`` shares the construction's
-       admitted float64 array. A dtype conversion or a Python-list input
-       would add its conversion buffer.
+       float64 array, which is already counted. A dtype conversion or a
+       Python-list input would add its conversion buffer.
     2. In ``np.angle(np.exp(1j*values))`` the complex multiplication and
        exponential can overlap at 32E. The exponential and real argument
        array overlap at 24E.
     3. At a recursion level with m real entries, ``q = m/2``. The enclosing
        real array, difference input, copied transform array, two copied
        butterfly halves, arithmetic intermediates, index conversion and
-       gathered result fit a 32E numerical envelope. The final gather can
+       gathered result fit within 32E numerical bytes. The final gather can
        have ``8m + 40q = 28m`` numerical bytes. The wrapping and recursion
        numerical phases are successive.
     4. The Gray-code helper (``subroutines._multiplexors.gray_code_rotation_angles``)
        builds ``[index ^ (index >> 1) for index in range(q)]``, at most
        ``q <= E/2`` Python integers: 16 bytes per list slot, including
        capacity slack, and ``L(n)`` per integer. Small integers shared by
-       CPython are charged as if independent.
-    5. At most ``E - 1`` emitted Python floats over all levels: referents at
+       CPython are counted as if independent.
+    5. At most ``E - 1`` returned Python floats over all levels: referents at
        most 24E, old and replacement destination slots during growth 32E,
        the ``.tolist()`` and filtered-comprehension slots at most
        ``24q <= 12E``. ``72E`` covers these, rounded up from 68E.
-    6. Steps 3 and 5 give 104E. 112E is a conservative whole-level envelope.
+    6. Steps 3 and 5 give 104E. 112E is a conservative bound for a whole
+       level.
 
-    This is a length-E law even when the block reports zero rotations: the
-    helper still examines its dense phase array. For ``E < 2`` the helper
-    returns immediately and H0 suffices. The array and Python-object
-    allowances are qualified for 64-bit CPython 3.12.14, NumPy 2.5.2, SymPy
-    1.14.0 and Pydantic 2.13.5. They are not process-RSS bounds and exclude
-    allocator fragmentation, module import/code initialization and
-    independently owned native-library memory.
+    The bound depends on the table length E even when the block reports
+    zero rotations, because the helper still examines its dense phase array.
+    For ``E < 2`` the helper returns immediately and H0 suffices. The array and
+    Python-object allowances are qualified for 64-bit CPython 3.12.14, NumPy
+    2.5.2, SymPy 1.14.0 and Pydantic 2.13.5. They are not process-RSS bounds
+    and exclude allocator fragmentation, module import/code initialization
+    and memory that compiled libraries allocate independently.
     """
     entries = int(entries)
     # H0 = 65536 bytes is the bookkeeping allowance BOOKKEEPING_BYTES of nwqlib.evidence._work
@@ -439,9 +448,9 @@ def _dense_census_bytes(entries):
 
 
 def _inspection_group_sizes(steps):
-    """Return ``(work, bytes)`` of grouping the stored blocks into distinct blocks, before grouping them.
+    """Return ``(work, bytes)`` of grouping the Plan's blocks into distinct blocks, before grouping them.
 
-    With B stored block occurrences,
+    With B block occurrences,
     ``G = H0 + sum_occurrences [512 + 16*len(variables) + L(bit_length(max(1, B)))]``
     covers grouping keys, exponent hex strings, value pairs, counters,
     mapping resize storage, result slots and support-tuple references, and
@@ -461,54 +470,54 @@ def _inspection_group_sizes(steps):
 
 
 def _census_sizes(rows, *, cp_pair, kinetic_occurrences, grouping_bytes, qft_gate_count, grouping_work):
-    """Return ``(work, workspace)`` of the binary rotation census from scalar metadata alone.
+    """Return ``(work, workspace)`` of the binary rotation classification from scalar metadata alone.
 
     ``rows`` has one ``(entries, diagonal_slots, occurrences, dense)`` tuple
     per distinct block u: its full phase-table length ``E_u = 2**n_u``, a
-    bound ``N_u`` on its nonzero diagonal rotation slots, its occurrence
+    bound ``N_u`` on its nonzero diagonal rotations, its occurrence
     multiplicity ``m_u`` and whether it is a dense diagonal. With
     ``P = 2*qft_controlled_phases(bits, cutoff)`` (``cp_pair``), the CP
     gates of the forward/inverse QFT pair, a kinetic occurrence contributes
-    3P single-axis rotation slots, and with ``K_occ`` kinetic occurrences
+    3P single-axis rotations, and with ``K_occ`` kinetic occurrences
 
     ``U_cap = P + sum_u N_u``, ``C_cap = 3P K_occ + sum_u m_u N_u``.
 
-    ``U_cap`` bounds distinct magnitudes, ``C_cap`` a count stored at any
-    magnitude, the exact-T total and the sum of all slots. P is
-    conservative: many CP angles have the same magnitude, and it covers the
-    zero-count keys of the QFT-half loop when there are no kinetic
-    occurrences.
+    ``U_cap`` bounds the distinct magnitudes, and ``C_cap`` bounds the count
+    recorded at any one magnitude, the exact-T total and the total number of
+    rotations. P is conservative, because many CP angles have the same
+    magnitude, and it covers the zero-count keys of the QFT-half loop when
+    there are no kinetic occurrences.
 
-    Grouping keeps the ``np.unique`` laws ``B_unique(N) = 64N + H0`` and
+    Grouping uses the ``np.unique`` formulas ``B_unique(N) = 64N + H0`` and
     ``W_unique(N) = 2N ceil(log2(max(2, N))) + 8N`` (``_unique_work``). The
     merge holds the ``magnitudes.tolist()`` and ``counts.tolist()``
     arguments simultaneously while ``zip`` is consumed, which fit
-    ``B_merge_lists(N) = [56 + L(bit_length(max(1, N)))] N``: 24 + 16 for
-    floats and list slots plus 16 for count-list slots, and L for the Python
-    counts. The product ``int(count)*occurrences``, old value, new sum and
-    scalar conversions need at most a further ``4L(b_C)`` at one merge
+    ``B_merge_lists(N) = [56 + L(bit_length(max(1, N)))] N``, with 24 + 16
+    for floats and list slots plus 16 for count-list slots, and L for the
+    Python counts. The product ``int(count)*occurrences``, old value, new sum
+    and scalar conversions need at most a further ``4L(b_C)`` at one merge
     operation, with ``b_C = bit_length(max(1, C_cap))``. A returned dense
-    list is input to grouping and stays live there, 40N for its floats and
-    slots. Walsh angles are the construction's array and belong to the
-    model and cache charge. The block-local envelope is
+    list is input to grouping and stays in memory there, 40N for its floats and
+    slots. Walsh angles are the construction's array and are counted with
+    the model and its cache. The block-local byte bound is
 
     ``B_group(N) = H0 + 64N + B_merge_lists(N) + 4L(b_C)``,
     ``B_local,u = max(D_dense(E_u), 40N_u + B_group(N_u))`` (dense),
     ``B_local,u = B_group(N_u)`` (Walsh), with D_dense of
     ``_dense_census_bytes``.
 
-    The whole Python population phase (the ``slots`` and ``magnitudes``
-    Counters with resize overlap, float keys, original and classified
-    integer counts, sorted pair tuples and list, sort scratch, and
-    ``RotationPopulation`` validation and construction) fits
+    The Python objects that classify the rotations (the ``slots`` and
+    ``magnitudes`` Counters with resize overlap, float keys, original and
+    classified integer counts, sorted pair tuples and list, sort scratch, and
+    ``RotationPopulation`` validation and construction) fit
 
     ``B_population(U, C) = H0 + [1024 + 4L(bit_length(max(1, C)))] U``.
 
     The loop keeps its previous dense ``angles`` list while evaluating the
     next one, another ``40 N_max``. The QFT-half list and its temporary
     concatenation fit ``128 (G_qft + 1)``, with ``G_qft`` the combined
-    forward/inverse gate count. With the grouping pre-bound G
-    (``_inspection_group_sizes``),
+    forward/inverse gate count. With the grouping bound G, computed before
+    grouping (``_inspection_group_sizes``),
 
     ``B_census = G + 128 (G_qft + 1) + B_population(U_cap, C_cap) + 40 N_max + max_u B_local,u``.
 
@@ -548,7 +557,11 @@ def _census_sizes(rows, *, cp_pair, kinetic_occurrences, grouping_bytes, qft_gat
 
 
 def _admit_inspection(plan, held_bytes=0):
-    """Admit the binary rotation census of a Plan (``_admit_census``), or return None for a one-hot Plan."""
+    """Check a binary Plan's rotation classification against its QHD limits (``_admit_census``).
+
+    Return the result of ``_admit_census`` for a binary Plan, or None for a
+    one-hot Plan.
+    """
     if plan.method.encoding != "binary":
         return None
     r = plan.reconstruction
@@ -567,46 +580,49 @@ def _admit_inspection(plan, held_bytes=0):
 
 
 def _admit_census(method, steps, support_values, held_bytes=0):
-    """Admit the binary rotation census of ``circuit_resources`` or ``run_resources`` and return its grouping and bytes.
+    """Check the binary rotation classification of ``circuit_resources`` or ``run_resources`` against the QHD limits.
 
-    Resource inspection admits distinct-block grouping, the full dense-table
+    The rotation classification sorts the circuit's rotations into Clifford
+    gates, exact T gates and arbitrary rotations. Before it runs, the work
+    and bytes of its distinct-block grouping, the full dense-table
     angle-formation workspace, NumPy unique/grouping arrays, Python
     magnitude/count objects, final sorting and RotationPopulation validation
-    against the Plan's QHD limits. Dense formation is charged by the
-    phase-table length even when no rotation survives. Count integers are
-    sized from the total occurrence bound. The model, its admitted
-    construction cache and the caller's live data share the same byte
-    limit with the census. The array and Python-object allowances describe
-    the qualified runtime's named allocations. Module initialization and
-    process RSS have separate scope.
+    are compared with the Plan's QHD limits. Dense formation is counted by
+    the phase-table length even when no rotation survives. Count integers
+    are sized from the total occurrence bound. The model, its construction
+    cache and the caller's data in memory share the same byte limit with the
+    classification. The array and Python-object allowances describe the
+    named allocations of the qualified runtime. Module initialization and
+    process RSS lie outside their scope.
 
     The grouping bytes (``_inspection_group_sizes``) are checked before the
-    blocks are grouped, and that one grouping is returned for the census
-    (``_binary_population``). The census work of ``_census_sizes`` is the
-    named inspection ``QHD.max_work`` charge, checked before any dense
-    formation or sort. The returned bytes are ``held_bytes`` (the caller's
-    live data), the Plan's support tables, 8 bytes per entry, and
-    ``B_census``. The caller passes them to ``binary.BinaryModel`` as its
-    held bytes, whose baseline admission (``BinaryModel.__init__``,
-    documented under ``construction``) adds the model, one current
-    construction per table and the largest synthesis or use workspace
-    against ``QHD.max_bytes`` before any array is built.
-    For each distinct block, ``entries`` is its table length (``2**b`` for a
-    kinetic block, ``2**(b |S|)`` for a potential block on support S), its
-    diagonal slots are its recorded rotations less the ``3P`` of its QFT
-    pair for a kinetic block and its recorded rotations for a potential
-    block, and ``dense`` its stored synthesis. Quantum binary planning uses
-    this same metadata census admission before returning its Plan. The
-    returned held charge includes the caller's other live records, source
-    table payloads once and the census workspace. The model baseline is
-    admitted against the remainder before model construction.
-    ``method``, ``steps`` and ``support_values`` are the binary Plan's QHD
-    Method, stored step blocks and support tables (``_admit_inspection``
-    passes a Plan's), so planning can admit the same charge before its Plan
-    exists. It returns ``(distinct, kinetic, held)``.
+    blocks are grouped, and that one grouping is returned for the
+    classification (``_binary_population``). The work of ``_census_sizes``
+    is compared with ``QHD.max_work`` before any dense formation or sort,
+    and an excess raises an error that names the resource inspection. The
+    returned bytes are ``held_bytes`` (the caller's data in memory), the Plan's
+    support tables, 8 bytes per entry, and ``B_census``. The caller passes them to
+    ``binary.BinaryModel`` as its held bytes, and the model's baseline check
+    (``BinaryModel.__init__``, documented under ``construction``) adds the
+    model, one current construction per table and the largest synthesis or
+    use workspace and compares the sum with ``QHD.max_bytes`` before any
+    array is built. For each distinct block, ``entries`` is its table length
+    (``2**b`` for a kinetic block, ``2**(b |S|)`` for a potential block on
+    support S), its ``diagonal_slots`` are its recorded rotations less the
+    ``3P`` of its QFT pair for a kinetic block and its recorded rotations
+    for a potential block, and ``dense`` states whether its synthesis is
+    ``dense_diagonal``. Quantum binary planning applies this same check,
+    from the same metadata, before returning its Plan. The returned held
+    bytes include the caller's other records in memory, source table payloads
+    once and the workspace of the classification. The model baseline is
+    checked against the remainder before model construction. ``method``, ``steps``
+    and ``support_values`` are the binary Plan's QHD Method, step blocks
+    and support tables (``_admit_inspection`` passes a Plan's), so planning
+    can apply the same check before its Plan exists. It returns
+    ``(distinct, kinetic, held)``, the grouping and the held bytes.
 
     Raises:
-        ValueError: The census exceeds the Plan's QHD work or byte limit.
+        ValueError: The classification exceeds the Plan's QHD work or byte limit.
     """
     from .binary import _require_bytes, qft_controlled_phases, register_bits
 
@@ -634,13 +650,13 @@ def _admit_census(method, steps, support_values, held_bytes=0):
 
 
 def _binary_population(model, distinct, kinetic):
-    """Classify every single-axis rotation of the emitted binary circuit from its stored blocks.
+    """Classify every single-axis rotation of the built binary circuit from the Plan's blocks.
 
     ``model`` is the Plan's ``binary.BinaryModel``, whose ``construction``
     rebuilds each block's diagonal from its stored exponent and synthesis
     exactly as ``native.append_binary_steps`` does. Per block:
 
-    - Kinetic block: the selected QFT and its exact inverse
+    - Kinetic block: the chosen QFT and its exact inverse
       (``model.forward``, ``model.inverse``). Qiskit's ``CPhaseGate(lambda)``
       definition holds ``P(lambda/2)``, ``P(-lambda/2)`` and ``P(lambda/2)``
       around two CX, so each controlled phase at ``lambda = pi/2**r`` gives
@@ -650,24 +666,25 @@ def _binary_population(model, distinct, kinetic):
     - Walsh diagonal: one ``Rz(theta_m)`` per kept mask, as a single ``Rz``,
       inside ``RZZGate`` or between parity CX (``apply_pauli_rotation``).
     - Dense diagonal: the nonzero multiplexor angles
-      (``_dense_diagonal_angles``). The recorded slot count
+      (``_dense_diagonal_angles``). The recorded rotation count
       ``2**n - 1`` includes omitted zero angles.
 
     The structured binary preparation is an H layer and adds no rotation.
-    Each magnitude is classified against the stored conventional angles
-    (module docstring). Every angle reaches its gate unchanged or, in a
-    controlled phase, halved exactly in the normal range. The work is one
-    synthesis of every stored block, the
-    transforms that planning performed, and for a dense diagonal on n
-    qubits the ``O(n 2**n)`` Gray-code angles of each distinct block, which
-    planning does not form, with no circuit.
+    Each magnitude is classified against the binary64 values of the
+    conventional angles (module docstring). Every angle reaches its gate
+    unchanged or, in a controlled phase, halved exactly in the normal range.
+    The work is one synthesis of every block of the Plan, the transforms
+    that planning performed, and for a dense diagonal on n qubits the
+    ``O(n 2**n)`` Gray-code angles of each distinct block, which planning
+    does not form, with no circuit.
 
     Each distinct block, keyed by kind, variables, exponent and synthesis,
     is synthesized once and its angles are merged with its occurrence
     multiplicity (``merge_angles``), so equal second-order halves are counted
-    twice from one construction. ``_admit_inspection`` admits this census
-    before any construction and passes its grouping, ``distinct`` and the
-    kinetic occurrence count ``kinetic`` (``_distinct_blocks``).
+    twice from one construction. ``_admit_inspection`` checks this
+    classification against the QHD limits before any construction and
+    passes its grouping, ``distinct`` and the kinetic occurrence count
+    ``kinetic`` (``_distinct_blocks``).
     """
     slots = Counter()
     halves = [abs(gate[1]) / 2 for gate in model.forward + model.inverse if gate[0] == "cp"]
@@ -689,26 +706,26 @@ def _binary_population(model, distinct, kinetic):
 
 
 def _onehot_wrap_census_bytes(method, reconstruction):
-    """Return (source, local) for a one-hot census that can call the wrap.
+    """Return (source, local), the bytes of a one-hot rotation classification that can compute wrapped phases.
 
     Source tables, initial vectors, step/block records and support positions
-    follow the inventories that planning charges (the table metadata of
-    ``method._support_table_bytes``, the stored initial vectors of
+    follow the byte counts of planning (the table metadata of
+    ``method._support_table_bytes``, the initial vectors of
     ``method._initial_state_bytes``, ``_STEP_BYTES`` and ``_BLOCK_BYTES``, as
-    in ``method._binary_source_reservation``). The local population
-    uses the qualified census rate 1024+4*L(bit_length(C)) per possible
-    magnitude, with C bounding total rotation multiplicity. It prices
-    Counter keys/counts, sorting and RotationPopulation construction.
-    The wrap cache and one miss coexist with these populations.
-    Return (0, 0) when no stored block uses the diagonal provider.
-    Caller-owned additional live buffers are separate held_bytes.
+    in ``method._binary_source_reservation``). The local bytes of the
+    classification use the qualified rate 1024+4*L(bit_length(C)) per
+    possible magnitude, with C bounding the total rotation multiplicity. The rate covers Counter
+    keys/counts, sorting and RotationPopulation construction. The cache of
+    wrapped phases and one cache miss coexist with these objects. Return
+    (0, 0) when no block of the Plan uses the phase-diagonal construction. Further
+    buffers of the caller in memory are passed separately as held_bytes.
 
     U counts possible distinct magnitudes and C total rotation or T
-    occurrences, before the census allocates. Each kinetic block adds at most
-    one magnitude and two rotations. A diagonal projector on s qubits adds at
-    most one magnitude and ``2**s - 1`` rotations. An MCPhase projector adds
-    at most ``max(1, s-1, 2s-5)`` magnitudes, and ``16 s**2`` bounds its
-    rotation and T population. Up to s = 5 it has at most ``max(1, s-1)``
+    occurrences, before the classification allocates memory. Each kinetic block adds
+    at most one magnitude and two rotations. A diagonal projector on s qubits
+    adds at most one magnitude and ``2**s - 1`` rotations. An MCPhase
+    projector adds at most ``max(1, s-1, 2s-5)`` magnitudes, and ``16 s**2``
+    bounds its rotations and T gates. Up to s = 5 it has at most ``max(1, s-1)``
     parameter-dependent magnitudes, and its fixed arbitrary rotations share
     the magnitude pi/8, for which one key is reserved globally.
     ``_projector_slots`` has at most ``4s - 5`` parameter rotations at
@@ -717,17 +734,18 @@ def _onehot_wrap_census_bytes(method, reconstruction):
     ``_mcx_rotations(h)`` totals at most ``8h``. Summing controls from 2 to
     s-1 gives less than ``8 s**2`` with the parameter rotations, and
     ``16 s**2`` also covers s = 1 and 2. From s = 6 it has ``s - 2``
-    parameter magnitudes and ``s - 3`` fixed ones, and its slots total
+    parameter magnitudes and ``s - 3`` fixed ones, and its rotations total
     ``4 s**2 - 10 s + 3``. Structured preparation adds at most
     ``d(K-1)`` magnitudes and ``2d(K-1)`` rotations. The ``"none"``
     preparation adds none. ``L(b) = 32 + 4 ceil(max(1,b)/30)`` is
-    ``binary._integer_storage``. The source inventory charges the table
+    ``binary._integer_storage``. The source byte count includes the table
     payload once, the table metadata ``65536 + 6144T + (24 + L(b_d))M +
-    256d``, the stored initial vectors ``8dK + 324d + 64``, ``_STEP_BYTES``
-    per schedule row, ``_BLOCK_BYTES`` per block and a support-position rate
-    from the register width, because one-hot blocks store qubits. These are
-    engineering allowances on CPython 3.12.14 and NumPy 2.5.2 for the named
-    populations, not process RSS or arbitrary symbolic or SDK internals.
+    256d``, the initial vectors ``8dK + 324d + 64``, ``_STEP_BYTES`` per
+    schedule row, ``_BLOCK_BYTES`` per block and a support-position rate
+    from the register width, because one-hot blocks record their qubits.
+    These are engineering allowances on CPython 3.12.14 and NumPy 2.5.2 for
+    the named objects, not bounds on process RSS or on the internal
+    allocations of symbolic or quantum SDK libraries.
     """
     from .binary import _integer_storage
     from .method import _BLOCK_BYTES, _STEP_BYTES
@@ -775,13 +793,13 @@ def _onehot_wrap_census_bytes(method, reconstruction):
 
 
 def _admitted_onehot_population(method, reconstruction, held_bytes=0):
-    """Admit a reached wrap together with the census residents, then count.
+    """Check the bytes of the wrapped phases and the classification's objects against ``max_bytes``, then classify.
 
-    The byte gate ``held_bytes + source + local`` of
-    ``_onehot_wrap_census_bytes`` runs against the Method's ``max_bytes``
-    before ``rotation_population`` creates its Counters or wrap cache. Its
-    zero work argument makes it an additional byte gate, not a claim that
-    the census performs zero work.
+    The byte check ``held_bytes + source + local`` of
+    ``_onehot_wrap_census_bytes`` compares with the Method's ``max_bytes``
+    before ``rotation_population`` creates its Counters or its cache of
+    wrapped phases. Its zero work argument makes it an additional byte
+    check, not a claim that the classification performs zero work.
     """
     source, local = _onehot_wrap_census_bytes(method, reconstruction)
     if local:
@@ -791,13 +809,14 @@ def _admitted_onehot_population(method, reconstruction, held_bytes=0):
 
 
 def _plan_population(plan, held_bytes=0):
-    """Return the ``RotationPopulation`` of a native QHD Plan's circuit, for either encoding.
+    """Return the ``RotationPopulation`` of the circuit of a quantum QHD Plan, for either encoding.
 
-    A binary census is admitted first (``_admit_inspection``) with the
-    caller's live data ``held_bytes``, and its model is built under that
-    reservation. A one-hot census whose stored blocks use the diagonal
-    provider admits its wrapped-phase cache beside its source records and
-    the same ``held_bytes`` (``_admitted_onehot_population``).
+    A binary rotation classification is first checked against the QHD
+    limits (``_admit_inspection``) with the caller's data in memory
+    ``held_bytes``, and its model is built within the bytes set aside there.
+    A one-hot classification whose blocks use the phase-diagonal construction checks
+    the bytes of its cache of wrapped phases together with its source
+    records and the same ``held_bytes`` (``_admitted_onehot_population``).
     """
     from .method import _grid
 
@@ -809,7 +828,7 @@ def _plan_population(plan, held_bytes=0):
 
 
 def _inspection_model(grid, method, support_values, held_bytes):
-    """Return the Plan's ``binary.BinaryModel`` built under the census reservation, or raise a named inspection refusal."""
+    """Return the Plan's ``binary.BinaryModel`` built within the bytes set aside for the classification, or raise."""
     from .binary import BinaryModel
 
     try:
@@ -820,14 +839,15 @@ def _inspection_model(grid, method, support_values, held_bytes):
 
 
 def rotation_law(population):
-    """Return the planning ``ResourceLaw`` with metric ``arbitrary_rotations`` of one emitted circuit.
+    """Return the planning cost rule (``ResourceLaw``) with metric ``arbitrary_rotations`` of one built circuit.
 
     It is exact for the stated decomposition and classification, whose
-    scalings the census admits in the normal range (``rotation_population``).
-    Its basis is ``selected_logical`` with no precision or synthesis, so the
-    default resource fold reports it. The exact T gates are not a T count of
-    the circuit, because its arbitrary rotations still need synthesis, so
-    they stay in ``QHDCircuitResources.exact_t`` rather than in a law.
+    scalings the classification checks to lie in the normal range
+    (``rotation_population``). Its basis is ``selected_logical`` with no
+    precision or synthesis, so the default resource total reports it. The
+    exact T gates are not a T count of the circuit, because its arbitrary
+    rotations still need synthesis, so they stay in
+    ``QHDCircuitResources.exact_t`` rather than in a cost rule.
     """
     return ResourceLaw(
         metric="arbitrary_rotations",
@@ -870,8 +890,8 @@ def _distance_bound(angle):
     2026-09-26 with Python 3.12.14 and Qiskit 2.5.2 on an Apple M3 Max. On this instance the
     Taylor bound added about 0.98 s to projection beside 11.9 s of planning,
     and both bounds made zero replacements. The Taylor bound is used for
-    its tighter error charge, which can admit more replacements on other
-    rotation populations.
+    its tighter error bound, which can allow more replacements in other
+    circuits.
     """
     magnitude = abs(angle)
     k = round(magnitude / (pi / 2))
@@ -898,7 +918,7 @@ def clifford_distance(angle):
     ``|delta| <= 4 arcsin(eps/2)``, about ``2 eps`` for small eps, and every
     angle is replaceable once ``eps >= 2 sin(pi/16)``.
 
-    The value is outward and uses no library sine. k is the rounded binary64
+    The value is evaluated outward and uses no library sine. k is the rounded binary64
     quotient ``|angle|/(pi/2)``. Any integer k names a Clifford rotation, and
     the common phase 0 gives ``2 |sin(delta/4)|``, so a k that misses the
     nearest multiple, as for a huge angle, only loosens the bound. ``|delta|``
@@ -908,8 +928,8 @@ def clifford_distance(angle):
     ``2 sin(y) <= 2 y (1 - y**2/6 + y**4/120)``, the alternating Taylor bound
     of sine for ``y >= 0``, and a larger ``|delta|`` gets the cap 2. The
     result is converted upward. It applies to a standalone circuit, whose
-    global phase is free. A controlled reuse would need phase-consistent
-    representatives.
+    global phase is free. Using the replaced rotation inside a controlled
+    gate would need phase-consistent representatives.
     """
     return _upward(_distance_bound(angle))
 
@@ -919,38 +939,39 @@ class QHDSynthesisProjection(Record):
 
     `circuit_resources(plan, synthesis_epsilon=E)` returns it as `synthesis`. The fields
     below are read-only. The projection describes an approximated construction. The
-    emitted circuit is unchanged, and replaced rotations are Cliffords only in the
-    construction this record prices. With N arbitrary rotations, every rotation whose
-    distance from the nearest Clifford rotation is at most `q = E/N` becomes that
-    Clifford, and the remaining budget is split evenly over the M rotations left. The T
-    estimate is `T_exact + 3 M log2(1/epsilon_rot)`, the leading term of the typical
-    Ross-Selinger count (arXiv:1403.2975v3) with intercept zero. It treats the circuit's
-    angles as typical Ross-Selinger instances. QHD's angles repeat and are structured,
-    so a large rotation count gives the estimate no statistical support, and it carries
-    no error bar. The guide's
+    built circuit is unchanged, and replaced rotations are Cliffords only in the
+    construction whose cost this record estimates. With N arbitrary rotations, every
+    rotation whose distance from the nearest Clifford rotation is at most `q = E/N`
+    becomes that Clifford, and the remaining budget is split evenly over the M rotations
+    left. The T estimate is `T_exact + 3 M log2(1/epsilon_rot)`, the leading term of the
+    typical Ross-Selinger count (arXiv:1403.2975v3) with intercept zero. It treats the
+    circuit's angles as typical Ross-Selinger instances. QHD's angles repeat and are
+    structured, so a large rotation count gives the estimate no statistical support, and
+    it carries no error bar. The guide's
     [fault-tolerant resources](../../algorithms/qhd.md#fault-tolerant-resources) section
     derives the rule.
 
     Attributes:
         epsilon: E, the total operator-norm allowance of one circuit execution for
             Clifford replacement plus rotation synthesis.
-        candidates: N, the arbitrary rotations of the emitted circuit.
+        candidates: N, the number of arbitrary rotations of the built circuit, each a
+            candidate for Clifford replacement.
         threshold: `q = E/N`, the initial per-rotation allowance, rounded downward, None
             when N is zero.
-        replaced: Candidates whose distance bound `2 sin(|delta|/4)`, with delta the
-            angle minus the nearest multiple of `pi/2`, is at most q, replaced by
-            Cliffords.
+        replaced: Number of arbitrary rotations whose distance bound `2 sin(|delta|/4)`,
+            with delta the angle minus the nearest multiple of `pi/2`, is at most q,
+            which are replaced by Cliffords.
         replacement_error: `E_C`, the exact sum of their distance bounds, rounded
             upward.
         rotations: `M = N - replaced`, the rotations left to synthesize.
-        rotation_epsilon: Per-rotation allowance obtained by rounding E minus the stored
-            `replacement_error` downward, dividing that remaining allowance by M
-            exactly, and rounding downward again. None when M is zero. The stored
+        rotation_epsilon: Per-rotation allowance obtained by rounding E minus the
+            recorded `replacement_error` downward, dividing that remaining allowance by M
+            exactly, and rounding downward again. None when M is zero. The recorded
             replacement error plus M times this allowance is at most E.
-        exact_t: T and T-inverse occurrences of the emitted circuit, which need no
+        exact_t: T and T-inverse occurrences of the built circuit, which need no
             synthesis and spend no budget.
-        t: The T estimate as a `ResourceLaw` (metric `t`, basis `clifford_t`,
-            interpretation `estimate`, precision E), or None.
+        t: The T estimate as a cost rule, a `ResourceLaw` with metric `t`, basis
+            `clifford_t`, interpretation `estimate` and precision E, or None.
         t_unavailable: Why there is no estimate, for example a per-rotation budget of 1
             or more, where the logarithmic model does not apply, or None.
     """
@@ -986,38 +1007,41 @@ def synthesis_projection(population, epsilon):
 
     1. For N > 0, test each candidate replacement against ``q = E/N`` in
        exact rational arithmetic.
-    2. Let C be the exact sum of admitted distance bounds and publish
-       ``E_C = up64(C)``. Form ``R = down64(E - E_C)`` from an exact
-       subtraction.
-    3. For M > 0 remaining rotations, publish ``eps = down64(R/M)`` after
+    2. Let C be the exact sum of the distance bounds of the replaced
+       rotations and record ``E_C = up64(C)``. Form ``R = down64(E - E_C)``
+       from an exact subtraction.
+    3. For M > 0 remaining rotations, record ``eps = down64(R/M)`` after
        exact division. If M = 0 no per-rotation tolerance is needed. If N = 0
-       the threshold is also None. A positive M with eps = 0 is refused.
+       the threshold is also None. A positive M with eps = 0 raises ValueError.
 
-    The threshold and selected distance bounds are exact rationals. Their
-    sum C is at most |B| E/N. The published replacement_error is C rounded
-    upward. Since E is representable, that published charge is at most E.
-    The remaining allowance is E minus the published charge, formed
-    exactly and rounded downward. Dividing it by M and rounding downward
-    gives the recorded rotation_epsilon. Thus the stored charge plus M
-    stored per-rotation allowances is at most E. The exact unrounded
-    allocation is at least E/N, while the published share may be slightly
-    smaller because of rounding. A distance upper bound can leave a
-    threshold rotation in the synthesis population, which costs T gates
-    without spending uncharged error. Exact T gates spend no budget. Rotations
-    that ``rotation_threshold`` pruned left the population, and their error
-    stays in the pruning entry, so nothing is charged twice. Dividing the
-    original E by M while also charging a nonzero ``E_C`` would overspend.
+    The threshold and the distance bounds of the replaced rotations are
+    exact rationals. Their sum C is at most |B| E/N. The recorded
+    replacement_error is C rounded upward. Since E is representable, that
+    recorded error is at most E. The remaining allowance is E minus the
+    recorded error, formed exactly and rounded downward. Dividing it by M
+    and rounding downward gives the recorded rotation_epsilon. Thus the
+    recorded replacement error plus M recorded per-rotation allowances is
+    at most E. The exact unrounded allocation is at least E/N, while the
+    recorded share may be slightly smaller because of rounding. Because the
+    distance is an upper bound, a rotation near the threshold can remain
+    among the rotations to synthesize, which costs T gates but adds no error
+    outside the budget. Exact T gates spend no budget. Rotations that
+    ``rotation_threshold`` pruned are not among the N rotations, and their
+    error stays in the pruning entry, so no error is counted twice. Dividing
+    the original E by M while also counting a nonzero ``E_C`` would exceed
+    the budget.
 
-    Even split. For a fixed population M > 0 and remaining real allowance R
-    with 0 < R < M, minimize ``sum_j [a log2(1/eps_j) + beta]`` subject to
-    ``0 < eps_j < 1`` and ``sum_j eps_j <= R``, with a > 0. The objective
-    decreases with each eps_j, so a real optimum uses the full allowance.
-    Strict convexity and Jensen's inequality give the unique real allocation
-    ``eps_j = R/M`` and cost at least ``M[a log2(M/R) + beta]``. Published
-    downward rounding can leave unused margin and does not assert an optimum
-    over binary64 allocations. Discrete replacement choices, integer synthesis costs
-    and cross-gate cancellation can change the global optimum, and this rule
-    is a sufficient zero-T replacement rule, not that larger optimization.
+    Even split. For a fixed number M > 0 of rotations and remaining real
+    allowance R with 0 < R < M, minimize ``sum_j [a log2(1/eps_j) + beta]``
+    subject to ``0 < eps_j < 1`` and ``sum_j eps_j <= R``, with a > 0. The
+    objective decreases with each eps_j, so a real optimum uses the full
+    allowance. Strict convexity and Jensen's inequality give the unique real
+    allocation ``eps_j = R/M`` and cost at least ``M[a log2(M/R) + beta]``.
+    The downward rounding of the recorded values can leave unused margin and
+    does not claim an optimum over binary64 allocations. Discrete
+    replacement choices, integer synthesis costs and cross-gate cancellation
+    can change the global optimum, and this rule is a sufficient zero-T
+    replacement rule, not that larger optimization.
 
     Estimate. ``T = T_exact + M a log2(1/eps)`` with ``a = T_PER_PRECISION_BIT``
     and intercept 0, the leading term of the Ross-Selinger count
@@ -1141,21 +1165,22 @@ class QHDCircuitResources(Record):
 
     Attributes:
         plan_id: Content hash of the Plan.
-        arbitrary_rotations: Arbitrary rotations of the emitted circuit, classified
-            exactly by angle, from the stored blocks for one-hot and from the computed
+        arbitrary_rotations: Arbitrary rotations of the built circuit, classified
+            exactly by angle, from the Plan's blocks for one-hot and from the computed
             block angles for binary. For one-hot this is the value of `rotation_law`.
-        exact_t: Exact T and T-inverse occurrences of the emitted circuit.
-        rotation_law: The Plan's `arbitrary_rotations` count, a `ResourceLaw`. The
-            binary encoding's count includes the rotation gates before angle
-            classification, exact T gates and the omitted zero angles of dense
-            diagonals, so it is an upper bound on `arbitrary_rotations`.
+        exact_t: Exact T and T-inverse occurrences of the built circuit.
+        rotation_law: The Plan's `arbitrary_rotations` count, a cost rule
+            (`ResourceLaw`). The binary encoding's count includes the rotation gates
+            before angle classification, exact T gates and the omitted zero angles of
+            dense diagonals, so it is an upper bound on `arbitrary_rotations`.
         synthesis: The budgeted Clifford replacement and T estimate, a
             [`QHDSynthesisProjection`][nwqlib.algorithms.qhd.resources.QHDSynthesisProjection],
             or None without a synthesis budget.
         evolution: Splitting and schedule bounds, a
             [`QHDEvolutionBound`][nwqlib.algorithms.qhd.evolution_bounds.QHDEvolutionBound].
-        error_sources: The replacement of the finite-difference kinetic, then every
-            error source of the circuit against the finite model, in stage order, each a
+        error_sources: The replacement of the finite-difference kinetic operator by the
+            finite model's kinetic operator (`kinetic_model`), then every error source of
+            the circuit against the finite model, in stage order, each a
             [`QHDErrorSource`][nwqlib.algorithms.qhd.resources.QHDErrorSource].
     """
 
@@ -1169,7 +1194,7 @@ class QHDCircuitResources(Record):
 
 
 def _native_plan(plan):
-    """Return the Plan's rotation law after checking that it selects a native QHD circuit with one."""
+    """Return the Plan's rotation count after checking that it builds a quantum QHD circuit with one."""
     if plan.execution != "quantum":
         raise ValueError("fault-tolerant QHD resources describe a native circuit; plan with execution='quantum'")
     laws = [law for selection in plan.construction.selections for law in selection.resource_laws
@@ -1181,7 +1206,7 @@ def _native_plan(plan):
 
 
 def _one_hot_sources(entry, r, method, grid):
-    """Return the one-hot ledger entries from ``angle_formation`` through ``state_preparation`` (``circuit_resources``)."""
+    """Return the one-hot error sources from ``angle_formation`` through ``state_preparation`` (``circuit_resources``)."""
     from .circuit_errors import block_errors, phase_allowance, preparation_error
 
     counts = block_errors(r, method, grid)
@@ -1217,7 +1242,7 @@ def _one_hot_sources(entry, r, method, grid):
 
 
 def _binary_sources(entry, r, method, grid, model):
-    """Return the binary ledger entries from ``angle_formation`` through ``state_preparation`` (``circuit_resources``)."""
+    """Return the binary error sources from ``angle_formation`` through ``state_preparation`` (``circuit_resources``)."""
     from .binary import register_bits
     from .circuit_errors import binary_angle_formation, binary_phase_allowance
 
@@ -1273,7 +1298,7 @@ def circuit_resources(plan, *, synthesis_epsilon=None):
     `circuit_resources(plan, synthesis_epsilon=E)` reads a QHD Plan with
     `execution="quantum"` and the structured or no initial-state preparation, in either
     encoding, and builds, transpiles and compiles no circuit. The record holds the
-    arbitrary rotations and exact T gates of the emitted circuit, the
+    arbitrary rotations and exact T gates of the built circuit, the
     [`evolution_bound`][nwqlib.algorithms.qhd.evolution_bounds.evolution_bound] of its
     product formula and every error source against the finite model, each with its
     status. With a synthesis budget E it also replaces by Clifford gates the rotations
@@ -1287,17 +1312,20 @@ def circuit_resources(plan, *, synthesis_epsilon=None):
     gives the replacement rule, the budget split and a comparison with a compiled count.
 
     Error sources, in the order of the stages they compare. The finite model uses the
-    exact schedule functions with the stored tables, constant and binary64 spacings on
-    the Plan's grid, and the compiled product uses the stored step weights.
+    exact schedule functions with the Plan's support tables, objective constant and
+    binary64 grid spacings, and the compiled product uses the step weights stored in
+    the Plan as binary64 numbers. In the list below, a stored angle or weight is such
+    a binary64 value, as opposed to the exact value it approximates.
 
     - `kinetic_model`: the replacement of the finite-difference stencil by the finite
       model's kinetic operator. Not applicable to the finite-difference model, which
       every one-hot circuit applies. Unavailable for the spectral model of a binary
       circuit, against which every later entry is measured. The two kinetic operators
-      differ by a norm that grows as `1/h**2`, and Duhamel's formula bounds the change
-      of the state only through the momentum content of the whole trajectory
-      ([Split-step classical evaluation](../../algorithms/qhd.md#split-step-classical-flavor)),
-      which the record does not have.
+      differ by an operator norm that grows as `1/h**2`, so a uniform Duhamel bound on
+      the change of the state can be weak. A sharper bound through the momentum
+      content of the whole trajectory
+      ([Split-step classical evaluation](../../algorithms/qhd.md#split-step-classical-flavor))
+      needs information that the record does not have.
     - `time_ordering`, `midpoint_quadrature` (not applicable under the integrated
       coefficient rule), `coefficient_rounding` and `product_formula`: the stages of
       `evolution_bound`. The coefficient residual is exact except for the quadratic
@@ -1319,9 +1347,10 @@ def circuit_resources(plan, *, synthesis_epsilon=None):
       dropped `Rz` angles plus the exact contributions of the rotations and dense phase
       entries omitted below the normal range.
     - `gate_parameters`: one-hot, the fused hopping gate's own parameter against twice
-      the stored angle, zero since the builder doubles the stored angle's own product,
-      with the projector and chain rotations exact power-of-two scalings of their stored
-      angles, which planning checks to lie in the normal binary64 range. Binary, zero,
+      the stored angle, zero since the circuit construction doubles the stored angle's
+      own product, with the projector and chain rotations exact power-of-two scalings
+      of their stored angles, which planning checks to lie in the normal binary64
+      range. Binary, zero,
       since every angle reaches its gate unchanged or halved exactly.
     - `diagonal_wrap`: the phase wrap `angle(exp(-i a))` of a phase diagonal, the
       one-hot projectors on 4 to 6 qubits or the binary dense diagonals, whose circuit
@@ -1336,7 +1365,7 @@ def circuit_resources(plan, *, synthesis_epsilon=None):
       preparation.
     - `clifford_replacement`: `E_C` of the synthesis projection, an outward bound of the
       replaced rotations' distances from their Clifford gates, describing the
-      approximated construction, not the emitted circuit.
+      approximated construction, not the built circuit.
     - `synthesis`: the requested allowance `E - E_C`, rounded downward, of the remaining
       rotations. NWQEC 0.1.2 applies a fixed `1e-4` angle cleanup, groups angles to four
       significant digits and passes them as decimal strings, all outside the requested
@@ -1361,13 +1390,14 @@ def circuit_resources(plan, *, synthesis_epsilon=None):
     forms no total. Sampling, device noise and the optimization gap are outside these
     error sources.
 
-    Cost. The one-hot work is one pass over the stored blocks with a few exact rational
+    Cost. The one-hot work is one pass over the Plan's blocks with a few exact rational
     operations per block, and the bound's pass over tables and steps. The binary work
-    reads the stored Walsh phase terms, synthesizes each distinct stored block once for
+    reads the Plan's Walsh phase terms, synthesizes each distinct block once for
     its angles, with the table transforms of planning, adds the `O(n 2**n)` Gray-code
     angles of each distinct dense-diagonal block on n qubits and two upward reductions
-    per table for the angle formation, and builds no circuit. The binary rotation count
-    is first checked against the Plan's `QHD.max_work` and `QHD.max_bytes`.
+    per table for the angle formation, and builds no circuit. The work and bytes of
+    classifying the rotations of a binary circuit are first checked against the
+    Plan's `QHD.max_work` and `QHD.max_bytes`.
 
     Args:
         plan (Plan): A QHD Plan from `nwqlib.plan(problem, method=QHD(...))` with
@@ -1385,9 +1415,10 @@ def circuit_resources(plan, *, synthesis_epsilon=None):
 
     Raises:
         ValueError: If the Plan is classical, if its state preparation has no rotation
-            count (`"qiskit_state_preparation"`), if the binary rotation count exceeds
-            the Plan's QHD work or byte limit with the model's baseline, or if a budget
-            leaves a per-rotation tolerance that rounds down to zero.
+            count (`"qiskit_state_preparation"`), if classifying the rotations of a
+            binary circuit would exceed the Plan's QHD work or byte limit with the
+            model's baseline, or if a budget leaves a per-rotation tolerance that
+            rounds down to zero.
 
     Examples:
         One first-order step of `(x - 1/5)**2` on three interior grid points of
@@ -1439,9 +1470,9 @@ def circuit_resources(plan, *, synthesis_epsilon=None):
     factors = "potential and whole-kinetic factors with exact QFTs" if binary else "potential and link factors"
     sources = [
         entry("kinetic_model", "unavailable", None,
-              "the spectral kinetic replaces the finite-difference stencil, and the state change it causes depends "
-              "on the momentum content of the whole trajectory, since the two operators differ by a norm that "
-              "grows as 1/h**2")
+              "the spectral kinetic operator replaces the finite-difference stencil. Their operator-norm "
+              "difference grows as 1/h**2, so a uniform state-error bound can be weak. Trajectory information "
+              "can sharpen the bound, but this record does not contain it")
         if method.kinetic_model == "spectral" else
         entry("kinetic_model", "not_applicable", None, "the circuit applies the finite-difference stencil"),
         entry("time_ordering", "bound", bound.time_ordering,
@@ -1494,9 +1525,10 @@ class QHDRunEntry(Record):
             `"round k level z"`.
         plan_id: Content hash of the inner Plan, or None when no Plan was chosen or the
             record does not name one.
-        circuits: Circuit preparations of its Run, the compiled bodies.
-        shots: Raw shots set aside by its attempts of every status, which bound the
-            shots it executed from above.
+        circuits: Number of circuits that its Run prepared, each a compiled circuit
+            counted once.
+        shots: Raw shots set aside by its execution attempts of every status, an upper
+            bound on the shots it executed.
         arbitrary_rotations: Arbitrary rotations of its circuit, the value that its
             resources recorded, which for the binary encoding counts rotation gates
             before angle classification.
@@ -1518,12 +1550,14 @@ class QHDRunResources(Record):
 
     [`run_resources`][nwqlib.algorithms.qhd.resources.run_resources] returns it. The
     fields below are read-only. Two totals are kept apart. The body totals count every
-    compiled circuit once (`circuits` of each entry), the static inventory of what a
-    compiler synthesizes. The shot totals weight each circuit by the raw shots set aside
-    for its attempts of every status, `sum_e shots_e R_e`, because each executed shot
+    compiled circuit once (`circuits` of each entry), which is what a compiler
+    synthesizes. The shot totals weight each circuit by the raw shots set aside for its
+    execution attempts of every status, `sum_e shots_e R_e`, because each executed shot
     runs the whole circuit, state preparation included, and the shots set aside bound
-    the executed ones from above. Exact readout uses no shots, while hardware would need
-    some, so its shot totals are None and `unavailable` says to multiply each entry's
+    the executed ones from above. Exact readout (`shots=None`, in which the simulator
+    computes the probabilities without shot sampling, subject to numerical rounding)
+    uses no shots, while hardware would need some,
+    so its shot totals are None and `unavailable` says to multiply each entry's
     per-circuit values by the intended shots. Per circuit the counts are those of
     `circuit_resources`. Each round and level uses its own tables, spacing and
     exponents, so its own circuit is counted rather than the first one multiplied. A
@@ -1539,10 +1573,11 @@ class QHDRunResources(Record):
     Attributes:
         synthesis_epsilon: The per-circuit budget E of the T estimates, or None.
         rotation_interpretation: `"upper_bound"` when the run uses the binary encoding,
-            a live Plan's rotation count is an upper bound, or a round or level without
-            a live result adds a positive recorded count with a positive or unknown
-            multiplicity, because its record does not keep the interpretation of that
-            count. `"exact"` otherwise.
+            when the rotation count of a Plan that the run result holds is an upper bound,
+            or when a round or level whose inner result the run result does not hold
+            adds a positive recorded count with a positive or unknown multiplicity,
+            because its record does not keep the interpretation of that count.
+            `"exact"` otherwise.
         entries: One [`QHDRunEntry`][nwqlib.algorithms.qhd.resources.QHDRunEntry] per
             started round, or per started level of a refinement, in order.
         arbitrary_rotations: `sum_e circuits_e R_e`, with R_e the entry's arbitrary
@@ -1566,17 +1601,18 @@ class QHDRunResources(Record):
 def _run_entry(label, plan_id, resources, result, epsilon, held_bytes=0):
     """Return the ``QHDRunEntry`` of one round or level from its record, its resources and its inner result, if any.
 
-    ``held_bytes`` prices the inner Results that the run result holds while
+    ``held_bytes`` counts the inner Results that the run result holds while
     this entry's Plan is inspected (``_plan_population``).
 
-    The rotation count is the per-circuit law value that the round's or
-    level's resources already hold (``_outer.law_count``), with its recorded
-    reason when it is unknown. The T estimate needs the Plan's stored blocks,
-    so it comes from the live inner result and is unknown without one. The
-    recorded resources keep only the rotation count, which fixes neither the
-    Clifford replacements, which depend on each angle's distance from a
-    Clifford angle (``synthesis_projection``), nor the exact T gates, so no
-    estimate is formed from them, and the entry states that reason.
+    The rotation count is the per-circuit value of the cost rule
+    (``ResourceLaw``) that the round's or level's resources already hold
+    (``_outer.law_count``), with its recorded reason when it is unknown. The T estimate needs the Plan's
+    blocks, so it comes from the inner result that the run result holds and
+    is unknown without one. The recorded resources keep only the rotation
+    count, which fixes neither the Clifford replacements, which depend on
+    each angle's distance from a Clifford angle (``synthesis_projection``),
+    nor the exact T gates, so no estimate is formed from them, and the entry
+    states that reason.
     """
     counts = dict(resources.unavailable)
     reasons = [("arbitrary_rotations", counts["arbitrary_rotations"])] if resources.arbitrary_rotations is None else []
@@ -1624,16 +1660,17 @@ def run_resources(result, *, synthesis_epsilon=None):
     with or without box refinement in each round, or a
     [`BoxRefinementResult`][nwqlib.algorithms.qhd.refinement_records.BoxRefinementResult],
     run with `execution="quantum"`. Each started round, or each started level of a
-    round's refinement, contributes the circuit preparations, the shots set aside and
-    the per-circuit rotation count that its resources recorded (`ALResources`,
-    `RefinementResources`), and the T estimate of its live inner result's Plan. A round
-    or level whose Run raised, and a refinement level that stopped the run, keep their
-    recorded counts but have no inner result, so their T estimate is unknown when they
-    prepared a circuit. A Plan with Qiskit's state preparation has no rotation count,
-    which its resources record as unknown. Nothing is planned, compiled or executed. The
-    work is one pass over each inner Plan's stored blocks, which for the binary encoding
-    synthesizes each distinct block's diagonal once more to read its angles, after the
-    rotation count is checked against that Plan's QHD limits.
+    round's refinement, contributes the number of prepared circuits, the shots set
+    aside and the per-circuit rotation count that its resources recorded
+    (`ALResources`, `RefinementResources`), and the T estimate of the Plan of its inner
+    result, which the run result holds. A round or level whose Run raised, and a
+    refinement level that stopped the run, keep their recorded counts but have no inner
+    result, so their T estimate is unknown when they prepared a circuit. A Plan with
+    Qiskit's state preparation has no rotation count, which its resources record as
+    unknown. Nothing is planned, compiled or executed. The work is one pass over the
+    blocks of each inner Plan, which for the binary encoding synthesizes each distinct
+    block's diagonal once more to read its angles, after the work and bytes of
+    classifying the rotations are checked against that Plan's QHD limits.
 
     Args:
         result (ConstrainedQHDResult | BoxRefinementResult): The run with its inner
@@ -1648,9 +1685,9 @@ def run_resources(result, *, synthesis_epsilon=None):
             `shot_t_estimate`, and one entry per started round or level.
 
     Raises:
-        ValueError: If the run used classical execution, which selects no circuit, or if
-            an inner binary Plan's rotation count exceeds that Plan's QHD work or byte
-            limit.
+        ValueError: If the run used classical execution, which builds no circuit, or if
+            classifying the rotations of an inner binary Plan would exceed that Plan's QHD
+            work or byte limit.
     """
     from .constrained import ConstrainedQHDResult
 

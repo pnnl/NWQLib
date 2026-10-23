@@ -1,6 +1,9 @@
-"""Bounded numerical inputs.
+"""Operator inputs, converted within byte limits.
 
-Native numerical dependencies load on selection.
+The package covers dense, sparse, Pauli, fermionic and double-factorized
+operators. The conversion and bound modules are imported when one of their
+names is first used, so `import nwqlib.operators` alone imports neither
+SciPy nor Qiskit.
 """
 
 from importlib import import_module

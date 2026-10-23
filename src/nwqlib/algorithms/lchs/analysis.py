@@ -32,9 +32,10 @@ def fact(name,frame,value=None,*,reason="selected error component is unavailable
 def error_model(problem,output,construction,components=(),*,shots=None):
     """Declare the requested-output error terms and the listed physical components.
 
-    The required terms are algorithmic approximation, native floating point
-    and sampling in the output frame. Components such as kernel_approximation
-    or trotter_synthesis are listed_only physical-solution facts. Analysis
+    The required terms are algorithmic_approximation, native_floating_point
+    (floating-point error of the execution) and sampling, in the output
+    frame. Components such as kernel_approximation or trotter_synthesis are
+    listed_only physical-solution facts. Analysis
     propagates them into algorithmic_approximation once and never counts
     them twice.
     """
@@ -57,14 +58,14 @@ def result_fields(plan,data):
 
 
 def _chunks(plan,data):
-    """Map each selected experiment to its one completed acquisition.
+    """Map each planned experiment to its one completed data collection.
 
-    Every chunk must match its Plan, Run, realization, setting, observation,
-    bindings and a completed trace event, so analysis never combines data
-    from another selection or reuses one acquisition for two settings. The
-    exact reduction's one point chunk joins its producing receipt's
-    trajectory declaration, and its completed event names that one-point
-    acquisition.
+    Every observation chunk must match its Plan, Run, built circuit, setting,
+    observation, bindings and a completed trace event, so analysis never
+    combines data from another Plan or reuses one data collection for two
+    settings. The exact reduction's one-point chunk joins the trajectory
+    declaration of the record that produced it, and its completed event names
+    that one-point data collection.
     """
     from nwqlib.execution import ObservationView
     if data.trace.plan_id!=plan.content_id or len(data.observations.chunks)!=len(plan.experiments):
@@ -93,7 +94,7 @@ def _chunks(plan,data):
 
 
 def analyze(plan,data):
-    """Dispatch to the no-evolution, classical host or quantum readout analysis."""
+    """Dispatch to the no-evolution, classical or quantum readout analysis."""
     if plan.reconstruction.mode in {'initial','zero'}:
         from .host import analyze_initial
         return analyze_initial(plan,data)
@@ -105,20 +106,20 @@ def analyze(plan,data):
 
 
 def projected_moments(data,chunk):
-    """Saved statistics of the exact reduction, validated against its producing receipt.
+    """Saved statistics of the exact reduction, validated against the record that produced it.
 
-    The native width is that of the bound declaration (its coordinates and
-    valued selectors partition the native wires), so the populations come
-    from the declaration and not from the payload.
+    The circuit width is that of the attached declaration (its coordinates and
+    valued selectors partition the circuit wires), so the amplitude counts
+    (``populations``) come from the declaration and not from the saved data.
 
-    The projected kernel bounds the masses it forms from saved amplitudes with
+    The projected reduction routine bounds the masses it forms from saved amplitudes with
     its scaled two-pass allowance. It resolves only the receipt's
     amplitude-derived masses label. Mass validation uses the resulting
     qualified saved-state budget (``PreparedArtifact.saved_state_error``,
-    host phase product included), or the producing receipt's propagated
-    window (``saved_state_probability_window``) when another premise remains
-    unavailable. Acquisition and publication use the same saved_state_error
-    and saved_state_probability_window.
+    classical phase product included), or the propagated window of the
+    record that produced it (``saved_state_probability_window``) when another
+    assumption remains unavailable. Data collection and the reported result
+    use the same saved_state_error and saved_state_probability_window.
     """
     import json
     from nwqlib._quantum_readout import (PROJECTED_KERNEL, PROJECTED_MASS_EXCLUSIONS, PROJECTED_MOMENTS,
@@ -145,10 +146,10 @@ def _sampled(rec,output,chunks):
     """Weighted group moments of the counts settings and the padded physical mass.
 
     A normalized unpadded output averages each group's weighted parities
-    over its success-selected shots. Otherwise every returned shot is kept
-    with its success indicator, and the identity coefficient is assigned
+    over its shots postselected on success. Otherwise every returned shot is
+    kept with its success indicator, and the identity coefficient is assigned
     once to the first group. A padded normalized output divides by the
-    separately acquired physical-prefix mass.
+    separately measured physical-prefix mass.
     """
     import numpy as np
     from nwqlib._quantum_readout import weighted_group_moments
@@ -202,10 +203,10 @@ def _sampled(rec,output,chunks):
 def _vector_publication(plan,chunks):
     """Return a quantum Solution's or StateVector's ``(artifact, unavailable, physical_scale, norm_squared)``.
 
-    ``chunks`` maps each selected experiment to its acquisition (``_chunks``).
-    The Result publishes the one amplitude acquisition's artifact, if any, whose
-    array declaration must be the selected one, the acquisition's first
-    unavailability reason, if any, its physical scale, and the square of that
+    ``chunks`` maps each planned experiment to its data collection (``_chunks``).
+    The Result reports the saved array of the one amplitude data collection,
+    if any, whose array declaration must be the planned one, that data
+    collection's first unavailability reason, if any, its physical scale, and the square of that
     scale as its norm squared. ``analyze_quantum`` calls this.
     """
     first = chunks[plan.experiments[0].name]
@@ -220,7 +221,7 @@ def _vector_publication(plan,chunks):
 
 
 def analyze_quantum(plan,data,chunks):
-    """Reduce the acquired LCHS vector, exact reduction or counts in original coordinates."""
+    """Reduce the simulated LCHS vector, exact reduction or counts in original coordinates."""
     from nwqlib._quantum_readout import (pair_float, pair_ratio, recover_scaled_pair, reduce_sample_arrays,
                                          reduce_setting)
     from nwqlib.core.records import FrozenArray

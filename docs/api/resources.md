@@ -1,6 +1,6 @@
 # Resource estimates
 
-Count the qubits, gates, depth, measurements and memory of a planned computation before running it, and read each count with its label. The [Estimate resources](../resources.md) guide explains the counting rules, and [Estimate fault-tolerant resources](../fault-tolerant-resources.md) covers compiled Clifford+T counts and physical projections.
+Count the qubits, gates, depth, measurements and memory of a planned computation before running it, and read each count with its label. The [Estimate resources](../resources.md) guide explains how each count is formed, and [Estimate fault-tolerant resources](../fault-tolerant-resources.md) covers compiled Clifford+T counts and physical projections.
 
 ```python
 import nwqlib
@@ -34,7 +34,7 @@ exact 2
 unavailable
 ```
 
-The Plan uses at most 3 CX gates and exactly 2 qubits. No rule of its circuit blocks gives a total operation count in this basis, so that count is unavailable rather than zero, and `operations.fact.reason` says why. `print(workload)` lists every quantity with its label and conditions. A quantity with a value also keeps its evidence in `fact.evidence`, whose kind is the weakest among the sources that determined the value, for example a proof, a numerical estimate, an observation or an assertion.
+The Plan uses at most 3 CX gates and exactly 2 qubits. No exact gate list, registered CX bound (an upper bound on CX gates that NWQLib records for its own blocks) or cost rule (`ResourceLaw`) of its circuit blocks, the subroutines of its circuit such as a state preparation, gives a total operation count in this basis, so that count is unavailable rather than zero, and `operations.fact.reason` says why. `print(workload)` lists every quantity with its label and conditions. A quantity with a value also keeps its evidence in `fact.evidence`, whose kind is the weakest among the sources that determined the value, for example a proof, a numerical estimate, an observation or an assertion.
 
 An estimate describes the planned logical circuit. It is not a count of compiled gates, which `Prepared.inspect_resources` gives for a prepared circuit, and it includes no routing, error correction or provider billing.
 
@@ -63,8 +63,8 @@ Each [`ResourceQuantity`][nwqlib.resources.records.ResourceQuantity] holds its v
 | `exact` | The exact count |
 | `upper_bound` | The count is at most this value, for example a CX bound before gate cancellation and routing, or the maximum over the arms of a branch |
 | `estimate` | Derived from observed, empirically predicted or numerically estimated evidence |
-| `conditional` | Holds only under a stated condition, such as a memory peak that needs independent circuit batches to run one at a time (`required_schedule`) |
-| `unavailable` | No applicable rule. `fact.reason` says why, and the value is never read as zero |
+| `conditional` | Holds only under a stated condition, such as a memory peak that needs the circuit executions of each measurement batch to run one after another (`required_schedule`) |
+| `unavailable` | The value cannot be determined, for example a gate count that no exact gate list, registered CX bound or cost rule of the blocks gives. `fact.reason` says why, and the value is never read as zero |
 
 An exact count or upper bound is only as strong as its evidence, `fact.evidence.kind`, so a count derived from an asserted rule stays an assertion. The conditions of a value are in `fact.assumptions`.
 
@@ -88,7 +88,7 @@ The [Estimate resources](../resources.md) guide defines what `shots`, `settings`
 
 ## Declare costs and memory
 
-A circuit block declares its own costs and memory with these records. The estimate reads them and creates no allocation.
+A circuit block declares its own costs and memory with these records. The estimate reads them and allocates none of the declared memory.
 
 ::: nwqlib.resources.records.ResourceLaw
     options:

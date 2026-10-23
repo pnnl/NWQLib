@@ -1,13 +1,14 @@
-"""Bounded projection of existing forecasts and execution records, with no acquisition.
+"""Pairing of existing forecasts with execution records, within limits and without running anything.
 
-The execution trace is the event owner. This module neither appends events nor
-replays assessment, folds resources, fits models, or interprets scientific output.
+The execution trace holds the events. This module neither appends events nor
+repeats an assessment, sums resource counts, fits models or interprets
+scientific output.
 
-A residual ``observed - predicted`` is formed only for the assessment bound to
-an attempt before it started, a completed acquisition and an exact timing of
-the forecast's scope. Every other pairing is kept with its reason, so
+A residual ``observed - predicted`` is formed only for the assessment attached
+to an attempt before it started, a completed data collection and an exact
+timing of the forecast's scope. Every other pairing is kept with its reason, so
 failures and censored timings stay visible. docs/profiles.md, "Compare
-forecasts with measured times", defines this contract.
+forecasts with measured times", defines these rules.
 """
 
 from math import isfinite
@@ -76,12 +77,13 @@ class TimingComparison(Record):
 
 
 class TelemetryRow(Record):
-    """Projection of one source event without histogram or native payload copies.
+    """The view of one source event, without copies of histograms or backend data.
 
-    event keeps reservations, exposure and terminal outcome unchanged. timings
-    combines its native measurement with supplied scoped measurements. collected
-    IDs name actual supplied chunks. Contribution IDs name their use by the
-    separately supplied result. Neither population proves output completeness.
+    event keeps the bytes set aside, exposure and final outcome unchanged.
+    timings combines the backend's own timing with supplied scoped timings.
+    collected IDs name the supplied observation chunks. Contribution IDs name
+    their use by the separately supplied result. Neither list proves that the
+    output is complete.
     comparisons keep predictions even when timing cannot support a residual.
     """
 
@@ -96,7 +98,7 @@ class TelemetryRow(Record):
     def _membership(self):
         """Keep the row tied to its one event.
 
-        Timings are distinct and include the event's own native timing when it
+        Timings are distinct and include the event's own backend timing when it
         has one.
         Collected observations can only be the event's own observation, and
         result contributions are a subset of them, so a row cannot borrow
@@ -163,7 +165,7 @@ class PredictionLedger(Record):
 
     @model_validator(mode="after")
     def _relations(self):
-        """Accept a residual only for its completed, pre-bound forecast and an exact timing of the same scope."""
+        """Accept a residual only for a completed attempt, a forecast attached before it and an exact timing of the same scope."""
         if (
             len(set(self.assessment_ids)) != len(self.assessment_ids)
             or len({p.content_id for p in self.predictions}) != len(self.predictions)
@@ -294,7 +296,7 @@ def align_telemetry(
     Raises:
         TypeError: If no execution record or `RunData` is available.
         ValueError: If a Run or Result is mixed with explicit records, a timing
-            or record belongs to another run, attempt or Plan, identities
+            or record belongs to another run, attempt or Plan, content hashes
             conflict, or the pairs exceed `max_comparisons`.
     """
     if type(max_comparisons) is not int or max_comparisons < 1:

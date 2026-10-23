@@ -1,25 +1,24 @@
-"""Envelope of a host phase correction of a saved statevector and the budgets it propagates.
+"""Error bound (envelope) of a classical phase correction of a saved statevector, and the error budgets it propagates.
 
-Owner of the scalar functions that ``backends/qiskit_aer.py`` and
-``backends/nwqsim.py`` (the factor's envelope at preparation) and
-``PreparedArtifact.saved_state_error`` and
+``backends/qiskit_aer.py`` and ``backends/nwqsim.py`` (the factor's envelope
+at preparation) and ``PreparedArtifact.saved_state_error`` and
 ``PreparedArtifact.saved_state_probability_window`` in ``execution.py`` (the
-corrected budgets) share.
+corrected budgets) share the scalar functions of this module.
 
 Aer supplies its stored Python factor. NWQ-Sim supplies the factor reported
 by its selected runner during preparation and transmitted in the execution
 request. The same finite envelope applies to either represented factor.
-Multiplication by ``(1.0, ±0.0)`` has a zero envelope under the host
-arithmetic assumptions. The native first-order allowance remains part of the
-resulting saved-state estimate.
+Multiplication by ``(1.0, ±0.0)`` has a zero envelope under the assumptions
+on classical arithmetic below. The simulator's first-order allowance remains
+part of the resulting saved-state estimate.
 
-Finite bound for the actual complex multiplication. Let z be the binary64
+Finite bound for the complex multiplication as performed. Let z be the binary64
 complex vector before correction, with D entries. Let ``c = a + ib`` be the
-actual finite binary64 factor that the code multiplies into z. Work with the
+finite binary64 factor that the code actually multiplies into z. Work with the
 exact represented real values a, b, ``u = 2**-53`` and ``eta = 2**-1074``.
 Assume IEEE round-to-nearest with gradual underflow, and no overflow in the
-component products and sums. This is the host arithmetic premise, separate
-from the native model. Put::
+component products and sums. This is the assumption on classical (host)
+arithmetic, separate from the simulator's own error model. Put::
 
     gamma_2 = 2u/(1 - 2u),
     kappa = |a| + |b|,
@@ -32,7 +31,7 @@ rounded sum give error at most ``gamma_2 (|ax| + |by|) + (3/2 + u) eta``. The
 imaginary component has the corresponding swapped terms. The nonnegative 2x2
 coefficient matrix has spectral norm kappa. Combining the 2D component errors
 gives ``||fl(cz) - cz||_2 <= gamma_2 kappa ||z||_2 + e``. A fused
-implementation is no worse under the same premises. If c is nonzero, compare
+implementation is no worse under the same assumptions. If c is nonzero, compare
 cz with multiplication by ``c/|c|``. Its modulus error is
 ``||c| - 1| <= |s - 1|``. If c is zero, the same inequality holds with any unit
 phase. Thus ``distance_mod_phase(fl(cz), z) <= t ||z||_2 + e``. This uses the
@@ -42,14 +41,14 @@ phase-angle error. An incorrect phase is still a unit phase for this metric.
 It matters for phase-defined outputs, whose budget remains unavailable.
 
 The functions use exact rational arithmetic for the few scalar coefficients
-and round each published nonnegative bound upward. There is no scan or copy of
+and round each reported nonnegative bound upward. There is no scan or copy of
 z. A nonfinite factor or an unrepresentable envelope does not support a finite
-claim. The finite input/vector premise remains necessary, and the existing
-output checks still apply. This scalar owner is not an additional state-norm
-validation pass.
+claim. The assumption of a finite input vector remains necessary, and the
+existing output checks still apply. These scalar functions add no further
+validation pass over the state norm.
 
-Source: NWQLib's derivation of the reduction-context phase semantics and
-host correction of a saved statevector, stated in full above.
+Source: NWQLib's derivation of the phase convention of the reduction context
+and of the classical correction of a saved statevector, stated in full above.
 """
 
 from fractions import Fraction as F
@@ -61,7 +60,7 @@ ETA = F(1, 2**1074)
 
 
 def up_float(value):
-    """The smallest binary64 value at or above the exact rational ``value``. It refuses a nonfinite result."""
+    """The smallest binary64 value at or above the exact rational ``value``. It raises ValueError for a nonfinite result."""
     value = F(value)
     if abs(value) > F(float_info.max):
         raise ValueError("phase-product envelope is not finite")
@@ -89,12 +88,13 @@ def phase_product_envelope(factor, dimension):
 def corrected_state_error(delta, envelope):
     """Return ``delta_saved = delta + t (1 + delta) + e``, rounded upward, or None when delta is None.
 
-    Given an existing qualified native estimate delta and its associated
-    ``||z|| <= 1 + delta`` premise, this is the corrected estimate after the
-    multiplication whose envelope is ``(t, e)``. The host propagation is
-    finite and includes higher-order and underflow terms. The overall
-    statement is still conditional on the native first-order model. It is not
-    an unconditional bound on native execution.
+    Given an existing qualified simulator estimate delta and its associated
+    assumption ``||z|| <= 1 + delta``, this is the corrected estimate after the
+    multiplication whose envelope is ``(t, e)``. The propagation through the
+    classical correction is finite and includes higher-order and underflow
+    terms. The overall statement is still conditional on the simulator's
+    first-order error model. It is not an unconditional bound on the
+    simulator's execution.
     """
     if delta is None:
         return None
@@ -106,13 +106,13 @@ def corrected_state_error(delta, envelope):
 def corrected_mass_window(window, envelope):
     """Return ``omega_saved``, rounded upward, for the norm window ``window`` after the multiplication.
 
-    With omega the existing nonnegative norm-window policy for z, from
-    ``| ||z||**2 - 1 | <= omega`` and the host inequality,
+    With omega the existing nonnegative norm-window convention for z, from
+    ``| ||z||**2 - 1 | <= omega`` and the classical-arithmetic inequality,
     ``omega_saved = omega + (2t + t**2)(1 + omega) + 2(1 + t)(1 + omega) e + e**2``.
     Here ``sqrt(1 + omega) <= 1 + omega`` avoids another rounded square root.
-    This propagates the existing validation convention through the selected
-    host operation. It does not convert that convention into a native
-    accuracy certificate.
+    This propagates the existing validation convention through the classical
+    correction. It does not turn that convention into a certified accuracy
+    bound for the simulator.
     """
     t, e = map(F, envelope)
     w = F(window)

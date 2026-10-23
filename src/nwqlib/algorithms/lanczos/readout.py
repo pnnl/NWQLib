@@ -1,10 +1,10 @@
-"""SDK-free signed readout over supplied histograms. No operator is applied.
+"""Signed readout of supplied histograms, without Qiskit. No operator is applied.
 
-A Lanczos count outcome stores the SELECT index in its least significant
+A Lanczos count outcome holds the SELECT index in its least significant
 bits. Its used row supplies a sign and the system-support mask. The signed
 value is the sign times the support parity, with zero for an unused address.
 Reflection readout returns +1 only for index zero. Vectorized decoding uses
-the same first and second moments and the returned count population. Exact
+the same first and second moments and the returned shot count. Exact
 probability reduction preserves the supplied mass without renormalization.
 """
 
@@ -19,9 +19,9 @@ from .records import MomentStatistics
 def packed_lanczos_census(table):
     """Derive the Lanczos frame and ordered SELECT metadata from packed Pauli words.
 
-    A native row ``(x, z, c)`` represents ``c i**popcount(x&z) X**x Z**z``.
+    A packed row ``(x, z, c)`` represents ``c i**popcount(x&z) X**x Z**z``.
     Its support is ``x|z``. It is identity exactly when every support word is
-    zero. For an admitted Hermitian table, coefficients are real. Exact-zero
+    zero. For a checked Hermitian table, coefficients are real. Exact-zero
     coefficients and identity rows are removed in source table order. For
     the remaining J rows
 
@@ -33,11 +33,11 @@ def packed_lanczos_census(table):
     2.1, Eqs. (2)-(4), after the identity term is removed. A zero alpha
     selects the algebraic scalar-operator path and performs no division.
     The sign is ``sign(c_j.real)`` and the parity mask is ``x_j|z_j``. No
-    extra Y phase belongs in that sign: the basis rotation already maps the
-    actual Hermitian Pauli P_j to the measured Z parity. The identity mask also
-    handles a table with more than one identity row.
+    extra Y phase belongs in that sign, because the basis rotation already
+    maps the Hermitian Pauli P_j itself to the measured Z parity. The
+    identity mask also covers a table with more than one identity row.
     Keep `fsum` for center and alpha.
-    Their binary64 values define the Plan's stored frame and must be
+    Their binary64 values define the frame recorded in the Plan and must be
     reproduced when the readout is rebuilt (``method._plan_readout``).
     Correct rounding assumes finite
     binary64 inputs and a reduction that completes without overflow under
@@ -52,7 +52,7 @@ def packed_lanczos_census(table):
     ``(J-1).bit_length()`` otherwise.
 
     Args:
-        table: Admitted PauliTerms with (M, W) uint64 x/z words and (M,)
+        table: Checked PauliTerms with (M, W) uint64 x/z words and (M,)
             complex128 coefficients.
 
     Returns:
@@ -81,31 +81,34 @@ def packed_lanczos_census(table):
 class LanczosReadout:
     """The SELECT readout table of one bound Plan, derived from its packed Pauli table.
 
-    The selected operator's packed Pauli table fixes the SELECT address order
-    (packed_lanczos_census). The Plan stores only the scalar frame and the
-    table identity. Loading derives this table again from the saved operator,
-    so the classical action and the quantum decoder use a common term order.
+    The packed Pauli table of the Plan's operator fixes the SELECT address
+    order (packed_lanczos_census). The Plan records only the scalar frame and
+    the identifier of the table. Loading derives this table again from the
+    saved operator, so the classical action and the quantum decoder use a
+    common term order.
 
     It also keeps the moment statistics already decoded for the bound Plan,
-    keyed by the chunk identity and the setting identity. A second analysis
-    of the same chunks decodes nothing.
+    keyed by the content hashes of the chunk and of the setting. A second
+    analysis of the same chunks decodes nothing.
 
-    The constructor takes the admitted PauliTerms table and the byte limit
-    max_bytes, which it checks before the census allocates. For M source
-    rows and W uint64 words per mask, the census and readout constructor
-    admit M*(16*W+56) additional array-data bytes plus a 65,536-byte fixed
-    allowance before allocation. The data law covers simultaneous support,
-    coefficient, index and sign arrays and the constructor's owning row
-    copy. The input Pauli table is excluded. The fixed allowance covers
-    headers and bookkeeping on the qualified stack, checked by
-    measurement (ENGINEERING_CONSTANTS.md, term "qualified"), including empty and small tables. Derivation: at the largest
-    return-expression frontier, support arrays contribute 8W(M+J), two masks 2M and the selected
-    coefficient/index/sign arrays at most 33J bytes, so the frontier holds
-    at most 8W(M+J)+2M+33J <= M(16W+35) <= M(16W+56) bytes for J <= M used
-    rows. Earlier identity, mask and reduction phases fit that envelope, and
-    the constructor's owning row copy of at most J*(8W+25) bytes fits after
-    the full-size census scratch dies (ENGINEERING_CONSTANTS.md, "Chebyshev
-    Lanczos defaults").
+    The constructor takes the checked PauliTerms table and the byte limit
+    max_bytes, which it checks before packed_lanczos_census allocates. For M
+    source rows and W uint64 words per mask, packed_lanczos_census and the
+    readout constructor count M*(16*W+56) additional array-data bytes plus a
+    65,536-byte fixed allowance against max_bytes before allocation. The data
+    formula covers the support, coefficient, index and sign arrays held at
+    once and the constructor's own row copy. The input Pauli table is
+    excluded. The fixed allowance covers headers and bookkeeping on the
+    qualified stack, checked by measurement (ENGINEERING_CONSTANTS.md, term
+    "qualified"), including empty and small tables. Derivation. When the
+    return expression is evaluated, the arrays held at once are the support
+    arrays, 8W(M+J) bytes, two masks, 2M bytes, and the coefficient, index
+    and sign arrays of the used rows, at most 33J bytes, so together they
+    hold at most 8W(M+J)+2M+33J <= M(16W+35) <= M(16W+56) bytes for J <= M
+    used rows. Earlier identity, mask and reduction phases fit that bound,
+    and the constructor's own row copy of at most J*(8W+25) bytes fits after
+    the full-size scratch of packed_lanczos_census is released
+    (ENGINEERING_CONSTANTS.md, "Chebyshev Lanczos defaults").
 
     Attributes:
         center: Identity shift of the frame, in the operator's units.
@@ -156,7 +159,7 @@ class LanczosReadout:
     def chunk_moments(self, setting, chunk, *, counts):
         """Return the MomentStatistics of one chunk, decoding it at most once per setting.
 
-        The key is the chunk's content identity and the setting's identity.
+        The key is the pair of content hashes of the chunk and the setting.
         The cache lives with this table, so it belongs to one bound Plan.
         """
         key = (chunk.content_id, setting.content_id)
@@ -228,7 +231,7 @@ def signed_outcomes(bits, *, index_width, histogram_width, signs, masks, reflect
     Args:
         bits: One-dimensional uint64 outcomes, index bits least significant.
         index_width: SELECT index bits a.
-        histogram_width: Admitted bit width of an outcome, at most 64.
+        histogram_width: Allowed bit width of an outcome, at most 64.
         signs: int8 sign per used SELECT address.
         masks: uint64 system-support mask per used SELECT address.
         reflection: True for a reflection setting.
@@ -265,7 +268,7 @@ def signed_outcomes(bits, *, index_width, histogram_width, signs, masks, reflect
 def readout_values(readout, kind, width, histogram):
     """Return the int8 signed values of a histogram's outcomes under one readout kind and width.
 
-    kind is ``reflection`` or ``select`` and width the setting's admitted
+    kind is ``reflection`` or ``select`` and width the setting's allowed
     histogram width. Widths up to 64 bits decode the uint64 indices with
     signed_outcomes. Wider histograms decode their Python-integer indices
     with outcome, entry by entry, after the same range check.
@@ -273,7 +276,7 @@ def readout_values(readout, kind, width, histogram):
     Args:
         readout: LanczosReadout of the bound Plan.
         kind: ``reflection`` or ``select``.
-        width: Admitted bit width of an outcome.
+        width: Allowed bit width of an outcome.
         histogram: Histogram with width, indices() and index_list().
     """
     if width <= 64 and histogram.width <= 64:
@@ -298,12 +301,12 @@ def reduce_moments(values, weights, *, counts):
     """Reduce signed values and their weights to the first two moments.
 
     With counts, the weights are nonnegative integer frequencies, the mean is
-    sum(w*x)/sum(w) and the population is the exact integer count total.
-    Without counts, the weights are exact probabilities used as returned,
-    with population 1, so missing probability, negative roundoff and padding
-    leakage stay in the moments. x*x is one on used select rows and zero on
-    padding, and one everywhere for reflection. The products are formed
-    elementwise and exactly, and fsum reduces them in stored order.
+    sum(w*x)/sum(w) and the shot count is the exact integer total of the
+    counts. Without counts, the weights are exact probabilities used as
+    returned, with denominator 1, so missing probability, negative roundoff
+    and padding leakage stay in the moments. x*x is one on used select rows
+    and zero on padding, and one everywhere for reflection. The products are
+    formed elementwise and exactly, and fsum reduces them in array order.
 
     Decode `m_hat=fsum(s_j*p_hat_j)` with exact signs `s_j` in `{-1,0,1}`,
     zero signs on unused SELECT addresses, and denominator one. Let
@@ -315,20 +318,20 @@ def reduce_moments(values, weights, *, counts):
     `e_prob=max(exact_readout_roundoff(w)*u, (2*N*u)/(1-2*N*u))` and
     `U_prob=4*N*eta`. The latter bounds absolute probability-evaluation
     underflow and may be zero under an established normal-range or
-    exact-underflow premise. With correctly rounded `fsum`, the absolute
+    exact-underflow assumption. With correctly rounded `fsum`, the absolute
     arithmetic error relative to `sum_j s_j*p_j`, where `p_j` is the exact
     bin probability of `psi_tilde`, satisfies
     `a_moment <= e_prob*R2 + u*sum_j abs(p_hat_j) + U_prob + eta
-    <= [e_prob+u*(1+e_prob)]*R2 + (1+u)*U_prob + eta`. If the receipt
-    supplies a state-distance allowance `delta` from a unit target,
-    `R2 <= (1+delta)**2`. Otherwise that substitution is unavailable.
-    Evaluate bound expressions outward when publishing them as numerical
-    upper bounds.
+    <= [e_prob+u*(1+e_prob)]*R2 + (1+u)*U_prob + eta`. If the preparation
+    record (receipt) supplies a state-distance allowance `delta` from a unit
+    target, `R2 <= (1+delta)**2`. Otherwise that substitution is
+    unavailable. Evaluate bound expressions outward when reporting them as
+    numerical upper bounds.
 
     The first inequality uses `|s_j|<=1` and a single rounded signed sum.
     The second uses `sum|p_hat_j| <= (1+e_prob)R2+U_prob`. The final `eta`
     covers the sum's rounding separately. Algebraically supplied moments
-    bypass this readout and have no `a_moment` charge.
+    bypass this readout and have no `a_moment` term.
 
     Comparison of an exact trajectory moment with a separately prepared one:
     when both routes have justified total state allowances `Delta_traj,k`
@@ -349,11 +352,11 @@ def reduce_moments(values, weights, *, counts):
     `Delta <= b + delta`, without counting the construction twice.
 
     For a view whose inverse is a different numerical construction of the
-    stored table's adjoint, such as an inverted UCG decomposition, the
+    adjoint of the binary64 table, such as an inverted UCG decomposition, the
     restoration residual enters the recurrence for `b_k` in
     ``method._trajectory_program`` as its `eps_i`. For one target with
-    stored table entries `U_c`, the represented decomposition `C_c` and
-    the actually lowered inverse block `A_c`, let `d_c = ||C_c - U_c||_2`,
+    binary64 table entries `U_c`, the represented decomposition `C_c` and
+    the inverse block `A_c` as decomposed into gates, let `d_c = ||C_c - U_c||_2`,
     `nu_c = ||A_c - C_c^dagger||_2` and `g_c = ||U_c^dagger U_c - I||_2`.
     Then `A_c U_c - I = (A_c - C_c^dagger) U_c + (C_c - U_c)^dagger U_c
     + (U_c^dagger U_c - I)` gives
@@ -362,21 +365,22 @@ def reduce_moments(values, weights, *, counts):
     `r_q = max_c ||A_(q,c) U_(q,c) - I_2||_2` over the addresses of target
     `q`, orthogonality of the control projectors and the tensor-product
     expansion give `eps_B = rho_phi + prod_q (1 + r_q) - 1`, where
-    `rho_phi = |exp(i*Phi) - exp(i*sum_q phi_q)|` charges the assembly of the
+    `rho_phi = |exp(i*Phi) - exp(i*sum_q phi_q)|` accounts for assembling the
     inverse's phase `Phi` from the factor phases `phi_q`. The odd view's
-    inverse here is the native adjoint table, whose residual is the Gram
-    defect stated in ``method._trajectory_program``.
+    inverse here is the adjoint table built target by target, whose residual
+    is the Gram defect stated in ``method._trajectory_program``.
 
     `state_error()` is unavailable when the executed native circuit has an
-    unresolved exclusion. Report the actual exclusions and operation count
+    unresolved roundoff exclusion. Report the exclusions and operation count
     for each route. Multiplexer application and matrix-unitary construction
     or application remain outside the current state-error derivation. A
     separately bounded readout restoration residual is an additional
     construction contribution and does not clear those exclusions. A
     missing state bound remains unavailable in the derived moment
-    comparison. When the receipts of both routes list an exclusion, such as
-    Aer's native `multiplexer`, neither route has a state bound (`delta` is
-    None) and the comparison supplies no numerical acceptance tolerance.
+    comparison. When the preparation records of both routes list an
+    exclusion, such as Aer's `multiplexer` instruction, neither route has a
+    state bound (`delta` is None) and the comparison supplies no numerical
+    acceptance tolerance.
     Knowing `eps_B`, observing a nearly unit norm or reducing the operation
     count does not provide the missing execution error, and the `1e-12`
     probability-window floor does not replace it.
@@ -390,7 +394,7 @@ def reduce_moments(values, weights, *, counts):
     statement keeps the qualification against excess precision and unsafe
     reassociation: platforms subject to the documented excess-precision
     exception need an additional correctly-rounded-sum allowance or a proved
-    conservative summation owner.
+    conservative summation routine.
 
     Args:
         values: int8 signed values.
@@ -425,11 +429,12 @@ def decode_histogram(readout, setting, histogram, *, counts):
     each weight is a nonnegative integer frequency, so the mean is
     sum(w*x)/sum(w) over the outcome values x.
     Without counts, the weights are exact probabilities that are used as
-    returned, with population 1. Missing probability, negative roundoff and
+    returned, with denominator 1. Missing probability, negative roundoff and
     padding leakage then stay in the moments.
 
-    Calling this kernel makes no acquisition/provenance claim. Runtime analysis
-    separately validates actual ObservationChunks against their completed trace.
+    This routine makes no claim about how or where the data were measured.
+    Analysis in a Run separately checks each ObservationChunk against its
+    completed trace.
 
     Returns:
         MomentStatistics with the mean and second moment of the signed

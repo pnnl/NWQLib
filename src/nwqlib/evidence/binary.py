@@ -1,6 +1,6 @@
 """Finite binary populations, conditional inference and affine readout correction.
 
-A population has n0 zero and n1 one outcomes of a +/-1 variable, with sample
+A binary population records n0 zero and n1 one outcomes of a +/-1 variable, with sample
 mean z=(n0-n1)/n and unbiased sample-mean variance 4*n0*n1/[n^2(n-1)]. The
 selectable inferences are:
 
@@ -21,14 +21,19 @@ selectable inferences are:
   is unavailable, while the posterior mean and variance remain available.
 
 Here alpha=delta/F, with delta the options' failure_probability and F the
-number of predeclared settings, so all F intervals hold jointly with
-probability at least 1-delta. The affine readout model z=a*mu+b,
+number of predeclared binary populations: without mitigation the nonzero
+nonidentity Pauli labels, including labels that share a measurement setting,
+and with mitigation the science and calibration settings. Hoeffding
+intervals give simultaneous coverage under their sampling assumptions.
+Beta intervals give posterior credibility under their likelihood
+assumptions. The affine readout model z=a*mu+b,
 a=(z0-z1)/2, b=(z0+z1)/2, with z0 and z1 the calibration means, is the
 standard single-bit model, derived in docs/algorithms/expectation.md.
 
-These operations consume supplied sufficient counts. They never acquire data,
-infer independence from identifiers, or turn a statistical model into a total
-physical guarantee. SciPy is loaded only for the selected scalar Beta quantiles.
+These operations use only the supplied counts, which are sufficient statistics.
+They never take measurements, infer independence from identifiers, or turn a
+statistical model into a total physical guarantee. SciPy is imported only to
+compute the scalar Beta quantiles of the ``beta`` method.
 """
 
 from itertools import product
@@ -72,10 +77,17 @@ class BinaryInferenceOptions(Record):
     neither what is measured nor the physical accuracy, and its intervals
     describe sampling under the stated model only.
 
-    Below, a population has n0 zero and n1 one outcomes, `n = n0 + n1`,
-    delta is `failure_probability`, and `alpha = delta/F` is its share for
-    each of the F predeclared settings, so that all F intervals hold jointly
-    with probability at least `1 - delta`.
+    Below, a binary population is the set of zero and one outcomes counted
+    for one estimated binary mean
+    ([`BinaryPopulation`][nwqlib.evidence.binary.BinaryPopulation]). It has
+    n0 zero and n1 one outcomes, and `n = n0 + n1`. F is the number of
+    predeclared binary populations. Without mitigation, these are the nonzero
+    nonidentity Pauli labels, including labels that share a measurement
+    setting. With mitigation, they are the science and calibration settings.
+    delta is `failure_probability`, and each interval uses `alpha = delta/F`.
+    Hoeffding intervals give simultaneous coverage under their sampling
+    assumptions. Beta intervals give posterior credibility under their
+    likelihood assumptions.
 
     Attributes:
         method: Default `"point"`, the empirical mean and variance without an
@@ -92,18 +104,26 @@ class BinaryInferenceOptions(Record):
             the posterior mean and variance remain
             ([Engineering constants](../../ENGINEERING_CONSTANTS.md#binary-inference-representation)).
         failure_probability: Default `0.05`, strictly between 0 and 1. Family
-            failure probability delta, divided equally across the
-            predeclared science and calibration settings.
+            failure probability delta, divided equally across the F
+            predeclared binary populations defined above.
         sampling_model: Default `"unknown"`. Assumed model of the shots, which
             NWQLib does not verify: `"iid_bernoulli"`,
             `"constant_conditional_mean"` or `"unknown"`. `"unknown"` keeps
             the empirical values and gives no interval.
             `"constant_conditional_mean"` does not supply the Beta likelihood.
-        independent_populations: Default `False`. `True` declares the measured
-            groups, or with mitigation the science and calibration settings,
-            statistically independent. The variance sum across settings and a
-            product Beta model need this assumption, which NWQLib does not
-            deduce from the data.
+        independent_populations: Default `False`. `True` supplies the
+            independence assumptions of the chosen inference. Without
+            mitigation, the empirical variance uses joint counts within each
+            measurement group and this assumption between groups. With
+            mitigation, the delta-method variance uses this assumption
+            between the science and calibration settings. A product Beta
+            model, which is available only without mitigation, requires
+            independence of the binary populations, here the individual
+            Pauli labels. Independence between groups alone does not
+            establish independence of labels measured from the same shots.
+            NWQLib does not infer these assumptions from the data, and the
+            aggregate Beta variance stays unavailable when distinct labels
+            share group shots.
         prior_alpha: Default `1.0`, positive. Beta prior shape for
             `p = P(bit = 0)`, added to the zero count n0.
         prior_beta: Default `1.0`, positive. Beta prior shape added to the one
@@ -169,7 +189,7 @@ class BinaryReadoutMitigation(Record):
 
 
 class BinaryPopulation(Record):
-    """Counts of zeros and ones of one binary readout, with each source of sampled data counted once.
+    """A binary population: the counts of zeros and ones of one measured binary mean, with each source of sampled data counted once.
 
     `BinaryEstimate.population` holds it. A source is one set of sampled
     data. A preparation with a fixed seed reproduces its source each time it
@@ -243,9 +263,13 @@ class BinaryInterval(Record):
         reason: Text recorded with the interval, including why it is
             unavailable or empty.
         assumptions: The assumptions the interval depends on.
-        family_size: Number F of predeclared settings, positive. Each
-            interval is evaluated at `alpha = delta/F`, so all F hold jointly
-            with probability at least `1 - delta`.
+        family_size: Number F of predeclared binary populations, positive.
+            Without mitigation, these are the nonzero nonidentity Pauli
+            labels, including labels that share a measurement setting. With
+            mitigation, they are the science and calibration settings. Each
+            interval is evaluated at `alpha = delta/F`. Hoeffding coverage
+            and Beta posterior credibility depend on their respective
+            sampling and likelihood assumptions.
     """
 
     kind: Literal["fixed_time", "time_uniform", "bayesian"]
@@ -268,7 +292,7 @@ class BinaryInterval(Record):
 
 
 class BinaryEstimate(Record):
-    """Quantities derived from the counts of one binary setting, with the empirical and posterior roles kept apart.
+    """Quantities derived from the counts of one binary population, with the empirical and posterior roles kept apart.
 
     `ExpectationStatistics.populations` holds one per measured label or
     setting, as the [Expectation
@@ -306,7 +330,7 @@ class BinaryEstimate(Record):
 
     @model_validator(mode="after")
     def _domains(self):
-        """Reject stored values that do not follow from the counts they claim.
+        """Reject recorded values that do not follow from the counts they claim.
 
         raw_mean must be (n0-n1)/n and exist exactly when n>0.
         empirical_variance must equal 4*n0*n1/[n^2(n-1)] as an exact
@@ -340,9 +364,9 @@ class BinaryCorrection(Record):
     The fields below are read-only.
 
     Attributes:
-        science_id: Content hash of the science setting's counted population.
-        zero_id: Content hash of the zero-state calibration population.
-        one_id: Content hash of the one-state calibration population.
+        science_id: Content hash of the science setting's binary population.
+        zero_id: Content hash of the zero-state calibration binary population.
+        one_id: Content hash of the one-state calibration binary population.
         options_id: Content hash of the options used.
         contrast: The contrast a, in [-1, 1], or `None`.
         offset: The offset b, in [-1, 1], or `None`.
@@ -351,8 +375,9 @@ class BinaryCorrection(Record):
             outside [-1, 1].
         derivatives: The Jacobian of `point` in `(z, z0, z1)`. Its use in a
             variance is a delta-method approximation.
-        interval_image: Image of the calibration box before intersection
-            with the physical mean domain [-1, 1].
+        interval_image: Image, under the corrected-mean map, of the joint
+            rectangle of the science and the two calibration intervals,
+            before intersection with the physical mean domain [-1, 1].
         interval: That intersection, a
             [`BinaryInterval`][nwqlib.evidence.binary.BinaryInterval].
         unavailable: Reasons for quantities that could not be formed.
@@ -406,27 +431,32 @@ def _interval(options, family_size, *, reason, assumptions, bounds=None, empty=F
 
 def infer_binary(population, *, options, family_size, fixed_time, fixed_time_reason,
                  applicability_reason, max_integer_bits=DEFAULT_MAX_INTEGER_BITS):
-    """Infer one selected finite population without acquisition or count replay.
+    """Compute the estimate and interval of one finite population from its counts.
 
-    fixed_time and applicability_reason are facts supplied by the actual
-    acquisition owner. They are not inferred from counts or options labels.
-    A direct caller is responsible for their scientific validity/provenance.
+    No measurement is taken and no count is recomputed. fixed_time and
+    applicability_reason are supplied by the code that ran the measurements
+    and are not inferred from the counts or the option labels. A caller who
+    supplies them directly is responsible for their validity and origin.
 
     Every interval uses alpha=delta/F, with delta the options'
-    failure_probability and F=family_size, so that a union bound over the F
-    predeclared science and calibration settings of one Plan gives joint
-    probability at least 1-delta. The ``hoeffding`` and ``anytime_hoeffding``
+    failure_probability and F=family_size. The family consists of the nonzero
+    nonidentity Pauli labels without mitigation or the science and calibration
+    settings with mitigation. A union bound gives simultaneous coverage for
+    the Hoeffding intervals under their sampling assumptions. Beta intervals
+    describe posterior credibility under their likelihood assumptions. The ``hoeffding`` and ``anytime_hoeffding``
     radii and the Beta posterior are those of the module docstring.
 
     Args:
         population: BinaryPopulation with the counts n0 and n1.
-        options: BinaryInferenceOptions selecting the method and its premises.
-        family_size: Number F of predeclared settings sharing delta.
-        fixed_time: Whether the data are one complete original acquisition,
-            the premise of the fixed-time Hoeffding interval.
+        options: BinaryInferenceOptions selecting the method and its
+            assumptions.
+        family_size: Number F of binary populations sharing delta.
+        fixed_time: Whether the data come from one complete, original run of
+            the measurements, the assumption of the fixed-time Hoeffding
+            interval.
         fixed_time_reason: Why fixed_time holds or fails.
         applicability_reason: Reason the interval is unavailable for this
-            population, such as missing receipts, or None.
+            population, such as missing preparation records, or None.
         max_integer_bits: Integer width limit of the exact rational arithmetic.
 
     Returns:
@@ -573,19 +603,19 @@ def _float(value, arithmetic, *, side=None):
 
 def correct_binary(science, zero, one, *, options, inference, applicability_reason,
                    max_integer_bits=DEFAULT_MAX_INTEGER_BITS):
-    """Correct one mean and jointly propagate its explicitly supplied rectangle.
+    """Correct one mean and propagate the joint rectangle of its three supplied intervals.
 
     Model. A stationary single-bit readout channel maps a true +/-1 mean mu
     to the observed mean z=a*mu+b. Preparing the pivot in zero (mu=+1) and
     in one (mu=-1) gives the calibration means z0=a+b and z1=b-a, so
     a=(z0-z1)/2 is the contrast and b=(z0+z1)/2 the offset.
 
-    Calibration fields keep distinct data identities even when their values
-    happen to agree. Shared-population derivatives are composed by
-    ``statistics.linear_variance``, and this function never assumes their
-    independence. Stored inference options and interval families must agree
-    before their rectangle can be composed. Correction never changes its
-    statistical model.
+    The calibration fields keep the content hashes of distinct data even
+    when their values agree. Derivatives with respect to shared populations
+    are combined by ``statistics.linear_variance``, and this function never
+    assumes their independence. The recorded inference options and interval
+    families of the three estimates must agree before their rectangle is
+    formed. Correction never changes the statistical model.
 
     The corrected point is mu=(z-b)/a=(2z-z0-z1)/(z0-z1), with derivatives
     (2/d, -(1+mu)/d, (mu-1)/d) in (z, z0, z1) for d=z0-z1. mu is

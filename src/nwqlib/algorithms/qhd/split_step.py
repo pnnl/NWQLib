@@ -1,6 +1,6 @@
 """Split-step classical evolution of the restricted QHD grid model in the kinetic eigenbasis.
 
-The ``split_step`` flavor of ``method.QHD`` evolves the ``D = K**d``
+``method.QHD`` with ``theory_flavor="split_step"`` evolves the ``D = K**d``
 amplitudes of the grid model ``H(t) = a(t) K + b(t) V`` with one symmetric
 (Strang) product per step. In ``H(t)`` and the operator formulas of this
 docstring K is the kinetic operator, and in ``K**d`` it is the number of
@@ -23,12 +23,13 @@ reversal, gives another time-symmetric second-order method whose leading
 time-ordering defect differs by ``(dt**3/8)(a b')_m [K, V]``, and neither
 convention is uniformly more accurate.
 
-The kinetic factor is applied exactly in the eigenbasis of the selected
-kinetic operator, so its cost per step does not depend on ``alpha_k``. This
-is the pseudo-spectral step of Leng et al., arXiv:2303.01471v1, Eq. (C.3),
-p. 32, which is first order (potential, then kinetic, with the
-left-endpoint weights ``a_j = exp(phi_(j s))``, ``b_j = exp(chi_(j s))`` of
-their Eq. (C.2), where s = T/N is their step size, dt here). The symmetric
+The kinetic factor is applied exactly in the eigenbasis of the kinetic
+operator that ``kinetic_model`` names, so its cost per step does not depend
+on ``alpha_k``. This is the pseudo-spectral step of Leng et al.,
+arXiv:2303.01471v1, Eq. (C.3), p. 32, which is first order (potential,
+then kinetic, with the left-endpoint weights ``a_j = exp(phi_(j s))``,
+``b_j = exp(chi_(j s))`` of their Eq. (C.2), where s = T/N is their step
+size, dt here). The symmetric
 placement is Strang's splitting (G. Strang, SIAM J. Numer. Anal. 5 (1968)
 506-517, doi:10.1137/0705041). Wu et al., arXiv:2605.12066v1, Sec. VI,
 p. 7, simulate their benchmarks with this split-step Fourier method and
@@ -43,11 +44,12 @@ refined or a penalty grows.
 
 1. Coefficient quadrature. The midpoint rule's remainder
    ``∫ f = dt f(m) + (dt**3/24) f''(m) + O(dt**5)`` over a step of midpoint
-   m means that midpoint freezing misses the first Magnus term's correction
-   ``-i (dt**3/24)(a'' K + b'' V)_m``. The integrated rule's exact integrals
-   remove it. A left-endpoint rule, ``∫ f = dt f(t) + (dt**2/2) f'(t) +
-   O(dt**3)``, would miss ``-i (dt**2/2)(a' K + b' V)`` and be first order,
-   which symmetric placement does not repair, so it is not offered.
+   m means that evaluating the coefficients at the midpoint misses the
+   first Magnus term's correction ``-i (dt**3/24)(a'' K + b'' V)_m``. The
+   integrated rule's exact integrals remove it. A left-endpoint rule,
+   ``∫ f = dt f(t) + (dt**2/2) f'(t) + O(dt**3)``, would miss
+   ``-i (dt**2/2)(a' K + b' V)`` and be first order, which symmetric
+   placement does not repair, so it is not offered.
 2. Time ordering. For sufficiently small dt, the exact step propagator is
    the Magnus exponential ``exp(Omega_1 + Omega_2 + ...)`` of ``-i H(t)``,
    with ``Omega_1 = -i (A_k K + B_k V)`` and
@@ -71,7 +73,7 @@ refined or a penalty grows.
    ``Y = -i A K``
    ``log(exp(-i B V/2) exp(-i A K) exp(-i B V/2)) = -i (A K + B V) +
    (i A**2 B/12)[K, [K, V]] + (i A B**2/24)[V, [K, V]] + O(dt**5)``,
-   with A and B of order dt. The ``schrodinger`` flavor applies
+   with A and B of order dt. ``theory_flavor="schrodinger"`` applies
    ``exp(-i(A K + B V))`` and has no such term.
 
 Each step therefore has local error O(dt**3), and the global error at fixed
@@ -163,15 +165,16 @@ SCRATCH_BYTES_PER_AXIS = 4096
 
 
 def transform_levels(grid):
-    """Return the level count L of the kernel's transforms on ``grid``.
+    """Return the level count L of the transforms of ``evolve`` on ``grid``.
 
     The periodic grid uses the length-K FFT, ``L = ceil(log2 K)``. The
     Dirichlet grids use DST-I, which is the discrete Fourier transform of
     the odd extension of its input, of logical length 2(K + 1), so
     ``L = ceil(log2(2 (K + 1)))``. L is the length measure of the
-    qualification assumption, not a count of the backend's passes. For an integer n >= 1, ``ceil(log2 n)`` is the bit length of
-    n - 1. L scales both the transform roundoff (``TRANSFORM_ROUNDOFF``) and
-    the transform work of ``sizes``.
+    qualification assumption, not a count of the backend's passes. For an
+    integer n >= 1, ``ceil(log2 n)`` is the bit length of n - 1. L scales
+    both the transform roundoff (``TRANSFORM_ROUNDOFF``) and the transform
+    work of ``sizes``.
     """
     k = grid.num_grid_points
     length = k if grid.boundary == "periodic" else 2 * (k + 1)
@@ -182,7 +185,7 @@ def kinetic_eigenvalues(grid, var_index, kinetic_model):
     """Return the eigenvalues of variable ``var_index``'s kinetic operator in the order of its transform.
 
     Entry m is the eigenvalue of the mode that output index m of the
-    kernel's forward transform holds, for the grid's binary64 spacing h
+    forward transform of ``evolve`` holds, for the grid's binary64 spacing h
     (``OneHotGrid.spacing``). Every value has the form ``2 (g(x)/h)**2`` with
     x in [0, pi/2] and carries at most ``EIGENVALUE_ROUNDOFF`` units of
     relative roundoff.
@@ -249,8 +252,8 @@ def kinetic_eigenvalues(grid, var_index, kinetic_model):
 def potential_diagonal(reconstruction, grid):
     """Return the potential ``V_0`` on the grid as a float64 array of shape ``(K,) * d``, axis j for variable j.
 
-    ``V_0[n_0, ..., n_(d-1)] = sum_S v_S(n_S)`` with the stored support
-    tables v_S of the reconstruction (``records.SupportValues``), whose values
+    ``V_0[n_0, ..., n_(d-1)] = sum_S v_S(n_S)`` with the support tables v_S
+    of the Plan's reconstruction (``records.SupportValues``), whose values
     are in lexicographic order of their sorted support, first variable most
     significant. Reshaping a table to K along its support axes and 1 along the
     others keeps that order, and broadcasting adds it to every grid point.
@@ -259,8 +262,9 @@ def potential_diagonal(reconstruction, grid):
     global phase that ``method._constant_phase`` restores. Starting from
     zero, the sum ``v_1 + ... + v_M`` takes M - 1 roundings, so each entry is
     within ``gamma_(M-1) sum_S |v_S|`` of the exact sum of the stored values
-    (Higham, doi:10.1137/1.9780898718027, Sec. 4.2). ``state_error`` charges
-    that term. One table is converted to an array at a time.
+    (Higham, doi:10.1137/1.9780898718027, Sec. 4.2). ``state_error``
+    includes that term in its budget. One table is converted to an array at
+    a time.
     """
     d, k = grid.num_variables, grid.num_grid_points
     potential = np.zeros((k,) * d)
@@ -290,7 +294,7 @@ def _dst(state, axis):
 
 
 def _transform(state, axis, periodic, inverse=False):
-    """Return the kernel's unitary kinetic transform T, or its inverse, of ``state`` along ``axis``.
+    """Return the unitary kinetic transform T of ``evolve``, or its inverse, of ``state`` along ``axis``.
 
     On the periodic grid T is the unitary DFT ``(F x)_k = K**(-1/2) sum_j
     exp(-2 pi i k j/K) x_j``, ``scipy.fft.fft(norm="ortho")``, and its inverse
@@ -331,15 +335,15 @@ def _kinetic_axis(state, axis, angles, scale, periodic):
     ``x >= pi/(2 (K + 1))`` in ``E = 2 (g(x)/h)**2``, with x in [0, pi/2].
     Both sine and the identity satisfy ``g(x)/g(pi/2) >= 2 x/pi``, so
     ``E_m/E_max >= (K + 1)**-2``. Under the normal relative-rounding
-    premises of evolve, the computed ratio differs by a relative O(u).
-    On a 64-bit array host ``K + 1 <= 2**63``, so the square of that ratio
-    is of order at least ``2**-252``, far above the normal-range floor ``2**-1022``.
-    This argument does not cover underflow in the population products.
-    The division and square add two roundings per mode. Including the
-    population reductions over the other axes, a conservative relative
-    estimate for the diagnostic is ``O(D u)``, with ``D = state.size``.
-    For ``D u << 1`` this affects its budget charge only at second order
-    under the same arithmetic premises (``_potential_moment``).
+    assumptions of ``evolve``, the computed ratio differs by a relative O(u).
+    With 64-bit array indexing ``K + 1 <= 2**63``, so the square of that
+    ratio is of order at least ``2**-252``, far above the normal-range floor
+    ``2**-1022``. This argument does not cover underflow in the population
+    products. The division and square add two roundings per mode. Including
+    the population reductions over the other axes, a conservative relative
+    estimate for the diagnostic is ``O(D u)``, with ``D = state.size``. For
+    ``D u << 1`` this affects its term in the budget only at second order
+    under the same arithmetic assumptions (``_potential_moment``).
     """
     shape = [1] * state.ndim
     shape[axis] = -1
@@ -362,8 +366,9 @@ def _potential_moment(state, potential, scratch):
 
     With ``w(x) = V(x) |state(x)|``, ``mu**2 = T/S`` for
     ``S = sum_x |state(x)|**2`` and ``T = sum_x w(x)**2``. ``scratch`` is a
-    real array of the state's shape that holds no live data, the angle array
-    of ``evolve`` after its phase array is formed. One call writes
+    real array of the state's shape whose current contents are not needed.
+    ``evolve`` passes its angle array before the first step and after
+    forming each step's phase array. One call writes
     ``|state|`` into it (``np.abs``), forms S as its ``vdot`` with itself,
     overwrites it with w, finds ``M = max_x |w(x)|`` from its maximum and
     minimum, divides it by M and forms ``T/M**2`` as its ``vdot`` with
@@ -383,21 +388,21 @@ def _potential_moment(state, potential, scratch):
     binary64 number. The caller replaces a moment that is not finite by
     its Plan maximum W. A product w(x) below the normal range carries an
     absolute error of at most ``2**-1075``, so all of them move the moment
-    by at most ``(D/S)**(1/2) 2**-1075``, and since a potential half charges
-    ``2 u |beta| mu`` with ``|beta| < 2**1024``, their effect on each charge
-    stays below ``2**-50 u (D/S)**(1/2)``.
+    by at most ``(D/S)**(1/2) 2**-1075``, and since a potential half
+    contributes ``2 u |beta| mu`` with ``|beta| < 2**1024``, their effect on
+    each such term stays below ``2**-50 u (D/S)**(1/2)``.
 
     Rounding. Each ``|state(x)|`` carries one ulp of ``np.abs``, each scaled
     entry ``w(x)/M`` two more roundings (the product with V and the
     division) and each square one, and the sums, whose order NumPy and the
     BLAS ``vdot`` do not specify, at most ``gamma_h`` for h at most D - 1
-    additions along any term's path, all terms being nonnegative. Under
-    evolve's arithmetic premises, with S of order one and ``D u << 1``,
-    normal rounding contributes a relative ``O(D u)`` moment error.
-    Subnormal weighted products add the absolute allowance derived above,
-    and a subnormal final rescaling adds at most ``2**-1075``. Thus the
-    error is relative plus absolute, including when every weighted entry
-    rounds to zero. In the charge ``2 u |beta| mu``, the relative part
+    additions along any term's path, all terms being nonnegative. Under the
+    arithmetic assumptions of ``evolve``, with S of order one and
+    ``D u << 1``, normal rounding contributes a relative ``O(D u)`` moment
+    error. Subnormal weighted products add the absolute allowance derived
+    above, and a subnormal final rescaling adds at most ``2**-1075``. Thus
+    the error is relative plus absolute, including when every weighted entry
+    rounds to zero. In the budget term ``2 u |beta| mu``, the relative part
     contributes ``O(D u**2 |beta| mu)`` and the absolute part contributes
     ``O(u**2 sqrt(D/S))`` for finite beta. The first-order budget omits
     these second-order contributions (``evolve``), so it does not require
@@ -429,7 +434,7 @@ def _capped(moment, maximum):
 
 
 def evolve(grid, kinetic_model, reconstruction, dt, state, *, start, ceiling=None):
-    """Return the final restricted state after one Strang step per stored step weight, and its observed state budget.
+    """Return the final restricted state after one Strang step per step-weight row, and its observed state budget.
 
     ``state`` is the unit start vector of length ``K**d`` in lexicographic
     grid order (``binary`` module docstring), and the potential is
@@ -450,7 +455,7 @@ def evolve(grid, kinetic_model, reconstruction, dt, state, *, start, ceiling=Non
     on its own trajectory. Its reference is the exact Strang product of
     ``state_error``, applied to the exact initial unit state. Norms are
     Euclidean norms over every entry of the restricted tensor. Each moment
-    uses the actual input to its phase operation, or for a first potential
+    uses the computed input to its phase operation, or for a first potential
     half the moment that the preceding diagonal phase keeps (below), divided
     by that input's norm for error accounting only, and the evolving state
     is unchanged by this normalization.
@@ -460,8 +465,8 @@ def evolve(grid, kinetic_model, reconstruction, dt, state, *, start, ceiling=Non
     ``x_L - U_L ... U_1 x_0 = U_L ... U_1 (x_0 - exact x_0) + sum_l
     U_L ... U_(l+1) r_l``, an exact identity, and since the exact later
     operations keep each defect's norm, ``||x_L - exact x_L|| <= delta_0 +
-    sum_l ||r_l||``. A defect bounded on the actual input to its operation
-    therefore needs no further charge for the earlier errors. For a phase
+    sum_l ||r_l||``. A defect bounded on the computed input to its operation
+    therefore needs no further term for the earlier errors. For a phase
     ``diag(exp(-i theta_hat))`` in place of ``diag(exp(-i theta))`` with
     ``|theta_hat_m - theta_m| <= q_m``, the pointwise inequality
     ``|exp(i a) - exp(i b)| <= min(2, |a - b|)`` gives
@@ -476,7 +481,7 @@ def evolve(grid, kinetic_model, reconstruction, dt, state, *, start, ceiling=Non
       ``eta_(j,k) = 15 u |alpha_k| ||E_j z||`` with
       ``||E_j z||**2 = sum_(m,l) E_(j,m)**2 |z_(m,l)|**2`` for z observed
       after the forward transform of axis j and before its phase, with l
-      over the other axes (``_kinetic_axis``). The kernel applies one axis
+      over the other axes (``_kinetic_axis``). ``evolve`` applies one axis
       at a time, so each step has d such moments.
     - Potential half of step k. With M support tables v_S,
       ``W = sum_S max |v_S|`` and ``m = max(M - 1, 0)``, the summed
@@ -488,25 +493,25 @@ def evolve(grid, kinetic_model, reconstruction, dt, state, *, start, ceiling=Non
       The m W term covers the summation error even when the tables cancel,
       it vanishes for one table, and the whole term is zero without tables.
       The phase array is shared, but the two inputs of a step differ, so
-      each half is charged on its own input. The second half of step k is
-      observed on the state ``y_k`` after all kinetic factors, giving
+      the term of each half uses its own input. The second half of step k
+      is observed on the state ``y_k`` after all kinetic factors, giving
       ``mu_k = mu(y_k)``. The first half of step k + 1 acts on the state
       that step k's second half produced from ``y_k``, an exact diagonal
       unitary that keeps every magnitude ``|y_k(x)|`` and therefore the
-      moment, so it is charged with ``mu_k`` again, and the first half of
-      step 1 with ``mu_0`` of the initial state. Each interior pair is thus
-      charged ``u (c_k + c_(k+1)) (2 mu_k + m W)``, the absolute
+      moment, so its term uses ``mu_k`` again, and that of the first half
+      of step 1 uses ``mu_0`` of the initial state. Each interior pair thus
+      contributes ``u (c_k + c_(k+1)) (2 mu_k + m W)``, the absolute
       coefficients added so that signed weights cannot cancel, and N steps
       need N + 1 moments instead of 2N. The computed multiplication changes
       each magnitude by a relative factor within ``1 +- p``,
-      ``p <= GLOBAL_PHASE_STATE_ROUNDOFF u`` (the phase-application charge
-      below), so the moment of the actual input to the next first half lies
-      within the relative factor ``(1 + p)/(1 - p)`` of ``mu_k``. Charging
+      ``p <= GLOBAL_PHASE_STATE_ROUNDOFF u`` (the phase-application term
+      below), so the moment of the computed input to the next first half
+      lies within the relative factor ``(1 + p)/(1 - p)`` of ``mu_k``. Using
       ``mu_k`` omits at most ``2 u (2p/(1 - p)) c_(k+1) mu_k``, about
-      ``20 u**2 c_(k+1) mu_k``, a second-order product of local charges that
-      the first-order budget omits. So does measuring the stored ``V_0``
-      instead of the computed angle array ``fl(beta_k V_0)``, which changes
-      the moment by a relative factor within ``1 +- u``.
+      ``20 u**2 c_(k+1) mu_k``, a second-order product of local terms that
+      the first-order budget omits. So does measuring the moment with the
+      array ``V_0`` instead of the computed angle array ``fl(beta_k V_0)``,
+      which changes the moment by a relative factor within ``1 +- u``.
     - Transforms and phase applications. Each of the 2d transforms of a
       step adds ``eps_T = TRANSFORM_ROUNDOFF * L * u`` (``transform_levels``)
       and each of the d + 2 phase applications
@@ -516,12 +521,12 @@ def evolve(grid, kinetic_model, reconstruction, dt, state, *, start, ceiling=Non
     ``delta = delta_0 + N_s (2 d eps_T + (d + 2) 5 u) + sum_k [sum_j
     eta_(j,k) + u c_k (2 mu_(k-1) + m W) + u c_k (2 mu_k + m W)]``, where the
     kinetic moments use the computed angles ``alpha E_j`` in place of the
-    exact ones, which changes them at second order. The per-step charges
-    are summed with ``math.fsum``. The first-order budget also
-    bounds the error up to a global phase. Norm growth of the computed
-    state comes from the transforms and phase applications alone, since an
-    angle error keeps the norm, so normalizing the observed inputs differs
-    from charging their raw norms only by products of the local charges.
+    exact ones, which changes them at second order. The per-step terms are
+    summed with ``math.fsum``. The first-order budget also bounds the error
+    up to a global phase. Norm growth of the computed state comes from the
+    transforms and phase applications alone, since an angle error keeps the
+    norm, so normalizing the observed inputs differs from using their raw
+    norms only by products of the local terms.
 
     Each unit-input moment is at most its Plan maximum,
     ``||E_j z|| <= max E_j`` and ``2 ||V_0 z|| + m W <= (M + 1) W`` for
@@ -529,28 +534,28 @@ def evolve(grid, kinetic_model, reconstruction, dt, state, *, start, ceiling=Non
     most ``state_error`` under the same first-order model. Each moment is
     therefore capped at its maximum, ``|alpha_k| max E_j`` for the computed
     kinetic angles and W for ``mu``, a moment that is not finite is replaced
-    by that maximum (``_capped``), and the returned budget is the smaller of the
-    observed sum and ``state_error``, so that a last-bit discrepancy of
-    the floating-point sums cannot exceed the Plan's first-order ceiling.
+    by that maximum (``_capped``), and the returned budget is the smaller of
+    the observed sum and ``state_error``, so that a last-bit discrepancy of
+    the floating-point sums cannot exceed the Plan's first-order budget.
     ``ceiling`` is that ``state_error`` value when the caller already holds
-    it: a split-step Plan stores it at planning as
+    it. A Plan with ``theory_flavor="split_step"`` records it at planning as
     ``QHDReconstruction.host_state_error``, from the same grid, kinetic
-    model, tables, step weights, dt and start (``method._admit_host_windows``),
-    so the evolution does not
-    recompute it. With ``ceiling`` None, as for a reference evolution of a
-    Plan of another flavor, whose stored budget is another flavor's or
-    None, it is computed here.
-    Both quantities are first order in u. A budget valid at every order in u
-    would need a Plan ceiling valid at every order too, because enclosing
-    some moments from above and keeping the linear ceiling of
-    ``state_error`` does not bound the state error at every order.
-    The transform constant and the one-ulp elementary-function premises are
-    qualification assumptions, as in ``state_error``. The relative-roundoff
-    charges assume round-to-nearest binary64 arithmetic without overflow,
-    with normal nonzero quantities wherever a relative error is used, so an
-    evolution whose intermediate values underflow would need absolute terms
-    that the budget does not charge. The budget excludes schedule,
-    table-input, spacing and discretization errors.
+    model, tables, step weights, dt and start
+    (``method._admit_host_windows``), so the evolution does not recompute
+    it. With ``ceiling`` None, as for a reference evolution of a Plan with
+    another ``theory_flavor``, whose recorded budget belongs to that option
+    or is None, it is computed here. Both quantities are first order in u.
+    A budget valid at every order in u would need a Plan budget valid at
+    every order too, because enclosing some moments from above and keeping
+    the linear bound of ``state_error`` does not bound the state error at
+    every order. The transform constant and the one-ulp assumption on
+    elementary functions are qualification assumptions, as in
+    ``state_error``. The relative-roundoff terms assume round-to-nearest
+    binary64 arithmetic without overflow, with normal nonzero quantities
+    wherever a relative error is used, so an evolution whose intermediate
+    values underflow would need absolute terms that the budget does not
+    include. The budget excludes schedule, table-input, spacing and
+    discretization errors.
     ``method._execute_theory`` converts it with
     ``probability_difference_window(delta, 5u)`` into the tie window of the
     most probable point. The observations add the reductions and arrays
@@ -631,16 +636,15 @@ def state_error(grid, kinetic_model, tables, step_weights, dt, *, start):
 
     to first order in u, because each exact step is unitary and carries an
     earlier error to the final state unchanged in norm (telescoping). The
-    sum omits products of the charges, which the product form
+    sum omits products of the terms, which the product form
     ``(1 + delta_0) prod_k (1 + rho_k) - 1`` would add. They add at most
     about ``delta**2/2``, 0.3% of delta at ``delta = 6.7e-3``, the budget on
     the 64-by-64 periodic spectral grid of the unit square with
     ``ShiftedCubicSchedule(s=2e-4)``, 1000 integrated steps and total time
     10, where the kinetic angles dominate for an objective of order one
-    (2026-09-26). The
-    ``expm_multiply`` budget is first order in the same way. The
-    relative-roundoff charges assume round-to-nearest binary64 arithmetic
-    without overflow or underflow, as in ``evolve``.
+    (2026-09-26). The ``expm_multiply`` budget is first order in the same
+    way. The relative-roundoff terms assume round-to-nearest binary64
+    arithmetic without overflow or underflow, as in ``evolve``.
 
     - ``delta_0 = start u`` bounds the construction of the initial vector,
       the value of ``initial_state.restricted_state_error`` that
@@ -668,24 +672,27 @@ def state_error(grid, kinetic_model, tables, step_weights, dt, *, start):
       the product, ``eta_(V,k) = (M + 1) u |beta_k| W`` with
       ``W = sum_S max |v_S|``, which bounds both ``|V_0|`` and the summands'
       absolute sum at every point. The same phase array serves both halves,
-      and each application is charged separately.
+      and each application is counted separately.
 
     A large angle loses absolute accuracy when it is formed, which wrapping
     it afterwards cannot restore, so the eta terms grow with ``sum_k
     |alpha_k|``, the kinetic integral, and with ``sum_k |beta_k| W``, and
     they dominate for schedules whose kinetic weight is large near t = 0.
     The transform term is an assumption about SciPy's transform backend,
-    ducc0.fft in SciPy 1.18.1 (``TRANSFORM_ROUNDOFF``), not a proved bound. The budget excludes the
-    error of the step weights, of h and of the stored tables relative to the
-    exact schedule, box and objective, and every time, splitting or grid
-    discretization error. ``method._host_probability_window`` turns delta
-    into the mass window, the same conversion as for the ``expm_multiply``
-    flavors. The charges use the largest eigenvalue and the largest table
-    magnitudes for every state, so this Plan budget is a ceiling. The kernel
-    selects its most probable point with the budget that ``evolve`` observes
-    on the actual trajectory, which weights each angle error by the state's
-    own mode and point probabilities and is at most this one
-    (``method._host_tie_window`` gives the ceiling of its tie window).
+    ducc0.fft in SciPy 1.18.1 (``TRANSFORM_ROUNDOFF``), not a proved bound.
+    The budget excludes the error of the step weights, of h and of the
+    stored tables relative to the exact schedule, box and objective, and
+    every time, splitting or grid discretization error.
+    ``method._host_probability_window`` turns delta into the mass window,
+    the allowed deviation of the computed total probability from one, with
+    the same conversion as for the ``theory_flavor`` values that use
+    ``expm_multiply``. The terms use the largest eigenvalue and the largest
+    table magnitudes for every state, so this Plan budget is an upper bound
+    for every trajectory. The classical evaluation selects its most probable
+    point with the budget that ``evolve`` observes on the computed
+    trajectory, which weights each angle error by the state's own mode and
+    point probabilities and is at most this one
+    (``method._host_tie_window`` gives the upper bound of its tie window).
 
     Raises:
         ValueError: An eigenvalue, weight product or the budget is not finite.
@@ -727,43 +734,43 @@ def sizes(grid, tables, num_steps, start_work):
     ``size_units = W_start + D (d + M + 7) + d K + N_s (2 d L D + (2 d + 13) D + 7 d K + d + 4)``.
 
     ``W_start`` is D for the direct uniform fill and
-    ``d K + sum_(j=2)^d K**j + D`` for the stored real factors, charged once
+    ``d K + sum_(j=2)^d K**j + D`` for the stored real factors, counted once
     per evolution. ``D (d + M)`` counts forming V from the tables (M
     additions and d index positions per point), 7 D the potential moment
-    of the initial state and ``d K`` the eigenvalues,
-    separate from the ``d K`` inside ``W_start``. These once-per-evolution
-    terms are nominal counts, not one unit per pass: ``kinetic_eigenvalues``
-    runs several passes of K per axis, ``evolve`` forms the eigenvalues and
-    the table magnitudes again when it compares its budget with
-    ``state_error``, and that comparison reads the N_s step rows once
-    more. Per step, each of the
-    2d transforms is charged the nominal proxy ``L D``, the level count of
-    ``transform_levels`` times the D entries it transforms. It is not a count
-    of the backend's radix passes, twiddle products, Bluestein convolutions
-    or planning work, which SciPy does not report. The per-step linear terms count
-    one unit per element of each array pass: the d D kinetic and 2 D
-    potential complex multiplications, 2 D for the potential phases (the
-    product of the angles with -i and the exponential), 2 D potential
-    angle products, d K kinetic angle products and 2 d K for the kinetic
-    phases (the product with -i and the exponential in ``_kinetic_axis``).
-    ``evolve`` forms the potential angles once per step for both halves, so
-    their term charges D more than it runs. The observed state budget adds,
-    per step, d D for the mode populations of the d kinetic moments (one
-    ``einsum`` pass over the D entries per axis), 4 d K for weighting them
-    (per axis the sum of the populations, the division of the angles by
-    their cap, the square and the reduction against the populations,
-    ``_kinetic_axis``), 7 D for the one potential moment of
-    the step (``_potential_moment``: the magnitudes, their sum of squares,
-    the product with V, its maximum and minimum, the division by the
-    largest magnitude and the sum of squares, the first half reusing the
-    previous moment), and ``d + 4`` for summing the step's d + 3 charges and adding
-    the step to the final sum. N_s steps take N_s + 1 potential moments. The whole law is a
-    nominal proxy in the units of the other QHD laws, not an upper bound on
-    the backend's arithmetic, a FLOP count or a runtime bound. At a fixed
+    of the initial state and ``d K`` the eigenvalues, separate from the
+    ``d K`` inside ``W_start``. These once-per-evolution terms are nominal
+    counts and do not count one unit per pass. ``kinetic_eigenvalues`` runs
+    several passes of K per axis, ``evolve`` forms the eigenvalues and the
+    table magnitudes again when it compares its budget with
+    ``state_error``, and that comparison reads the N_s step rows once more.
+    Per step, each of the 2d transforms is counted as the nominal measure
+    ``L D``, the level count of ``transform_levels`` times the D entries it
+    transforms. It is not a count of the backend's radix passes, twiddle
+    products, Bluestein convolutions or planning work, which SciPy does not
+    report. The per-step linear terms count one unit per element of each
+    array pass: the d D kinetic and 2 D potential complex multiplications,
+    2 D for the potential phases (the product of the angles with -i and the
+    exponential), 2 D potential angle products, d K kinetic angle products
+    and 2 d K for the kinetic phases (the product with -i and the
+    exponential in ``_kinetic_axis``). ``evolve`` forms the potential angles
+    once per step for both halves, so their term counts D more than it
+    performs. The observed state budget adds, per step, d D for the mode
+    populations of the d kinetic moments (one ``einsum`` pass over the D
+    entries per axis), 4 d K for weighting them (per axis the sum of the
+    populations, the division of the angles by their cap, the square and
+    the reduction against the populations, ``_kinetic_axis``), 7 D for the
+    one potential moment of the step (``_potential_moment``: the
+    magnitudes, their sum of squares, the product with V, its maximum and
+    minimum, the division by the largest magnitude and the sum of squares,
+    the first half reusing the previous moment), and ``d + 4`` for summing
+    the step's d + 3 budget terms and adding the step to the final sum. N_s
+    steps take N_s + 1 potential moments. The whole formula is a nominal
+    measure in the units of the other QHD work formulas, not an upper bound
+    on the backend's arithmetic, a FLOP count or a runtime bound. At a fixed
     step count it depends on neither a, b nor the objective's range, whereas
     the work of ``expm_multiply`` grows with them
-    (``method.restricted_sizes``). The selected resource law records it as an
-    estimate with the backend's internal work unknown
+    (``method.restricted_sizes``). The cost rule (``ResourceLaw``) that
+    planning records for it is an estimate with the backend's internal work unknown
     (``method.QHD._host_construction``).
 
     ``workspace_bytes = 64 D + 32 (d + 1) K + 8 T_max + 8 N_s + 1024 K + 4096 (d + 1)``
@@ -774,25 +781,25 @@ def sizes(grid, tables, num_steps, start_work):
     its kinetic angles (8 K), their mode populations (8 K), the complex
     product with -i (16 K) and the phases (16 K), in all at most
     ``8 d K + 48 K <= 32 (d + 1) K`` for d >= 1, one table converted to an
-    array, and the float64 per-step charges of the observed budget (8 N_s).
+    array, and the float64 per-step terms of the observed budget (8 N_s).
     The kinetic moment (``_kinetic_axis``) reads the state in place, and
     beside the populations NumPy 2.5.2's ``einsum`` traced at most 1368
     bytes on arrays of up to 2**20 entries, released before the phases are
     formed. The potential moment (``_potential_moment``) writes into the
-    angle array, which holds no live data at that point, and traced 296
+    angle array, whose current contents are not needed then, and traced 296
     bytes beyond it. The traced excess that ``SCRATCH_BYTES_PER_AXIS``
     covers includes both (2026-09-26). The scaled potential moment traced
     the same 296 bytes on arrays of 256 to 2**20 entries (2026-09-27,
     Python 3.12.14 and NumPy 2.5.2 on macOS arm64). The last two terms are
     the measured transform-scratch allowance, ``SCRATCH_BYTES_PER_POINT``
-    for the native plans and buffers of ducc0.fft with one worker and
-    ``SCRATCH_BYTES_PER_AXIS`` for Python and NumPy objects. The start
-    vector is formed before these arrays, and its explicit payload, at most
-    ``24 D + 8 d K`` bytes
+    for the plans and buffers that ducc0.fft allocates outside Python with
+    one worker and ``SCRATCH_BYTES_PER_AXIS`` for Python and NumPy objects.
+    The start vector is formed before these arrays, and its explicit
+    payload, at most ``24 D + 8 d K`` bytes
     (``initial_state.restricted_state``), fits within
-    ``64 D + 32 (d + 1) K`` term by term. Its complex result is the state already counted
-    here. The readout of ``method._execute_theory`` runs after these arrays
-    are released and has its own allowance.
+    ``64 D + 32 (d + 1) K`` term by term. Its complex result is the state
+    already counted here. The readout of ``method._execute_theory`` runs
+    after these arrays are released and has its own allowance.
     """
     d, k = grid.num_variables, grid.num_grid_points
     dimension = k**d

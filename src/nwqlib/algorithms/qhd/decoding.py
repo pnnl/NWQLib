@@ -86,8 +86,8 @@ def onehot_register_indices(k: int, d: int) -> np.ndarray:
     2**(j K + i_j)``. Each summand sets one bit in a disjoint variable
     register, so addition and bitwise OR agree exactly. There are D
     distinct indices. Broadcasting one one-dimensional vector per axis
-    enumerates them in C order, which is lexicographic grid order. A
-    materialized full register must already fit ``np.intp`` and its byte
+    enumerates them in C order, which is lexicographic grid order. A full
+    register held as an array must already fit ``np.intp`` and its byte
     limit. The array costs 8D bytes and its
     coordinate/local-index scratch at most 24K.
 
@@ -140,7 +140,7 @@ def onehot_local_indices(words: np.ndarray, k: int, d: int) -> np.ndarray:
 def decode_statevector_probabilities(
     statevector: Any, grid: OneHotGrid, bits: int | None = None
 ) -> DecodedOneHotDistribution:
-    """Decode a full-register statevector into its valid grid population and masses.
+    """Decode a full-register statevector into the probabilities of its valid grid points and its masses.
 
     The register has ``d K`` qubits for the one-hot encoding (``bits`` None)
     and ``d b`` qubits for the binary encoding with ``bits = b``. Each
@@ -149,24 +149,25 @@ def decode_statevector_probabilities(
     bounds.
 
     One-hot indices set the bit ``j*K+i_j`` for every variable, and binary
-    indices use the variable-axis permutation. Valid, invalid and total
-    masses describe their respective observed populations.
+    indices use the variable-axis permutation. The valid, invalid and total
+    masses are the probabilities of the valid outcomes, the invalid
+    outcomes and all outcomes.
 
     The valid amplitudes are gathered once (``onehot_register_indices``, or
     ``binary.lexicographic_register_array``) before their probabilities are
     formed. The total and invalid masses are each summed directly with
-    ``math.fsum`` over their own population, the total over every register
+    ``math.fsum`` over their own outcomes, the total over every register
     probability and the invalid mass over the complement of the valid set,
-    streamed ``QHD_DECODING_PROBABILITY_CHUNK_SIZE`` entries at a time with
+    ``QHD_DECODING_PROBABILITY_CHUNK_SIZE`` entries at a time with
     the one-hot word test (``onehot_valid_words``), so that no full-register
     Boolean mask is formed. ``invalid = total - fsum(valid)`` is an identity
-    in exact arithmetic, not fsum semantics in floating point: a valid
-    weight 1 and an invalid weight ``2**-54`` give correctly rounded total 1,
-    and subtraction returns zero although the directly summed invalid mass
-    is ``5.551115123125783e-17``. These accurate reductions can differ from a
-    sequential ``+=`` sum in the last bits, which can change threshold
-    decisions. The analysis of
-    the same populations uses the same reduction. ``points`` keeps each
+    in exact arithmetic but does not hold for the ``fsum`` results in
+    floating point. A valid weight 1 and an invalid weight ``2**-54`` give
+    the correctly rounded total 1, and subtraction returns zero although the
+    directly summed invalid mass is ``5.551115123125783e-17``. These
+    accurate reductions can differ from a sequential ``+=`` sum in the last
+    bits, which can change threshold decisions. The analysis of the same
+    outcomes uses the same reduction. ``points`` keeps each
     valid point whose probability is not ``<= 0``, so a NaN reaches the mass
     checks instead of disappearing as a zero probability.
     """
@@ -189,8 +190,8 @@ def decode_statevector_arrays(statevector: Any, grid: OneHotGrid, bits: int | No
     The arrays and masses of ``decode_statevector_probabilities``, formed by
     the same operations, without its per-point records: ``valid`` holds
     ``np.square(np.absolute(z))`` of every valid amplitude in lexicographic
-    grid order, and ``invalid`` and ``total`` are the ``math.fsum`` sums of
-    their own populations, streamed over the register.
+    grid order, and ``invalid`` and ``total`` are the ``math.fsum`` sums over
+    their own outcomes, accumulated over the register chunk by chunk.
     """
     from math import fsum
 
@@ -233,8 +234,8 @@ def decode_statevector_arrays(statevector: Any, grid: OneHotGrid, bits: int | No
 def decode_histogram(histogram, grid: OneHotGrid, bits: int | None = None):
     """Return ``(valid, points)`` of an observation histogram: which entries encode a grid point, and which point.
 
-    ``valid`` is the Boolean mask of the histogram's stored entries, in
-    stored order, that encode a grid point, and ``points`` the
+    ``valid`` is the Boolean mask of the histogram's entries, in their
+    order, that encode a grid point, and ``points`` the
     ``(entries, d)`` int64 grid-index tuples of those entries, in the same
     order. A readout up to 64 bits wide is decoded by array operations on
     ``Histogram.indices()``: the one-hot word test and local indices

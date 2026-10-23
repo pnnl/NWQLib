@@ -1,6 +1,6 @@
-"""The ADAPT Method: pool admission, the parameterized construction that every query reuses, and the generator compiler plans.
+"""The ADAPT Method: pool checks, the parameterized construction that every query reuses, and the generator compiler plans.
 
-The controller is ``adapt_acquisition.drive_adapt``.
+The ADAPT iteration itself is ``adapt_acquisition.drive_adapt``.
 """
 
 from nwqlib._limits import DEFAULT_MAX_BYTES
@@ -107,10 +107,11 @@ def _parameters(length, pool_size, term_count, group_count, *, residual=False, q
 
     One Program serves all adaptive queries, so each query is a point in this
     space rather than a new construction. ``l_*`` and ``r_*`` hold the left and
-    right generator chains with at most ``length`` slots. Inactive slots are
-    canonical (index -1, angle 0), which lets equal queries share one identity.
-    ``term`` and ``quadrature`` select a Hadamard-test Pauli term and real or
-    imaginary part. ``group`` selects a sampled QWC readout group. The
+    right generator chains with at most ``length`` positions. Unused positions
+    take canonical values (index -1, angle 0), so equal queries have one
+    content hash. ``term`` and ``quadrature`` select a Hadamard-test Pauli
+    term and real or imaginary part. ``group`` selects a sampled QWC
+    measurement group. The
     ``insert_*`` fields place one Pauli-insertion shift for measured
     derivatives. Residual queries also carry the Ritz energy and coefficients.
     """
@@ -151,11 +152,11 @@ def _parameters(length, pool_size, term_count, group_count, *, residual=False, q
 def generator_pool_slot_bound(num_qubits, term_counts):
     """Bound generator construction from the system width and stored Pauli term counts.
 
-    The commuting route uses at most 6q slots per term. Pair/split,
-    four-distinct and shared-index default routes fit 24q+6192 slots, using
+    The commuting route uses at most 6q instructions per term. Pair/split,
+    four-distinct and shared-index default routes fit 24q+6192 instructions, using
     at most six active modes and occupation blocks of dimension at most five
     for the last route. The bound counts logical appended instructions, not
-    native synthesis gates. It does not establish support for an arbitrary
+    backend synthesis gates. It does not establish support for an arbitrary
     custom noncommuting generator.
 
     For q system qubits and T stored Pauli terms, the circuit routes in
@@ -173,11 +174,11 @@ def generator_pool_slot_bound(num_qubits, term_counts):
     ``sum k <= 2**m``, so ``B_shared(q,m) <= 4m(q-m)+(4m-3)2**(m+1)``. For
     ``m <= 6`` the first term is at most ``24q-4m**2`` and the remaining
     constant is at most 2544 at ``m = 6``, so ``B_shared <= 24q+2544``,
-    below ``24q+6192``, the triplet four-distinct envelope. Pair/split is
+    below ``24q+6192``, the triplet four-distinct bound. Pair/split is
     also below that value for ``q >= 1``. A route-independent bound for any
     supported generator is thus ``B(q,T) = max{6q max(1,T), 24q+6192}``. It
     uses the O(P) existing tuple-length metadata of a P-member pool, with no
-    state expansion, commutation census or occupation-block planning.
+    state expansion, commutation count or occupation-block planning.
     """
     counts = tuple(term_counts)
     if not counts:
@@ -188,10 +189,10 @@ def generator_pool_slot_bound(num_qubits, term_counts):
 
 
 def _admit_generator_routes(pool, *, max_bytes, max_products):
-    """Refuse at planning a generator that no compiler route supports, and return whether all commute.
+    """Reject during planning a generator that no circuit route supports, and return whether all commute.
 
-    This is the eligibility part of ``fermionic_circuits._plan_generator_circuit``
-    with its charge: two Pauli words with bit masks ``(x_i, z_i)`` and
+    This is the eligibility part of ``fermionic_circuits._plan_generator_circuit``,
+    with its work counted. Two Pauli words with bit masks ``(x_i, z_i)`` and
     ``(x_j, z_j)`` commute exactly when ``popcount(x_i & z_j) +
     popcount(z_i & x_j)`` is even, and a generator whose terms do not all
     commute must be a normalized default GSD double
@@ -228,7 +229,7 @@ class CompilerPlans:
 
     ``construct_adapt``, ``_native_preparation``, the optimization shift-rule
     selection and ``adapt_archive`` read this one map. An entry is built by
-    ``fermionic_circuits._plan_generator_circuit`` for the admitted
+    ``fermionic_circuits._plan_generator_circuit`` for the checked
     generator at its pool index and reused for every later angle, and each
     entry compiles that same generator object. ``built()`` returns only the
     plans constructed so far, which are the ones a Plan archive and a Run
@@ -267,38 +268,39 @@ class CompilerPlans:
 
 
 def _construction(inputs, reference, method, length, compiler_plans, slot_bound, execution, shots):
-    """Select the one parameterized construction that every ADAPT query reuses.
+    """Choose the one parameterized construction that every ADAPT query reuses.
 
     The adaptive trajectory is unknown at planning time, so the Plan fixes a
     finite query space instead of concrete circuits. Each later query is a
-    point in the ``_parameters`` space, admitted by ``ADAPT.validate_point``
+    point in the ``_parameters`` space, checked by ``ADAPT.validate_point``
     and bound through ``Plan.resolve``. The same construction therefore serves
     live execution, resume and archive reload without replanning.
 
-    Classical execution selects one host kernel with experiments ``screen``,
+    Classical execution uses one classical routine with experiments ``screen``,
     ``pair``, ``energy`` and, for residual stopping, ``residual``. An
     ``energy`` query returns the product energy and its gradient in the
     chain's angles from one evaluation. Its known workspace is the bounded
-    frontier of cached state vectors and Hamiltonian actions, and with
-    optimization the energy-and-gradient reservation. A supplied Qiskit
-    reference adds a materialization whose cost is declared unknown.
+    set of cached state vectors and Hamiltonian actions held at one time,
+    and, with optimization, the memory set aside for energy-and-gradient
+    evaluations. A supplied Qiskit reference circuit adds a statevector
+    construction whose cost is declared unknown.
 
-    Quantum execution selects one native block per query family. ``screen`` and
+    Quantum execution uses one circuit block per query family. ``screen`` and
     ``energy`` prepare a generator chain on the system register and read Pauli
     labels. ``pair`` adds an ancilla. With shots it is the Hadamard test for one
     transition amplitude. Exact execution prepares the pair's phase-faithful
-    joint state, or a diagonal pair's system state, reduced at acquisition to
-    ``(H0_ij, S_ij)`` (``pair_reducer``), and the exact ``screen`` query of the
-    full chain also reduces its diagonal.
+    joint state, or a diagonal pair's system state, reduced when it is
+    computed to ``(H0_ij, S_ij)`` (``pair_reducer``), and the exact ``screen``
+    query of the full product state also reduces its diagonal.
     ``construct_adapt`` builds the circuit for each bound point.
-    ``construction_work`` is a declared envelope of logical construction slots
-    for the longest chain, not a native synthesis, CPU or memory bound.
-    ADAPT admits a family-level logical construction envelope before
-    acquisition. A generator's angle-independent compiler data is
-    constructed when that generator is selected and reused across its later
-    angles. The envelope uses its system width, Pauli term count and
-    supported compiler family. Logical construction slots and later native
-    synthesis costs are reported separately.
+    ``construction_work`` is a declared upper bound on the circuit
+    instructions appended for the longest chain, not a bound on backend
+    synthesis, CPU time or memory. ADAPT checks this bound for the generator
+    family before any circuit runs. A generator's angle-independent compiler
+    data is constructed when that generator is selected and reused across
+    its later angles. The bound uses the system width, Pauli term count and
+    supported circuit family. The appended instructions and the later cost
+    of synthesizing them into backend gates are reported separately.
 
     Returns:
         ``(construction, experiments, blocks)`` for the Plan.
@@ -586,13 +588,13 @@ def _construction(inputs, reference, method, length, compiler_plans, slot_bound,
 
 
 def _shared_readout(identity, coefficients, q, labels):
-    """Return the readout of the exact shared full-chain query at the end of its chain.
+    """Return the readout specification of the exact shared query on the full product state.
 
     Its ``diagonal`` point is the weighted-pencil reduction of the system
     state, ``H0_ii`` and the raw norm, when the Hamiltonian has a nonidentity
     term, and its ``screen`` point reads the active screening labels, when
-    there are any. Both points share one preparation and receipt, and no view
-    sits between them.
+    there are any. Both points share one preparation and preparation record,
+    and no measurement basis change sits between them.
     """
     from nwqlib.core.planning import ObservationPoint
     from .fixed_basis import pair_reduction_point
@@ -607,14 +609,14 @@ def _shared_readout(identity, coefficients, q, labels):
 
 
 def _pair_reduction_readout(identity, coefficients, q, *, diagonal):
-    """Return the readout of an exact quantum pair query: one weighted-pencil reduction at the end."""
+    """Return the readout specification of an exact quantum pair query, one weighted-pencil reduction at the end."""
     from .fixed_basis import pair_reduction_point
 
     return ReadoutDetails(positions=(pair_reduction_point(identity, coefficients, q, diagonal=diagonal),))
 
 
 class ADAPT(Method):
-    """Adaptive GCiM (ADAPT-GCIM) method for the smallest eigenvalue of an `Eigenproblem`.
+    """Adaptive GCiM (ADAPT-GCiM) method for the smallest eigenvalue of an `Eigenproblem`.
 
     It grows its trial basis from a pool of generators. Build it with
     keyword arguments and pass it as `method=`, for example
@@ -624,10 +626,10 @@ class ADAPT(Method):
     `eigenvalue` is the lowest projected Ritz value in the trial basis the run
     built.
 
-    The method follows ADAPT-GCIM of Zheng et al., npj Quantum Inf. 10, 127
+    The method follows ADAPT-GCiM of Zheng et al., npj Quantum Inf. 10, 127
     (2024), arXiv:2312.07691v3. Each round screens the current product state
     with the ADAPT gradient `<[H, A_i]>` of every unselected generator (main
-    text, "Integration of GCIM with ADAPT approach", p. 4, and Grimsley et
+    text, "Integration of GCiM with ADAPT approach", p. 4, and Grimsley et
     al. (2019), arXiv:1812.11173v2, Sec. II.B, steps 5-7). The selected
     generator enters at the fixed angle `theta`, and the basis grows by two
     states per selection (METHODS, p. 9). A selected generator is not
@@ -635,17 +637,19 @@ class ADAPT(Method):
     implementation (commit c5efcb0, lines 303-398), whereas Grimsley et al.
     step 7 permits reuse in its ADAPT-VQE ansatz. Optimization every
     `optimize_every_m` selections is the intermittent, truncated optimization
-    of Appendix H, and its extra energy evaluations run through the same Run.
-    Because later queries act on generators selected from earlier outcomes,
-    `prepare(plan, settings="all")` is refused.
+    of Appendix H, and its extra energy evaluations run through the same Run,
+    the saved execution of the Plan.
+    Because the circuits of each round depend on generators selected from
+    earlier results, `prepare(plan, settings="all")` is rejected.
 
-    The default flat-counter stop follows METHODS, p. 9: stop after
+    The default flat-counter stop follows METHODS, p. 9, and stops after
     `T = min(T_auto, T_usr)` consecutive energy changes below
     `energy_change_tolerance`, with `T_auto` equal to `t_auto_fraction`
     (20%) of the unselected generators and `T_usr = t_user`. Counting starts
-    at the first change from the reference energy, and the integer counter
-    reaches a fractional T at its ceiling. QuGCM's code instead uses a max
-    rule with 10% and a warmup. With `max_iterations=8` and `t_user=10`, the
+    at the first change from the reference energy. T is recomputed after each
+    selection from the current number of unselected generators, and the run
+    stops as soon as the integer count is at least `ceil(T)`. QuGCM's code
+    instead uses a max rule with 10% and a warmup. With `max_iterations=8` and `t_user=10`, the
     flat counter can fire only for pools of at most 42 generators. After k
     selections a pool of P generators has `P - k` unselected members and a
     flat count of at most k, so the stop needs `k >= 0.2*(P - k)`. The
@@ -683,11 +687,11 @@ class ADAPT(Method):
         max_iterations: Default `8`. Largest number of selection rounds. The
             basis holds at most ``2*min(max_iterations, pool size)`` states, so
             `max_basis_size=64` allows at most 32 selections for a pool of
-            more than 32 members. The default is a cost cap. With exact
+            more than 32 members. The default limits the cost. With exact
             evaluation and the spin-adapted pool, the H4 chain of the eigenvalue example reaches
             FCI at the eighth selection, and 10-qubit LiH is then 0.46 mHa
             above its FCI energy. With `max_iterations=32`, the largest that
-            `max_basis_size=64` admits for these pools, the flat counter stops
+            `max_basis_size=64` allows for these pools, the flat counter stops
             them at selections 18 and 19
             ([Engineering constants](../../ENGINEERING_CONSTANTS.md)).
         overlap_cutoff: Default `1e-12`, positive. Overlap eigenvalue cutoff
@@ -703,14 +707,14 @@ class ADAPT(Method):
         residual_norm_tolerance: Default `1.6e-3`, positive. Threshold on that
             full-state residual for the residual stop, in the Hamiltonian's
             energy unit.
-        optimize_every_m: Default `None`, no optimization. Run coefficient
-            optimization every m selected generators.
+        optimize_every_m: Default `None`, no optimization. Optimize the
+            generator angles of the product state every m selected generators.
         optimize_rounds_n: Default `None`. Largest number of BFGS iterations
             per optimization, required together with the other two
             optimization settings.
         optimize_max_evaluations: Default `None`. Largest number of energy
-            queries for enabled optimization, counted as distinct measured
-            parameter points. A classical point is one energy-and-gradient
+            evaluations when optimization is enabled, counted as distinct
+            evaluated parameter points. A classical point is one energy-and-gradient
             evaluation, whose work record includes its forward, derivative
             and reverse Taylor work.
         max_basis_size: Default `64`. Limit on the size of the growing trial
@@ -724,23 +728,29 @@ class ADAPT(Method):
             conversion, matrices and operator products. It also limits,
             separately, the exact synthesis of the dense unitaries in a
             supplied reference circuit and Qiskit's control of them. Before a
-            classical query starts, its reference, generator, Hamiltonian and
+            classical query (one evaluation of gradients, matrix elements or
+            an energy) starts, its reference, generator, Hamiltonian and
             scalar work are summed and checked, and each later query is
             checked afresh. Packed Pauli tables are checked once per Plan.
             The recorded allowance covers a whole query, while the counters
             record the actions performed after cache reuse.
-        input_conversion: Default `"auto"`, which keeps the accepted input
-            access. `"dense_pauli"` permits explicit dense-to-Pauli
-            conversion.
+        input_conversion: Default `"auto"`, which keeps Pauli input as it
+            is and converts an explicit dense matrix of original dimension at
+            most 16 to Pauli form. This applies to the Hamiltonian of a
+            quantum run and to custom pool generators that need conversion. A
+            classical run keeps a dense or sparse Hamiltonian in its form,
+            padded when needed. `"dense_pauli"` also permits the conversion of
+            sparse matrices and of larger dense matrices, within
+            `max_conversion_work` and `max_bytes`.
         max_conversion_work: Default `100_000_000`. Separate limit on the
             work of the chosen input conversion.
         pauli_coefficient_cutoff: Default `1e-14`, nonnegative. Operator
             coefficients at or below it in magnitude are removed, and the
-            removed mass is recorded.
-        input_symmetry_tolerance: Default `1e-12`, nonnegative. Relative
-            Frobenius window for the anti-Hermitian projection of each pool
-            generator. The Hamiltonian gets no window and must be exactly
-            Hermitian.
+            sum of the removed magnitudes is recorded.
+        input_symmetry_tolerance: Default `1e-12`, nonnegative. Largest
+            relative Frobenius-norm correction that the anti-Hermitian
+            projection of each pool generator may make. The Hamiltonian has
+            no tolerance and must be exactly Hermitian.
 
     Raises:
         ValueError: If `theta` is zero, if only some of the three
@@ -793,10 +803,10 @@ class ADAPT(Method):
     @field_validator("pool", mode="before")
     @classmethod
     def _pool(cls, value, info):
-        """Snapshot an explicit pool, or pass a built-in pool name through.
+        """Copy an explicit pool, or pass a built-in pool name through.
 
         The member count is checked against ``max_pool_size`` before any
-        member is copied. Each ``FermionicGenerator`` is admitted by
+        member is copied. Each ``FermionicGenerator`` is checked and copied by
         ``_snapshot_generator`` and every other entry by ``operator_input``.
         """
         if isinstance(value, str):
@@ -835,8 +845,8 @@ class ADAPT(Method):
 
         At ``theta = 0`` every generator exponential ``exp(theta A)`` is the
         identity, so each new basis state would repeat the reference.
-        Optimization needs its period, BFGS iteration cap and total
-        evaluation allowance together.
+        Optimization needs its period, BFGS iteration limit and total
+        evaluation limit together.
         """
         if self.theta == 0:
             raise ValueError("new-generator theta must be nonzero")
@@ -1026,13 +1036,16 @@ class ADAPT(Method):
         )
 
     def reduction_allowance(self, plan, point, *, observation, width, run):
-        """Admit an exact pair reduction's private workspace and return the host-work allowance of its query.
+        """Check an exact pair reduction's private workspace and return the classical-work allowance of its query.
 
-        The workspace gate refuses a point whose ``pair_reducer.pair_bytes``
-        exceeds ``max_bytes``. The controller admits the registered work of
-        every new pair reduction of a matrix stage against ``max_products``
-        before the stage's first query, so one query's allowance is the whole
-        ``max_products``. The ledger is read, never changed.
+        The workspace check rejects a point whose ``pair_reducer.pair_bytes``
+        exceeds ``max_bytes``. Before the first query of a newly entered exact
+        quantum matrix stage, the ADAPT iteration checks a lower bound on the
+        registered work of the stage's new pair reductions against
+        ``max_products`` (``adapt_acquisition._new_pencil_queries``). A resumed
+        matrix stage skips this stage check. Each query receives the whole
+        ``max_products`` as its allowance. The work record is read, never
+        changed.
         """
         import json
         from .pair_reducer import pair_bytes
@@ -1045,7 +1058,7 @@ class ADAPT(Method):
 
 
     def prepare_all_refusal(self):
-        """ADAPT refuses ``settings="all"``, because its later queries act on generators selected from earlier outcomes."""
+        """ADAPT rejects ``settings="all"``, because its later queries act on generators selected from earlier results."""
         return (
             "ADAPT cannot prepare every setting in advance, because each iteration screens and "
             "projects with the generators selected from the outcomes of earlier queries. prepare(plan) "
@@ -1054,10 +1067,10 @@ class ADAPT(Method):
         )
 
     def prepare(self, plan, *, run, settings="first"):
-        """Prepare the controller's first new query (adapt_acquisition.prepare_adapt).
+        """Prepare the first new query of the ADAPT iteration (adapt_acquisition.prepare_adapt).
 
         ``settings`` is always ``"first"``, because ``prepare_all_refusal``
-        refuses ``"all"`` before a Run exists, so ``prepare_adapt`` does not
+        rejects ``"all"`` before a Run exists, so ``prepare_adapt`` does not
         take it.
         """
         from .adapt_acquisition import prepare_adapt
@@ -1065,7 +1078,7 @@ class ADAPT(Method):
         return prepare_adapt(plan, run=run)
 
     def execute(self, plan, *, run):
-        """Advance the ADAPT controller on the Run's original work (adapt_acquisition.drive_adapt)."""
+        """Advance the ADAPT iteration on the Run's original work (adapt_acquisition.drive_adapt)."""
         from .adapt_acquisition import drive_adapt
 
         return drive_adapt(plan, run=run)
@@ -1103,7 +1116,7 @@ class ADAPT(Method):
     def save_run_context(self, context, files):
         """Save the state and action caches, without the collected observations, which the Run or Result holds.
 
-        A live Run's journal and a saved Result's RunData hold every collected
+        A live Run's run log and a saved Result's RunData hold every collected
         chunk and its order, so the context refers to them instead of storing
         a second copy of each chunk. Array and gate files are written once per
         object and shared by later checkpoints (``ArchiveFiles.write_array``).
@@ -1114,7 +1127,7 @@ class ADAPT(Method):
 
     @staticmethod
     def _load_live_run_context(data, files, observations):
-        """Restore indices once from actual collected data, without analysis."""
+        """Restore indices once from the collected data, without analysis."""
         from .adapt_archive import load_context
         from .adapt_acquisition import _observation_index
 
@@ -1129,15 +1142,15 @@ class ADAPT(Method):
 
     @staticmethod
     def snapshot_result_context(context):
-        """Share immutable scientific data and keep mutable native caches private.
+        """Share immutable scientific data and keep the mutable Qiskit caches private.
 
-        The observation index is left out: the Result's RunData owns the
-        collected chunks and their order, and a saved Result refers to them
+        The observation index is left out, because the Result's RunData holds
+        the collected chunks and their order, and a saved Result refers to them
         (``save_run_context``), so a live and a reloaded Result carry the same
         context. ``compiler_plans`` becomes the read-only ``(pool index,
         kind, active modes, occupation blocks)`` entries built so far, so a
         Result from a reopened Run and its saved copy carry the compiler
-        plans of the selected generators, which native verification adopts.
+        plans of the selected generators, which circuit-level verification uses.
         """
         from collections.abc import Mapping
         from dataclasses import fields
@@ -1171,7 +1184,7 @@ class ADAPT(Method):
         return load_context(data, files)
 
     def validate_point(self, plan, experiment, values):
-        """Require canonical active/inactive chain slots and an actual supported query insertion."""
+        """Require canonical used and unused chain positions and a supported Pauli insertion, if any."""
         experiment = experiment.name
         r = plan.reconstruction
         if number(values["control_width"]) != int(experiment == "pair") or number(
@@ -1231,7 +1244,7 @@ class ADAPT(Method):
         generators not yet in the chain, energy queries read the nonidentity
         Hamiltonian labels, and a pair query reads the ancilla Z label. A
         sampled query reads the subset that falls in its QWC group. Classical
-        plans return host scalars instead: ``g_i`` per unselected generator,
+        plans return classical scalars instead: ``g_i`` per unselected generator,
         the four real and imaginary H/S parts of a pair, ``energy`` with
         ``gradient_j`` for each angle of the chain (only ``energy`` for a
         Pauli-insertion query) or ``residual_norm``. Both planning and
@@ -1271,8 +1284,8 @@ class ADAPT(Method):
     def specialize_experiment(self, plan, experiment, values):
         """Narrow the planned readout to the labels of this point.
 
-        An empty label set would be a zero-work query, so the controller must
-        skip it before preparation rather than submit it. An exact quantum
+        An empty label set would be a zero-work query, so the ADAPT iteration
+        must skip it before preparation instead of submitting it. An exact quantum
         pair query reads one weighted-pencil reduction instead of labels. Its
         layout is the diagonal system state when both chains are equal and
         the ancilla-bit-0 joint state otherwise.
@@ -1303,20 +1316,20 @@ class ADAPT(Method):
         return experiment.revise(readout=readout)
 
     def selected_kernels(self, plan, experiment, program):
-        """Admit all actions and other work of one classical query together.
+        """Check all actions and other work of one classical query together.
 
-        ``max_products`` bounds this complete invocation. The sum
+        ``max_products`` bounds this complete call. The sum
         (``adapt_actions.query_work``) covers the reference, generator,
-        Hamiltonian and scalar work of the invocation before it starts, so
-        every actual query term is bounded by its nonnegative outer charge
-        and no constituent can exceed the cap. The inner matvec gate may
-        still receive the whole cap. Every later invocation is checked
-        afresh. Resolution, analysis and repeated preparation checks do not
-        consume an execution budget, so this method keeps no Run-wide
-        ledger. Returns the host-kernel declaration revised with this
-        point's labels and its full ``invocation_work``, or an empty tuple
-        for quantum plans. Application counters record the actions actually
-        performed after cache reuse.
+        Hamiltonian and scalar work of the call before it starts, so every
+        term of the query is bounded by the nonnegative total counted for it,
+        and no part can exceed the limit. The inner matrix-vector check may
+        still receive the whole limit. Every later call is checked afresh.
+        Resolution, analysis and repeated preparation checks use no
+        execution budget, so this method keeps no Run-wide record. Returns
+        the classical-routine declaration revised with this point's labels
+        and its full ``invocation_work``, or an empty tuple for quantum
+        plans. Application counters record the actions performed after
+        cache reuse.
         """
         from .adapt_actions import query_work
 

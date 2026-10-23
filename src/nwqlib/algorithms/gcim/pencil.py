@@ -1,7 +1,7 @@
 """Shared GCiM pair, quadrature and projected-matrix mathematics.
 
 The circuits and data collection that supply these values are in
-``fixed_basis`` and ``adapt_acquisition``. These kernels neither prepare a
+``fixed_basis`` and ``adapt_acquisition``. These routines neither prepare a
 state nor evaluate a Hamiltonian.
 
 The matrix elements are ``H_ij = <phi_i|A|phi_j>`` and ``S_ij = <phi_i|phi_j>``
@@ -59,8 +59,9 @@ def matrix_element_count(pair_count, diagonal_pair_count, nonidentity_terms):
     An off-diagonal pair needs real and imaginary parts of ``S_ij`` and of
     every nonidentity Pauli term. A diagonal pair needs only the real part of
     each Pauli term, because normalized columns give ``S_ii = 1`` and
-    Hermiticity makes ``H_ii`` real. The count must equal the population that
-    ``matrix_elements`` yields, since planning admits it before expansion.
+    Hermiticity makes ``H_ii`` real. The count must equal the number of
+    observations that ``matrix_elements`` yields, because planning checks it
+    against the limits before expansion.
     """
     return (
         2 * (pair_count - diagonal_pair_count) * (1 + nonidentity_terms)
@@ -78,8 +79,8 @@ def matrix_elements(basis_size, terms, num_qubits):
     ``S_ii = 1`` for normalized columns, and each ``<phi_i|P|phi_i>`` is real
     because every Pauli word is Hermitian, so those scalars carry no new
     information. The identity term is
-    never measured (``assemble_pencil``). ``matrix_element_count`` gives the
-    size of this population.
+    never measured (``assemble_pencil``). ``matrix_element_count`` gives
+    their number.
     """
     identity = "I" * num_qubits
     pairs = ((left, right) for left in range(basis_size) for right in range(left, basis_size))
@@ -97,14 +98,14 @@ def matrix_elements(basis_size, terms, num_qubits):
 def assemble_pencil(basis_size, terms, num_qubits, values):
     """Return ``(H0, S)`` from every upper-triangle pair, without the identity term.
 
-    Callers pass the complete ``matrix_elements`` population. Fixed analysis
-    returns a partial result without calling this kernel, and ADAPT acquires
-    each query or raises for missing data before assembly. A missing scalar
+    Callers pass all the observations of ``matrix_elements``. FixedGCIM
+    analysis returns a partial result without calling this routine, and ADAPT
+    obtains each query or raises for missing data before assembly. A missing scalar
     still raises here instead of becoming a plausible zero.
 
     For ``A = cI + sum_k c_k P_k`` the identity term contributes
     ``<phi_i|cI|phi_j> = c S_ij``, so the projected matrix ``H = H0 + c S``
-    reuses the acquired overlap. ``H0`` holds only the nonidentity terms.
+    reuses the obtained overlap. ``H0`` holds only the nonidentity terms.
     Callers solve ``(H0, S)`` with ``identity_shift=c``, which adds c to the
     Ritz values after the ill-conditioned solve (``_solve_projected_pencil``
     explains the accuracy gained), and record ``physical_hamiltonian``. The
@@ -150,11 +151,11 @@ def _projected_solve_bytes(basis_size):
 
     ``512 b**2`` bytes is 32 complex128 ``b``-by-``b`` arrays, an untuned
     allowance. ``_solve_projected_pencil`` creates about a dozen such arrays:
-    the acquired ``H`` and ``S``, their Hermitian parts, the overlap
+    the obtained ``H`` and ``S``, their Hermitian parts, the overlap
     eigenvectors, the kept vectors and orthogonalizer ``X``, the product
     ``X^dagger H X`` and its eigenvectors, and the Ritz coefficients. The rest
-    leaves room for the caller's copies. FixedGCIM and ADAPT share this law
-    (docs/ENGINEERING_CONSTANTS.md, "Fixed GCIM projected size law"). It
+    leaves room for the caller's copies. FixedGCIM and ADAPT share this formula
+    (docs/ENGINEERING_CONSTANTS.md, "Fixed GCiM projected size law"). It
     excludes LAPACK workspace and Python object overhead.
     """
     return 512 * basis_size * basis_size
@@ -176,14 +177,14 @@ def _projected_solve_work(basis_size):
 
 
 def pair_count(basis_size, nonidentity_terms):
-    """Count the exact pair acquisitions of one ``basis_size`` pencil.
+    """Count the exact pair computations of one ``basis_size`` pencil.
 
     For M needed pairs including D diagonal pairs and L nonidentity terms,
-    the exact per-pair route acquires ``(M - D) + D*1_(L>0)``: one joint
-    state per off-diagonal pair and one system state per diagonal pair, whose
-    reduction returns both ``H0_ij`` and ``S_ij``. A complete b-state pencil
-    with L > 0 has ``M = b(b+1)/2`` and ``D = b``, so ``b(b+1)/2``
-    acquisitions, against ``b**2 L + b(b-1)`` Hadamard observations of the
+    the exact per-pair route prepares ``(M - D) + D*1_(L>0)`` states, one
+    joint state per off-diagonal pair and one system state per diagonal pair,
+    whose reduction returns both ``H0_ij`` and ``S_ij``. A complete b-state
+    pencil with L > 0 has ``M = b(b+1)/2`` and ``D = b``, so ``b(b+1)/2``
+    computations, against ``b**2 L + b(b-1)`` Hadamard observations of the
     per-element route.
     """
     pairs = basis_size * (basis_size + 1) // 2
@@ -193,8 +194,8 @@ def pair_count(basis_size, nonidentity_terms):
 def pair_acquisitions(basis_size, nonidentity_terms):
     """Yield the exact route's upper-triangle pairs ``(left, right)`` row by row.
 
-    A diagonal pair is acquired only when L > 0: with no nonidentity term its
-    H0 entry is algebraically zero and its normalized overlap is one.
+    A diagonal pair is computed only when L > 0, because with no nonidentity
+    term its H0 entry is algebraically zero and its normalized overlap is one.
     """
     for left in range(basis_size):
         for right in range(left, basis_size):
@@ -203,16 +204,16 @@ def pair_acquisitions(basis_size, nonidentity_terms):
 
 
 def assemble_pair_pencil(basis_size, values):
-    """Return ``(H0, S)`` from the acquired ``(H0_ij, S_ij)`` of every upper-triangle pair.
+    """Return ``(H0, S)`` from the obtained ``(H0_ij, S_ij)`` of every upper-triangle pair.
 
     ``values[(i, j)]`` holds the complex pair entries in the requested
     ``(i, j)`` orientation. Lower triangles follow by conjugation once. The
-    normalized-basis convention sets ``S_ii = 1``. The separately acquired
-    raw diagonal norms stay evidence and do not rescale the saved blocks.
+    normalized-basis convention sets ``S_ii = 1``. The separately obtained
+    raw diagonal norms remain evidence and do not rescale the saved blocks.
     Imaginary diagonal parts are zero algebraically for Hermitian P, so a
-    diagonal H0 keeps the real part of its acquired value, which has no
+    diagonal H0 keeps the real part of its obtained value, which has no
     larger error relative to its real Hermitian target. A diagonal pair
-    that was not acquired (L = 0) has H0 exactly zero. A missing
+    that was not computed (L = 0) has H0 exactly zero. A missing
     off-diagonal pair raises instead of becoming a plausible zero.
     """
     h0 = np.full((basis_size, basis_size), complex(np.nan, np.nan))

@@ -1,4 +1,4 @@
-"""Actual original spectrum, polynomial selection and bounded classical work."""
+"""Spectrum of the original A, polynomial choice and bounded classical work."""
 
 from dataclasses import dataclass, replace
 from math import ceil, fsum, log
@@ -21,15 +21,16 @@ from .primary_records import InversePolynomial, ReflectionPolynomial, QLSWork
 
 @dataclass(frozen=True)
 class OriginalSVD:
-    """Original-input singular frames, computed once and reused.
+    """Singular value decomposition of the original input, computed once and reused.
 
-    Dense quantum selection computes this SVD of the original ``A`` once.
-    Endpoint selection, dense completion and the archive reuse it, so no
-    padded or repeated decomposition is needed. Classical dense QLS acquires
-    it for a general original ``A`` when the selected inverse or linear norm
-    model needs factors (``_original_factors``). ``require_source`` rejects
-    frames that belong to a different input, including a same-shape one,
-    and frames that are writable.
+    For quantum execution of dense input, planning computes this SVD of the
+    original ``A`` once. The choice of spectral endpoints, dense completion
+    and the saved archive reuse it, so no padded or repeated decomposition
+    is needed. Classical dense QLS computes it for a general original ``A``
+    when the inverse or the linear norm model needs factors
+    (``_original_factors``). ``require_source`` rejects factors that belong
+    to a different input, including one of the same shape, and factors
+    that are writable.
 
     Attributes:
         source: Input reference of the original ``A``.
@@ -59,7 +60,7 @@ class OriginalSVD:
     calls = "svd_calls"
 
     def endpoints(self):
-        """Return the original ``(sigma_min, sigma_max)`` of the stored singular values."""
+        """Return ``(sigma_min, sigma_max)`` of the original ``A`` from its singular values."""
         return float(self.singular[-1]), float(self.singular[0])
 
     def frames(self):
@@ -69,12 +70,12 @@ class OriginalSVD:
 
 @dataclass(frozen=True)
 class OriginalEigensystem:
-    """Signed eigenvalues and eigenvectors of an exactly Hermitian original ``A``, acquired once.
+    """Signed eigenvalues and eigenvectors of an exactly Hermitian original ``A``, computed once.
 
-    Classical dense QLS acquires this factorization for a Hermitian original
-    when the selected inverse or linear norm model needs factors
-    (``_original_factors``). Planning endpoints, the inverse polynomial
-    action and the norm-model weights reuse it. Signed eigenvalues are
+    Classical dense QLS computes this factorization for a Hermitian
+    original ``A`` when the inverse or the linear norm model needs factors
+    (``_original_factors``). The spectral endpoints of planning, the inverse
+    polynomial action and the norm-model weights reuse it. Signed eigenvalues are
     needed for the odd inverse. ``require_source`` rejects factors that
     belong to a different input and factors that are writable.
 
@@ -108,30 +109,33 @@ class OriginalEigensystem:
     def frames(self):
         """Return ``(left, values, right_h)`` for ``numerical.inverse_polynomial_action``.
 
-        ``right_h`` is None: the right frame of a Hermitian eigensystem is
-        ``vectors`` itself, so no conjugate-transposed copy is stored.
+        ``right_h`` is None because the right factor of a Hermitian
+        eigensystem is ``vectors`` itself, so no conjugate-transposed copy
+        is stored.
         """
         return self.vectors, self.values, None
 
 
 def original_factor_laws(d, hermitian):
-    """Return ``(F, P, B_F)`` of one original full factorization of a d-square ``A``.
+    """Return ``(F, P, B_F)`` of one full factorization of a d-square original ``A``.
 
-    Classical QLS charges an original spectral factorization at the stage
-    that acquires it and reuses its immutable factors for the inverse
-    action or linear norm model:
+    ``F`` is the work, ``P`` the bytes of the factors kept afterwards and
+    ``B_F`` the peak bytes while computing them. Classical QLS counts the
+    spectral factorization of the original ``A`` at the stage that computes
+    it and reuses its read-only factors for the inverse action or the linear
+    norm model:
 
     ========================  ================  ===================  ====================
-    Original factorization    Work ``F(d)``     Persistent ``P(d)``  Acquisition ``B_F(d)``
+    Original factorization    Work ``F(d)``     Persistent ``P(d)``  Computation ``B_F(d)``
     ========================  ================  ===================  ====================
     General full SVD          ``8 d**3``        ``32 d**2 + 8 d``    ``96 d**2 + 32 d``
     Hermitian full ``eigh``   ``8 d**3+32 d**2``  ``16 d**2 + 8 d``  ``64 d**2 + 32 d``
     ========================  ================  ===================  ====================
 
-    The Hermitian acquisition envelope has four complex matrix slots for
-    scaling, driver-layout input and returned eigenvectors, plus vector
-    scratch. The general envelope is the law of ``_original_svd``.
-    Both exclude native LAPACK workspace. The Hermitian work is
+    The Hermitian peak allows four complex d-by-d matrices for the scaling,
+    the input in the layout of the LAPACK driver and the returned
+    eigenvectors, plus vector workspace. The general peak is the byte count
+    of ``_original_svd``. Both exclude LAPACK's internal workspace. The Hermitian work is
     ``_linalg_laws.hermitian_eigensystem_work(d)``.
     """
     if hermitian:
@@ -140,10 +144,10 @@ def original_factor_laws(d, hermitian):
 
 
 def _original_eigensystem(operator, method):
-    """Compute the one admitted ``eigh`` of an exactly Hermitian original dense ``A``.
+    """Compute the single ``eigh`` of an exactly Hermitian original dense ``A``.
 
-    Bytes and work of ``original_factor_laws(d, hermitian=True)`` are
-    admitted before the call. The matrix is scaled by a power of two for the
+    The bytes and work of ``original_factor_laws(d, hermitian=True)`` are
+    checked against the limits before the call. The matrix is scaled by a power of two for the
     decomposition, and the signed eigenvalues are scaled back exactly.
     Nonfinite output is rejected, and the factors are made read-only.
     """
@@ -165,10 +169,10 @@ def _original_eigensystem(operator, method):
 
 
 def _original_factors(operator, method):
-    """Acquire the original factorization that classical factor consumers reuse.
+    """Compute the original factorization that the classical inverse and linear norm model reuse.
 
-    Exact admitted Hermiticity metadata (``operator.structure``) selects one
-    full ``eigh``. Any other dense ``A`` takes ``_original_svd``.
+    Exact Hermiticity, as recorded in ``operator.structure``, selects one
+    full ``eigh``. Any other dense ``A`` uses ``_original_svd``.
     """
     if operator.structure == "hermitian":
         return _original_eigensystem(operator, method)
@@ -176,19 +180,19 @@ def _original_factors(operator, method):
 
 
 def classical_factor_consumer(method):
-    """Whether a classical evaluation needs original factors: the inverse or the linear norm model."""
+    """Return whether a classical evaluation needs the original factors, as the inverse and the linear norm model do."""
     return method.solver == "qsvt_inverse" or method.encoded_solution_norm_estimate == "linear_kappa_sequence"
 
 
 def _original_svd(operator, method):
-    """Compute the one admitted SVD of the original dense ``A``.
+    """Compute the single SVD of the original dense ``A``.
 
-    Bytes (``96 d^2 + 32 d``) and work (``8 d^3``) of
-    ``original_factor_laws(d, hermitian=False)`` are admitted before the
-    call. The matrix is scaled by a power of two for the decomposition, and
-    the singular values are scaled back exactly. Nonfinite output is
-    rejected, and the frames are made read-only so a Plan cannot mutate
-    them later.
+    The bytes (``96 d^2 + 32 d``) and work (``8 d^3``) of
+    ``original_factor_laws(d, hermitian=False)`` are checked against the
+    limits before the call. The matrix is scaled by a power of two for the
+    decomposition, and the singular values are scaled back exactly.
+    Nonfinite output is rejected, and the factors are made read-only so
+    that a Plan cannot modify them later.
     """
     d = operator.basis.dimension
     # 96 d^2 bytes are six complex128 d x d slots, an allowance for the
@@ -211,7 +215,7 @@ def _original_svd(operator, method):
 
 
 def _admit_query_synthesis(method, original, dimension, *, encoding=None, rhs=None):
-    """Charge the exact syntheses that the controlled queries make, and Qiskit's control of them, to ``max_work`` and ``max_bytes``.
+    """Count the exact syntheses that the controlled queries make, and Qiskit's control of them, against ``max_work`` and ``max_bytes``.
 
     The dense dilation of the encoded ``dimension``-square operator is one
     ``UnitaryGate`` on m = log2(dimension) + 1 qubits. A controlled query
@@ -224,13 +228,13 @@ def _admit_query_synthesis(method, original, dimension, *, encoding=None, rhs=No
     The inverse of a non-Hermitian
     ``A``, through its Hermitian dilation, and ``shortcut_native_svp`` call
     the query of ``A`` with one control, and ``shortcut_dilation`` with two,
-    each forward and adjoint. Lowering builds each of these two
-    specializations once per Run and reuses it (``blocks/lowering.py``), so
-    two syntheses of distinct matrices, and on the gate-wise route two
-    control steps, are charged,
-    their work summed and their circuits kept together. A supplied native
-    encoding (``encoding.native``) takes the gate-wise route on every
-    ``dense_control_route`` and is charged from the dense unitaries that
+    each forward and adjoint. Circuit construction builds each of these two
+    controlled versions once per Run and reuses it (``blocks/lowering.py``),
+    so two syntheses of distinct matrices, and on the gate-wise route two
+    control steps, are counted, their work summed and their circuits held
+    together. A supplied encoding circuit (``encoding.native``) takes the
+    gate-wise route on every ``dense_control_route`` and is counted from
+    the dense unitaries that
     ``qiskit_compat.dense_synthesis_widths`` and ``dense_control_counts``
     find in its circuit.
 
@@ -238,13 +242,13 @@ def _admit_query_synthesis(method, original, dimension, *, encoding=None, rhs=No
     of the ``A`` query. ``shortcut_native_svp`` builds it forward and
     adjoint, and ``shortcut_dilation`` both again for each value of the
     dilation qubit. A supplied preparation circuit (``qiskit.supplied``) is
-    charged for the dense unitaries in each of these specializations, on
-    the gate-wise route. Other preparations and encodings hold no dense
+    counted for the dense unitaries in each of these controlled versions,
+    on the gate-wise route. Other preparations and encodings hold no dense
     unitary.
 
     The inverse of a Hermitian ``A`` calls the query without controls, so its
-    construction synthesizes nothing, and a backend that lowers the circuit
-    to a gate basis charges the synthesis to the Run's
+    construction synthesizes nothing, and a backend that compiles the circuit
+    to a gate basis counts the synthesis against the Run's
     ``max_synthesis_work``.
     """
     from nwqlib.subroutines._dense_synthesis import (admit_dense_syntheses, gatewise_control_counts,
@@ -282,9 +286,9 @@ def _covers_spectral_estimate(bound, estimate):
 
 
 def _kappa_premise_refusal(route, alpha, alpha_meaning):
-    """Refusal message for a route without original singular values, so ``kappa="auto"`` cannot apply.
+    """Return the error message for a route without singular values of the original A, where ``kappa="auto"`` cannot apply.
 
-    The encoded gap parameter is ``alpha / sigma_min(A)`` (``_spectrum``),
+    The encoded inverse-gap parameter is ``alpha / sigma_min(A)`` (``_spectrum``),
     so the message states that bound with the ``alpha`` the route knows.
     """
     value = "" if alpha is None else f" = {alpha:.6g}"
@@ -295,7 +299,7 @@ def _kappa_premise_refusal(route, alpha, alpha_meaning):
 
 
 def input_access_refusal(operator, execution):
-    """Refusal message for a CSR, CSC or classical Pauli ``A``, or None for another input.
+    """Return the error message for a CSR, CSC or classical Pauli ``A``, or None for another input.
 
     Classical QLS reads dense ``A`` only (``method._admit``). Quantum QLS
     reads dense, Pauli or periodic-stencil access of ``A``, or a supplied
@@ -325,16 +329,16 @@ def input_access_refusal(operator, execution):
 
 
 def _spectrum(operator, method, *, alpha=None, factors=None):
-    """Resolve alpha and the encoded singular-value gap from supplied premises or bounded original-matrix work.
+    """Determine alpha and the encoded singular-value gap from supplied assumptions or bounded work on the original matrix.
 
-    Endpoints come from already acquired original factors (the quantum
+    Endpoints come from original factors already computed (the quantum
     dense SVD, or the classical SVD or Hermitian eigensystem that the
-    selected inverse or linear norm model reuses), from one bounded dense
+    inverse or the linear norm model reuses), from one bounded dense
     eigenvalue or singular-value computation, or not at all when ``alpha``
-    and ``kappa`` are both supplied premises. Compact inputs never acquire
-    a spectrum here and need a numeric ``kappa``. With endpoints known,
+    and ``kappa`` are both supplied as assumptions. Compact inputs never
+    compute a spectrum here and need a numeric ``kappa``. With endpoints known,
     ``alpha`` defaults to ``sigma_max`` and ``kappa_be`` to
-    ``max(1, alpha / sigma_min)``. Supplied premises must cover the
+    ``max(1, alpha / sigma_min)``. Supplied assumptions must cover the
     endpoints within the relative window ``QLS_SPECTRAL_PREMISE_RTOL``.
     ``polynomial_kappa`` adds the separate domain floor
     ``QLS_POLYNOMIAL_KAPPA_FLOOR``. The original condition number
@@ -343,12 +347,12 @@ def _spectrum(operator, method, *, alpha=None, factors=None):
     When dense Hermitian endpoint selection is needed and no reusable
     factors are available, compute all eigenvalues of the binary-scaled
     original matrix with ``eigvalsh`` and take the minimum and maximum
-    absolute values. Admission charges ``4*d**3 + 8*d**2`` work units and
-    ``64*d**2 + 48*d`` known buffer bytes, excluding stored input and native
-    LAPACK workspace. Exact admitted Hermiticity metadata selects this
-    branch at every dimension, including ``d = 1``. General matrices keep
-    the SVD-values law. The method string and ``spectral_calls`` name the
-    factorization actually used.
+    absolute values. The limit check counts ``4*d**3 + 8*d**2`` work units
+    and ``64*d**2 + 48*d`` known buffer bytes, excluding the input itself
+    and LAPACK's internal workspace. Exact Hermiticity, as recorded for the
+    input, selects this branch at every dimension, including ``d = 1``.
+    General matrices use the work formula of the singular-values-only SVD.
+    The method string and ``spectral_calls`` name the factorization used.
     """
     events = dict(svd_calls=0, eigh_calls=0, eigvalsh_calls=0)
     lower = upper = None
@@ -420,28 +424,29 @@ def _spectrum(operator, method, *, alpha=None, factors=None):
 
 
 def select_inputs(problem, method, *, execution):
-    """Select an actual encoding while preserving original A,b and their scale.
+    """Choose an encoding while keeping the original A and b and their scale unchanged.
 
     The routes are tried in this order. A supplied ``SelectedBlock`` must be
-    bound to the original ``A`` and owns its ``alpha``. A compact periodic stencil uses
+    bound to the original ``A`` and determines its own ``alpha``. A compact periodic stencil uses
     ``select_periodic_encoding``. Dense input with power-of-two dimension
     and exactly Hermitian entries uses the requested or automatic family.
     Any other dense input uses the dense dilation, whose quantum route
-    computes the original SVD once. Classical dense selection acquires the
-    original SVD, or one ``eigh`` of a Hermitian original, only when the
-    selected inverse or linear norm model needs factors and planning needs
-    spectral endpoints (``classical_factor_consumer``). Endpoints then come
+    computes the original SVD once. For classical execution of dense input,
+    planning computes the original SVD, or one ``eigh`` of a Hermitian
+    original ``A``, only when the inverse or the linear norm model needs
+    factors (``classical_factor_consumer``) and planning needs spectral
+    endpoints. Endpoints then come
     from those factors, and the classical evaluation reuses them. Compact
     Pauli input keeps Pauli access and requires a numeric ``kappa``. A
     non-power-of-two dense system is padded with the positive block
     ``alpha * I`` and ``b`` with zeros, so the solution occupies the original
     coordinate slice and the padding adds no singular value below
-    ``sigma_min`` or above ``alpha``. When the selected encoding's ``alpha``
+    ``sigma_min`` or above ``alpha``. When the chosen encoding's ``alpha``
     differs from the spectral estimate, ``kappa_be`` is recomputed from the
     encoding's ``alpha``. The original Problem is never changed.
 
     Returns:
-        ``(encoding, encoded_operator, rhs, svd, spectrum)``: the selected
+        ``(encoding, encoded_operator, rhs, svd, spectrum)``: the chosen
         encoding block, the operator it represents (padded when needed),
         the matching RHS, the original factors (``OriginalSVD``, or
         ``OriginalEigensystem`` for a classical Hermitian original) or
@@ -659,11 +664,11 @@ def select_inputs(problem, method, *, execution):
 
 
 def select_polynomial(method, kappa):
-    """Return the selected ``InversePolynomial`` or ``ReflectionPolynomial`` for domain parameter ``kappa``.
+    """Return the ``InversePolynomial`` or ``ReflectionPolynomial`` chosen for domain parameter ``kappa``.
 
     ``qsvt_inverse`` fits the odd inverse polynomial of
     ``_fit_inverse_chebyshev`` to the target ``epsilon_inv``. The shortcut
-    solvers realize Dalzell's even kernel-reflection polynomial
+    solvers construct Dalzell's even kernel-reflection polynomial
     (arXiv:2406.12086v2) with ``eta = epsilon_inv / sqrt(2)``. Both records
     keep the unrescaled Chebyshev coefficients together with
     ``rescale = s``, the norming bound on ``sup |P|`` times
@@ -722,15 +727,16 @@ def select_polynomial(method, kappa):
 
 
 def search_envelope(kappa, source):
-    """Return ``(rows, trials, queries)`` envelopes of a norm-search model before it runs.
+    """Return upper bounds on the ``(rows, trials, queries)`` of a norm-search model before it runs.
 
     The formulas are those of ``norm_search.py`` (Dalzell arXiv:2406.12086v2,
     Eqs. (24), (25), (28) and (29), with ``eta = sqrt(1/8)`` for the noisy
     search and ``ln(2/0.025) = ln(80)`` for the linear sequence), evaluated
-    from ``kappa`` alone so that planning can admit the model's work. Execution
-    rejects realized accounting above this envelope. The ladder length uses
-    the models' exact ``_ceil_log2``, so the envelope and the model count the
-    same rungs even when ``kappa`` lies one ulp from a power of two.
+    from ``kappa`` alone so that planning can check the model's work against
+    the limits. Execution rejects counts above these bounds. The length of
+    the ladder (the logarithmic grid of ``t`` values) uses the models' exact
+    ``_ceil_log2``, so the bounds and the model count the same grid points
+    even when ``kappa`` lies one ulp from a power of two.
     """
     steps = _ceil_log2(kappa)
     ladder = steps + 1
@@ -758,25 +764,26 @@ def selected_work(matrix, *, alpha, embedded, method, polynomial, kappa, t_sourc
                   hermitian, factors_held):
     """Return the ``QLSWork`` record of one explicit classical model evaluation.
 
-    Classical QLS charges an original spectral factorization at the stage
-    that acquires it and reuses its immutable factors for the inverse
-    action or linear norm model. Shortcut action separately factors its
-    augmented projected matrix. Rank-one projector application has
-    quadratic work, and Hermitian dilations are written into one allocated
-    array. Workspace includes factors acquired during this invocation and
-    excludes factors already owned by the Plan and opaque LAPACK workspace.
+    Classical QLS counts the spectral factorization of the original ``A``
+    at the stage that computes it and reuses its read-only factors for the
+    inverse action or the linear norm model. The shortcut action factors its
+    projected augmented matrix separately. Applying the rank-one projector
+    has quadratic work, and Hermitian dilations are written into one
+    allocated array. Workspace includes factors computed during this
+    evaluation and excludes factors that the Plan already holds and
+    LAPACK's internal workspace.
 
     Symbols: ``d`` is
-    the original dimension, ``n = d*(2 if embedded else 1)`` the semantic
+    the original dimension, ``n = d*(2 if embedded else 1)`` the encoded
     system dimension, ``a = 2n`` for a shortcut and ``h = 2a`` for
     ``shortcut_dilation``, ``m`` the polynomial degree,
     ``s = ceil(log2(kappa))`` for the linear model and ``tgt`` one for a
-    grid or noisy-search target solve. ``f`` is one only when a factor
-    consumer (the inverse, or the linear norm model) needs factors that
-    planning did not acquire (``factors_held``). ``F(d)``, ``P(d)`` and
+    grid or noisy-search target solve. ``f`` is one only when the inverse
+    or the linear norm model needs factors that planning did not compute
+    (``factors_held``). ``F(d)``, ``P(d)`` and
     ``B_F(d)`` are ``original_factor_laws``. ``E(x) = 8 x**3 + 32 x**2`` is
-    ``_linalg_laws.hermitian_eigensystem_work``. In the polynomial-visit
-    units the selected kernels are
+    ``_linalg_laws.hermitian_eigensystem_work``. In units of polynomial
+    visits, the work of the chosen routines is
 
     - ``W_inverse = f F(d) + m d + 2 d**2``;
     - ``W_shortcut = f F(d) + tgt n**3 + W_G + (8 a**3 + m a + 2 a**2)``
@@ -787,15 +794,15 @@ def selected_work(matrix, *, alpha, embedded, method, polynomial, kappa, t_sourc
     - ``W_linear,extra = d**2 + 12 d + 4 s d`` for the linear model, whose
       original factorization is already in ``f F(d)`` or planning.
 
-    ``size_units`` adds the selected observable work, physical
-    materialization, direction preparation, the vector reductions and, for
+    ``size_units`` adds the work of the observable, of forming the physical
+    array and of preparing the direction, the vector reductions and, for
     a shortcut, the componentwise normalization ``parts d**2 int(alpha!=1)``.
     The factor-based inverse forms neither an encoded matrix copy nor a 2d
     matrix or RHS embedding. The polynomial term ``m d`` uses the
     whole-Clenshaw-visit convention.
 
     ``workspace_bytes`` follows these explicit peaks, with
-    complex ceilings even for real input and ``r = min(a, PROJECTOR_ROW_TILE)``:
+    complex-valued upper bounds even for real input and ``r = min(a, PROJECTOR_ROW_TILE)``:
     ``inverse_action = 208 d``, ``augmentation = 16 a**2 + 16 r a + 64 a``,
     ``native_action = max(augmentation, 48 a**2 + 192 a + 32 n)``,
     ``dilation_action = max(augmentation, 16 a**2 + 16 h**2,
@@ -812,11 +819,12 @@ def selected_work(matrix, *, alpha, embedded, method, polynomial, kappa, t_sourc
     observable_bytes + 40 d int(materialize_physical)``, where the inverse
     returns its d-entry original-coordinate branch directly. Then
     ``workspace_bytes = max(B_F if acquired else 0, (P if acquired else 0) +
-    max(preparation, numerical, statistics))``. Factors already owned by the
-    Plan are excluded here. Planning adds their persistent ``P(d)`` to this
-    field when it compares the resident arrays with ``max_bytes``. These are
-    conservative known-array ceilings, not minimal simultaneous allocation
-    equalities, and they infer no allocator traffic or RSS.
+    max(preparation, numerical, statistics))``. Factors that the Plan
+    already holds are excluded here. Planning adds their persistent
+    ``P(d)`` to this field when it compares the arrays held in memory with
+    ``max_bytes``. These are conservative upper bounds on the known arrays,
+    not exact sizes of simultaneous allocations, and they say nothing about
+    allocator activity or RSS.
     """
     from .numerical import PROJECTOR_ROW_TILE
 
@@ -940,18 +948,18 @@ def selected_work(matrix, *, alpha, embedded, method, polynomial, kappa, t_sourc
 
 def application_arguments(reconstruction, *, t_value=1.0, rows=None, trials=None, queries=None,
                           reference_norm=None):
-    """Return the argument bindings that a classical model application must report.
+    """Return the argument bindings that a classical model evaluation must report.
 
-    The bindings are the selected ``alpha``, ``kappa_be``,
+    The bindings are the chosen ``alpha``, ``kappa_be``,
     ``polynomial_kappa``, ``rescale``, ``degree`` and ``t_value``, the work
     counts of ``QLSWork``, and a ``t_source.<name>`` flag. A grid or
     noisy-search norm model also records ``encoded_reference_norm``, the
     norm ``||(A/alpha)^-1 b_hat||`` of its one encoded reference solve, so
     that verification can reuse that intermediate instead of solving again.
-    Execution calls this with the realized ``t``, rows, trials, queries and
-    reference norm, and ``_validate_application`` calls it with the
-    selected values (the reference norm then has the placeholder 1), so a
-    stored observation is checked against the same field list that
+    Execution calls this with the ``t``, rows, trials, queries and
+    reference norm that occurred, and ``_validate_application`` calls it
+    with the planned values (the reference norm then has the placeholder 1),
+    so a saved observation is checked against the same field list that
     produced it.
     """
     r, w = reconstruction, reconstruction.work

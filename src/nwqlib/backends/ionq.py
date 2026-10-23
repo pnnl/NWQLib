@@ -1,12 +1,12 @@
-"""IonQ QIS/native conversion and single-request v0.4 execution.
+"""Conversion of circuits to IonQ's QIS or native gate set, and v0.4 execution with one request per operation.
 
 The adapter calls the documented v0.4 REST endpoints directly with one HTTP
 request per operation, so no SDK retry can create a second job. No idempotency
-key or exact name lookup is qualified for the v0.4 API, so the adapter exposes
-no reconciliation capability. A lost creation acknowledgement stays uncertain,
-and Run.wait reports RunFailed without creating a replacement or refunding work.
-Raw histograms are the only accepted result artifact, because probabilities
-are not a count population. docs/ionq.md records the API sources and the
+key or exact name lookup is qualified for the v0.4 API, so the adapter has no
+``reconcile`` method. A lost creation acknowledgement stays uncertain, and
+Run.wait reports RunFailed without creating a replacement or returning the
+counted work to the limits. Raw histograms are the only accepted result,
+because probabilities are not counts of shots. docs/ionq.md records the API sources and the
 offline qualification scope.
 """
 
@@ -44,7 +44,7 @@ class _PreparedIonQ:
 
 
 def ionq_decode_bytes(outcomes, qubits, width):
-    """Bound one nonempty IonQ histogram decode's live ndarray element bytes.
+    """Bound the NumPy array element bytes held while one nonempty IonQ histogram is decoded.
 
     Args:
         outcomes: Positive number m of provider histogram entries, including
@@ -54,8 +54,8 @@ def ionq_decode_bytes(outcomes, qubits, width):
 
     At most K=min(m, 2**min(q, c)) distinct mapped indices reach unique.
     Allow a separate gather buffer even for the 64-bit identity map.
-    NumPy 2.5.2 unique(return_inverse=True) simultaneously holds the native
-    states, gathered input, flattening copy, argsort permutation, sorted
+    NumPy 2.5.2 unique(return_inverse=True) simultaneously holds the provider
+    state array, gathered input, flattening copy, argsort permutation, sorted
     values, cumulative mask and inverse indices, each using 8*m bytes,
     plus the m-byte Boolean mask and 8*K bytes of unique values. The
     cumulative-mask expression's two simultaneous intp buffers fit the
@@ -67,9 +67,9 @@ def ionq_decode_bytes(outcomes, qubits, width):
     intp, uint64 and int64 must each occupy eight bytes. Views count once.
 
     This bounds one decode through its returned pair, not Python lists,
-    dictionaries, integer/string objects, ndarray headers, native workspace,
-    transport, public count records, other decodes or process RSS. Stored
-    output has its own admission. Re-derive the law if gather_bits,
+    dictionaries, integer/string objects, ndarray headers, the workspace of
+    compiled libraries, transport, public count records, other decodes or
+    process RSS. Saved output has its own check. Re-derive the formula if gather_bits,
     remap_counts, NumPy's unique implementation, dtype widths or lifetimes
     change. The helper does constant work and allocates no arrays.
     """
@@ -92,14 +92,14 @@ class IonQBackend(Record):
     `device`, `max_input_bytes` and `max_response_bytes` are required. It needs
     the `ionq` extra. Construction imports no SDK and contacts no service. The API
     key is read from the environment variable named by `token_env` only when a job
-    is submitted or retrieved, and it is never stored.
+    is submitted or retrieved, and it is never saved.
 
     Each operation is one HTTP request, so no SDK retry can create a second job.
     IonQ's v0.4 API offers no job lookup by name that NWQLib has tested, so a lost
     submission acknowledgement leaves the outcome uncertain, and `Run.wait` raises
     `RunFailed` without submitting a replacement. Only raw histograms are read, because
     IonQ's probability results are not counts of shots. The Run bounds decoded
-    data and stored observations. NWQLib has tested this backend only offline,
+    data and saved observations. NWQLib has tested this backend only offline,
     with SDK and API checks, and has not tested live QPU behavior. The
     [IonQ guide](../ionq.md) gives the API sources, batch limits and histogram
     decoding.
@@ -160,10 +160,10 @@ class IonQBackend(Record):
     optimization_level: Annotated[Count, Field(le=3)] = 0
 
     def target_for(self, observation):
-        """Admit raw counts on an explicit ``qpu.*`` device before any conversion or request.
+        """Accept raw counts on an explicit ``qpu.*`` device before any conversion or request.
 
-        The ideal simulator ignores requested shots, so its histogram is not
-        the requested count population.
+        The ideal simulator ignores requested shots, so its histogram is not a
+        histogram of the requested shots.
         """
         if observation.kind == "trajectory":
             observation.reject_unsupported_schedule(f"IonQ {self.device}")
@@ -189,7 +189,7 @@ class IonQBackend(Record):
         """Encode a request body within the configured input and Run data byte limits.
 
         The Run share is one third of ``max_data_bytes``, an untuned factor that
-        leaves room for the JSON text and its UTF-8 bytes to coexist with journal
+        leaves room for the JSON text and its UTF-8 bytes to coexist with run-log
         metadata (docs/ENGINEERING_CONSTANTS.md, "Provider and compiler
         policies"). It does not bound the memory of requests or the SDK.
         """
@@ -200,8 +200,8 @@ class IonQBackend(Record):
         """Send one v0.4 HTTP request and return its parsed JSON body.
 
         The body is read from the documented streamed ``response.raw`` and
-        admitted read by read against max_response_bytes and the Run data
-        allowance before it is parsed. The reader never holds more than
+        checked read by read against max_response_bytes and the Run data
+        allowance before it is parsed. The adapter never holds more than
         max_response_bytes + 1 body bytes. A transport error during that read
         propagates as a ``urllib3.exceptions`` error, for example
         ``ProtocolError`` or ``ReadTimeoutError``, not as a
@@ -253,7 +253,7 @@ class IonQBackend(Record):
 
         The flat IonQ format returns one final-state histogram, so every
         measurement must be final and write a distinct classical bit. The QIS
-        gateset is reached through Qiskit's Rx/Ry/Rz/CX basis at the selected
+        gateset is reached through Qiskit's Rx/Ry/Rz/CX basis at the configured
         optimization level, with angles in radians. A native-gateset circuit is passed
         unchanged, keeping its angles in turns. The measurement map returned by
         the converter is the translation the decoder later applies.
@@ -339,7 +339,7 @@ class IonQBackend(Record):
                             options["num_qubits"], dict(readout_population=record.population, observation=record.observation))
 
     def admit_batch(self, natives):
-        """Admit one IonQ job with at most 5000 circuits, 150000 gates and one shared shot count.
+        """Accept one IonQ job with at most 5000 circuits, 150000 gates and one shared shot count.
 
         IonQ's v0.4 create-job reference limits a multi-circuit job to 5000
         circuits and 150000 gates in total across them. Gates are counted here
@@ -361,7 +361,7 @@ class IonQBackend(Record):
             self.target_for(native.metadata["observation"])
 
     def launch(self, natives, *, submission_id, run):
-        """Create one IonQ job with a single POST and return its locator.
+        """Create one IonQ job with a single POST and return its job locator.
 
         Batch circuits are named ``nwqlib:<submission_id>:<index>`` so that
         ``refresh`` can join each returned child job to its original item by
@@ -387,7 +387,7 @@ class IonQBackend(Record):
         return JobLocator(provider=self.kind, job_id=response["id"], account=self.token_env, instance=self.device)
 
     def _path(self, locator):
-        """API path of the original job, after checking that the locator names this account and device."""
+        """API path of the original job, after checking that the job locator names this account and device."""
         if locator.provider != self.kind or locator.account != self.token_env or locator.instance != self.device:
             raise ValueError("IonQ locator differs from the selected account/device")
         return "jobs/" + quote(locator.job_id, safe="")
@@ -398,17 +398,19 @@ class IonQBackend(Record):
         A v1 histogram key is a decimal state whose bit q is qubit q, the
         convention of qiskit-ionq's map_output. A v2 output_all key is read
         most significant first to give the same integer. The v2 convention
-        has offline fixture qualification only. Classical bit b takes qubit
+        is checked only against offline test data. Classical bit b takes qubit
         measurement_map[b], and an unwritten bit stays zero. The integer total
-        must equal actual shots and must not exceed admitted shots.
+        must equal the job's reported shots and must not exceed the accepted
+        shot count.
 
         Up to 64 native qubits and 64 classical bits, return a uint64/int64
-        pair after admitting ionq_decode_bytes. Wider inputs use Python
-        integers and bit-string keys. Both routes validate every provider entry
-        and omit outcomes whose summed count is zero. The m*(c+16) admission
-        covers represented count-key JSON, not Python heap memory or the public
-        CountBin envelope.
-        The common publication owner separately reserves public count records.
+        pair after checking ionq_decode_bytes against the limit. Wider inputs
+        use Python integers and bit-string keys. Both routes validate every
+        provider entry and omit outcomes whose summed count is zero. The
+        m*(c+16) check covers the count keys as JSON, not Python heap memory or
+        the public CountBin record.
+        The shared execution code separately sets aside bytes for the public
+        count records.
         """
         from nwqlib.backends.results import BackendRunResult, remap_counts
         from nwqlib.execution import ExecutionMode
@@ -486,11 +488,11 @@ class IonQBackend(Record):
 
     @staticmethod
     def _histogram_artifact(job, native, known_result_id=None):
-        """Select the raw histogram artifact and its ID, keeping a previously recorded ID fixed.
+        """Select the raw histogram result and its ID, keeping a previously recorded ID fixed.
 
-        Once an artifact ID is saved for an acquisition, a different ID is
-        rejected, so a replaced provider artifact cannot silently change the
-        population behind an existing observation.
+        Once a result ID is saved for a measurement, a different ID is
+        rejected, so a replaced provider result cannot silently change the
+        shots behind an existing observation.
         """
         shots = job["shots"]
         if type(shots) is not int or not 1 <= shots <= native.shots:
@@ -511,7 +513,7 @@ class IonQBackend(Record):
         raise ValueError("IonQ job has no raw histogram artifact; probabilities cannot supply binomial counts")
 
     def _histogram(self, job, native, *, run, artifact=None):
-        """Download one job's selected raw histogram artifact and decode it (``_decode``)."""
+        """Download one job's raw histogram result and decode it (``_decode``)."""
         artifact_format, result_id = self._histogram_artifact(job, native) if artifact is None else artifact
         path = "jobs/" + quote(job["id"], safe="") + "/artifacts/" + quote(result_id, safe="")
         payload = self._request("GET", path, run=run)
@@ -522,11 +524,11 @@ class IonQBackend(Record):
         """Read the original job once and download completed raw histograms.
 
         A batch parent is read once. While it is pending no child is read.
-        Otherwise each unconsumed child is read once. Every child
+        Otherwise each child not yet saved is read once. Every child
         must name its parent and carry an original item name. Children are
-        joined to items by that name, and new child and artifact IDs are
-        returned as associations for the common owner to persist. All
-        associations are validated before any artifact download, and a later
+        joined to items by that name, and new child and result IDs are
+        returned as associations for the shared execution code to save. All
+        associations are validated before any result download, and a later
         download or decode failure is returned with the results decoded before
         it.
         """

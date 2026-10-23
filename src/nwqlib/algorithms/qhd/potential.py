@@ -31,7 +31,7 @@ SupportTables = Mapping[tuple[int, ...], Any]
 def coerce_real_scalar(value: object, *, context: str) -> float:
     """Return ``value`` as a finite real scalar.
 
-    Any nonzero imaginary part rejects, however small. A complex objective
+    Any nonzero imaginary part, however small, is rejected. A complex objective
     value would make the diagonal potential non-Hermitian, and dropping the
     imaginary part would change the objective.
     """
@@ -84,9 +84,9 @@ class PotentialCompiler:
     product is nonzero there. Each table entry gives one number-projector
     block with phase angle ``dt * potential_weight * f_S(g)``, the duration
     times the diagonal matrix element. A zero table value gives a zero angle
-    and emits nothing. Every other entry is kept or omitted by
+    and adds no gate. Every other entry is kept or omitted by
     ``select_occurrences`` before pruning, and kept angles below the
-    threshold are counted in the dropped-rotation ledger.
+    threshold are counted in the record of dropped rotations.
     """
 
     def __init__(self, rotation_threshold: float = DEFAULT_ROTATION_THRESHOLD) -> None:
@@ -96,7 +96,7 @@ class PotentialCompiler:
         self._reset_dropped_rotations()
 
     def _reset_dropped_rotations(self) -> None:
-        """Reset the ledgers of the rotations that the threshold dropped and of the range omissions."""
+        """Reset the records of the rotations that the threshold dropped and of the range omissions."""
 
         self._dropped_nonzero_contribution_count = 0
         self._dropped_absolute_angle_sum = 0.0
@@ -119,34 +119,35 @@ class PotentialCompiler:
     ) -> tuple[ProjectorOccurrence, ...]:
         """Keep or omit each table entry's projector and its identity event together, for one potential factor.
 
-        ``grid_values`` holds the stored support tables (``SupportTables``),
+        ``grid_values`` holds the support tables (``SupportTables``),
         whose entry at C-order position e has the grid indices of the
         mixed-radix digits of e in base ``num_grid_points``. For the duration t (dt, or dt/2 for a second-order half), the step
         weight b, a table value v and support size s, the intended exponent
         is ``Z = t b v``. A zero value or weight is kept with zero angle and
-        emits nothing. Otherwise the checked construction forms ``p = fl(b v)``,
+        adds no gate. Otherwise the checked construction forms ``p = fl(b v)``,
         ``zeta = fl(t p)``, the identity coefficient ``q = p/2**s`` and its
         phase ``fl(-t q)``, and needs ``|zeta| 2**-s >= 2**-1022`` for the
         projector's power-of-two parameter scalings and, with the
         phase-diagonal provider, the same for its nonzero wrapped phase
         (``pauli_evolution.wrapped_projector_phase``). A value need not be
-        normal itself: a subnormal v with ``b = 16`` can give normal results.
+        normal itself, since a subnormal v with ``b = 16`` can give normal results.
         When any of these results would be nonzero and below ``2**-1022``
         (``validation._underflows``), the whole occurrence is omitted, the
         projector and its identity event together, and no later product of
         its coefficient is formed. Overflow and nonfinite results still
-        raise. One owner decides both halves, since independent decisions
+        raise. One decision covers both halves, since independent decisions
         could keep a projector without its identity or the reverse.
 
-        Charges. The projector splits as ``P = (P - 2**-s I) + 2**-s I`` with
+        Error contributions. The projector splits as ``P = (P - 2**-s I) + 2**-s I`` with
         ``||P - 2**-s I|| = 1 - 2**-s``, and ``||exp(-i a G) - I|| <= |a| ||G||``
         for a Hermitian G, so an omitted occurrence costs ``(1 - 2**-s) |Z|``
         in its traceless part and ``2**-s |Z|`` in its identity phase, which
-        add to ``|Z|``, the direct bound for dropping a projector of norm one. The traceless charge is already in
-        the omitted weight of ``circuit_errors.block_errors`` (the
-        ``rotation_pruning`` entry), which subtracts the kept blocks from the
-        intended weight of the original table, and the identity charge enters
-        the phase ledger (``method._phase_ledger``). Both sums are kept exact.
+        add to ``|Z|``, the direct bound for dropping a projector of norm one.
+        The traceless contribution is already in the omitted weight of
+        ``circuit_errors.block_errors`` (the ``rotation_pruning`` entry),
+        which subtracts the kept blocks from the intended weight of the
+        original table, and the identity contribution enters the running
+        phase total (``method._phase_ledger``). Both sums are kept exact.
         Occurrences whose products are all normal pass every range check of
         the construction, the provider's included.
         """

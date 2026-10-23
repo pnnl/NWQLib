@@ -1,21 +1,21 @@
-"""Size laws of the dense linear-algebra kernels that several methods call.
+"""Size formulas (laws) of the dense linear-algebra routines that several methods call.
 
-The laws cover SciPy's matrix exponential and its action on a vector, the
+The formulas cover SciPy's matrix exponential and its action on a vector, the
 singular values that numpy.linalg.norm(ord=2) and
 numpy.linalg.svd(compute_uv=False) compute without singular vectors, the
 eigenvalues and eigenvectors of numpy.linalg.eigh and the least-squares
-solution of numpy.linalg.lstsq. A caller admits these laws against its work
-and byte limits before it calls the kernel. Work uses the units of the
-library's dense laws, n**3 for a product of two n-square matrices, n**2 for
+solution of numpy.linalg.lstsq. A caller checks the counts from these
+formulas against its work and byte limits before it calls the routine. Work
+uses the units of the library's dense formulas, n**3 for a product of two n-square matrices, n**2 for
 a dense matrix-vector product and one unit per stored entry that a sparse
 product with a vector visits. A multiply-add, a division or an elementwise
 operation such as an absolute value or a comparison counts as one unit.
-Bytes count the arrays of known size that the kernel holds at once and
-exclude the rest of the process. The exponential laws follow the algorithms
-of SciPy 1.18.1, and the other laws follow the LAPACK drivers that NumPy
-2.5.2 calls (gesdd, heevd or syevd, and gelsd). Revisit a law when its
-kernel changes. The module also owns the guard for the random draws of
-SciPy's norm estimates (seeded_norm_estimates).
+Bytes count the arrays of known size that the routine holds at once and
+exclude the rest of the process. The exponential formulas follow the
+algorithms of SciPy 1.18.1, and the other formulas follow the LAPACK drivers
+that NumPy 2.5.2 calls (gesdd, heevd or syevd, and gelsd). Revisit a formula
+when its routine changes. The module also provides seeded_norm_estimates,
+which fixes the random draws of SciPy's norm estimates.
 """
 
 from contextlib import contextmanager
@@ -53,9 +53,9 @@ def seeded_norm_estimates():
     generator (np.random.randint). scipy.sparse.linalg.expm calls it from
     order 200, and expm_multiply for a shifted 1-norm above 63.36, condition
     (3.13) of Al-Mohy and Higham (2011), doi:10.1137/100788860. Without
-    this guard such a call advances the caller's random stream, and the
+    this seeding such a call advances the caller's random stream, and the
     estimated norms, and with them the parameters SciPy selects and the
-    rounding of its result, depend on the caller's state. Inside the guard
+    rounding of its result, depend on the caller's state. During the call
     the generator starts from seed 0, so the same input gives the same draws
     and the same result, and on exit the generator returns to the caller's
     state. The generator is shared by the whole process, so another thread
@@ -83,16 +83,16 @@ def expm_requirements(dimension, norm):
     is ceil(log2(eta/4.25)), with eta at most ||M||_1, plus a backward-error
     term that adds squarings only while 2**-s ||M||_1 exceeds 2**2.44, so
     s <= max(0, ceil(log2(||M||_1/4.25))).
-    The law charges ``ceil(log2(norm))`` squarings when ``norm > 1`` and
+    The formula counts ``ceil(log2(norm))`` squarings when ``norm > 1`` and
     zero otherwise, using the supplied upper bound ``norm`` on ``||M||_1``.
-    For ``norm > 4.25``, this charge is two or three larger than
+    For ``norm > 4.25``, this count is two or three larger than
     ``ceil(log2(norm/4.25))`` in exact arithmetic.
-    With c the charged squaring count above, the law charges (10 + c) n**3
+    With c the counted squarings above, the formula counts (10 + c) n**3
     units for eight products, the solve at 4/3 n**3 units and c squarings.
     It adds 128 n**2 units for the 79 products of |M| with a vector in the
     backward-error tests of orders 3 to 13, their absolute values and norms,
     and 34 scaled sums of the Pade evaluation.
-    The kernels hold at most 20 complex n-square arrays at once (M, the
+    The routines hold at most 20 complex n-square arrays at once (M, the
     identity, the five powers, four scaled powers, two partial products, U,
     V, their sum and difference, the LU factors, the solution and a squared
     copy), 320 n**2 bytes, and 65536 bytes cover small objects.
@@ -170,9 +170,9 @@ def singular_values_work(dimension):
     dlasq2 reports its division count, which stayed at or below 4.12 d**2
     for random complex and real matrices and for matrices with clustered or
     graded singular values of order 4 to 128 (macOS Accelerate LAPACK,
-    2026-09-25), so the dqds stage took at most about 25 d**2 units. The law
-    charges 32 d (d + 1) units for these steps together, which also covers
-    their terms linear in d. The library's dense laws charge 8 d**3 for a
+    2026-09-25), so the dqds stage took at most about 25 d**2 units. The
+    formula counts 32 d (d + 1) units for these steps together, which also covers
+    their terms linear in d. The library's dense formulas count 8 d**3 for a
     full SVD, which also forms both singular frames. This route forms
     neither.
 
@@ -200,8 +200,8 @@ def hermitian_eigensystem_work(dimension):
     eigenvector matrix at four units per row, so two iterations per
     eigenvalue over the shrinking active block take about 4 d**3 units. The
     cubic work is therefore about 6 d**3 units or less on either route. The
-    law charges 8 d**3, the charge of a full SVD in the library's dense
-    laws, and 32 d**2 for the terms of lower order: the input copy and
+    formula counts 8 d**3, the count of a full SVD in the library's dense
+    formulas, and 32 d**2 for the terms of lower order: the input copy and
     scans, the Householder vectors, and the rotation parameters or the
     secular equations of the tridiagonal step.
 
@@ -228,8 +228,8 @@ def least_squares_work(rows, columns):
     rotations take about 4 c**3 units at two sweeps per singular value.
     Above 25 it uses divide and conquer with a compact representation of
     the vectors, whose leaves of order at most 25 take the same sweeps and
-    whose merges solve secular equations in O(c**2) work per level. The law
-    charges m c**2 + c**3 for the factorizations, 4 min(c, 25) c**2 for the
+    whose merges solve secular equations in O(c**2) work per level. The
+    formula counts m c**2 + c**3 for the factorizations, 4 min(c, 25) c**2 for the
     bidiagonal solve and 8 m c for NumPy's copies of the matrix and the
     right-hand side, the reflectors applied to it and the remaining vector
     work.

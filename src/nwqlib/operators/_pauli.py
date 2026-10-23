@@ -1,4 +1,8 @@
-"""SDK-free coefficient accumulation, packed Pauli kernels and tiled little-endian Pauli action."""
+"""Pauli coefficient summation, arithmetic on packed Pauli words and the action of a Pauli sum on states.
+
+None of it uses Qiskit. The action works on tiles of coordinates, in
+little-endian qubit order.
+"""
 
 from dataclasses import dataclass
 from itertools import product
@@ -27,11 +31,11 @@ def _half_sum(left, right):
 
 
 def pauli_coefficients(matrix):
-    """SDK-free I/X/Y/Z block transform of an already admitted dense matrix.
+    """I/X/Y/Z block transform, without Qiskit, of a dense matrix whose size has already been checked.
 
     Labels proceed from the most significant qubit to the least significant.
-    This function checks no limit: each caller admits the transform's bytes
-    and work under its own law before entry. Only exact zero coefficients
+    This function checks no limit. Each caller checks the transform's bytes
+    and work against its own formula before the call. Only exact zero coefficients
     are omitted. The caller applies its own explicit pruning policy
     afterward.
 
@@ -88,7 +92,8 @@ def pc(words):
     ``np.bitwise_count`` returns uint8 per word. The sum over all W words is
     accumulated in int64 before any subtraction, so multiword sums include
     every word and signed differences cannot wrap. Padding bits above the
-    qubit width are zero by admission.
+    qubit width are zero, because input conversion rejects masks with such
+    bits set.
     """
     return np.bitwise_count(words).sum(axis=-1, dtype=np.int64)
 
@@ -139,18 +144,18 @@ def _product_tile(left, right):
 
 
 def pauli_product_requirements(left, right, words):
-    """Bytes that PauliTerms.product admits for an ordered product of M = left and K = right rows.
+    """Bytes that PauliTerms.product checks for an ordered product of M = left and K = right rows.
 
     With N = MK output terms, W = words packed words per mask and the block
     length ``C = min(max(M, K), 1024)``, the output plus its immutable
-    snapshot take ``2N(16W+16)`` bytes, and a conservative explicit scratch
-    envelope of ``64CW + 128C`` bytes covers two result masks,
+    copy take ``2N(16W+16)`` bytes, and a conservative upper bound of
+    ``64CW + 128C`` bytes on the scratch arrays covers two result masks,
     intermediate masks and popcounts, signed exponent vectors and
-    coefficient temporaries of one candidate block, released before the
-    next. The reservation is ``2N(16W+16) + 64CW + 128C``. An empty product
-    reserves 0. PauliTerms.product checks this law, and
-    FactorizedOperatorProduct.expansion_requirements charges it for each
-    Pauli chain step, so the two cannot differ.
+    coefficient temporaries of one block, released before the next. The
+    total is ``2N(16W+16) + 64CW + 128C``. An empty product reserves 0.
+    PauliTerms.product checks this formula, and
+    FactorizedOperatorProduct.expansion_requirements counts it for each
+    Pauli product of a chain, so the two cannot differ.
     """
     count = left * right
     tile = _product_tile(left, right)
@@ -159,9 +164,13 @@ def pauli_product_requirements(left, right, words):
 
 @dataclass(frozen=True, eq=False, init=False, slots=True)
 class PauliTerms:
-    """Immutable packed Pauli table.
+    """Immutable packed Pauli table, a Pauli sum stored as X and Z bit masks with complex coefficients.
 
-    Word j covers qubits 64*j through 64*j+63.
+    [`pauli_table`][nwqlib.operators.inputs.pauli_table] and
+    `OperatorInput.pauli_terms()` return it, and constructing it directly
+    raises `TypeError`. Its arrays are read-only copies. M is the number of
+    rows, `len(table)`, and q is `num_qubits`. Bit b of mask word j refers
+    to qubit 64*j + b, so word j covers qubits 64*j through 64*j+63.
 
     Raw layout is M*(16*W+16) bytes, W=ceil(q/64). Python object overhead
     is outside logical byte limits. Product tables keep pair order and
@@ -171,17 +180,18 @@ class PauliTerms:
     qubit with both bits set carries Y itself and the stored coefficient
     multiplies the canonical I/X/Y/Z label.
 
-    The packed fields are the public access for packed consumers, which
-    should not call ``labels()``. The module-level kernels ``pc``,
-    ``product_words``, ``anticommutes`` and ``qwc`` operate on rows of
-    ``x`` and ``z`` and broadcast over leading axes. ``apply_terms`` acts
-    with a single-word table on a state or a block of state columns.
+    Code that works on packed masks reads these fields and should not call
+    ``labels()``. The functions ``pc``, ``product_words``, ``anticommutes``
+    and ``qwc`` of the module ``nwqlib.operators._pauli`` operate on rows of
+    ``x`` and ``z`` and broadcast over leading axes. ``apply_terms`` of the
+    same module acts with a single-word table on a state or a block of
+    state columns.
 
     Attributes:
-        num_qubits: Positive physical width, with qubit zero rightmost.
-        x: Native uint64 flip words, shape (M,W).
-        z: Native uint64 phase words, shape (M,W).
-        coefficients: Native complex128 values, shape (M,).
+        num_qubits: Positive number of qubits, with qubit zero rightmost.
+        x: uint64 X (flip) mask words, shape (M,W).
+        z: uint64 Z (phase) mask words, shape (M,W).
+        coefficients: complex128 coefficients, shape (M,).
     """
 
     num_qubits: int
@@ -206,25 +216,39 @@ class PauliTerms:
         return len(self.coefficients)
 
     def labels(self, *, max_bytes=DEFAULT_INPUT_BYTES):
-        """Materialize labels in stored term order using tiled ASCII columns.
+        """Return the ``(label, coefficient)`` pairs in table order, decoding the labels in tiles of ASCII columns.
 
         In addition to the returned logical payload ``M*(q+16)``, a tile of t
-        rows reserves ``t*(q+25)+q+4`` bytes on a 64-bit host for the
+        rows reserves ``t*(q+25)+q+4`` bytes on a 64-bit machine for the
         character table, word/code buffers and one transient encoded row.
-        Python object headers are outside this logical byte law.
+        Python object headers are not counted by this byte formula.
 
-        A tile of ``t = min(M, C)`` rows holds one (t, q) uint8 character
-        table, two t-entry uint64 word buffers, one t-entry intp code buffer
+        A tile of ``t = min(M, C)`` rows, with C = 1024, holds one (t, q)
+        uint8 character table, two t-entry uint64 word buffers, one t-entry intp code buffer
         and one t-entry uint8 output column, ``tq + 16t + 8t + t = t(q+25)``
         bytes with an eight-byte intp. The alphabet takes four bytes and one
-        row converted to ``bytes`` adds q transient bytes, so the admission
+        row converted to ``bytes`` adds q transient bytes, so the checked total
         is ``M(q+16) + t(q+25) + q + 4`` for M > 0. The tile is chosen from
         the bytes that remain after the payload, before the first tile is
-        allocated. An empty table returns ``()`` and charges nothing. The
+        allocated. An empty table returns ``()`` and counts nothing. The
         code ``x_bit + 2*z_bit`` indexes ``b"IXZY"`` (I, X, Z, Y for 0..3)
-        and bits are emitted from q-1 down to 0, so qubit zero stays the
+        and bits are written from q-1 down to 0, so qubit zero stays the
         rightmost letter. Decoding visits M*(q+1) entries. The returned
-        tuple is caller-owned, never cached by the input.
+        tuple belongs to the caller and is not cached by the table.
+
+        Args:
+            max_bytes (int): Byte limit of the returned labels and the
+                decoding workspace, checked before decoding. Default 10 GB
+                (decimal, `10_000_000_000`).
+
+        Returns:
+            labels (tuple[tuple[str, complex], ...]): One `(label,
+                coefficient)` pair per row, in table order, with qubit 0 as
+                the rightmost letter.
+
+        Raises:
+            ValueError: For a nonempty table, if `max_bytes` is not a
+                positive integer or the checked bytes exceed it.
         """
         m, q = len(self), self.num_qubits
         if m == 0:
@@ -262,7 +286,7 @@ class PauliTerms:
         return tuple(result)
 
     def product(self, other, *, max_bytes=DEFAULT_INPUT_BYTES):
-        """Ordered P*Q, without pruning or intermediate bucket accumulation.
+        """Return the ordered product P*Q, without pruning and without summing identical words.
 
         A packed row denotes ``i**popcount(x & z) X**x Z**z``. Ordered
         multiplication XORs the masks and multiplies the coefficients by
@@ -270,16 +294,34 @@ class PauliTerms:
         2*popcount(za & xb) - popcount((xa ^ xb) & (za ^ zb))`` modulo four.
         Popcounts include every packed word (``product_words``).
 
-        Output row ``i*K+j`` holds left row i times right row j, without
-        combining duplicate products. One row of the shorter table is
-        multiplied by blocks of at most C rows of the longer one, with
-        ``C = min(max(M, K), 1024)`` (``_PAULI_TILE``), and the products of
-        a block are written to their rows ``i*K+j``. N=M*K output terms are
-        admitted before enumeration with ``pauli_product_requirements(M, K,
-        W)``, the byte law stated there. Work law N*(W+1) counts word-pair
-        visits and coefficients (constant arithmetic per visit), not CPU
-        instructions. Each coefficient is ``(c_i*c_j)*1j**e`` in that order,
-        as a scalar loop would form it.
+        For a left table P of M rows and a right table Q of K rows, with W
+        mask words per row, output row ``i*K+j`` holds left row i times
+        right row j, without combining duplicate products. One row of the
+        shorter table is multiplied by blocks of at most C rows of the
+        longer one, with ``C = min(max(M, K), 1024)``, and the products of a
+        block are written to their rows ``i*K+j``. The N=M*K output terms,
+        their immutable copy and the scratch arrays of one block, in total
+        ``2N(16W+16) + 64CW + 128C`` bytes, are checked against
+        ``max_bytes`` before enumeration, and an empty product reserves no
+        bytes. The work formula N*(W+1) counts
+        word-pair visits and coefficients (constant arithmetic per visit),
+        not CPU instructions. Each coefficient is ``(c_i*c_j)*1j**e`` in
+        that order, as a scalar loop would form it.
+
+        Args:
+            other (PauliTerms): The right factor Q, with the same
+                `num_qubits`.
+            max_bytes (int): Byte limit, checked before the product is
+                formed. Default 10 GB (decimal, `10_000_000_000`).
+
+        Returns:
+            table (PauliTerms): The M*K product rows, row ``i*K+j`` being
+                left row i times right row j.
+
+        Raises:
+            ValueError: If `other` is not a PauliTerms of the same width,
+                `max_bytes` is not a positive integer or the product
+                exceeds it, or a product coefficient is not finite.
         """
         if not isinstance(other, PauliTerms) or self.num_qubits != other.num_qubits:
             raise ValueError("Pauli product requires equal qubit widths")
@@ -313,7 +355,7 @@ class PauliTerms:
 
     def group(self, *, strategy, max_bytes=DEFAULT_INPUT_BYTES, max_comparisons=1_000_000,
               limit_name="max_comparisons"):
-        """Deterministic first-fit QWC or general commuting algebra partition.
+        """Partition the terms deterministically into first-fit qubit-wise commuting (QWC) or commuting groups.
 
         QWC compares each term with the group's accumulated basis, while
         general commutation compares it with each group member. For two
@@ -327,35 +369,38 @@ class PauliTerms:
         partitions, not QWC measurement settings.
 
         Let M = L be the number of input terms, W the number of uint64
-        words per mask and t the candidate tile length. Grouping stores
-        ordered member indices and QWC basis masks, then tests bounded
-        candidate tiles. For M > 1 its logical buffer reserve is
-        ``M*(16*W+16)+64*t*W+64*t+32*W`` bytes. QWC compares group masks,
-        while general commuting groups compare members. ``comparison_count``
-        counts every candidate actually evaluated.
+        words per mask and t the length of a comparison block. Grouping
+        stores ordered member indices and QWC basis masks, then tests the
+        comparisons in blocks of at most t. For M > 1 its logical buffer
+        reserve is ``M*(16*W+16)+64*t*W+64*t+32*W`` bytes. QWC compares
+        group masks, while general commuting groups compare members.
+        ``comparison_count`` counts every comparison evaluated.
 
-        Grouping admits each candidate tile before evaluating it.
-        ``comparison_count`` counts all candidates in evaluated tiles. For L
-        input terms it is at most L(L-1)/2. The next tile is admitted only if
-        ``C_so_far + charge <= max_comparisons``, where ``C_so_far`` is the
-        count already admitted and charge is the next tile's candidate
-        count. A refusal names the work already counted, the next charge
-        and the limit. Later phases using the same option are admitted
-        separately. General commuting grouping charges actual member-pair
-        tests and can reach the quadratic count even with one group. The
-        groups partition the preceding terms, and each member is evaluated
-        at most once for each new term, so the total is at most ``L(L-1)/2``.
+        Grouping checks each block of comparisons against the limit before
+        evaluating it. ``comparison_count`` counts all comparisons in the
+        evaluated blocks. For L input terms it is at most L(L-1)/2. The next
+        block is evaluated only if ``C_so_far + charge <= max_comparisons``,
+        where ``C_so_far`` is the count already accepted and ``charge`` is
+        the number of comparisons in the next block. The error raised
+        otherwise names the comparisons already counted, the next charge and
+        the limit. Later steps that use the same option check their own
+        counts separately. General commuting grouping counts the member-pair
+        tests it performs and can reach the quadratic count even with one
+        group. The groups partition the preceding terms, and each member is
+        evaluated at most once for each new term, so the total is at most
+        ``L(L-1)/2``.
 
         The reserve covers two M-by-W basis arrays and two M-entry
         membership sequences (``M(16W+16)``). It also covers four t-by-W
-        uint64 candidate arrays, their t-entry reductions and, for commuting
-        groups, the gathered member rows, masks and popcounts
-        (``64tW + 64t``). The scalar term masks add ``32W``. With
-        C = ``_PAULI_TILE``, a table needing comparisons uses
+        uint64 arrays of one comparison block, their t-entry reductions and,
+        for commuting groups, the gathered member rows, masks and popcounts
+        (``64tW + 64t``). The scalar term masks add ``32W``. With the
+        block length C = 1024, a table needing comparisons uses
         ``t = min(M, C, floor((max_bytes - M*(16*W+16) - 32*W)/(64*W+64)))``.
-        A table is refused when one candidate cannot be funded. If ``g_i`` is
-        the number of groups present before term i, indexed from zero,
-        ``g_0 = 0`` and a QWC pass costs at most ``sum_i g_i`` comparisons.
+        A table is rejected when ``max_bytes`` cannot hold a block of one
+        comparison. If ``g_i`` is the number of groups present before term
+        i, indexed from zero, ``g_0 = 0`` and a QWC pass costs at most
+        ``sum_i g_i`` comparisons.
         Forming all G final groups as early as possible maximizes every
         ``g_i``, giving ``0+1+...+(G-1)+(L-G)G``. For a nonempty table the
         count is at most ``LG - G(G+1)/2 < LG``. The inequality ``g_i <= i``
@@ -367,9 +412,34 @@ class PauliTerms:
         costs ``min(g_i, t*(floor(j_i/t)+1))`` when a compatible group
         exists and ``g_i`` otherwise. A caller that passes a Method field as
         ``max_comparisons`` passes that field's name as ``limit_name``, such
-        as ``"FixedGCIM.max_analysis_work"``, and the refusal names it. The
-        default ``max_comparisons`` is registered in
-        ENGINEERING_CONSTANTS.md, "Explicit input operation defaults".
+        as ``"FixedGCIM.max_analysis_work"``, and the error message names
+        it. The default ``max_comparisons`` is registered in [engineering
+        constants](../ENGINEERING_CONSTANTS.md#explicit-input-operation-defaults).
+
+        Args:
+            strategy (str): `"qwc"` for qubit-wise commuting groups or
+                `"commuting"` for general commuting groups.
+            max_bytes (int): Byte limit of the grouping arrays, checked
+                before grouping. Default 10 GB (decimal, `10_000_000_000`).
+            max_comparisons (int): Positive limit on the counted
+                comparisons. Default `1_000_000`.
+            limit_name (str): Name of the caller's option that supplies
+                `max_comparisons`, used in the error message. Default
+                `"max_comparisons"`.
+
+        Returns:
+            grouping (PauliGrouping): Its `groups` holds the original row
+                indices of each group, in first-fit and member order, and
+                its `comparison_count` is the number of QWC group masks or
+                commuting member pairs compared, including every
+                comparison of an evaluated block. The comparison count is
+                not a measurement count.
+
+        Raises:
+            ValueError: If `strategy` is another value, `max_bytes` or
+                `max_comparisons` is not a positive integer, the grouping
+                arrays exceed `max_bytes`, or the next block of comparisons
+                would exceed `max_comparisons`.
         """
         if strategy not in ("qwc", "commuting"):
             raise ValueError("grouping strategy must be qwc or commuting")
@@ -432,13 +502,13 @@ class PauliTerms:
 
 @dataclass(frozen=True, slots=True)
 class PauliGrouping:
-    """Ordered algebra partition of a Pauli table.
+    """Partition of a Pauli table into QWC or commuting groups, in first-fit order.
 
     Its comparison count is not a measurement count.
 
     Attributes:
-        groups: Original table indices, preserving first-fit and member order.
-        comparison_count: Evaluated QWC group masks or commuting member pairs, including every candidate of an evaluated tile.
+        groups: Original table indices, in first-fit and member order.
+        comparison_count: Number of QWC group masks or commuting member pairs compared, including every comparison of an evaluated block.
     """
 
     groups: tuple[tuple[int, ...], ...]
@@ -459,7 +529,7 @@ def _pauli_masks(label: str) -> tuple[int, int, int]:
 
 
 def combine_terms(terms):
-    """Combine a bounded term stream without thresholding nonzero residues.
+    """Sum the coefficients of identical labels in a finite sequence of terms, keeping every nonzero residue.
 
     Terms with identical labels are summed with ``stable_complex_sum``, which
     keeps a small nonzero residue of near cancellation. Only a sum that is
@@ -489,8 +559,8 @@ def pauli_action_requirements(rows, terms, flips, columns=1, *, complex_input=Fa
 
     N = rows, b = columns >= 1, L = terms (including stored zeros),
     g = flips >= the number of distinct flip masks, and t = min(N, C),
-    where C = _PAULI_TILE. The caller supplies admitted dimensions and
-    a valid group-count upper bound. A single-word N-coordinate action
+    where C = _PAULI_TILE. The caller supplies checked dimensions and
+    a valid upper bound on the number of groups. A single-word N-coordinate action
     can use g = min(L, N) from counts alone. This helper reads no table.
 
     Bytes are ``(33 if complex_input else 49)*N*b + 24*L + 16*g + 8
@@ -498,8 +568,9 @@ def pauli_action_requirements(rows, terms, flips, columns=1, *, complex_input=Fa
     occupy 33Nb. A possible conversion to complex128 adds 16Nb, whose
     result stays live throughout the action. Set complex_input=True
     only for an already complex128 input. An existing out buffer counts
-    as the resident output. The law reserves at most 16 bytes per input
-    or output entry, as used by the admitted binary64 callers.
+    as the resident output. The formula reserves at most 16 bytes per input
+    or output entry, which covers the float64 and complex128 entries that
+    the callers pass.
 
     Logical metadata is 8L member indices, 16L rotated coefficients,
     8g flip keys and 8(g+1) group offsets. Forming the Y counts holds
@@ -516,10 +587,10 @@ def pauli_action_requirements(rows, terms, flips, columns=1, *, complex_input=Fa
     The 3L preprocessing work is independent of b. Labels add L*(q+1) work.
     The retry is reserved in full because grouping can fail late.
 
-    These are conservative kernel/pass units and logical buffer
-    payloads, including an overestimate for empty tables. They exclude
-    the caller-owned packed table or label payload, Python object
-    overhead, opaque allocation workspace and RSS.
+    These are conservative counts of passes over the data and of logical
+    buffer bytes, including an overestimate for empty tables. They exclude
+    the caller's packed table or labels, Python object overhead, workspace
+    allocated inside NumPy and the resident memory of the process.
     """
     if type(columns) is not int or columns < 1:
         raise ValueError("a Pauli action requires at least one state column")
@@ -641,7 +712,7 @@ def apply_terms(
     Memory: the input and output of 16Nb bytes each, O(L) group metadata
     and at most ``(64+16b)C`` explicit scratch bytes per tile of length C
     (``(64+32b)C`` on the ordered retry), never a full diagonal.
-    ``pauli_action_requirements`` states the admitted envelope.
+    ``pauli_action_requirements`` states the checked upper bound.
     """
     if (isinstance(num_qubits, (bool, np.bool_)) or not isinstance(num_qubits, (int, np.integer))
             or not 0 <= num_qubits < 63):

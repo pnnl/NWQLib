@@ -70,7 +70,7 @@ Code paths are relative to `nwqlib.subroutines`. Equation and section numbers re
 | Scientific step | Source and location | Code |
 | --- | --- | --- |
 | Magnitude-tree RY angles | Mottonen et al., quant-ph/0407010v1, Sec. III, Eq. (8) | `state_preparation.direct._build_normalized_state_preparation` |
-| Uniformly controlled RY and RZ lowering by Walsh transform and Gray code | Mottonen et al., quant-ph/0407010v1, Sec. II, Fig. 2 and Eq. (3), and Shende, Bullock and Markov, quant-ph/0406176v5, Theorem 8 | `_multiplexors._rotation_multiplexor` |
+| Decomposition of uniformly controlled RY and RZ by Walsh transform and Gray code | Mottonen et al., quant-ph/0407010v1, Sec. II, Fig. 2 and Eq. (3), and Shende, Bullock and Markov, quant-ph/0406176v5, Theorem 8 | `_multiplexors._rotation_multiplexor` |
 | Phase diagonal as one RZ multiplexor per qubit | Shende, Bullock and Markov, quant-ph/0406176v5, Theorem 7 | `_multiplexors.append_control_diagonal_phases` |
 | CX counts `2**k` per multiplexor and `2**n - 2` per tree or diagonal | Shende, Bullock and Markov, quant-ph/0406176v5, Theorem 8 and Fig. 2, summed over the tree by NWQLib | `_multiplexors.multiplexor_resource_law` |
 | TT-SVD sweep and truncation estimates | Oseledets, SIAM J. Sci. Comput. 33(5) (2011), doi:10.1137/090752286, Algorithm 1 (p. 2301) for the sweep. Proof of Theorem 2.2 and Eq. (2.5) (p. 2299) for the error estimate, with NWQLib's inner-product step for the norm and fidelity estimates | `state_preparation.mps.decompose_state_to_mps`, `state_preparation.mps.analyze_mps_state_compression` |

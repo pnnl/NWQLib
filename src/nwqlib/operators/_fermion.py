@@ -1,4 +1,7 @@
-"""Ordered ladder tables and explicit SDK-free Jordan–Wigner/Z-free mapping."""
+"""Tables of ordered fermionic ladder-operator strings, and their mapping to Pauli operators.
+
+The Jordan–Wigner and Z-free mappings run without Qiskit.
+"""
 
 from collections.abc import Sized
 from dataclasses import dataclass
@@ -12,7 +15,7 @@ from ._pauli import PauliTerms, combine_terms
 
 
 def _count_product(a, b, limit):
-    """Reject before multiplication can form an inadmissible count."""
+    """Return ``a * b``, raising before the multiplication when the product would exceed ``limit``."""
     limit = min(limit, sys.maxsize)
     if b and a > limit // b:
         raise ValueError("operator expansion exceeds its finite size limit")
@@ -255,7 +258,7 @@ def fermion_table(terms, *, num_modes, max_bytes=DEFAULT_INPUT_BYTES):
 
 
 def _coalesced_fermion(table, *, max_bytes=DEFAULT_INPUT_BYTES):
-    """Admit a Fermion table after coalescing identical complete strings.
+    """Return the OperatorInput of a fermionic table after summing identical complete strings.
 
     Only strings with the same ordered ``(mode, action)`` sequence combine,
     and only an exact-zero sum is removed. No anticommutation or normal
@@ -307,23 +310,25 @@ def ingest_fermion(terms, *, num_modes, max_bytes=DEFAULT_INPUT_BYTES):
 def mapping_requirements(lengths, *, num_modes, max_bytes=DEFAULT_INPUT_BYTES, labels=False):
     """Return the cumulative ``(items, bytes, work)`` law of mapping strings with ``lengths`` ladder operators to Pauli rows, checked against ``max_bytes`` after each string.
 
-    The law includes raw admission and final conversion.
+    The counts cover the raw table and the final conversion.
 
-    Count arithmetic is capped by intp representability and data bytes before
-    shifts/arrays. Counts and scalar visits remain descriptive cost laws.
-    Local ladders reserve 4L bytes each (two rows plus snapshots), and products
-    reserve 2*N*L+32W each. Final arrays/scaling/coalescing reserve 6*R*L, plus
-    R*S for the identity JSON share S of ``inputs._pauli_identity_bytes`` that
-    the final mask ingestion charges.
-    Explicit SDK conversion additionally reserves R*(3q+48) bytes and
-    R*(3q+3) work, bounding labels, SDK boolean tables, scalars and conversion.
+    Before any shift or array allocation, the count arithmetic is capped by
+    the largest intp value and by the data bytes. The counts and scalar
+    visits are cost formulas, not measurements. Each single-operator image
+    reserves 4L bytes (two rows plus their immutable copies), and each
+    product reserves 2*N*L+32W. The final arrays, scaling and summation of
+    identical words reserve 6*R*L, plus R*S for the content-hash JSON share S
+    of ``inputs._pauli_identity_bytes`` that the final mask conversion counts.
+    With ``labels=True``, the conversion to Qiskit labels additionally
+    reserves R*(3q+48) bytes and R*(3q+3) work, covering the labels, Qiskit's
+    boolean tables, the scalars and the conversion.
 
     Here ``q = num_modes``, ``W = ceil(q/64)`` mask words, and
     ``L = 16 W + 16`` bytes is one Pauli row (two W-word uint64 masks and a
     complex128 coefficient). A string of ``p`` ladder operators maps to
     ``2**p`` rows, and ``R`` is their total over all strings. The
     left-to-right products of one string have ``4, 8, ..., 2**p`` rows, so a
-    string with ``p >= 2`` forms ``N = 2**(p+1) - 4`` candidate rows.
+    string with ``p >= 2`` forms ``N = 2**(p+1) - 4`` intermediate rows.
     """
     if type(num_modes) is not int or not 1 <= num_modes <= sys.maxsize:
         raise ValueError("mapping requires a positive representable width")

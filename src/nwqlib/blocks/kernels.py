@@ -1,6 +1,6 @@
-"""Host kernels bound by a Method's factory.
+"""Classical routines (host kernels) that a Method binds to its Plan.
 
-A portable Source never resolves into a callable.
+A saved Source record alone never resolves into a callable.
 """
 
 from dataclasses import dataclass, field
@@ -13,11 +13,11 @@ from nwqlib.problems.inputs import PhysicalScale
 
 @dataclass(frozen=True)
 class KernelOutput:
-    """One invocation's selected identity, statistics, named arrays and applications.
+    """Output of one call of a classical routine: its content hashes, statistics, named arrays and routine records.
 
     Attributes:
-        plan_id: Exact selected Plan identity for the invocation.
-        selected_kernel_id: Selected host-kernel declaration that produced this output.
+        plan_id: Content hash of the Plan of this call.
+        selected_kernel_id: Content hash of the SelectedKernel declaration that produced this output.
         scalars: Ordered named scalar values in the declaration's frames.
         physical_scale: Positive factor that restores physical magnitude to
             unit-normalized scalars or arrays, or None. Each Method defines it,
@@ -25,8 +25,8 @@ class KernelOutput:
         physical_scale_unavailable: Why ``physical_scale`` is None, because the
             scale is unavailable or no recovery applies. Exactly one of the two
             fields is set.
-        arrays: Named actual complex128 arrays matching selected output declarations.
-        applications: Actual selected operator/application receipts for this invocation.
+        arrays: Named complex128 arrays matching the declared outputs.
+        applications: KernelApplication records of the operators and routines applied in this call.
         unavailable: Declared named outputs that could not be produced, with reasons.
     """
 
@@ -49,16 +49,16 @@ class KernelOutput:
 
 @dataclass(frozen=True, init=False, eq=False, slots=True)
 class BoundKernel:
-    """Method-owned immutable inputs and an exact static or point-bound closure.
+    """A classical routine bound by a Method: immutable inputs with one fixed closure, or a binder that builds a closure per point.
 
-    A point binder only captures already admitted inputs and arguments.
-    Numerical work starts at invocation. Persisted declarations never load
-    either callable.
+    A point binder captures only inputs and arguments that were already
+    accepted. Numerical work starts when the routine is called. Saved
+    declarations never load either callable.
     A point closure may capture its context, but must not keep the live Run.
 
     Attributes:
         record: Exact SelectedKernel declaration associated with the bound closure.
-        plan_id: Identity of the original Plan whose immutable inputs the closure uses.
+        plan_id: Content hash of the original Plan whose immutable inputs the closure uses.
     """
 
     record: SelectedKernel
@@ -76,7 +76,7 @@ class BoundKernel:
 
     @classmethod
     def _bind_pointwise(cls, plan, record, binder):
-        """Return a pointwise binding whose ``binder(realization, declaration, run)`` returns the no-argument closure at each admitted point (see ``_at``)."""
+        """Return a pointwise binding whose ``binder(realization, declaration, run)`` returns the no-argument closure at each accepted point (see ``_at``)."""
         return cls._make(plan, record, call=None, binder=binder)
 
     @classmethod
@@ -91,12 +91,12 @@ class BoundKernel:
         return result
 
     def _at(self, realization, declaration, run):
-        """Return the binding to invoke at one admitted point of the same Plan.
+        """Return the binding to invoke at one accepted point of the same Plan.
 
         The realization and the Run must both belong to this binding's Plan.
         A static binding returns itself, and only for its unchanged
         declaration. A pointwise binding accepts the template declaration or
-        a revision of it (parent identity equal to the template, with the same
+        a revision of it (parent content hash equal to the template's, with the same
         name, implementation, inputs and dependencies), so a point can change
         its declared scalars, outputs and work but never its implementation or
         inputs. The binder receives the realization, declaration and Run and

@@ -95,7 +95,7 @@ for registration in registrations:
     print(registration.source.name, registration.source.version)
 ```
 
-For formatted declarations and configuration schemas, use the `algorithms`, `card` and `options` commands. Discovery neither runs nor qualifies a Method.
+For formatted declarations and configuration schemas, use the `algorithms`, `card` and `options` commands. Listing Methods neither runs nor tests them.
 
 ## Read a saved report
 
@@ -109,4 +109,4 @@ result.save("my-result")
 python -m nwqlib report my-result
 ```
 
-The JSON output holds the saved selection, scientific fields, observations, preparation records and trace. `report` checks the shared format and returns this metadata. Method names stay text. Use `nwqlib.load_result(path, method=...)` to reconstruct a Result and access its saved arrays and circuits.
+The JSON output holds the saved Plan with its Method name (`selection`), the scientific fields, observations, preparation records and trace. `report` checks the format version and returns this metadata. Method names are shown as text, and no Method code is imported. Use `nwqlib.load_result(path, method=...)` to reconstruct a Result and access its saved arrays and circuits.

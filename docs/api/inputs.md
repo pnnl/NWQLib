@@ -9,7 +9,7 @@ from nwqlib.problems import state_input
 
 Every operator function and record on this page imports from `nwqlib.operators`, and every state function and record from `nwqlib.problems`. The annotation types under [Input types](#input-types) are defined in `nwqlib.core.records`, `nwqlib.problems.records` and `nwqlib.operators.access`.
 
-A Problem field accepts a NumPy array, a SciPy sparse matrix, a Qiskit `SparsePauliOp`, a `PeriodicStencil` or a state vector directly. The functions on this page make the same conversion explicit and return an `OperatorInput` or a `StateInput`, which keeps an immutable copy of the data in its original representation. Passing one such object to several Problems reuses that copy:
+A Problem field accepts a NumPy array, a SciPy sparse matrix, a Qiskit `SparsePauliOp`, a `PeriodicStencil` or a state vector directly. The functions on this page make the same conversion explicit and return an input object, an `OperatorInput` or a `StateInput`, which keeps an immutable copy of the data in its original representation. Passing one input object to several Problems reuses that copy:
 
 ```python
 import numpy as np
@@ -80,6 +80,11 @@ Every function checks the bytes it will keep against `max_bytes`, default 10 GB 
 ::: nwqlib.operators.inputs.pauli_table
     options:
       heading_level: 3
+
+::: nwqlib.operators._pauli.PauliTerms
+    options:
+      heading_level: 3
+      show_signature: false
 
 ::: nwqlib.operators.inputs.ingest_pauli_masks
     options:

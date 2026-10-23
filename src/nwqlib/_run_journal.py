@@ -1,23 +1,25 @@
-"""Atomic SQLite run transitions with finite encoded data and a controller lock.
+"""The run log of a saved Run, written in atomic SQLite transactions of bounded size under an exclusive lock.
 
-A Run journal is one SQLite file with two tables. ``records(kind, key, size,
-collected, payload)`` holds one JSON row per durable fact, keyed by its kind
-(header, limits, rng, prepared, preparation, submission, event, chunk,
-checkpoint, cache and others) and its identity, with the UTF-8 byte size of its
+The run log (``run.sqlite``) is one SQLite file with two tables. ``records(kind,
+key, size, collected, payload)`` holds one JSON row per saved fact, keyed by its
+kind (header, limits, rng, prepared, preparation, submission, event, chunk,
+checkpoint, cache and others) and its identifier, with the UTF-8 byte size of its
 JSON text in ``size``. ``collected`` is zero for everything except a chunk
-that the Method has consumed, which gets the next positive ordinal.
-``binary(identity, ordinal, payload)`` holds native payloads and published arrays
-as ordered blocks of at most 1 MiB.
+that the Method has collected, which gets the next positive ordinal.
+``binary(identity, ordinal, payload)`` holds the payloads of backend circuits and
+the saved observation arrays as ordered blocks of at most 1 MiB.
 
-Every Run transition is one ``commit`` call, and SQLite makes it atomic. Row sizes
-are admitted before any JSON text is allocated. Only cache rows and fields that a
-controller removed from its checkpoint can be deleted. Every other row is evidence
-of work that happened and is only ever inserted or revised.
+Every change of a Run's state is one ``commit`` call, and SQLite makes it atomic.
+Row sizes are checked against the byte limit before any JSON text is allocated.
+Only cache rows and fields that an adaptive Method removed from its saved
+iteration state (the state its iteration code needs to choose the next
+experiment) can be deleted. Every other row records work that happened and is
+only ever inserted or revised.
 
-One process at a time controls a Run. ``LocalJournal`` takes a nonblocking
+One process at a time holds a Run open. ``LocalJournal`` takes a nonblocking
 exclusive ``flock`` on the adjacent ``.lock`` file and holds it until ``close``.
-The kernel releases that lock when the process exits, so a lock file left by a
-crash does not block a later controller.
+The operating system releases that lock when the process exits, so a lock file
+left by a crash does not block a later process.
 """
 
 from datetime import datetime
@@ -54,12 +56,13 @@ def unsupported_run_format(found, where="saved run"):
 
 
 class WorkflowItem(Record):
-    """Original experiment, RNG draw and exact preparation/acquisition joins.
+    """One experiment of a static Plan, with its random draw and the identifiers of its preparation and acquisition.
 
-    One row per static experiment, keyed by experiment name. The runtime seed is
-    drawn once when the row is created. The three identities are filled in as the
-    preparation charge, the receipt and the attempt commit, which lets a restart
-    find the exact work of each experiment instead of starting it again.
+    One row per experiment, keyed by experiment name. The runtime seed is
+    drawn once when the row is created. The three identifiers are filled in as
+    the preparation charge, the preparation record and the attempt commit,
+    which lets a restart find the exact work of each experiment instead of
+    starting it again.
     """
 
     realization: Realization
@@ -70,17 +73,17 @@ class WorkflowItem(Record):
 
 
 class PreparationCharge(Record):
-    """An actual preparation attempt, including failures without a receipt.
+    """One preparation attempt, including a failed one without a preparation record.
 
-    The charge commits before native work. ``prepared_id`` stays None for a
-    preparation that failed or was interrupted. A circuit preparation's charge
-    still counts against ``max_total_circuits``.
+    The charge commits before the backend work. ``prepared_id`` stays None for a
+    preparation that failed or was interrupted. Even then, a circuit
+    preparation counts against ``max_total_circuits``.
 
     Attributes:
         execution: ``quantum_circuit`` or ``host_kernel``.
-        preparation_id: Identity of this attempt.
-        prepared_id: Receipt identity once the preparation completed, else None.
-        checkpoint_sequence: Controller checkpoint current when the charge was made, or None.
+        preparation_id: Identifier of this attempt.
+        prepared_id: Content hash of the preparation record once the preparation completed, else None.
+        checkpoint_sequence: Checkpoint of the iteration state that was current when the charge was made, or None.
         synthesis_work: Exact dense synthesis work reserved against ``ExecutionLimits.max_synthesis_work`` during this preparation, each amount before its synthesis started.
         synthesis_refused: Work of the synthesis that ``max_synthesis_work`` refused before it started, or None. A refused preparation made no synthesis or backend call after the refusal, and its experiment is left unprepared.
     """
@@ -98,7 +101,7 @@ def _portable(value):
     """JSON form of a value the standard encoder cannot write: a Record, datetime or Enum.
 
     Computed fields such as ``content_id`` are excluded, because they are derived
-    from the stored fields and are recomputed on load.
+    from the saved fields and are recomputed on load.
     """
     if isinstance(value, Record):
         return value.model_dump(mode="json", exclude_computed_fields=True)
@@ -108,9 +111,9 @@ def _portable(value):
 
 
 class JSONBytesExceeded(ValueError):
-    """The encoded JSON of a value would exceed the byte limit it is admitted against.
+    """The encoded JSON of a value would exceed the byte limit it is checked against.
 
-    ``Run._write`` admits new rows against the space that ``max_data_bytes``
+    ``Run._write`` checks new rows against the space that ``max_data_bytes``
     leaves, and it catches this error to name that limit in its own message.
     """
 
@@ -119,9 +122,9 @@ def _json_bound(value, max_bytes):
     """Bound JSON bytes before encoding, and reject unsupported or deep scalar trees.
 
     Strings use the encoder's escaped UTF-8 size and integers their decimal
-    size. Finite binary64 values have a 32-byte envelope. Reading Record fields
-    avoids allocating its portable tree merely to count it. This bounds encoded
-    bytes, not Python object storage, CPU or RSS.
+    size. Finite binary64 values have an upper bound of 32 bytes. Reading
+    Record fields avoids allocating its portable tree merely to count it. This
+    bounds encoded bytes, not Python object storage, CPU time or process memory.
     """
     if type(max_bytes) is not int or max_bytes < 0:
         raise ValueError("JSON byte limit must be a nonnegative integer")
@@ -203,7 +206,7 @@ def _json_bound(value, max_bytes):
 
 
 def _encode_admitted(value, max_bytes):
-    """Encode a value whose bound was already admitted, and return its text and UTF-8 byte length.
+    """Encode a value whose bound was already checked, and return its text and UTF-8 byte length.
 
     The compact separators and ``allow_nan=False`` give the spelling that
     ``_json_bound`` counts. Nonfinite floats raise instead of producing invalid
@@ -220,22 +223,22 @@ def _encode_admitted(value, max_bytes):
 
 
 def encode(value, max_bytes):
-    """Admit ``value`` by its size bound, then encode it as compact journal JSON."""
+    """Check the size bound of ``value``, then encode it as compact JSON for the run log."""
     _json_bound(value, max_bytes)
     return _encode_admitted(value, max_bytes)[0]
 
 
 def _row_value(kind, value):
-    """The value a journal row stores for ``value``.
+    """The value a run-log row stores for ``value``.
 
-    A chunk row omits the chunk's ``observation``. The chunk's receipt, the
-    ``prepared`` row named by its ``prepared_id``, stores the same readout
-    declaration, and ``Run._write`` checks that they are equal before a chunk
-    row is written. Reopening a Run puts the receipt's observation back
+    A chunk row omits the chunk's ``observation``. The chunk's preparation
+    record, the ``prepared`` row named by its ``prepared_id``, stores the same
+    readout declaration, and ``Run._write`` checks that they are equal before
+    a chunk row is written. Reopening a Run puts the record's observation back
     (``Run._restore_observations``), so the reopened chunk equals the
-    original, identity included. A trajectory point chunk holds only its
-    point's one-point readout, which reopening rebuilds from the receipt's
-    trajectory declaration. A chunk row therefore grows with its JSON
+    original, content hash included. A trajectory point chunk holds only its
+    point's one-point readout, which reopening rebuilds from the trajectory
+    declaration of the preparation record. A chunk row therefore grows with its JSON
     statistics but not again with the readout's labels or points. A
     probability chunk row holds its array manifests and scalar summaries,
     whose size does not grow with the number of outcomes. The values are
@@ -249,7 +252,7 @@ def _row_value(kind, value):
 
 @dataclass(frozen=True)
 class _EncodedRecords:
-    """The admitted JSON rows and their encoded sizes.
+    """The checked JSON rows and their encoded sizes.
 
     ``sizes`` holds the UTF-8 byte length of each row's text, in row order.
     """
@@ -259,10 +262,10 @@ class _EncodedRecords:
 
 
 def encode_records(records, max_bytes):
-    """Admit a complete finite row delta before producing any JSON output.
+    """Check the size of a complete, finite set of row changes before producing any JSON output.
 
     Each row is bounded, then encoded once (``_encode_admitted``), in the
-    stored form of ``_row_value``.
+    saved form of ``_row_value``.
     """
     if not isinstance(records, (tuple, list)):
         raise TypeError("run row transitions require a finite tuple or list")
@@ -283,14 +286,14 @@ def encode_records(records, max_bytes):
 
 
 def _write_bytes(connection, key, buffer, chunk_bytes):
-    """Copy an already admitted buffer into the caller's current transaction as ordered blocks."""
+    """Copy an already checked buffer into the caller's current transaction as ordered blocks."""
     view = memoryview(buffer).cast("B")
     for ordinal, start in enumerate(range(0, len(view), chunk_bytes)):
         connection.execute("INSERT INTO binary VALUES (?,?,?)", (key, ordinal, view[start:start + chunk_bytes]))
 
 
 class LocalJournal:
-    """SQLite owns atomic durability. A POSIX descriptor owns exclusivity.
+    """The run log of one Run. SQLite makes each commit atomic and durable, and a POSIX file lock makes access exclusive.
 
     The connection uses ``journal_mode=DELETE``, where deleting the rollback
     journal is the commit, and ``synchronous=EXTRA``, which also syncs the
@@ -308,20 +311,20 @@ class LocalJournal:
 
     Each ``records`` row stores the UTF-8 byte size of its JSON text in its
     ``size`` column, written with the text. The column precedes the text in
-    the row, so the size caps, the stored total and the replaced sizes read
+    the row, so the size limits, the saved total and the replaced sizes read
     it without reading the text. Loading does not check the column against
-    the text of the Run's own journal.
+    the text of the Run's own run log.
     """
 
     def __init__(self, path, max_bytes, *, create, restore_limits=False):
-        """Acquire exclusive POSIX ownership and open a bounded atomic run database.
+        """Take the exclusive POSIX lock and open the run log with its byte limit.
 
-        The lock is taken before the database is opened, so a second controller
+        The lock is taken before the database is opened, so a second process
         fails before reading any row. ``create=True`` requires a new file
         (``O_EXCL``), so an existing Run is never initialized twice.
-        ``restore_limits`` reads the current limits before admitting the
-        cumulative stored bytes. Collection ordinals record the order in
-        which the Method consumed observations.
+        ``restore_limits`` reads the current limits before checking the
+        cumulative saved bytes against them. Collection ordinals record the
+        order in which the Method collected observations.
         """
         if os.name != "posix":
             raise ValueError("durable run journals require POSIX advisory locking")
@@ -369,24 +372,24 @@ class LocalJournal:
             raise
 
     def _check_size(self, extra=0):
-        """Reject a stored total, rows plus binary blocks, above ``max_bytes``, and return the current total."""
+        """Reject a saved total, rows plus binary blocks, above ``max_bytes``, and return the current total."""
         if self._data_bytes + extra > self.max_bytes:
             raise ValueError("saved run data exceeds max_data_bytes")
         return self._data_bytes
 
     def commit(self, records=(), *, collected=(), payloads=(), deleted=(), encoded=None, replaced=None):
-        """Commit an entire transition or none of its published observations.
+        """Commit all rows of one change of state, or none of them.
 
         ``BEGIN IMMEDIATE`` takes the write lock at the start, so the size check and
         the writes see one consistent database. Replaced rows are credited before
         the new size is checked. ``replaced`` maps each written or deleted
-        ``(kind, key)`` to the stored size its caller already holds (``Run``
+        ``(kind, key)`` to the saved size its caller already holds (``Run``
         keeps them in ``data_sizes``). Without it the ``size`` column is read. A
-        binary payload whose identity is already stored is not written again,
+        binary payload whose content hash is already saved is not written again,
         which lets two acquisitions with identical array bytes share one
         payload. Chunks named in ``collected`` get the next ordinals, in
         the given order, only if they have none yet. Any error rolls the whole
-        transition back, and the in-memory byte and ordinal counters change only
+        change back, and the in-memory byte and ordinal counters change only
         after ``COMMIT``.
         """
         conn = self.connection
@@ -468,8 +471,8 @@ class LocalJournal:
     def rows(self, kind):
         """Yield ``(key, parsed JSON, collected)`` for each row of ``kind`` in insertion order.
 
-        The journal admits its total stored bytes before rows are read.
-        ``collected`` is True for a chunk the Method has consumed.
+        The run log checks its total saved bytes against its limit before rows
+        are read. ``collected`` is True for a chunk the Method has collected.
         """
         for key, text, collected in self.connection.execute(
                 "SELECT key,payload,collected FROM records WHERE kind=? ORDER BY rowid", (kind,)):
@@ -478,17 +481,17 @@ class LocalJournal:
     def payload_chunks(self, reference):
         """Yield the binary blocks of one array payload to its loader, one block alive at a time.
 
-        The block inventory is streamed, so the iterator's own metadata is
+        The list of blocks is streamed, so the iterator's own metadata is
         O(1) instead of O(ceil(B/C)) for B payload bytes in C-byte blocks.
         The loader (``ArtifactStore._hydrate``) checks the block order, each
         block size and the complete total before it exposes any array. A
-        yielded block is deleted when the consumer resumes the iterator, before
-        the next block is read, so with a consumer that also releases its
-        block the explicit block memory is one block. SQLite's own caches are
-        outside this count. A closed journal reads through a read-only
-        connection held for this iteration: committed payload blocks never
-        change, so an array first read after the Run closed is the one it
-        published.
+        yielded block is deleted when the calling code resumes the iterator,
+        before the next block is read, so with calling code that also releases
+        its block the explicit block memory is one block. SQLite's own caches
+        are outside this count. After the run log is closed, the blocks are
+        read through a read-only connection held for this iteration. Committed
+        payload blocks never change, so an array first read after the Run
+        closed is the one it saved.
         """
         import sqlite3
         if reference.bytes > self.max_bytes:
@@ -510,10 +513,10 @@ class LocalJournal:
                 connection.close()
 
     def read_payload(self, reference):
-        """Return one saved native payload as bytes after checking its block inventory.
+        """Return one saved backend payload as bytes after checking its list of blocks.
 
         A gap in the block ordinals or a total size different from the reference
-        rejects before the payload is used for a new submission or a remote
+        is rejected before the payload is used for a new submission or a remote
         preparation. Block contents are not authenticated.
         """
         if reference.bytes > self.max_bytes:
@@ -533,11 +536,11 @@ class LocalJournal:
 
     @property
     def usage(self):
-        """Logical stored bytes (rows and blocks) and the database file size, which can be larger."""
+        """Counted saved bytes (rows and blocks) and the database file size, which can be larger."""
         return dict(data_bytes=self._check_size(), database_bytes=self.path.stat().st_size)
 
     def close(self):
-        """Close the database, then release the controller lock by closing its descriptor. Idempotent."""
+        """Close the database, then release the Run's exclusive lock by closing its descriptor. Idempotent."""
         if self.connection is not None:
             self.connection.close()
             self.connection = None

@@ -1,4 +1,4 @@
-"""Save original inputs, actual selected bodies and already-produced QLS data."""
+"""Save the original inputs, the chosen encoding and preparation, and the QLS data already computed."""
 
 from nwqlib.blocks.records import SelectedDefinition
 from nwqlib.blocks.selection import SelectedBlock, _preparation_circuit
@@ -12,8 +12,8 @@ def _label_masks(labels, num_qubits):
     """Return packed ``(x, z)`` uint64 words of I/X/Y/Z labels.
 
     Bit j describes qubit j, the rightmost printed letter, and word j // 64
-    holds bit j % 64, the convention of ``operators._pauli.PauliTerms``: X
-    and Y set x, Z and Y set z.
+    holds bit j % 64, the convention of ``operators._pauli.PauliTerms``, in
+    which X and Y set x and Z and Y set z.
     """
     import numpy as np
 
@@ -37,7 +37,7 @@ def _mask_labels(x, z, num_qubits):
 
 
 def _save_decomposition(source, files, original):
-    """Store a Pauli decomposition by reference to the saved problem operator, or as arrays.
+    """Save a Pauli decomposition by reference to the saved problem operator, or as arrays.
 
     A compact Pauli ``A`` is decomposed from ``original.pauli_terms()`` with
     ``atol = 0.0``, so its decomposition is that operator's term table. An
@@ -65,7 +65,7 @@ def _save_decomposition(source, files, original):
 
 
 def _load_decomposition(data, files, original):
-    """Rebuild the ``PauliDecomposition`` record that ``_save_decomposition`` stored."""
+    """Rebuild the ``PauliDecomposition`` record that ``_save_decomposition`` saved."""
     from nwqlib.subroutines.pauli_decomposition import PauliDecomposition, PauliTerm
 
     values = dict(data)
@@ -79,9 +79,9 @@ def _load_decomposition(data, files, original):
 
 
 def _save_encoding(block, files, original):
-    """Store the selected encoding in its own native, banded, Pauli or dense-plan representation.
+    """Save the chosen encoding in its own representation (a supplied Qiskit circuit, a band table, a Pauli table or a dense plan).
 
-    A Pauli decomposition is stored by ``_save_decomposition``, by reference
+    A Pauli decomposition is saved by ``_save_decomposition``, by reference
     to ``original`` when it is that operator's term table.
     """
     payload = block._payload
@@ -115,7 +115,7 @@ def _save_encoding(block, files, original):
 
 
 def _load_encoding(data, files, encoded, original):
-    """Rebind the stored encoding payload without performing new normalization or decomposition."""
+    """Rebind the saved encoding data without a new normalization or decomposition."""
     from nwqlib.subroutines.block_encoding.core import BlockEncoding, BlockEncodingPlan
 
     fields = {
@@ -157,7 +157,7 @@ _FACTOR_ARRAYS = {"original_svd": (OriginalSVD, ("left", "singular", "right_h"))
 
 
 def _save_factors(factors, files):
-    """Store the original factors a Plan owns, with their input binding, or None."""
+    """Save the original factors that a Plan holds, with the reference to their input, or return None."""
     if factors is None:
         return None
     prefix = "original-svd-" if factors.method == "original_svd" else "original-eigh-"
@@ -180,16 +180,16 @@ def _load_factors(data, files):
 
 
 def save(method, plan, files):
-    """Store the selected Plan with the inputs and data it already produced.
+    """Save the Plan with the inputs and data it already produced.
 
-    A quantum Plan writes its encoding payload, padded operator and RHS,
-    original SVD frames and RHS preparation record once. A classical Plan
+    A quantum Plan writes its encoding data, padded operator and RHS,
+    original SVD factors and RHS preparation record once. A classical Plan
     reads the original ``A`` and ``b`` only, so it writes the original
     factors that its inverse or linear norm model reuses, and the encoding
-    payload only when the Method itself carries a supplied encoding. The
-    selected encoding's alpha, family, ancilla count and error bound travel
-    in the reconstruction. The phase table travels inside the Plan's
-    reconstruction. Nothing is recomputed to fill the archive.
+    data only when the Method itself carries a supplied encoding. The
+    chosen encoding's alpha, family, ancilla count and error bound are saved
+    in the Plan's reconstruction, and so are the QSP phases. Nothing is
+    recomputed to fill the archive.
     """
     validate_selection(plan)
     native = plan._native
@@ -214,11 +214,12 @@ def save(method, plan, files):
 
 
 def load(saved, files):
-    """Restore selected QLS inputs and bind the saved native payloads.
+    """Restore the QLS inputs and bind the saved Qiskit circuits and encoding data.
 
-    Quantum block bindings are rebuilt from the stored phases and queries.
-    The stored Program and experiments remain the execution description.
-    Loading performs no phase search, decomposition, polynomial fit or reference solve.
+    The quantum blocks are rebuilt from the saved phases and queries. The
+    saved Program and experiments remain the description of the execution.
+    Loading performs no QSP phase solve, decomposition, polynomial fit or
+    reference solve.
     """
     from .quantum import BaseEncoding, _program
 

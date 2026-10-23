@@ -1,9 +1,9 @@
-"""Explicit native representatives of an existing LCHS selection.
+"""Representative Qiskit circuits of an existing LCHS Plan.
 
-This samples saved numerical data and actual PREP children, without new phases,
-MPS decomposition or a Run. Weighted totals are representative estimates.
-The full native inventory comes from prepare(plan).circuits and the shared
-circuit inspection.
+This samples the saved numerical data and the PREP children, without new
+phases, MPS decomposition or a Run. Weighted totals are estimates from the
+representatives. The full list of circuit operations comes from
+prepare(plan).circuits and the shared circuit inspection.
 """
 
 from __future__ import annotations
@@ -15,14 +15,14 @@ from nwqlib.operators.access import _check_bytes
 
 
 def _native_envelope(limits, width, slots, *, dense=False):
-    """Charge one representative to the cumulative gate/table size proxy.
+    """Count one representative against the cumulative gate/table size proxy.
 
     The proxy makes no promise about SDK CPU time or workspace.
 
     A representative with ``slots`` gates on ``width`` qubits counts
     slots*(width+1) table entries, or 4**width entries for a dense
     controlled matrix. The build work grows by the entries plus
-    slots*(width+1), and 64 bytes per entry and per slot are admitted
+    slots*(width+1), and 64 bytes per entry and per gate are checked
     against max_bytes.
     """
     if width>limits['max_qubits']:
@@ -36,10 +36,10 @@ def _native_envelope(limits, width, slots, *, dense=False):
 
 
 def _synthesis_envelope(limits, qubit_counts, controls=(), controlled_qubit_counts=()):
-    """Charge the exact dense syntheses of one representative, and Qiskit's control of them, to the build work.
+    """Count the exact dense syntheses of one representative, and Qiskit's control of them, in the build work.
 
     Each entry of ``qubit_counts`` is one call of
-    ``_dense_synthesis.dense_unitary_circuit``, and its work law
+    ``_dense_synthesis.dense_unitary_circuit``, and its work formula
     (``dense_synthesis_size``) is added to the cumulative build work. Each
     entry of ``controls`` is the ``(gates, instructions, heavy)`` triple of
     one call of Qiskit's control of such a synthesis, sized by
@@ -47,7 +47,7 @@ def _synthesis_envelope(limits, qubit_counts, controls=(), controlled_qubit_coun
     one whole-matrix synthesis on that many qubits, controls included
     (``controlled_synthesis_size``). The calls run one at a time and the
     representative keeps their circuits, so the largest working allowance
-    plus every kept allowance is admitted against max_bytes.
+    plus every kept allowance is checked against max_bytes.
     """
     from nwqlib.subroutines._dense_synthesis import (controlled_synthesis_size, dense_synthesis_size,
                                                      gatewise_control_size)
@@ -69,7 +69,7 @@ def _product_formula_occurrence_blocks(
     num_system_qubits: int,
     implementation: str,
 ):
-    """Build one actual resolved Pauli-rotation block per occurrence label."""
+    """Build one resolved Pauli-rotation block per occurrence label."""
 
     from collections import Counter
     from qiskit import QuantumCircuit, QuantumRegister
@@ -155,20 +155,20 @@ def _product_formula_occurrence_blocks(
 
 
 def dense_representative_envelope(q, a, route="gatewise"):
-    """Return value-independent counts in explicitly named owner bases.
+    """Return value-independent counts in explicitly named gate bases.
 
     This computes a resource model. It builds no representative circuit and
     does not report the operations of an arbitrary transpiled circuit.
 
     Dense representative resource reporting uses the value-independent upper
-    counts of the selected library synthesis and control route. Each record
-    identifies its basis, route, owner assumptions and
-    ``count_kind="structural_upper_bound"``. It is not an observed circuit
-    inventory. Counts for an arbitrary explicitly requested compilation
-    continue to require its actual circuit inspection.
+    counts of the library synthesis and the chosen control route. Each record
+    identifies its basis, route, construction assumptions and
+    ``count_kind="structural_upper_bound"``. It is not a count of an observed
+    circuit. Counts for any explicitly requested compilation still require
+    inspection of that compiled circuit.
 
-    For system width q >= 1 and address width a, the uncontrolled dense
-    synthesis census (C_q, U_q, Z_q, H_q) in the basis CX, U, RZ, H is
+    For system width q >= 1 and address width a, the gate counts of the
+    uncontrolled dense synthesis (C_q, U_q, Z_q, H_q) in the basis CX, U, RZ, H is
     (0, 1, 0, 0) at one qubit and, for q >= 2,
     C_q = (25*4**q - 72*2**q + 32)/48, U_q = 7*4**(q-2),
     Z_q = (3*4**q - 12*2**q)/8, H_q = (4**q - 16)/24
@@ -178,8 +178,8 @@ def dense_representative_envelope(q, a, route="gatewise"):
     has the CX bound C_branch = C_q*x(a+1) + H_q*x(a) + Z_q*z(a) + U_q*u(a)
     + p(a) of native.dense_branch_select_cx, with x the ancilla-free
     multi-controlled X count, z, y and u the MCRZ, MCRY and U costs and p
-    the branch global phase, and the control constructor populations of
-    _dense_synthesis.gatewise_control_counts. A gatewise U bound is not
+    the branch global phase, and the gate counts of the control constructor
+    in _dense_synthesis.gatewise_control_counts. A gatewise U bound is not
     available and is reported as None, not zero. Open controls conjugate by
     at most 2*a X gates, which change no CX count. With no address bits the
     route is ``uncontrolled``. A one-system-qubit branch follows the
@@ -240,7 +240,7 @@ def _dense_select_bound(payload, data):
     Every physical branch of a homogeneous dense Plan has the same width and
     route, so one bound C per branch gives N*C for SELECT CX. No smallest,
     median or largest |k| branch is built. The record keeps its basis and
-    route, and it is not added to the raw representative inventory.
+    route, and it is not added to the operation counts of the representatives.
     """
     bound = dense_representative_envelope(data.num_system_qubits, data.num_control_qubits,
                                           payload.method.dense_control_route)
@@ -299,8 +299,9 @@ def _pf_samples(payload, data, operation):
 def _qsp_samples(payload, data, operation):
     """Yield one controlled joint-generator query and the QSP fixed blocks with their counts.
 
-    Multiplicities come from the saved structural law (block-encoding
-    queries, projector phases, boundary gates and OAA reflections), so the
+    Multiplicities come from the saved structural formula (block-encoding
+    queries, projector phases, boundary gates and the reflections of
+    oblivious amplitude amplification), so the
     degree-long QSP circuit is never built for this estimate.
     """
     from qiskit import QuantumCircuit
@@ -366,9 +367,9 @@ def _qsp_samples(payload, data, operation):
 
 
 def _representatives(plan,payload,operation,bounds):
-    """Yield explicit selected PREP, evolution and readout representatives with their multiplicities.
+    """Yield the PREP, evolution and readout representatives with their multiplicities.
 
-    A dense exact SELECT builds no representative: its structural upper-bound
+    A dense exact SELECT builds no representative. Its structural upper-bound
     record (_dense_select_bound) is appended to ``bounds`` instead.
     """
     from qiskit import QuantumCircuit,ClassicalRegister
@@ -448,24 +449,24 @@ def _representatives(plan,payload,operation,bounds):
 # consequence of these laws.
 def sample_resources(plan, *, max_qubits=13, max_bytes=DEFAULT_MAX_BYTES,
                      max_build_work=100_000_000,max_operations=100_000,transpile_options=None):
-    """Inventory selected representative circuits and weight them by multiplicity.
+    """Count the operations of representative circuits of the Plan and weight them by multiplicity.
 
     Returns ``representatives`` (name, saved multiplicity and the operation
-    inventory of each representative circuit) and ``weighted_totals`` for each
+    counts of each representative circuit) and ``weighted_totals`` for each
     readout setting (a sampled group, a mass setting or the exact reduction):
     every core representative's operation counts times its multiplicity,
     plus that setting's readout representative (its group basis change and
-    measurements, none for the exact reduction). The weighted
-    totals are estimates of the selected construction's operation counts. They
-    do not model angle-specific cancellation, cross-block optimization or SDK
-    workspace. ``structural_bounds`` lists the records that no raw inventory
-    represents: for a dense exact SELECT, its structural upper bound for
-    every physical branch (dense_representative_envelope) in the named owner
-    bases, never added to a weighted total. max_qubits bounds the Plan width and the width of every
-    representative circuit.
+    measurements, none for the exact reduction). The weighted totals are
+    estimates of the planned construction's operation counts. They do not
+    model angle-specific cancellation, cross-block optimization or the
+    working memory of Qiskit. ``structural_bounds`` lists the records that no representative
+    circuit covers, which for a dense exact SELECT is its structural upper
+    bound for every physical branch (dense_representative_envelope) in the
+    named gate bases, never added to a weighted total. max_qubits bounds the
+    Plan width and the width of every representative circuit.
     max_build_work bounds summed known gate/table size proxies.
     max_operations bounds all inspected representative operations. No cap
-    bounds SDK runtime or process RSS. Transpilation occurs only when
+    bounds the runtime of Qiskit or process RSS. Transpilation occurs only when
     explicitly requested.
     """
     from nwqlib.core.planning import Plan

@@ -1,4 +1,7 @@
-"""Portable resource facts and scoped declarations, without SDK objects or executable laws."""
+"""Records of resource counts and of the cost declarations of circuit blocks.
+
+They hold no quantum SDK object and no executable formula.
+"""
 
 import math
 from typing import Literal
@@ -133,7 +136,8 @@ class ResourceContext(Record):
             for a later device assessment. The estimate itself allocates
             nothing and queries no device.
         batch_schedule: Default `"unspecified"`. `"serial"` declares that
-            independent circuit batches run one at a time, so a batch memory
+            the circuit executions of each measurement batch run one after
+            another, so a batch memory
             peak holds without condition. With `"unspecified"` such a peak is
             labeled `conditional`. The required schedule stays recorded for
             the execution to follow.
@@ -163,8 +167,8 @@ class ResourceLaw(Record):
     estimate uses a rule only for a call whose control and adjoint flags, cost
     parameters and call arguments, basis, precision and synthesis all match.
     The value is a number per call, not a formula, so the estimate can check
-    it against a known gate recipe and keep its source without running
-    caller code. Rules in different bases are alternatives, not additions.
+    it against the block's known gate decomposition and keep its source
+    without running caller code. Rules in different bases are alternatives, not additions.
     Build it with keyword arguments when you write a block (see [Compose
     blocks](../blocks.md)). `metric`, `basis`, `value`, `interpretation` and
     `evidence` are required.
@@ -286,12 +290,13 @@ class ResourceQuantity(Record):
             `"conditional"` or `"unavailable"`.
         location: Location of a width or byte peak, `None` for a total.
         sources: Content hashes of all evidence attached to the value,
-            including evidence used only to check a gate recipe against a
-            declared rule.
+            including evidence used only to check a block's gate
+            decomposition against a declared rule.
         derivation_sources: Content hashes of the evidence that determined the
             value, a subset of `sources`.
         required_schedule: `"serial_acquisitions"` when this peak holds only
-            if independent circuit batches run one at a time, otherwise
+            if the circuit executions of each measurement batch run one after
+            another, otherwise
             `None`. Follow it before comparing the peak with a device
             capacity.
         schema_version: Format version of the record, 2.
@@ -317,7 +322,7 @@ class ResourceQuantity(Record):
     required_schedule: Literal["serial_acquisitions"] | None = None
 
     def __str__(self):
-        """Show this stored quantity and its scope without evaluating a law."""
+        """Show this quantity and its scope without evaluating a cost rule."""
         fact = self.fact
         if isinstance(fact.value, Rational):
             value = str(fact.value.numerator)
@@ -349,8 +354,8 @@ class ResourceQuantity(Record):
         or Float64 and nonnegative, and an exact value must be an integer
         cardinality, except ``expected_operations``, which may be fractional.
         Byte metrics use the byte unit and all others the count unit. The
-        Fact names this metric, and every derivation source is also a kept
-        source.
+        Fact names this metric, and every derivation source is also listed in
+        ``sources``.
         """
         unavailable = self.fact.availability in {"unknown", "not_applicable"}
         if unavailable != (self.interpretation == "unavailable"):
@@ -389,8 +394,9 @@ class WorkloadEstimate(Record):
     device profile is given, and so does [`estimate`][nwqlib.resources.fold.estimate].
     Read one metric with `quantity(metric)`, or a width or byte peak with
     `quantity(metric, location=...)`, and list everything with `quantities`
-    or `print(workload)`. A metric without a cost rule is present and
-    labeled `unavailable`, never zero. The estimate is of the logical
+    or `print(workload)`. A metric whose value cannot be determined, such as
+    a gate count that no exact gate list, registered CX bound or cost rule
+    gives, is present and labeled `unavailable`, never zero. The estimate is of the logical
     circuit description, before compilation, routing or error correction.
 
     `exact_evaluations` counts grouped exact-statistic requests, not returned
@@ -412,7 +418,7 @@ class WorkloadEstimate(Record):
         sources: The original evidence records of the cost rules. The
             arithmetic of the estimate does not make them verified.
         defined_selections: Content hashes of the circuit blocks and classical
-            kernels the run may reach, not a record of built circuits.
+            routines the run may reach, not a record of built circuits.
         work_units: Bookkeeping work of the estimate, not run time, at most
             `24 * limits.max_steps`.
         evaluated_contexts: Distinct node and call contexts evaluated.
@@ -424,7 +430,8 @@ class WorkloadEstimate(Record):
     Examples:
         A two-dimensional Lanczos Plan, estimated in the CX basis, has an
         exact width of two qubits and an upper bound of three CX gates. No
-        rule gives its total operation count:
+        exact gate list, registered CX bound or cost rule gives its total
+        operation count:
 
         >>> import nwqlib
         >>> from nwqlib import Eigenproblem
@@ -463,13 +470,14 @@ class WorkloadEstimate(Record):
         """Check a loaded estimate's bookkeeping and that every reference resolves inside it.
 
         work_units may not exceed ``FOLD_WORK_PER_ADMISSION_STEP * max_steps``,
-        the largest fold ceiling an admitted Program can reach, and
-        evaluated_contexts may not exceed work_units. The expression table
-        must be an acyclic graph within the admission limits, with declared
-        parameters and integer constants within ``max_integer_bits``. Each
-        (metric, location) pair appears once, every source
-        identity names a stored Evidence record and every symbolic value names
-        a stored expression.
+        the largest work of the resource total that an accepted Program can
+        reach, and evaluated_contexts may not exceed work_units. The
+        expression table must be an acyclic graph within the Program's size
+        limits (``AdmissionLimits``), with declared parameters and integer
+        constants within ``max_integer_bits``. Each (metric, location) pair
+        appears once, every source content hash names an Evidence record in
+        ``sources`` and every symbolic value names an expression in
+        ``expressions``.
         """
         if (self.work_units > FOLD_WORK_PER_ADMISSION_STEP * self.limits.max_steps
                 or self.evaluated_contexts > self.work_units):
@@ -515,7 +523,7 @@ class WorkloadEstimate(Record):
                 selects a total.
 
         Returns:
-            quantity (ResourceQuantity): The stored quantity.
+            quantity (ResourceQuantity): The quantity held in the estimate.
 
         Raises:
             ValueError: If no quantity has this metric and location. The
@@ -537,7 +545,7 @@ class WorkloadEstimate(Record):
         return matches[0]
 
     def __str__(self):
-        """Display the existing fold, including unavailable costs and conditions."""
+        """Display the resource totals, including unavailable costs and conditions."""
         lines = [f"Selected resources ({self.context.basis}):"]
         lines.extend(str(quantity) for quantity in self.quantities)
         if self.assumptions:

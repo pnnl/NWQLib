@@ -1,7 +1,8 @@
-"""Save and load the numerical records, arrays and block bindings of an LCHS Plan.
+"""Save and load the numerical records and arrays of an LCHS Plan and the data each block uses.
 
-The record list belongs to this method's actual selected payload. It contains
-data only: no provider functions, arbitrary Python objects or SDK gate schema.
+The record list covers the numerical data of this method's Plans. It contains
+data only, with no kernel or quadrature functions, arbitrary Python objects or
+SDK gate schema.
 """
 
 from collections.abc import Mapping
@@ -50,7 +51,7 @@ def _record_type(name):
 
 
 class _SelectedData:
-    """Write and read selected LCHS values as tagged data and array files.
+    """Write and read the LCHS values of a Plan as tagged data and array files.
 
     Only scalars, arrays, ingested inputs, the Plan's own Method and the
     record types listed in _RECORD_MODULES can be saved, so an archive never
@@ -159,21 +160,21 @@ _CONSTRUCTORS = {
 
 
 def save(method,plan,files):
-    """Save the Plan, its native numerical data and how each block is rebound.
+    """Save the Plan, its numerical payload for circuit construction and how each block receives its data.
 
-    Each selected block is saved as its known constructor name, or as the
-    index of its base for an inverse or controlled copy. Only a PREP tensor
-    block saves its payload. Planning binds the other payloads from the
-    Plan's own data, and loading binds them the same way. SELECT and the
-    periodic leaves share the Plan's one native payload, SELECT also takes the
-    Problem's elapsed time, the input preparation is the Problem's initial
-    state (quantum.py, periodic.py and host.py) and a parity block has no
-    payload. No circuit is saved. Native circuits are built only when a point
+    Each block of the construction is saved as its known constructor name,
+    or as the index of its base for an inverse or controlled copy. Only a PREP
+    tensor block saves its payload. Planning gives the other blocks their data
+    from the Plan's own data, and loading gives it the same way. SELECT and
+    the periodic Strang blocks share the Plan's one numerical payload, SELECT
+    also takes the Problem's elapsed time, the input preparation is the
+    Problem's initial state (quantum.py, periodic.py and host.py) and a
+    parity block has no payload. No circuit is saved. Qiskit circuits are built only when a point
     is prepared.
 
-    The native payload grows with the grid and the schedule (node tables,
-    coefficients, host actions and SELECT angle tables), so it is written to
-    its own JSON file with NPY array leaves, and the returned record names
+    The numerical payload grows with the grid and the schedule (node tables,
+    coefficients, classical actions and SELECT angle tables), so it is written
+    to its own JSON file with NPY array leaves, and the returned record names
     that file in place of the payload. That record is embedded in result.json
     and in a Run's selection file.
     """
@@ -207,18 +208,19 @@ def save(method,plan,files):
 
 
 def load(saved,files):
-    """Rebind the saved LCHS constructors to the saved native data and the Problem.
+    """Give the saved LCHS block constructors the saved numerical payload and the Problem again.
 
-    The native payload is read back from the JSON file that save named, and
-    each PREP tensor payload from its block entry. The other payloads are
-    bound as planning bound them (see save). When the Problem has no source,
-    the coefficient plan inside the native data is also bound as the Plan's
-    coefficient plan, as at planning. A source Plan binds None there, because
+    The numerical payload is read back from the JSON file that save named,
+    and each PREP tensor payload from its block entry. The other blocks
+    receive their data as at planning (see save). When the Problem has no
+    source, the coefficient plan inside the numerical payload is also attached
+    as the Plan's coefficient plan, as at planning. A source Plan attaches
+    None there, because
     its execution does not use that homogeneous plan.
 
     Loading checks the format and restores each inverse or controlled copy
     from its saved base index. The periodic Strang payload is used as saved.
-    Loading never reselects a grid, fits phases or solves an eigensystem.
+    Loading never chooses a new grid, fits phases or solves an eigensystem.
     """
     if saved.get('format')!=FORMAT:
         raise unsupported_archive_format("LCHS archive", saved.get('format'), FORMAT)

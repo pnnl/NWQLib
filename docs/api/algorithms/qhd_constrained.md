@@ -20,7 +20,7 @@ The [QHD](qhd.md) page documents the `QHD` configuration that every round and le
 | Refine the box of an unconstrained problem | [`refine_box`][nwqlib.algorithms.qhd.refinement.refine_box] with [`BoxRefinement`][nwqlib.algorithms.qhd.refinement_records.BoxRefinement] options |
 | Continue or reopen a refinement | [`resume_box_refinement`][nwqlib.algorithms.qhd.refinement.resume_box_refinement], [`load_box_refinement`][nwqlib.algorithms.qhd.refinement.load_box_refinement] |
 | Read the levels of a refinement | [`BoxRefinementResult`][nwqlib.algorithms.qhd.refinement_records.BoxRefinementResult], [`RefinementLevel`][nwqlib.algorithms.qhd.refinement_records.RefinementLevel] |
-| Read selected region mass bounds from counts | `print(result)` or `result.report()` on either result type, with [simultaneous coverage](../../algorithms/qhd.md#box-refinement) over the configured run |
+| Read lower bounds on the mass of each level's selected region (the box formed by the marginal intervals that the level keeps, or the chosen side of a stall split) from counts | `print(result)` or `result.report()` on either result type, with [simultaneous coverage](../../algorithms/qhd.md#box-refinement) over the configured run |
 
 ## Solve a constrained problem
 
@@ -56,7 +56,7 @@ The [QHD](qhd.md) page documents the `QHD` configuration that every round and le
 
 With counts and refinement, `print(result)` and `result.report()` include mass lower bounds for each level's backend-sampled distribution conditioned on valid decoding. The default 95% confidence covers all rounds and levels together. Both result types accept `report(failure_probability=alpha)` and explicit `None` to omit the statistical report. The method entries below give the parameter and returned fields.
 
-`ConstrainedQHDResult.record` is an `AugmentedLagrangianRecord`, which keeps one `ALIteration` per round, with the round's point and update in `ALEvaluation` and its counts in `ALResources`. Under `inequality_form="slack"` or `"auto"`, `InnerRepresentation`, `SlackAxis` and `FormTrial` record each round's resolved choice. Feasibility, complementarity and the stopping status describe the chosen point and its multipliers. A stopping status does not assess optimality.
+`ConstrainedQHDResult.record` is an `AugmentedLagrangianRecord`, which keeps one `ALIteration` per round, with the round's point and update in `ALEvaluation` and its counts in `ALResources`. Under `inequality_form="slack"` or `"auto"`, `InnerRepresentation`, `SlackAxis` and `FormTrial` record the representation chosen in each round. Feasibility, complementarity and the stopping status describe the chosen point and its multipliers. A stopping status does not assess optimality.
 
 ::: nwqlib.algorithms.qhd.constrained.ConstrainedQHDResult
     options:
@@ -145,5 +145,5 @@ With counts and refinement, `print(result)` and `result.report()` include mass l
 - A stopping status does not assess optimality. `feasible_complementary` is not convergence in the sense of Algencan, the solver of Birgin and Martínez (doi:10.1137/1.9781611973365), because projected stationarity is not a stopping condition.
 - Finite-grid multipliers are dual iterates of the grid problem, not the continuous KKT multipliers, and the reported multipliers belong to the last round, not to the best point.
 - Neither the joint mass bound of a refinement level nor a small box certifies that the global minimizer lies in the box.
-- `constrained_grid_minimum` covers the preprocessed box's grid only and refuses a run with box refinement. Its gap is an evaluated-value diagnostic, not a bound for the mathematical objective.
+- `constrained_grid_minimum` covers the preprocessed box's grid only and rejects a run with box refinement. Its gap is an evaluated-value diagnostic, not a bound for the mathematical objective.
 - The work and byte bounds of the record sum per-category limits. They are not runtime or peak-memory bounds.

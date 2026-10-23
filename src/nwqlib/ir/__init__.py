@@ -1,4 +1,8 @@
-"""SDK-free shared Program construction, bounded binding and lifecycle admission."""
+"""`Program`, NWQLib's description of a circuit as named steps, with bounded parameter binding and structural checks.
+
+The structural check (Program admission) follows the declared lifecycle of
+registers and classical values. No quantum SDK is imported.
+"""
 
 from .expressions import (
     AdmissionLimits, Binary, Binding, Constant, ExprRef, Expression, Parameter, ParameterRef,

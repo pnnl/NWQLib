@@ -1,4 +1,7 @@
-"""Explicit trusted registrations with inert external discovery."""
+"""Explicit, trusted registrations of Methods by name and version.
+
+Discovering installed extensions imports none of their code.
+"""
 
 from collections.abc import Iterable
 from dataclasses import dataclass
@@ -254,7 +257,7 @@ def algorithm_card(registration: Registration) -> dict:
     The keys are `source`, `descriptor`, `options_available` and a fixed
     `qualification` text. `descriptor` is None when the registration does not
     carry it, as for an installed extension found by
-    `third_party_registrations`. The card reads only the stored metadata, so
+    `third_party_registrations`. The card reads only the registration's metadata, so
     it loads no code and assesses no backend. `nwqlib card` and
     `nwqlib algorithms --json` print it.
     """

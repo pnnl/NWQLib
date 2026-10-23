@@ -2,7 +2,7 @@
 
 NWQLib's error models treat a dense unitary that a construction appends, such
 as an LCHS ``dense_exact`` branch or a dense block-encoding dilation, as the
-exact matrix. When a construction adds controls, or a backend lowers the
+exact matrix. When a construction adds controls, or a backend compiles the
 circuit to a gate basis, the circuit that replaces the unitary must
 therefore equal it to binary64 rounding. Qiskit 2.6.0 does
 not guarantee this. Its ``TwoQubitBasisDecomposer`` always decomposes the
@@ -21,7 +21,7 @@ controlled matrix when ``numpy.allclose`` with ``atol=1e-7`` and
 ``UnitaryGate`` with :func:`controlled_unitary_circuit` and replaces every
 dense ``UnitaryGate`` in a definition by :func:`dense_unitary_circuit`
 before it adds controls. ``qiskit_compat.exact_dense_unitaries`` replaces
-them before a backend lowers a circuit to a gate basis, and the MPS state
+them before a backend compiles a circuit to a gate basis, and the MPS state
 preparation synthesizes its two-qubit gates with
 :func:`dense_unitary_circuit`.
 
@@ -968,9 +968,9 @@ def controlled_unitary_circuit(matrix: Any, num_controls: int):
     The demultiplexing step replaces each diagonal block by its unitary
     polar factor, the nearest unitary, and every later step works on exact
     unitaries. A ``matrix`` that is unitary to rounding is therefore
-    realized to rounding. One with a larger unitarity defect, such as a high
-    power of an input admitted within a tolerance, is realized as its polar
-    factor, which differs from it by about half that defect.
+    synthesized to rounding. One with a larger unitarity defect, such as a
+    high power of an input accepted within a tolerance, is synthesized as
+    its polar factor, which differs from it by about half that defect.
     """
     array = np.asarray(matrix, dtype=complex)
     step = 1 << num_controls
@@ -983,7 +983,7 @@ def controlled_synthesis_size(num_qubits: int) -> tuple[int, int, int]:
     """Return (work, working bytes, kept bytes) of one :func:`controlled_unitary_circuit` on ``num_qubits`` qubits.
 
     Here m = ``num_qubits`` >= 1 counts the control and system qubits
-    together, and M = 2**m. The laws follow the recursion of :func:`_qsd`
+    together, and M = 2**m. The formulas follow the recursion of :func:`_qsd`
     for a matrix that is block diagonal at the top (module docstring). For
     m = 1, the control of a scalar phase, the circuit is one U gate. A work
     unit is one complex multiply-add. As for the dense completion of
@@ -1020,13 +1020,13 @@ def controlled_synthesis_size(num_qubits: int) -> tuple[int, int, int]:
       A.2 therefore has at most ``(11/8) 4**l - 3 2**l`` instructions, and
       the controlled matrix at most ``(11/16) 4**m - 2**(m+1)`` for m >= 3,
       which a generic base unitary reaches, and ten for m = 2. Qiskit stores
-      a standard gate in Rust. The law allows 256 bytes for each of
-      ``(11/16) M**2`` slots and 16384 bytes for the circuit, gate and
+      a standard gate in Rust. The formula allows 256 bytes for each of
+      the ``(11/16) M**2`` instructions and 16384 bytes for the circuit, gate and
       register objects. The circuits of a random base unitary with one
       control, rebuilt from their gate lists in a fresh process, held 115
       to 165 bytes of resident memory per instruction for m = 3 to 9 and
       2.8 KB in total for m = 2 (Apple-silicon Mac, Qiskit 2.5.2, averaged
-      over up to 256 copies for m <= 5). The law was 1.7 to 7.0 times that
+      over up to 256 copies for m <= 5). The formula gave 1.7 to 7.0 times that
       memory, and 1.95 and 2.03 times for m = 8 and 9.
     - Working bytes ``256 M**2 + 65536``, alive for one synthesis at a
       time. The controlled matrix and the reordered copy that the top
@@ -1040,7 +1040,7 @@ def controlled_synthesis_size(num_qubits: int) -> tuple[int, int, int]:
       their circuits, below 60 M**2. The multiplexor and U angles kept as Python floats for
       appending take below 35 M**2. The 65536 bytes cover the fixed Python
       objects of a call. For m = 2 to 9 the peak that tracemalloc measured,
-      which excludes the circuit held in Rust, was at most 0.48 of the law,
+      which excludes the circuit held in Rust, was at most 0.48 of the formula,
       and 0.40 for m = 6 to 9.
     """
     size = 1 << num_qubits
@@ -1051,7 +1051,7 @@ def controlled_synthesis_size(num_qubits: int) -> tuple[int, int, int]:
 def dense_synthesis_size(num_qubits: int) -> tuple[int, int, int]:
     """Return (work, working bytes, kept bytes) of one :func:`dense_unitary_circuit` on ``num_qubits`` qubits.
 
-    Here m = ``num_qubits`` >= 1 and M = 2**m. The laws hold for any input
+    Here m = ``num_qubits`` >= 1 and M = 2**m. The formulas hold for any input
     and follow the recursion of :func:`_qsd` (module docstring). The units
     are those of :func:`controlled_synthesis_size`, in which a product of
     two h-square matrices counts h**3 units and an SVD or complex Schur
@@ -1088,13 +1088,13 @@ def dense_synthesis_size(num_qubits: int) -> tuple[int, int, int]:
     - Kept bytes ``352 M**2 + 16384``. For m >= 2 the circuit has at most
       ``7 M**2 / 16`` U, ``25 M**2 / 48`` CX, ``3 M**2 / 8`` RZ and
       ``M**2 / 24`` H gates (:func:`dense_synthesis_gate_census`), at most
-      ``11 M**2 / 8`` instructions. The law allows 256 bytes for each of
-      these slots and 16384 bytes for the circuit and register objects. The
+      ``11 M**2 / 8`` instructions. The formula allows 256 bytes for each of
+      these instructions and 16384 bytes for the circuit and register objects. The
       circuits of Haar-random inputs, rebuilt from their gate lists in a
       fresh process, held 124 to 173 bytes of resident memory per
       instruction for m = 3 to 9 and 3.9 KB in total for m = 2
       (Apple-silicon Mac, Qiskit 2.5.2, averaged over up to 256 copies for
-      m <= 5). The law was 1.7 to 5.6 times that memory, and 1.98 and 2.17
+      m <= 5). The formula gave 1.7 to 5.6 times that memory, and 1.98 and 2.17
       times for m = 8 and 9.
     - Working bytes ``320 M**2 + 65536``, alive during one synthesis. The
       blocks of one depth hold M**2 entries, 16 M**2 bytes, the input at
@@ -1112,12 +1112,12 @@ def dense_synthesis_size(num_qubits: int) -> tuple[int, int, int]:
       the Python records of the blocks below 20 M**2. The 65536 bytes cover
       the fixed Python objects of a call. For m = 1 to 9 the peak that
       tracemalloc measured, which excludes the circuit held in Rust, was at
-      most 0.54 of the law, and 0.45 for m = 6 to 9, for Haar-random,
+      most 0.54 of the formula, and 0.45 for m = 6 to 9, for Haar-random,
       near-identity and block-diagonal inputs.
 
     A Haar-random input took 0.027 s at m = 6, 0.12 s at m = 7, 0.57 s at
     m = 8 and 2.6 s at m = 9 on the same machine with one thread, 0.65 to
-    1.1 s per 10**9 units of the work law at m = 8 and 9.
+    1.1 s per 10**9 units of the work formula at m = 8 and 9.
     """
     size = 1 << num_qubits
     work = 113 * size**3 // 4 + (num_qubits**2 + 16 * num_qubits + 512) * size**2
@@ -1273,7 +1273,7 @@ def controlled_synthesis_gate_census(num_qubits: int) -> dict[str, int]:
 
 
 def census_control_counts(census: dict[str, int], num_controls: int) -> tuple[int, int, int]:
-    """Return (gates, instructions, heavy) of Qiskit's control of a circuit with the gate census ``census``.
+    """Return (gates, instructions, heavy) of Qiskit's control of a circuit with the gate counts ``census``.
 
     ``census`` has the keys u, cx, rz and h of :func:`dense_synthesis_gate_census`
     and :func:`controlled_synthesis_gate_census`, and the circuit also has a
@@ -1297,10 +1297,10 @@ def gatewise_control_counts(num_qubits: int, num_controls: int) -> tuple[int, in
     composite gate by its exact synthesis and then calls Qiskit's
     ``control``, which unrolls the composite to its basis and controls each
     gate with ``num_controls`` controls (``qiskit/circuit/_add_control.py``).
-    ``gates`` bounds the gates it unrolls, the census of
+    ``gates`` bounds the gates it unrolls, the gate counts of
     :func:`dense_synthesis_gate_census` plus the global phase.
-    ``instructions`` bounds the instructions it emits, each census gate
-    priced by ``CONTROLLED_U_INSTRUCTIONS``, ``CONTROLLED_RZ_INSTRUCTIONS``
+    ``instructions`` bounds the instructions it emits, each counted gate
+    multiplied by ``CONTROLLED_U_INSTRUCTIONS``, ``CONTROLLED_RZ_INSTRUCTIONS``
     or the fixed counts beside them, plus one for the phase. ``heavy``
     counts those of them that hold angles or are Python objects
     (:func:`_controlled_heavy_instructions`). A composite that holds several
@@ -1318,11 +1318,11 @@ def gatewise_control_size(gates: int, instructions: int, heavy: int) -> tuple[in
     instructions, ``heavy`` of which hold angles or are Python objects.
     Qiskit's control step does Python and Rust bookkeeping, no
     floating-point linear algebra, so its work has no count of
-    multiply-adds. The law sets its units by measured time instead. Per
+    multiply-adds. The formula sets its units by measured time instead. Per
     unit, the call took 0.45 to 3.3 times as long as
     :func:`dense_synthesis_size` on 4 qubits and 2.6 to 21 times as long on
-    7 qubits in the measurements below, and the limits that add both laws
-    count work units, not time.
+    7 qubits in the measurements below, and the limits that add both
+    formulas count work units, not time.
 
     - Work ``2048 gates + 16 instructions``. Each unrolled gate costs one
       Python call of ``apply_basic_controlled_gate``, 6 to 16 us with one
@@ -1332,7 +1332,8 @@ def gatewise_control_size(gates: int, instructions: int, heavy: int) -> tuple[in
       instruction added 0.1 to 0.2 us (Apple-silicon Mac, one thread,
       Qiskit 2.5.2). For Haar-random syntheses on m = 4 to 7 qubits with
       one to eight controls the call took 4.4 to 35 ns per unit of this
-      law, and the synthesis itself 1.6 to 15 ns per unit of its own law.
+      formula, and the synthesis itself 1.6 to 15 ns per unit of its own
+      formula.
     - Kept bytes ``96 instructions + 1024 heavy + 16384``. The
       ``ControlledGate`` keeps a deep copy of the emitted definition and of
       the base gate. The copy of the base holds the synthesized circuit,
@@ -1340,7 +1341,7 @@ def gatewise_control_size(gates: int, instructions: int, heavy: int) -> tuple[in
       once ``controlled`` returns, so it is not counted again. In circuits
       of one instruction kind, a parameterless standard gate held 40 to 59
       bytes of resident memory, a standard gate with angles 123 to 177, an
-      MCX gate 355 and an MCPhase gate 733. The law allows 96 bytes for
+      MCX gate 355 and an MCPhase gate 733. The formula allows 96 bytes for
       every instruction, 1024 more for each heavy one and 16384 bytes for
       the gate and circuit objects.
     - Working bytes ``1024 gates + 96 instructions + 1024 heavy + 65536``,
@@ -1348,15 +1349,16 @@ def gatewise_control_size(gates: int, instructions: int, heavy: int) -> tuple[in
       second circuit and the definition of the unrolled gate
       (``_unroll_gate``), and the ``ControlledGate`` constructor deep-copies
       the base gate and the emitted circuit, so four copies of the unrolled
-      gates, allowed 256 bytes a slot, and one of the emitted circuit exist
+      gates, allowed 256 bytes each, and one of the emitted circuit exist
       besides the kept copy. The 65536 bytes cover the fixed Python objects
       of the call.
 
     For m = 4 to 7 and one to eight controls, kept controlled gates with the
     copy of their base held 67 to 267 bytes of resident memory per emitted
-    instruction. The kept laws of the synthesis and of this step together
-    were 1.7 to 7.7 times that memory, and this law, working and kept bytes
-    together, was 2.1 to 11 times the peak increase of resident memory
+    instruction. The kept-byte formulas of the synthesis and of this step
+    together gave 1.7 to 7.7 times that memory, and the working and kept
+    bytes of this formula together were 2.1 to 11 times the peak increase of
+    resident memory
     during the call, wherever that increase exceeded 0.1 MB.
     """
     return (2048 * gates + 16 * instructions, 1024 * gates + 96 * instructions + 1024 * heavy + 65536,

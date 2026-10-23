@@ -1,11 +1,12 @@
-"""Qiskit Aer lowering, readout insertion and result translation.
+"""Translation of circuits for Qiskit Aer, readout insertion and translation of Aer results.
 
-This module owns how a selected logical circuit becomes an Aer-executable
-circuit. Definitions are expanded until Aer's native classes remain. Pauli
-readouts are inserted at the original instruction position, and probability
-and amplitude saves follow the circuit after final measurements are removed.
-A trajectory schedule inserts every point's saves at its original bound
-boundary, before lowering, and executes nothing after the last save.
+This module turns a logical circuit into a circuit that Aer executes.
+Definitions are expanded until only operation classes that Aer executes
+directly (Aer-native classes) remain. Pauli readouts are inserted at the
+original instruction position, and probability and amplitude saves follow the
+circuit after final measurements are removed. A trajectory schedule inserts
+every point's saves at its boundary in the original bound circuit, before
+translation, and executes nothing after the last save.
 A final measurement is removed only when no later classical instruction reads
 its bit.
 ``_submit_aer_execution`` is the single place where Aer results become NWQLib
@@ -55,13 +56,13 @@ class _AerDecompose(Decompose):
         """Record Aer's native operation classes by name, from the simulator's target.
 
         ``expanded`` reports whether the last pass decomposed anything, which
-        lets ``_lower_aer_circuit`` stop as soon as only native operations remain.
+        lets ``_lower_aer_circuit`` stop as soon as only Aer-native operations remain.
         ``exact_synthesis`` is the Run's ``_exact_dense_unitaries``, which
         synthesizes the dense unitaries that a target without the unitary
         instruction needs, each distinct matrix once per Run object, and
-        reserves each new synthesis against the Run's ``max_synthesis_work``.
-        With None, lowering calls ``qiskit_compat.exact_dense_unitaries``
-        without a synthesis cache or charge.
+        counts each new synthesis against the Run's ``max_synthesis_work``.
+        With None, translation calls ``qiskit_compat.exact_dense_unitaries``
+        without a synthesis cache or count.
         """
         super().__init__(apply_synthesis=True)
         self.native_types = {
@@ -101,9 +102,9 @@ class _AerDecompose(Decompose):
 
 
 def _lower_aer_circuit(circuit, decompose):
-    """Lower one circuit on its own copy of the operations.
+    """Translate one circuit for Aer on its own copy of the operations.
 
-    Returns the lowered circuit and the number of decomposition passes.
+    Returns the translated circuit and the number of decomposition passes.
 
     Aer applies a ``UnitaryGate`` as its matrix. A noise model's gate basis
     omits that instruction, and decomposing it would use Qiskit's inexact
@@ -142,13 +143,13 @@ def _lower_aer_circuit(circuit, decompose):
 
 
 class _AerPreparation:
-    """One Run's lowered top-level Gate definitions for one Aer target, shared by source-gate identity.
+    """One Run's translated top-level Gate definitions for one Aer target, shared per source gate object.
 
-    Keep unique lowered blocks, never expanded submission circuits. The caller
-    must keep its logical gates unchanged while this cache holds them.
-    Parameter and definition payloads may be shared with those source gates.
-    Their immutability is the caller's lifetime contract, not a deep-copy
-    guarantee. Strong source references prevent reuse of an expired object's
+    Keep unique translated blocks, never expanded submission circuits. The
+    caller must keep its logical gates unchanged while this cache holds them.
+    Parameter and definition data may be shared with those source gates.
+    Their immutability is the caller's obligation for as long as the cache
+    holds them, not a deep-copy guarantee. Strong source references prevent reuse of an expired object's
     integer id.
     """
 
@@ -158,8 +159,8 @@ class _AerPreparation:
     def keep_sources(self, sources):
         """Release definitions outside the caller's current immutable gate set.
 
-        Prepared circuits keep their own instructions. Run keeps static
-        definitions and the previous/current parameter points, including during
+        Prepared circuits keep their own instructions. The Run keeps fixed
+        definitions and the previous and current parameter points, including during
         a failed preparation, instead of accumulating every optimizer trial.
         """
         stored = {id(source) for source in sources}
@@ -168,14 +169,14 @@ class _AerPreparation:
                 del self._blocks[key]
 
     def prepare(self, circuit, decompose):
-        """Return a new container whose non-native top-level gates share cached lowered definitions.
+        """Return a new container whose top-level gates that Aer does not execute directly share cached translated definitions.
 
-        Each distinct source gate is lowered once and wrapped as an Instruction
+        Each distinct source gate is translated once and wrapped as an Instruction
         with the same name, parameters and label, so instruction positions and
         observation boundaries are unchanged. A ``UnitaryGate`` wrapper is
         named ``dense_unitary`` instead, because Qiskit's ``circuit_to_dag``
         turns an instruction named ``unitary`` with a matrix parameter back
-        into a ``UnitaryGate`` and would discard the exact lowered definition.
+        into a ``UnitaryGate`` and would discard the exact translated definition.
         """
         prepared = circuit.copy_empty_like()
         for item in circuit.data:
@@ -198,7 +199,7 @@ class _AerPreparation:
 
 
 def _remove_final_measurements(circuit: QuantumCircuit, *, inplace: bool = False) -> QuantumCircuit:
-    """Remove final readout, preserving custom names and classical dependencies."""
+    """Remove final measurements, keeping custom names and classical dependencies."""
 
     collisions = []
     consumed = set()
@@ -255,7 +256,7 @@ def _prepare_execution_circuit(
 
     Qiskit Aer does not always execute composite library instructions such as
     ``StatePreparation`` or controlled dense ``UnitaryGate`` directly.
-    Preparation therefore decomposes an owned execution copy and leaves the
+    Preparation therefore decomposes its own execution copy and leaves the
     caller's logical circuit unchanged.
     """
 
@@ -291,7 +292,7 @@ def _prepare_execution_circuit(
 
 @dataclass(frozen=True)
 class _PreparedAerExecution:
-    """Internal prepared native circuit. The caller owns its mutation lifetime.
+    """Internal prepared Aer circuit. The caller decides how long it may be changed.
 
     ``trajectory`` is the save plan of a trajectory schedule
     (``_trajectory_saves``), or None for a single-endpoint readout.
@@ -372,22 +373,22 @@ def _trajectory_saves(observation, boundaries):
 
 
 def _aer_operation_counts(circuit):
-    """Return ``(native_operations, save_instructions)`` of a lowered coherent Aer circuit.
+    """Return ``(native_operations, save_instructions)`` of a translated coherent Aer circuit.
 
-    ``native_operations`` is the receipt's numerical operation count ``G``:
-    the native evolution operations to which the per-operation state-roundoff
-    model applies (``_validation.py``, consumed by
-    ``PreparedArtifact.probability_window`` and ``state_error``). A save
+    ``native_operations`` is the preparation record's numerical operation
+    count ``G``: the evolution operations of the translated circuit to which
+    the per-operation state-roundoff model applies (``_validation.py``, used
+    by ``PreparedArtifact.probability_window`` and ``state_error``). A save
     evaluates a statistic of the current state, or copies the state, and
-    stores the result. Rounding in that evaluation changes the saved
+    saves the result. Rounding in that evaluation changes the saved
     statistic. It does not insert another local state error into the
     continuing state, so a save adds zero to ``G``. Readout arithmetic is
     represented separately by ``exact_readout_roundoff``. Barrier and Delay
-    are state identities on this noiseless target. The save inventory is an
-    instruction count, not a runtime-work estimate: a marginal can require a
-    pass over the state and exponential output storage.
+    are state identities on this noiseless target. The save count is an
+    instruction count, not a runtime-work estimate, because a marginal can
+    require a pass over the state and exponential output storage.
 
-    Premise: the lowered, deterministic coherent native circuit. Instruction
+    Assumption: the translated, deterministic coherent Aer circuit. Instruction
     types are compared, not names, because a real gate can have a name that
     starts with ``save_``. Source: the derivation above the roundoff constants
     in ``_validation.py``, and docs/ENGINEERING_CONSTANTS.md, "Probability
@@ -418,11 +419,11 @@ def _aer_state_threads():
     explicit cap: ``_prepare_aer_execution`` passes it to Aer as
     ``max_parallel_threads``, and the Aer executor takes the minimum of an
     explicit positive cap and its automatic OpenMP maximum (one without
-    OpenMP), so the state-update worker count does not exceed it, apart from
+    OpenMP), so the state-update thread count does not exceed it, apart from
     Aer's explicit debugging overrides, which the statevector target does not
     enable. The trajectory memory check uses the same value
     (``connection._run_state_threads`` resolves it once per open Run). The cap can
-    reduce parallelism. It does not price transport, fusion workspace,
+    reduce parallelism. It does not account for transport, fusion workspace,
     thread stacks or process RSS.
     """
     import os
@@ -435,14 +436,14 @@ def _aer_state_threads():
 
 
 def _admit_aer_saved_buffers(observation, *, width, memory_mb, state_threads):
-    """Admit the simulation-phase numerical arrays of an Aer trajectory before native lowering.
+    """Check the numerical arrays of an Aer trajectory's simulation against the limit before translation.
 
-    Returns the admitted bytes.
+    Returns the counted bytes.
 
     For distinct probability save ``i`` of marginal width ``k_i >= 1``,
     ``save_probabilities`` produces a dense float64 vector of length
     ``N_i = 2**k_i``, and Aer keeps the saved results until completion, so
-    the kept numerical payload is ``B_prob = 8 * sum_i 2**k_i``. Let
+    the kept numerical data is ``B_prob = 8 * sum_i 2**k_i``. Let
     ``S`` count distinct saved statevectors of amplitude and reduction
     points, ``E`` the distinct saved expectations and ``w`` the complete
     native width. The general marginal kernel of the Aer 0.18.0 CPU
@@ -452,18 +453,18 @@ def _admit_aer_saved_buffers(observation, *, width, memory_mb, state_threads):
     ``W_marginal = max_i (g_i * 16 * t_i * 2**k_i)`` with ``g_i`` indicating
     the general kernel rather than its sorted full-register fast path and
     ``t_i`` a positive upper bound on the state-update threads. The
-    conservative simulation-phase envelope of the numerical arrays is
+    conservative upper bound on the numerical arrays during simulation is
 
         B_sim,num = (1+S) * 16 * 2**w + B_prob + 8*E + W_marginal,
 
-    checked against ``simulator_memory_mb * 2**20``. It uses the final
-    kept-save population together with the largest transient. Declared
-    positions are used before lowering resolves the end shorthand, which can
-    overcount an eventual shared save: a safe early bound. Every power is
+    checked against ``simulator_memory_mb * 2**20``. It uses the final set of
+    kept saves together with the largest transient. Declared positions are
+    used before translation resolves the end shorthand, which can overcount an
+    eventual shared save and so gives a safe early bound. Every power is
     refused before it is formed beyond the remaining budget.
 
     Distinct boundaries, ordered wire lists or readout views are different
-    saved data. Premises: CPU, double precision, this kernel, one coherent
+    saved data. Assumptions: CPU, double precision, this kernel, one coherent
     shot, and the stated thread bound. They are not established for GPU,
     distributed or chunked simulation, or another Aer release. The complete
     transport, allocator, OpenMP stack, fusion workspace and host decode
@@ -542,7 +543,7 @@ def _admit_aer_saved_buffers(observation, *, width, memory_mb, state_threads):
 
 
 def _trajectory_phase_ledger(selected, keys, decompose, preparation):
-    """Return the prefix phase ``Phi_k`` of each named statevector save, before lowering.
+    """Return the prefix phase ``Phi_k`` of each named statevector save, before translation.
 
     ``selected`` is the bound circuit with the saves (and any view tails and
     inverses) inserted. The phase of a save is that of every instruction
@@ -550,28 +551,28 @@ def _trajectory_phase_ledger(selected, keys, decompose, preparation):
 
     Aer applies an executed circuit's global phase once, before its first
     instruction, so every saved state carries the phase ``theta_save`` of
-    the whole lowered circuit, not that of its own prefix. Write the
-    lowering of top-level instruction ``j`` as ``C_j = exp(i*phi_j) U_j``,
-    ``U_j`` the emitted native sequence, and let ``phi_0`` be the logical
+    the whole translated circuit, not that of its own prefix. Write the
+    translation of top-level instruction ``j`` as ``C_j = exp(i*phi_j) U_j``,
+    ``U_j`` the resulting sequence of Aer-native operations, and let ``phi_0`` be the logical
     circuit's own top-level phase, which the circuit-prefix convention
     includes in every prefix. The phase of boundary ``k`` is ``Phi_k = phi_0
     + sum_(j<=k) phi_j`` (modulo ``2*pi``), and the saved array is multiplied
     by ``exp(i*(Phi_k - theta_save))``. ``theta_save`` is the executed
-    circuit's global phase. The receipt's native budget is modulo one common
-    global phase and does not bound the exact prefix phase, this ledger's
-    accumulation or the subtraction forming the correction angle, so a
-    phase-defined output has no state-error budget
-    (``core.planning.ReductionContext``). The multiplication by the actual
-    stored factor has the finite modulo-phase envelope of
-    ``_phase_product.phase_product_envelope``, which the receipt records
-    (``_statevector_roundoff``) and every consumer of the corrected array
-    carries.
+    circuit's global phase. The state-error budget of the preparation record
+    holds modulo one common global phase and does not bound the exact prefix
+    phase, the accumulation of these phases or the subtraction forming the
+    correction angle, so a phase-defined output has no state-error budget
+    (``core.planning.ReductionContext``). The multiplication by the saved
+    factor has the finite modulo-phase bound of
+    ``_phase_product.phase_product_envelope``, which the preparation record
+    keeps (``_statevector_roundoff``) and every computation that uses the
+    corrected array carries.
 
-    The ledger is produced by the same boundary-preserving lowering that
-    executes: each top-level block of ``preparation`` is lowered once, and its
-    wrapper's lowered definition carries ``phi_j``, which the final
-    decomposition adds to the circuit phase. A native instruction adds zero.
-    Another non-native instruction is lowered alone to read its phase.
+    The phases come from the same boundary-preserving translation that
+    executes: each top-level block of ``preparation`` is translated once, and
+    its wrapper's translated definition carries ``phi_j``, which the final
+    decomposition adds to the circuit phase. An Aer-native instruction adds
+    zero. Any other instruction is translated alone to read its phase.
     Source: the derivation in this docstring.
     """
     from qiskit_aer.library.save_instructions.save_data import SaveData
@@ -599,26 +600,30 @@ def _trajectory_phase_ledger(selected, keys, decompose, preparation):
 def _phase_factor(angle):
     """The ``(real, imag)`` pair of the binary64 factor ``exp(i*angle)`` that corrects one saved state.
 
-    It is formed once, at preparation, and stored in the native metadata, so
-    submission and a restored preparation multiply by the same represented
-    factor whose envelope the receipt records.
+    It is formed once, at preparation, and saved in the metadata of the
+    prepared circuit, so submission and a restored preparation multiply by the
+    same represented factor whose error bound the preparation record keeps.
     """
     factor = complex(np.exp(1j * angle))
     return factor.real, factor.imag
 
 
 def _statevector_roundoff(prepared):
-    """Receipt-wide ``(t, e)`` envelope of the stored phase factors of ``prepared``.
+    """The ``(t, e)`` error bound, for the whole preparation record, of the saved phase factors of ``prepared``.
 
-    Each corrected save key's factor has its envelope
+    Each corrected save key's factor has its bound
     ``_phase_product.phase_product_envelope(factor, D)`` with
     ``D = 2**native_width``. A save with no multiplication has ``(0, 0)``.
-    The componentwise maxima over the receipt's save keys give one
-    conservative pair, charged to every statevector consumer the receipt
-    covers, including an uncorrected save when another key caused the
-    maximum. Charges are never summed across shared consumers, and the
-    multiplication is never applied twice. A preparation without stored
-    factors, every non-trajectory readout included, multiplies no saved state
+    The componentwise maxima over the record's save keys give one
+    conservative pair of relative and absolute terms, which propagates the
+    phase-multiplication error into the bound of every computation on a
+    statevector that the record covers (``PreparedArtifact.saved_state_error``
+    for the state distance, ``PreparedArtifact.saved_state_probability_window``
+    for the total probability), including an uncorrected save when another key
+    caused the maximum. The pair enters each such bound once and is never
+    summed across computations that share a save, and the multiplication is
+    never applied twice. A preparation
+    without saved factors, every non-trajectory readout included, multiplies no saved state
     and gives ``(0.0, 0.0)``. This is O(number of distinct saved keys)
     scalar work, with no scan or copy of a state.
     """
@@ -631,13 +636,14 @@ def _statevector_roundoff(prepared):
 
 
 def _restore_aer_readout(circuit, observation, boundaries=()):
-    """Restore only backend-owned save classes lost by QPY, at their native positions.
+    """Restore only the Aer save classes that QPY loses, at their positions in the translated circuit.
 
-    Prepared Run lowering inserts these top-level, default-subtype readouts.
-    Logical user inputs cannot supply Aer directives. Keep the saved parameters
-    and wire order. Do not lower the circuit again or move the observation to
-    its earlier logical position. A trajectory's saves are planned again from
-    its observation and the receipt's resolved ``boundaries``
+    Translation in a prepared Run inserts these top-level, default-subtype
+    readouts. Logical user inputs cannot supply Aer directives. Keep the saved
+    parameters and wire order. Do not translate the circuit again or move the
+    observation to its earlier logical position. A trajectory's saves are
+    planned again from its observation and the preparation record's resolved
+    ``boundaries``
     (``_trajectory_saves``), so every save, of every kind, is identified by
     its key, class, payload and wires.
     """
@@ -764,9 +770,9 @@ def _probability_window_exclusions(circuit, operation_names, *, amplitudes):
 
 
 def _readout_population(circuit, save_type, labels):
-    """Classify the history before each requested native save, never the later circuit.
+    """Classify the history before each requested Aer save, never the later circuit.
 
-    This is structural trajectory provenance, not a proof of state purity.
+    This is a structural record of the history, not a proof of state purity.
     Unresolved preceding control flow is unknown. A preceding measurement or
     reset can condition the saved trajectory. No simulation or gate expansion
     occurs.
@@ -805,38 +811,39 @@ def _prepare_aer_execution(
     state_threads: int | None = None,
     exact_synthesis=None,
 ) -> _PreparedAerExecution:
-    """Finish native lowering and readout insertion without submitting a job.
+    """Finish translation for Aer and readout insertion without submitting a job.
 
     A statevector target returns amplitudes unless one readout selector is
-    given. ``probability_qubits`` requests only the native probability marginal
+    given. ``probability_qubits`` requests only Aer's probability marginal
     on those qubits, as a dense float64 array whose index bit ``j`` is
     ``probability_qubits[j]``. ``pauli_expectation_readout=(position, labels)``
     observes system-width Pauli labels before the instruction at ``position`` of
     the original circuit. A position equal to the circuit length observes after
     all of its instructions, including measurements.
 
-    ``trajectory``, the ``(saves, points)`` plan of ``_trajectory_saves``, evaluates all selected point
+    ``trajectory``, the ``(saves, points)`` plan of ``_trajectory_saves``, evaluates all point
     readouts while advancing one coherent simulator state. Each save is
     inserted before the instruction at its boundary of the original bound
-    circuit, before lowering, so lowering cannot move a gate across it that
-    acts on the saved wires, and no prefix is constructed again. Pauli saves
-    (one ``save_expectation_value`` per label, each with its own key) leave
-    the state unchanged. Nothing after the last save is executed, so the
-    native operation count covers the circuit through the final observation.
+    circuit, before translation, so translation cannot move a gate across it
+    that acts on the saved wires, and no prefix is constructed again. Pauli
+    saves (one ``save_expectation_value`` per label, each with its own key)
+    leave the state unchanged. Nothing after the last save is executed, so the
+    operation count of the translated circuit covers the circuit through the
+    final point.
     ``phase_keys`` names the statevector saves that serve a phase-sensitive
     point. Each gets the phase of its own prefix (``_trajectory_phase_ledger``).
     ``views`` maps a readout view's tail and inverse definitions to their
     logical circuits. At a view's boundary the tail is applied, the view's
-    saves follow, and the exact inverse of the same selected sequence is
-    applied before continuation. The final observation needs no inverse when
+    saves follow, and the exact inverse of the same sequence is applied
+    before continuation. The final observation needs no inverse when
     nothing follows it. Multiple views at one boundary each start from the
     restored continuation state.
     ``preparation`` may share bound definitions that its caller keeps immutable.
-    A persistent prepared-handle caller privately owns those source definitions
-    and the fresh logical container. This function creates its execution circuit.
+    A caller that keeps a prepared circuit holds its own copies of those source
+    definitions and of the fresh logical container. This function creates its execution circuit.
     ``state_threads`` is the positive state-update thread cap of the
     statevector target, passed to Aer as ``max_parallel_threads`` and used by
-    the trajectory memory admission (``_admit_aer_saved_buffers``). None
+    the trajectory memory check (``_admit_aer_saved_buffers``). None
     resolves ``_aer_state_threads()``.
     ``exact_synthesis`` synthesizes the dense unitaries on a noise target
     whose gate basis omits the unitary instruction (``_AerDecompose``), and
@@ -1015,7 +1022,7 @@ def _prepare_aer_execution(
 
 
 def _submit_aer_execution(prepared: _PreparedAerExecution) -> BackendRunResult:
-    """Submit the already native artifact, with no lowering, inventory or readout edits."""
+    """Submit the already translated Aer circuit, with no further translation, counting or readout edits."""
     circuit = prepared.circuit
     # Exact readouts, a trajectory schedule of several points included, run
     # one pure-state trajectory (ENGINEERING_CONSTANTS.md, "Aer

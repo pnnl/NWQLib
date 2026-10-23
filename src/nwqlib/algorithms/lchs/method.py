@@ -1,7 +1,8 @@
 """LCHS choices for the original equation du/dt=-A u+b.
 
-Input and coordinates belong to LinearDynamics. Numerical selection belongs to
-this Method, acquisition to Run, and reconstruction to the selected readout.
+LinearDynamics defines the input and its coordinates. This Method chooses the
+numerical approximation, a Run executes the circuits or classical evaluation,
+and the chosen readout reconstructs the output.
 """
 
 import json
@@ -175,12 +176,13 @@ class LCHS(Method):
             ``B = T**3 sum_j |c_j| W_q(a_j, p)`` over the quadrature nodes
             and coefficients. The matching-operator commutators give
             ``W_q(a, p) = g a**3/2 + 4 a**2 p/3 + a p**2/3``, with g = 0
-            for q = 1, 2 and g = 1 for q >= 3, in the emitted potential,
-            even-matching, odd-matching order (Childs et al.,
+            for q = 1, 2 and g = 1 for q >= 3, when the circuit applies the
+            potential, even-matching and odd-matching factors in that order
+            (Childs et al.,
             doi:10.1103/PhysRevX.11.011020, Proposition 10, Eq. (121),
             or arXiv:1912.08854v3, Proposition 16, Eq. (152)).
-            The bound covers the selected finite weighted action on a unit input;
-            input scaling and other error components are handled separately. With
+            The bound covers the planned finite weighted action on a unit input.
+            Input scaling and other error components are treated separately. With
             zero potential the ideal synthesis error is zero at q = 1, 2.
             It requires
             `hamiltonian_evolution_backend="trotter"` and
@@ -230,10 +232,11 @@ class LCHS(Method):
             truncation threshold of the coefficient-state compression.
         mps_num_layers: Default `2`, positive. Number of layers of the
             coefficient-state MPS circuit.
-        max_dense_select_slots: Default `4_096`. Upper limit on the padded
-            address count, a power of two, of the dense SELECT circuit of
-            `"dense_exact"`. Planning refuses a larger construction and never
-            changes the grid, Duhamel nodes or tolerance to fit.
+        max_dense_select_slots: Default `4_096`. Upper limit on the number
+            of address slots of the dense SELECT circuit of `"dense_exact"`,
+            the branch count rounded up to a power of two. Planning refuses a
+            larger construction and never changes the grid, Duhamel nodes or
+            tolerance to fit.
         max_bytes: Default 10 GB (decimal, `10_000_000_000` bytes). Upper
             limit on the known bytes of input and numerical workspace.
         max_svd_work: Default `1e8` (`100_000_000`). Upper limit on the
@@ -256,22 +259,24 @@ class LCHS(Method):
             [LCHS guide](../../algorithms/lchs.md#native-methods-and-physical-coordinates)
             gives the sizes that fit this default.
         max_readout_work: Default `2_000_000_000`. Positive integer giving an
-            inclusive limit on candidate comparisons when grouping the Pauli
+            inclusive limit on the comparisons made when grouping the Pauli
             terms of sampled observables into qubit-wise commuting measurement
-            settings, and on character or kernel-input visits for exact scalar
+            settings, and on the visits to characters of the serialized
+            observable and to numerical-routine inputs for exact scalar
             readout (`shots=None`). Planning checks and records the grouping
-            comparisons. Exact scalar readout is checked against the full limit
-            before acquisition. Its declared live data and workspace must also
-            fit `max_bytes`. A work-limit refusal names `LCHS.max_readout_work`.
+            comparisons. Exact scalar readout is checked against the full
+            limit before the circuits run. Its known data and workspace must
+            also fit `max_bytes`. A work-limit refusal names
+            `LCHS.max_readout_work`.
         max_qsp_degree: Default `256`. Upper limit on the QSP polynomial
             degree of `"qsp_block_encoding"`.
         max_qsp_evaluations: Default `20_000`. Upper limit on the residual
             evaluations of the QSP phase solver.
         max_admission_steps: Default `1_000_000`. Upper limit on the
             planning work of checking each `Program` that the method builds
-            (NWQLib's description of a circuit as named steps). It caps the
-            number of stored fields of a Program and the work units of one
-            check of it, and summing a Program's resource counts may use up
+            (NWQLib's description of a circuit as named steps). It limits the
+            number of fields of a Program and the work units of one check of
+            it, and summing a Program's resource counts may use up
             to 24 times this value. A larger Program is refused with a
             ValueError that names this field, the refused stage and its
             count. Raising the limit permits a larger check and changes no
@@ -373,9 +378,9 @@ class LCHS(Method):
         every node's step count from its allowance and never reads
         trotter_steps, so any value other than the default 1 is refused
         rather than ignored. An explicit 1 equals the default, which the
-        stored record cannot tell apart, so it stays admitted. ``dense_exact``
-        and ``qsp_block_encoding`` also never read trotter_steps. They admit
-        a value other than 1, normalize it to 1 before content identity is
+        saved record cannot tell apart, so it stays accepted. ``dense_exact``
+        and ``qsp_block_encoding`` also never read trotter_steps. They accept
+        a value other than 1, normalize it to 1 before the content hash is
         computed, and keep the supplied value only for ``plan``'s warning.
         """
         resolve_lchs_provider_requests(self.lchs_kernel, self.k_quadrature)
@@ -405,15 +410,15 @@ class LCHS(Method):
         return self
 
     def plan(self, problem, *, output, execution, shots, rng):
-        """Check output, execution and shots against LCHS, then select the Plan once.
+        """Check output, execution and shots against LCHS, then build the Plan once.
 
         A complex vector needs amplitude readout, so vector outputs reject
         shots. Samples need quantum execution with shots. QSP evolution has no
-        classical acquisition. All numerical selection happens in plan_lchs.
+        classical execution. All numerical choices are made in plan_lchs.
 
         ``dense_exact`` and ``qsp_block_encoding`` apply no product formula
         and record 0 steps. An ignored trotter_steps is canonicalized to 1
-        during Method validation, leaving the selected content identity
+        during Method validation, leaving the Method's content hash
         unchanged. Planning warns with the supplied value, which the Method keeps privately.
         The warning skips frames inside the nwqlib package,
         so it names the caller's line whether the call came through
@@ -450,10 +455,10 @@ class LCHS(Method):
         return plan_lchs(self, problem, output=output, execution=execution, shots=shots, rng=rng)
 
     def analyze(self, plan, data, *, settings):
-        """Reconstruct the requested output from the acquired data (analysis.analyze).
+        """Reconstruct the requested output from the execution data (analysis.analyze).
 
         LCHS fixes its recovery scale and coordinates in the Plan, so there
-        are no reconstruction settings to choose after acquisition.
+        are no reconstruction settings to choose after execution.
         """
         if settings:
             raise ValueError("LCHS has no post-hoc reconstruction settings")
@@ -461,7 +466,7 @@ class LCHS(Method):
         return analyze(plan, data)
 
     def reduction_allowance(self, plan, point, *, observation, width, run):
-        """Check the Plan's single exact scalar readout against ``max_bytes`` for its declared live data and workspace, and ``max_readout_work`` for character or kernel-input visits, before acquisition.
+        """Check the Plan's single exact scalar readout against ``max_bytes`` for its known data and workspace, and ``max_readout_work`` for character or numerical-routine input visits, before execution.
 
         Return the full ``max_readout_work`` allowance for that reduction.
         """
@@ -486,13 +491,13 @@ class LCHS(Method):
         return limit
 
     def save_archive(self, plan, files):
-        """Save the Plan's selected numerical data and block bindings (archive.save)."""
+        """Save the Plan's numerical data and the data assigned to each circuit block (archive.save)."""
         from .archive import save
         return save(self, plan, files)
 
     @classmethod
     def load_archive(cls, data, files):
-        """Restore a saved Plan and check its selected-data identities (archive.load)."""
+        """Restore a saved Plan and check the content hashes of its numerical data (archive.load)."""
         from .archive import load
         return load(data, files)
 

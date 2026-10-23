@@ -1,7 +1,8 @@
-"""Pareto ranking of candidate Plans of one Problem.
+"""Pareto ranking of Plans of one Problem.
 
-The objectives are requested shots, logical width or predicted time, read from
-the candidates' stored resource estimates and forecasts.
+The objectives are the requested shots, the logical width or the predicted
+time, taken from the resource estimate and device forecast of each Plan
+compared.
 """
 
 from dataclasses import dataclass, field
@@ -38,20 +39,20 @@ class Candidate:
     """A Plan to rank with [`scan`][nwqlib.search.scan], with its optional device context.
 
     Build it with the Plan and optional keyword arguments, for example
-    `Candidate(plan, allocation=allocation)`, and pass a tuple of candidates
-    to `scan`. A Candidate changes nothing in its Plan. A different Method
-    setting or shot count is a different Plan and a separate candidate, and
-    `scan` neither creates nor tunes Method configurations.
+    `Candidate(plan, allocation=allocation)`, and pass a tuple of them to
+    `scan`. A Candidate changes nothing in its Plan. A different Method
+    setting or shot count is a different Plan and needs its own Candidate,
+    and `scan` neither creates nor tunes Method configurations.
 
     Args:
         plan: Required, positional. A Plan from [`plan`][nwqlib.scientist.plan].
         allocation: The devices granted to a run of this Plan
             (`Allocation`), needed for device forecasts.
-        facts: Error evidence (`FramedFact` records) to assess with this
-            candidate's forecast.
+        facts: Error evidence (`FramedFact` records) to assess with the
+            forecast of this Plan.
         reference: Target reference (`TargetReference`) to assess with it.
             No reference value is computed.
-        prior_work: Records (`Fact`) of work done earlier for this candidate.
+        prior_work: Records (`Fact`) of work done earlier for this Plan.
             Each supplied record is kept, repeated ones included. An empty
             tuple means that no earlier work is recorded, not that it cost
             nothing.
@@ -65,7 +66,7 @@ class Candidate:
     prior_work: tuple[Fact, ...] = field(default=(), kw_only=True)
 
 class Objective(Record):
-    """A quantity that [`scan`][nwqlib.search.scan] minimizes over its candidates.
+    """A quantity that [`scan`][nwqlib.search.scan] minimizes over the Plans it ranks.
 
     Build it with keyword arguments, for example
     `Objective(kind="requested_shots")`, and pass a tuple of objectives to
@@ -114,9 +115,9 @@ class Objective(Record):
 
 
 class ObjectiveValue(Record):
-    """The value of one objective for one candidate, with what it rests on.
+    """The value of one objective for one row, with what it rests on.
 
-    [`scan`][nwqlib.search.scan] computes these values, one per candidate and
+    [`scan`][nwqlib.search.scan] computes these values, one per row and
     objective, in `SearchSelection.values`. A value is `exact`, `conditional`
     on the assumptions it lists, or `unavailable` with a `reason`. A sum of
     binary64 time predictions is computed exactly but stays a conditional
@@ -131,8 +132,8 @@ class ObjectiveValue(Record):
         unit: `Unit(symbol="count", dimension="count")` for shots and width,
             `Unit(symbol="s", dimension="time")` for predicted seconds.
         status: `"exact"`, `"conditional"` or `"unavailable"`.
-        sources: Content hashes of the stored resource quantities, experiments
-            or predictions that the value is computed from. Nonempty for an
+        sources: Content hashes of the resource quantities, experiments or
+            predictions that the value is computed from. Nonempty for an
             available value.
         assumptions: Conditions taken over from those sources.
         reason: Why the value is unavailable, or `None` for an available
@@ -169,18 +170,18 @@ class SearchWork(Record):
     read-only.
 
     Attributes:
-        origin: `"evaluated_here"` when `scan` received candidates,
+        origin: `"evaluated_here"` when `scan` received Candidate records,
             `"stored_comparison"` when it rescored a Comparison.
         requested_points: Forecast points that the rows need, equal to
             `assessed_points + reused_points`.
         assessed_points: Forecast points evaluated by this call. Zero when
             rescoring.
         reused_points: Forecast points taken from an identical earlier row
-            or from the stored Comparison.
+            or from the Comparison being rescored.
         base_folds: Resource estimates or forecasts computed by this call.
             Zero when rescoring.
         reused_folds: Rows whose estimate or forecast came from an identical
-            earlier row or from the stored Comparison.
+            earlier row or from the Comparison being rescored.
     """
 
     origin: Literal["evaluated_here", "stored_comparison"]
@@ -212,7 +213,8 @@ class SearchSelection(Record):
     is listed in `incomparable` instead of being ranked as zero or infinity.
     The front holds only within the rows given. It is not a feasibility
     filter or a global optimum. Validation recomputes both lists from the
-    stored values with exact rational arithmetic. The fields below are read-only.
+    objective values with exact rational arithmetic. The fields below are
+    read-only.
 
     Attributes:
         comparison_id: Content hash of the Comparison that this selection
@@ -252,13 +254,14 @@ class SearchSelection(Record):
 
     @model_validator(mode="after")
     def _rows(self):
-        """Check the stored values and recompute the frontier and incomparable rows from them.
+        """Check the objective values and recompute the Pareto front and the incomparable rows from them.
 
         Every row must hold one value per objective in objective order, with
         the objective's unit, integer counts for shots and width, and a
         predicted duration that is never marked exact. The size limits are
-        checked before any comparison. The frontier then follows the class
-        definition with exact rational comparisons, which determine both lists.
+        checked before any comparison. The Pareto front then follows the
+        class definition with exact rational comparisons, which determine
+        both lists.
         """
         if not self.values or not self.objectives or len(self.prior_work) != len(self.values):
             raise ValueError("search requires nonempty aligned original rows and objectives")
@@ -342,7 +345,7 @@ class SearchResult:
 
     Attributes:
         comparison: The [`Comparison`][nwqlib.scientist.Comparison] of every
-            candidate, including rows without a Plan or with unavailable
+            row ranked, including rows without a Plan or with unavailable
             values.
         selection: The [`SearchSelection`][nwqlib.search.SearchSelection]
             with every objective value, the Pareto front and the
@@ -374,9 +377,9 @@ class SearchResult:
 
 
 def _comparison_identity(comparison):
-    """Hash the existing immutable identifiers, without Plan serialization or hydration.
+    """Hash the content hashes that the rows already hold, without serializing or reloading any Plan.
 
-    The Comparison and its rows are frozen, so the identity is stored on the
+    The Comparison and its rows are immutable, so the hash is cached on the
     Comparison object at the first call (outside its dataclass fields, so
     equality ignores it) and later calls, such as ``SearchResult``
     validation, return it.
@@ -406,9 +409,9 @@ def _comparison_identity(comparison):
 
 
 def _frontier_size(count, width, limit, max_values):
-    """Admit N rows and k objectives before any value is computed.
+    """Check N rows and k objectives against the size limits before any value is computed.
 
-    The table has N*k cells, at most ``max_values``. The frontier compares
+    The table has N*k cells, at most ``max_values``. The Pareto front compares
     every ordered pair of distinct rows on every objective, N*(N-1)*k
     coordinate comparisons, at most ``limit``.
     """
@@ -423,24 +426,27 @@ def _frontier_size(count, width, limit, max_values):
 
 
 def _objective_value(row, objective, arithmetic, profile_points):
-    """Read one objective for one comparison row from its stored selection and evidence.
+    """Read one objective for one comparison row from its Plan and resource estimate.
 
-    Nothing is planned, folded or predicted here. The value comes from the
-    row's Plan and its original WorkloadEstimate or PlanEstimate, which is why
-    rescoring a stored Comparison costs no new model or fold work. Whenever
-    the stored evidence does not fix the value, the result is unavailable
-    with a reason, so an incomplete row cannot rank as if it cost nothing.
+    Nothing is planned, estimated or predicted here. The value comes from
+    the row's Plan and its original WorkloadEstimate or PlanEstimate, which
+    is why rescoring a Comparison needs no new model evaluation or resource
+    estimate. Whenever the row's estimates do not fix the value, the result
+    is unavailable with a reason, so an incomplete row cannot rank as if it
+    cost nothing.
 
-    - ``requested_shots``: planned terminal-batch shots from the fold plus
-      the raw shots of direct (non-batch) Experiments, which the fold does
-      not see. Adaptive Programs, provider-managed estimates and query
-      templates without a complete population are unavailable.
-    - ``logical_width``: the largest exact per-location logical width. A
+    - ``requested_shots``: the planned shots of the terminal measurement
+      batches, from the resource estimate, plus the raw shots of the
+      Experiments outside any batch, which the estimate does not see. The
+      value is unavailable for adaptive Programs, provider-managed
+      estimates and query templates whose shots are not all known.
+    - ``logical_width``: the largest exact logical width at one location. A
       batch peak that holds only under a serial schedule counts only when
-      the stored context declares ``batch_schedule="serial"``.
+      the estimate's context declares ``batch_schedule="serial"``.
     - ``predicted_seconds``: under an explicit serial schedule, the sum of
-      exactly one matching prediction (model_id and scope) per assessed
-      acquisition point. It remains conditional as a model prediction.
+      exactly one matching prediction (model_id and scope) per forecast
+      point, that is per planned execution. It remains conditional as a
+      model prediction.
 
     Sums and maxima use exact rational arithmetic within the scan's
     integer-bit limit.
@@ -587,18 +593,20 @@ def scan(
 ):
     """Rank Plans of one Problem by resource objectives and return their Pareto front.
 
-    For each candidate, `scan` estimates the resources of its Plan, as
+    For each Candidate, `scan` estimates the resources of its Plan, as
     [`estimate`][nwqlib.scientist.estimate] does, evaluates each objective
     and returns a [`SearchResult`][nwqlib.search.SearchResult]. Its
-    `selection.nondominated` lists the rows that no other row beats on every
-    objective, and `select(index)` returns a row to run. A ranking that rests
+    `selection.nondominated` lists the rows with complete objective values
+    for which no other row is at least as good on every objective and
+    strictly better on at least one, and `select(index)` returns a row to
+    run. A ranking that rests
     on conditional values, such as model predictions, is conditional too.
     Passing an existing [`Comparison`][nwqlib.scientist.Comparison] rescores
-    its stored estimates and forecasts, and then nothing is planned,
-    estimated or predicted. Every row is an existing Plan. A different shot
-    count or Method setting is a different Plan, supplied as another
-    candidate. The candidate, value and comparison limits are checked before
-    any estimate, model evaluation or comparison, and a profile's complete
+    the estimates and forecasts that its rows hold, and then nothing is
+    planned, estimated or predicted. Every row is an existing Plan. A
+    different shot count or Method setting is a different Plan, supplied as
+    another Candidate. The limits on rows, values and comparisons are
+    checked before any estimate, model evaluation or comparison, and a profile's complete
     set of forecasts is checked before its first model evaluation. The
     [Rank candidate plans](../search.md) guide describes the objectives.
 
@@ -609,7 +617,7 @@ def scan(
         objectives (tuple[Objective, ...]): Distinct objectives, all
             minimized.
         profile (DeviceProfile | None): Device models for time forecasts.
-            Every candidate then needs an Allocation. Not accepted when
+            Every Candidate then needs an Allocation. Not accepted when
             rescoring.
         context (ResourceContext | None): Counting options for the resource
             estimates. Omitted, `ResourceContext()` applies. Not accepted when
@@ -619,7 +627,7 @@ def scan(
             rescoring.
         max_candidates (int): Default `256`. Largest number of rows.
         max_assessments (int): Default `4096`. Largest number of forecast
-            rows evaluated, or read from a stored Comparison.
+            rows evaluated, or read from a Comparison being rescored.
         max_pair_comparisons (int): Default `1_000_000`. Largest number of
             coordinate comparisons of the Pareto front, `N*(N-1)*k` for N
             rows and k objectives.
@@ -637,10 +645,10 @@ def scan(
             records, or `candidates` is neither a nonempty tuple of Candidate
             records nor a Comparison.
         ValueError: If the objectives are not distinct, a limit has an
-            invalid value or is exceeded, the candidates plan different
-            Problems, a profile is given without an Allocation on every
-            candidate, or a Comparison is rescored with `profile`, `context`
-            or `assessed_at`.
+            invalid value or is exceeded, the Plans of the Candidates belong
+            to different Problems, a profile is given without an Allocation
+            on every Candidate, or a Comparison is rescored with `profile`,
+            `context` or `assessed_at`.
 
     Examples:
         Two Plans that differ only in their shots, ranked by requested shots:

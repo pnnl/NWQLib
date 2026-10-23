@@ -1,30 +1,31 @@
-"""QHD initial states, their classical start vector and their native one-hot or binary preparation.
+"""QHD initial states, their classical start vector and their circuit preparation in the one-hot or binary encoding.
 
 ``QHD.initial_state`` selects one of the state records below and
-``QHD.initial_state_preparation`` the recipe that prepares it natively. Every
-state is a product of nonnegative per-variable amplitude vectors on the
-Method's grid (``variable_amplitudes``). Planning evaluates them once, together
-with the construction error of the classical start vector (``evaluate``),
-and stores both in ``QHDReconstruction``. The classical routes start from
-the tensor product of the stored vectors in lexicographic grid order, the
-enumeration of ``(n_0, ..., n_(d-1))`` with each digit in ``0, ..., K-1`` and
-the last variable advancing fastest, so that variable 0 is most significant:
+``QHD.initial_state_preparation`` the recipe that prepares it in the quantum
+circuit. Every state is a product of nonnegative per-variable amplitude
+vectors on the Method's grid (``variable_amplitudes``). Planning evaluates
+them once, together with the construction error of the classical start
+vector (``evaluate``), and records both in ``QHDReconstruction``. The
+classical evaluations start from the tensor product of the recorded vectors
+in lexicographic grid order, the enumeration of ``(n_0, ..., n_(d-1))`` with
+each digit in ``0, ..., K-1`` and the last variable advancing fastest, so
+that variable 0 is most significant:
 ``i = sum_(j=0)^(d-1) n_j * K**(d-1-j)`` (``restricted_state``), except for the
 uniform state and the kinetic ground state on the periodic grid, whose
 entries ``1/sqrt(K**d)`` are filled directly with their own construction
 term of 2u. The construction error (``restricted_state_error``) is the
-start term of the host state budgets
+start term of the classical state budgets
 (``nwqlib._validation.expm_multiply_state_error``,
 ``split_step.state_error`` and the budget that ``split_step.evolve``
 observes), which ``method._host_probability_window``,
-``method._host_tie_window`` and the kernel's tie window use. The native routes prepare the stored
-per-variable vectors with the structured preparation of the one-hot
-encoding, the amplitude chain (``append_amplitude_chain``), or with one
-Qiskit ``StatePreparation`` per register
-(``append_register_state_preparation``). The binary encoding's structured
-preparation is one H per qubit, which prepares the uniform state only, and
-its Qiskit route one ``StatePreparation`` of K amplitudes per register
-(``append_binary_initial_state``).
+``method._host_tie_window`` and the tie window of the classical evaluation
+use. The quantum circuit prepares the recorded per-variable vectors with
+the structured preparation of the one-hot encoding, the amplitude chain
+(``append_amplitude_chain``), or with one Qiskit ``StatePreparation`` per
+register (``append_register_state_preparation``). The binary encoding's
+structured preparation is one H per qubit, which prepares the uniform state
+only, and its Qiskit recipe one ``StatePreparation`` of K amplitudes per
+register (``append_binary_initial_state``).
 
 The error bounds below use the unit roundoff u = 2**-53. Those of the uniform
 state, the kinetic ground state and the chain are first order in u. Those of
@@ -34,8 +35,8 @@ with gradual underflow, correctly rounded basic operations and square root,
 and at most one ulp (relative error 2u, or 2**-1074 below the normal range)
 in ``math.sin``, ``math.exp``, ``math.expm1``, ``math.log1p``, ``math.atan2``
 and ``math.hypot``. The math module takes sin, exp, expm1, log1p and atan2
-from the platform C library, so these are platform assumptions. Python documents an error below one ulp for its own ``hypot``
-since 3.10.
+from the platform C library, so these are platform assumptions. Python
+documents an error below one ulp for its own ``hypot`` since 3.10.
 """
 
 from __future__ import annotations
@@ -67,7 +68,7 @@ def _normalized(values):
     Rounding of this function. With ``n = ||v||`` and ``n_hat = hypot(v)``
     within one ulp, ``|n_hat - n| <= 2u n``, and each quotient
     ``fl(v_i/n_hat)`` has relative error at most u, or absolute error at most
-    2**-1075 when it is subnormal, charged as the representable 2**-1074
+    2**-1075 when it is subnormal, counted as the representable 2**-1074
     (``_SUBNORMAL_ULP``). Hence
     ``||w_hat - v/n_hat|| <= u/(1 - 2u) + sqrt(K) 2**-1074`` and
     ``||v/n_hat - v/n|| = |n/n_hat - 1| <= 2u/(1 - 2u)``, so the result lies
@@ -271,11 +272,10 @@ def _gaussian_beta(values, shifted, enclosures):
     overflows, yet their norm does not), and returns inf only when the norm
     itself exceeds the range. Its rounding, below one ulp, is counted in
     ``_OUTWARD``, which also lifts the result (each x is inflated by it
-    before expm1). The caller turns
-    beta into a direction bound with the exact inequality
-    ``||t/||t|| - v/||v|| || <= 2 beta``: the left side is at most
-    ``||t|| |1/||t|| - 1/||v||| + ||t - v||/||v||``, and the first term is
-    ``| ||v|| - ||t|| |/||v|| <= beta``.
+    before expm1). The caller turns beta into a direction bound with the
+    exact inequality ``||t/||t|| - v/||v|| || <= 2 beta``. The left side is
+    at most ``||t|| |1/||t|| - 1/||v||| + ||t - v||/||v||``, and the first
+    term is ``| ||v|| - ||t|| |/||v|| <= beta``.
     """
     errors = []
     for value, y, x in zip(values, shifted, enclosures, strict=True):
@@ -369,10 +369,10 @@ class GaussianState(Record):
         Exponents. Entry i of a variable uses ``q_i = |x_i - c|/sigma`` and
         ``z_i = (q_i q_i)/2``. With ``|x_i - c|`` computed first, q carries two
         rounding factors. The difference ``x_i - c`` stays finite on every
-        admitted grid with binary64 bounds, as the ``Real`` bounds of an
+        accepted grid with binary64 bounds, as the ``Real`` bounds of an
         ``Optimization`` are. It overflows only at
         ``|x_i - c| >= 2**1024 - 2**970``, and ``|c| <= 2**1024 - 2**971``, so
-        it needs ``|x_i| >= 2**970``. An admitted grid has spacing h below
+        it needs ``|x_i| >= 2**970``. An accepted grid has spacing h below
         2**511 (at most about 3.3e153, ``grid.OneHotGrid``) and coordinates
         ``x_i = lower + n_i h`` with ``n_i <= K``. So either K exceeds 2**457
         or ``|lower| >= 2**969``. In the second case the upper bound, a
@@ -522,13 +522,13 @@ def restricted_state(state, grid: OneHotGrid, amplitudes=None) -> np.ndarray:
     each digit in ``0, ..., K-1`` and the last variable advancing fastest, so
     that variable 0 is most significant: ``i = sum_(j=0)^(d-1) n_j * K**(d-1-j)``,
     so ``np.kron`` of the per-variable vectors in variable order gives it.
-    The classical kernel passes the vectors that planning evaluated and
-    stored (``evaluate``, ``QHDReconstruction.initial_amplitudes``), so it
+    The classical evaluation passes the vectors that planning evaluated and
+    recorded (``evaluate``, ``QHDReconstruction.initial_amplitudes``), so it
     evaluates no amplitudes itself. The uniform state's product has the
     single value ``1/sqrt(K**d)``, which is formed directly, and so has the
     kinetic ground state on the periodic grid, which is the uniform state
-    (``KineticGroundState``). The result is complex, as the host evolution
-    requires. Forming the product holds the d converted input vectors
+    (``KineticGroundState``). The result is complex, as the classical
+    evolution requires. Forming the product holds the d converted input vectors
     (``8 d K`` bytes), the real products of the earlier Kronecker stages, at
     most ``D/K`` entries before the last one, and the preallocated complex
     result, into which the last Kronecker stage writes its products
@@ -558,10 +558,10 @@ def restricted_state(state, grid: OneHotGrid, amplitudes=None) -> np.ndarray:
 def evaluate(state, grid: OneHotGrid) -> tuple[tuple[np.ndarray, ...], float]:
     """Return ``(variable_amplitudes(grid), restricted_state_error(state, grid))`` from one amplitude evaluation.
 
-    Planning calls this once and stores both results
+    Planning calls this once and records both results
     (``QHDReconstruction.initial_amplitudes`` and ``initial_state_error``),
-    which the classical kernel, its windows and the native builder read, so
-    no later stage evaluates the amplitudes again. The Gaussian's error
+    which the classical evaluation, its windows and the quantum circuit
+    construction read, so no later stage evaluates the amplitudes again. The Gaussian's error
     bound comes from the same ``_variables`` rows as its amplitudes. The
     other states' error bounds evaluate no amplitudes.
     """
@@ -573,12 +573,12 @@ def evaluate(state, grid: OneHotGrid) -> tuple[tuple[np.ndarray, ...], float]:
 
 
 def stored_amplitudes(amplitudes):
-    """Return the per-variable vectors as the immutable float64 arrays that ``QHDReconstruction`` stores.
+    """Return the per-variable vectors as the immutable float64 arrays that ``QHDReconstruction`` records.
 
     Each vector is copied once into its own read-only float64 array
     (``core.records.FrozenArray``) with its entries and axis order
-    unchanged, so the stored vectors are bitwise the evaluated ones and are
-    not renormalized (``method._initial_state_bytes``).
+    unchanged, so the recorded vectors are bitwise the evaluated ones and
+    are not renormalized (``method._initial_state_bytes``).
     """
     from nwqlib.core.records import FrozenArray
 
@@ -586,21 +586,22 @@ def stored_amplitudes(amplitudes):
 
 
 def start_vector_work(state, grid: OneHotGrid) -> int:
-    """Return the work units of forming the classical start vector (``restricted_state``) from stored vectors.
+    """Return the work units of forming the classical start vector (``restricted_state``) from recorded vectors.
 
     With ``D = K**d``, the direct uniform complex fill writes D entries, so
-    it costs D. Otherwise reading the d stored float64 rows of K entries
+    it costs D. Otherwise reading the d recorded float64 rows of K entries
     costs ``d K`` entry units, the left-associated Kronecker product
     stage j (j = 2..d) multiplies a product of ``K**(j - 1)`` entries by a
     vector of K entries and writes ``K**j`` entries, one unit each, the
     last stage writing into the complex128 result, and a further D is
-    charged for that result, so the charge is
+    counted for that result, so the count is
     ``d K + sum_(j=2)^d K**j + D``. The sum is empty for d = 1. These are
-    logical entry and action units, like the kernel laws that add this
-    charge once per evolution (``split_step.sizes``,
-    ``method.restricted_sizes``), not CPU instructions. The amplitudes and
-    their error bound belong to planning (``evaluate``) and are not charged
-    again. K comes from the grid, not from a root of D.
+    logical entry and action units, like the work formulas of the classical
+    evaluation that add this count once per evolution
+    (``split_step.sizes``, ``method.restricted_sizes``), not CPU
+    instructions. The amplitudes and their error bound belong to planning
+    (``evaluate``) and are not counted again. K comes from the grid, not
+    from a root of D.
     """
     d, k = grid.num_variables, grid.num_grid_points
     if _is_uniform(state, grid):
@@ -633,7 +634,7 @@ def restricted_state_error(state, grid: OneHotGrid, *, errors=None) -> float:
     passes d - 1 roundings, which move the vector by at most
     ``gamma_(d-1) prod_j N_j`` with ``gamma_n = n u/(1 - n u)`` (Higham,
     doi:10.1137/1.9780898718027, Lemma 3.1), and gradual underflow of the
-    products adds at most ``sqrt(D) (d - 1) 2**-1075``, charged as
+    products adds at most ``sqrt(D) (d - 1) 2**-1075``, counted as
     ``(d - 1) ceil(sqrt(D)) 2**-1074`` (``_SUBNORMAL_ULP``), one correctly
     rounded quotient of the exact integers ``(d - 1) ceil(sqrt(D))`` and
     ``2**1074``, with ``ceil(sqrt(D)) = isqrt(D - 1) + 1``. D is therefore
@@ -660,8 +661,8 @@ def restricted_state_error(state, grid: OneHotGrid, *, errors=None) -> float:
     Gaussian bound is infinite or large, evaluated upward with ``_OUTWARD``.
     ``errors`` supplies ``state.variable_errors(grid)`` when the caller has
     already evaluated them (``evaluate``). The value is the start term of the
-    host state budgets, ``nwqlib._validation.expm_multiply_state_error`` and
-    ``split_step.state_error``.
+    classical state budgets, ``nwqlib._validation.expm_multiply_state_error``
+    and ``split_step.state_error``.
 
     Raises:
         ValueError: The underflow allowance or the final bound in units of u
@@ -701,26 +702,29 @@ def restricted_state_error(state, grid: OneHotGrid, *, errors=None) -> float:
 
 
 def chain_links(vector) -> int:
-    """Return the number of links that ``append_amplitude_chain`` emits for one register (``chain_selection``).
+    """Return the number of links that ``append_amplitude_chain`` appends for one register (``chain_selection``).
 
     It is at most the index L of the last positive amplitude, since the
     chain stops once the remaining tail norm is zero, and smaller when the
-    lower-range cutoff stops it earlier. Each emitted link costs one
-    controlled RY, two CX in its standard lowering, and one CX, so a
-    register costs 3 CX per emitted link and at most ``3 (K - 1)``.
+    lower-range cutoff stops it earlier. Each link in the circuit costs one
+    controlled RY, two CX in its standard decomposition, and one CX, so a
+    register costs 3 CX per link and at most ``3 (K - 1)``.
     """
     return len(chain_selection(vector).angles)
 
 
 class ChainSelection(NamedTuple):
-    """The emitted prefix of one register's amplitude chain and its charge (``chain_selection``).
+    """The links of one register's amplitude chain that the circuit keeps, and the error contribution of the rest.
+
+    ``chain_selection`` returns it.
 
     Attributes:
-        angles: The CRY angles of the emitted links, in link order.
+        angles: The CRY angles of the links in the circuit, in link order.
         links: L, the index of the last positive amplitude, the links of
             the chain without the cutoff.
-        charge: The exact charge Delta of the omitted links against the
-            complete chain, zero when no link is omitted by the cutoff.
+        charge: The exact error contribution Delta of the omitted links
+            against the complete chain, zero when no link is omitted by the
+            cutoff.
     """
 
     angles: tuple[float, ...]
@@ -729,17 +733,17 @@ class ChainSelection(NamedTuple):
 
 
 def chain_selection(alpha) -> ChainSelection:
-    """Return the links of one register's chain that the lower-range cutoff keeps, and the charge of the rest.
+    """Return the links of one register's chain that the lower-range cutoff keeps, and the error contribution of the rest.
 
-    The candidate angles are those of ``append_amplitude_chain``. Let m be
+    The angles considered are those of ``append_amplitude_chain``. Let m be
     the first link whose CRY parameter ``theta_m/2``, the exact half of the
     computed angle, lies below ``2**-1022`` (``validation._underflows``),
     including a computed angle of zero from a positive tail norm, since the
     exact angle is positive for every link up to L, the index of the last
     positive amplitude (``ChainSelection.links``). The chain then stops
-    before link m and emits links 1 to m - 1, which prepare the vector with
-    entries ``alpha_i`` for ``i < m - 1``, the tail norm ``r_(m-1)`` at
-    ``m - 1`` and zero after it, for the stored vector alpha read exactly
+    before link m and contains links 1 to m - 1, which prepare the vector
+    with entries ``alpha_i`` for ``i < m - 1``, the tail norm ``r_(m-1)`` at
+    ``m - 1`` and zero after it, for the recorded vector alpha read exactly
     and normalized by ``N = ||alpha||``. With
     ``r_(m-1)**2 - alpha_(m-1)**2 = r_m**2``, its distance from the complete
     chain's target ``alpha/N`` is
@@ -750,14 +754,15 @@ def chain_selection(alpha) -> ChainSelection:
     (``_normalized``), so ``Delta = min(sqrt2_up, sqrt2_up L_m/(1 - eta_K))``
     bounds it, where sqrt2_up is the upper rational of sqrt(2) of
     ``circuit_errors`` and also bounds the distance of two nonnegative unit
-    vectors. The dropped tail norm r_m alone would undercharge, because the
-    amplitude left at site ``m - 1`` changes from ``alpha_(m-1)`` to
-    ``r_(m-1)`` as well. The count of omitted links is
-    ``L - (m - 1)``. The native builder, the CX law, the rotation census and
-    ``circuit_errors.preparation_error`` read the prefix and the charge
-    here. The stored amplitudes, their construction error
-    (``restricted_state_error``) and the classical start vector remain
-    those of the complete vector. The work is the chain's own tail pass, and
+    vectors. The dropped tail norm r_m alone would underestimate the error,
+    because the amplitude left at site ``m - 1`` changes from
+    ``alpha_(m-1)`` to ``r_(m-1)`` as well. The count of omitted links is
+    ``L - (m - 1)``. The quantum circuit construction, the CX count, the
+    rotation classification (``resources.rotation_population``) and
+    ``circuit_errors.preparation_error`` read the kept links and the error
+    contribution here. The recorded amplitudes, their
+    construction error (``restricted_state_error``) and the classical start
+    vector remain those of the complete vector. The work is the chain's own tail pass, and
     the exact tail sum is formed only when the cutoff applies.
     """
     from .circuit_errors import _SQRT2_UP, _TAU, _U
@@ -817,7 +822,7 @@ def append_amplitude_chain(circuit: QuantumCircuit, grid: OneHotGrid, amplitudes
     and every later link has an unexcited control on all components, so
     they act as the identity for any angle, while their angles are the
     undefined 0/0. The chain therefore stops after link L, the index of the
-    last positive amplitude (``ChainSelection.links``), and emits 3L CX. For
+    last positive amplitude (``ChainSelection.links``), and contains 3L CX. For
     the uniform state L = K - 1, which gives the ``3 d (K - 1)`` CX of the
     full chain.
 
@@ -839,9 +844,9 @@ def append_amplitude_chain(circuit: QuantumCircuit, grid: OneHotGrid, amplitudes
     one by at most 3u (``_normalized``). No 2**K amplitude vector is formed.
 
     Lower-range cutoff. A link whose parameter ``theta_m/2`` would fall
-    below the normal binary64 range ends the chain before it, and the
-    omitted links are charged to the preparation entry of the error ledger
-    (``chain_selection``).
+    below the normal binary64 range ends the chain before it, and the error
+    of the omitted links is counted in the ``state_preparation`` entry of
+    the error sources (``chain_selection``).
     """
     for var_index, alpha in enumerate(amplitudes):
         circuit.x(grid.qubit(var_index, 0))
@@ -853,14 +858,14 @@ def append_amplitude_chain(circuit: QuantumCircuit, grid: OneHotGrid, amplitudes
 
 
 def chain_angles(alpha) -> list[float]:
-    """Return the CRY angles that ``append_amplitude_chain`` emits for one register.
+    """Return the CRY angles that ``append_amplitude_chain`` appends for one register.
 
     ``theta_m = 2 atan2(r_m, alpha_(m-1))`` with the tail norms
     ``r_m = hypot(alpha_m, r_(m+1))``, so ``cos(theta_m/2) = alpha_(m-1)/r_(m-1)``
     and ``sin(theta_m/2) = r_m/r_(m-1)`` (``append_amplitude_chain`` derives
     them), for the links that ``chain_selection`` keeps. The chain and the
-    rotation law of its circuit (``resources.rotation_population``) both
-    read the angles here.
+    rotation classification of its circuit (``resources.rotation_population``)
+    both read the angles here.
     """
     return list(chain_selection(alpha).angles)
 
@@ -895,7 +900,7 @@ def append_register_state_preparation(circuit: QuantumCircuit, grid: OneHotGrid,
 
 
 def append_initial_state(circuit: QuantumCircuit, grid: OneHotGrid, amplitudes, *, recipe: str) -> None:
-    """Append the QHD initial state with the selected native recipe.
+    """Append the QHD initial state with the circuit recipe that the Method chose.
 
     ``recipe`` is the Method's ``initial_state_preparation``. On this one-hot
     register ``"structured"`` appends the amplitude chain
@@ -911,7 +916,7 @@ def append_initial_state(circuit: QuantumCircuit, grid: OneHotGrid, amplitudes, 
 
 def append_binary_initial_state(circuit: QuantumCircuit, grid: OneHotGrid, bits: int, amplitudes, *,
                                 recipe: str) -> None:
-    """Append the QHD initial state on the binary registers with the selected native recipe.
+    """Append the QHD initial state on the binary registers with the circuit recipe that the Method chose.
 
     Variable j occupies qubits ``j b`` to ``j b + b - 1`` with grid index
     ``n_j = sum_l 2**l n_(j,l)`` (``binary`` module). ``"structured"``
@@ -921,7 +926,7 @@ def append_binary_initial_state(circuit: QuantumCircuit, grid: OneHotGrid, bits:
     uniform state and the kinetic ground state of the periodic grid, which
     is the same state, and ``method.QHD.plan`` rejects it for any other state.
     ``"qiskit_state_preparation"`` appends one Qiskit ``StatePreparation`` of
-    the stored K amplitudes of each variable to its register. The basis index
+    the recorded K amplitudes of each variable to its register. The basis index
     of the register's qubits in Qiskit's little-endian order is the grid
     index, so the vector needs no reordering. Qiskit's synthesis has no CX
     bound in the QHD record. ``"none"`` is resource-only and is rejected

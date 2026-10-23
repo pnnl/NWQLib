@@ -1,4 +1,7 @@
-"""Input-bound block-encoding selection with lazy native construction."""
+"""Block encodings selected for a given operator input.
+
+The Qiskit circuit of an encoding is constructed only when the Program's circuit is built.
+"""
 
 from dataclasses import replace
 from math import isfinite
@@ -41,23 +44,23 @@ def _encoding_record(name, *, operator, alpha, error, ancillas, system_qubits,
     ``(I tensor <0_a|) U (I tensor |0_a>)``.
     An, Childs and Lin, arXiv:2312.03916v2, Appendix A.2, Definition 23
     (p. 36), is the exact case epsilon = 0 with alpha >= ||A||. Alpha and
-    epsilon are in the units of the original A. A supplied native oracle
-    asserts this relation. Selection does not extract or verify its dense
-    block.
+    epsilon are in the units of the original A. A supplied Qiskit oracle
+    circuit asserts this relation. Selection does not extract or verify its
+    dense block.
 
     Args:
         name: Signature name of the block.
-        operator: Admitted operator input that the encoding represents.
+        operator: Checked operator input that the encoding represents.
         alpha: Positive normalization in the units of A.
         error: Operator-norm error bound epsilon in the units of A, or None when unknown.
         ancillas: Number a of encoding ancillas.
         system_qubits: System width, log2 of the operator dimension.
         family: Encoding family, such as ``dense_dilation``, ``banded`` or ``pauli_lcu``.
         implementation: ``encoding.native`` for a supplied circuit or ``encoding.planned`` for a deferred plan.
-        work: Construction work units of the native definition.
-        snapshot_bytes: Stored-data census of a supplied circuit, or None.
-        census: Named integer gate counts read by the family CX law.
-        query: CX count per uncontrolled forward query from that law, or None when no law applies.
+        work: Construction work units of the Qiskit definition.
+        snapshot_bytes: Byte count of the copied data of a supplied circuit, or None.
+        census: Named integer gate counts read by the family's CX formula.
+        query: CX count per uncontrolled forward query from that formula, or None when no formula applies.
 
     Returns:
         The SelectedDefinition. A known ``query`` becomes one CX ResourceLaw
@@ -107,14 +110,15 @@ def _encoding_record(name, *, operator, alpha, error, ancillas, system_qubits,
 
 
 def _native_family_census(encoding):
-    """Read only the four named integer counts used by the actual resource law.
+    """Read only the four named integer counts used by the family's resource formula.
 
     Returns ``(census, query)``: the ``(name, count)`` pairs read from the
     encoding metadata and the CX count per query from
-    ``block_encoding_per_query_cx``. A family without a law, missing counts
-    or a law value that overflows or is not finite give ``((), None)``. A
-    count that is not an ordinary integer raises. The dense dilation reads no
-    counts because its law depends only on the system width.
+    ``block_encoding_per_query_cx``. A family without a formula, missing
+    counts or a formula value that overflows or is not finite give
+    ``((), None)``. A count that is not an ordinary integer raises. The dense
+    dilation reads no counts because its formula depends only on the system
+    width.
     """
     import numpy as np
     from nwqlib._validation import integer
@@ -170,7 +174,7 @@ def select_block_encoding(name, encoding, *, operator, max_bytes=DEFAULT_INPUT_B
     cannot attach another circuit later. When the encoding's family and gate
     counts are known (dense dilation, banded, Pauli LCU or multiplexed Pauli),
     the block carries a CX-per-query estimate from them, recorded as the
-    caller's assertion rather than a verified inventory. Qiskit is imported only
+    caller's assertion rather than a verified gate count. Qiskit is imported only
     by this call.
 
     Args:
@@ -210,10 +214,10 @@ def select_block_encoding(name, encoding, *, operator, max_bytes=DEFAULT_INPUT_B
 
 
 def construct_block_encoding(block, *, max_bytes=DEFAULT_INPUT_BYTES, max_work=1_000_000_000):
-    """Construct the exact selected encoding only at the native consumer.
+    """Construct the exact selected encoding, only when its Qiskit circuit is built.
 
     Known construction arrays are checked before dense completion or multiplexor
-    table allocation. This does not claim to bound undocumented SDK workspace.
+    table allocation. This does not bound undocumented Qiskit workspace.
     """
     from nwqlib.subroutines.block_encoding.core import build_block_encoding_from_plan
 
@@ -240,7 +244,7 @@ def _encoding_circuit(block, arguments, method_context):
 def _select_planned_encoding(name, plan, *, operator, dense_svd_selected=False):
     """Bind the plan that the Method selected to a block.
 
-    No native circuit is built.
+    No Qiskit circuit is built.
     """
     _validate_encoding(operator, plan.alpha, plan.error_bound, plan.num_ancillas, plan.system_qubits)
     n, a = plan.system_qubits, plan.num_ancillas

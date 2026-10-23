@@ -1,6 +1,7 @@
 """GCiM methods (FixedGCIM and ADAPT) and their chemistry and sector helpers, imported on first access.
 
-Discovery and fixed planning do not import native providers or chemistry.
+Listing the methods and planning a FixedGCIM run import neither the backend
+providers nor the chemistry packages.
 """
 
 from importlib import import_module

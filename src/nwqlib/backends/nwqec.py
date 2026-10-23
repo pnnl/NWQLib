@@ -1,10 +1,10 @@
-"""Explicit released-NWQEC compilation of an already selected static body.
+"""Compilation, on request, of a fixed circuit body with the released NWQEC compiler.
 
 Compilation is an auxiliary operation. It reads an existing prepared circuit or
-lowered block, runs NWQEC 0.1.2 once in a bounded child process
-(``_auxiliary_process``) and stores a LogicalCompilation. It never replaces the
-selected construction or its readout. docs/fault-tolerant-resources.md defines
-the targets, stages and limitations.
+a block already built as a Qiskit circuit, runs NWQEC 0.1.2 once in a child
+process with limits (``_auxiliary_process``) and records the output as a
+LogicalCompilation. It never replaces the chosen construction or its readout.
+docs/fault-tolerant-resources.md defines the targets, stages and limitations.
 """
 
 from __future__ import annotations
@@ -48,9 +48,9 @@ Positive = Annotated[Real, Field(gt=0)]
 class LogicalCompilation(Record):
     """Auxiliary compiler output, never a phase-faithful replacement for its source.
 
-    Original readout and source phase describe the input, not acquired data or
-    recovered compiler phase. Raw PBC operation names/angles stay in the stored
-    output QASM. Resource quantities concern only the stated compiler stage.
+    Original readout and source phase describe the input, not measured data or
+    a phase recovered from the compiler. Raw PBC operation names and angles stay
+    in the saved output QASM. Resource quantities concern only the stated compiler stage.
     """
 
     source_kind: Literal["prepared", "logical_circuit"]
@@ -91,7 +91,7 @@ class LogicalCompilation(Record):
         """Keep the stage, target and output consistent with ``count_only`` and the recorded limits.
 
         A count-only run stops at Clifford+T synthesis before fusion and has no
-        output circuit. A full run stores its final QASM. Raw gate names are
+        output circuit. A full run keeps its final QASM. Raw gate names are
         distinct, their total respects ``max_operations``, and measured qubits
         lie inside the compiled width.
         """
@@ -110,7 +110,7 @@ class LogicalCompilation(Record):
         return self
 
     def save(self, path, *, max_bytes=DEFAULT_MAX_BYTES):
-        """Save this stored record through the existing bounded JSON writer."""
+        """Save this record with the library's byte-limited JSON writer."""
         from nwqlib._choice_archive import ArchiveFiles
 
         path = Path(path)
@@ -118,7 +118,7 @@ class LogicalCompilation(Record):
 
     @classmethod
     def load(cls, path, *, max_bytes=DEFAULT_MAX_BYTES):
-        """Read current-format stored compilation data without importing NWQEC."""
+        """Read saved compilation data in the current format without importing NWQEC."""
         from nwqlib._choice_archive import ArchiveFiles
 
         path = Path(path)
@@ -139,10 +139,10 @@ def _source(source, index):
     """Return the Qiskit circuit of ``source`` and its source metadata, without copying or preparing it.
 
     A Prepared source uses the circuit index order of ``Prepared.circuits``
-    (``Prepared._circuit_handles``). A handle that ``Run.release_native``
-    released is reloaded from its saved QPY by ``PreparedHandle._restore_native``,
-    as ``Prepared.inspect_resources`` reloads it, without lowering or
-    transpiling again.
+    (``Prepared._circuit_handles``). A prepared circuit that
+    ``Run.release_native`` released is reloaded from its saved QPY by
+    ``PreparedHandle._restore_native``, as ``Prepared.inspect_resources``
+    reloads it, without building or transpiling it again.
     """
     from nwqlib._prepared_execution import Prepared
     from nwqlib.blocks.lowering import LogicalCircuit
@@ -186,10 +186,10 @@ def _source(source, index):
 
 
 def _static_body(circuit, *, max_operations, max_bytes):
-    """Separate terminal readout from a static Gate-only compiler input.
+    """Separate the terminal measurements from a fixed compiler input made only of Gates.
 
     NWQEC compiles unitary bodies, so terminal measurements and recognized Aer
-    saves become source metadata and are removed from the compiler input.
+    save instructions become source metadata and are removed from the compiler input.
     Anything nonunitary before them, a classical condition, or a measurement
     followed by more gates is rejected. The body is exchanged as QASM2
     because NWQEC 0.1.2 reads QASM files. Returns the QASM2 text, the
@@ -295,15 +295,16 @@ def compile_logical(
     max_bytes=DEFAULT_MAX_BYTES,
     timeout_seconds=60,
 ):
-    """Compile one existing selected static body in a bounded local child.
+    """Compile one existing fixed circuit body in a local child process with limits.
 
-    Limits cover known input/output operations and transport bytes, not native
-    compiler RSS. Requested synthesis precision is recorded, never certified.
-    Terminal source readout is metadata and is not compiled into the body.
+    The limits cover the counted input and output operations and the bytes
+    passed between processes, not the compiler's own process memory (RSS).
+    Requested synthesis precision is recorded, never certified. Terminal
+    measurements of the source are metadata and are not compiled into the body.
 
     Args:
-        source: A live ``Prepared`` or a ``LogicalCircuit`` from ``lower_qiskit``.
-        index: Position among the prepared quantum handles. It must be 0 for a
+        source: A ``Prepared`` of an open Run or a ``LogicalCircuit`` from ``lower_qiskit``.
+        index: Position among the prepared quantum circuits. It must be 0 for a
             LogicalCircuit.
         target: "clifford_t", "pbc", "pbc_tfuse" or "clifford_reduction".
         rz_err: NWQEC RZ synthesis error policy, "per-gate", "total" or "relative".
@@ -312,7 +313,8 @@ def compile_logical(
         count_only: Record Clifford+T counts before final fusion, without an
             output circuit. Valid only for "clifford_t".
         max_operations: Cap on source instructions and compiled output gates.
-        max_bytes: Cap on transport, capture and publication bytes.
+        max_bytes: Cap on the bytes passed to and from the child, the captured
+            diagnostics and the returned result.
         timeout_seconds: Wall-clock deadline for the compiler child. The
             defaults of the three limits are registered in
             docs/ENGINEERING_CONSTANTS.md ("Explicit logical compilation and

@@ -25,7 +25,7 @@ dense_dilation 1.1180339887 1
 2
 ```
 
-The Pauli construction's `alpha` is the coefficient 1-norm `1 + 0.5`, and the dense dilation's is the spectral norm `sqrt(5)/2`. `build_block_encoding(A)` plans and builds in one call, and its default `implementation="auto"` chooses the construction. Inside a Program, [`select_block_encoding`](../extending.md#nwqlib.blocks.encoding.select_block_encoding) chooses the encoding of a block, and [Compose blocks](../../blocks.md) explains composition, control, adjoints and circuit construction.
+The Pauli construction's `alpha` is the coefficient 1-norm `1 + 0.5`, and the dense dilation's is the spectral norm `sqrt(5)/2`. `build_block_encoding(A)` plans and builds in one call, and its default `implementation="auto"` chooses the construction. Inside a `Program` (NWQLib's description of a circuit as named steps), [`select_block_encoding`](../extending.md#nwqlib.blocks.encoding.select_block_encoding) chooses the encoding of a block, and [Compose blocks](../../blocks.md) explains composition, control, adjoints and circuit construction.
 
 ## Constructions
 
@@ -82,8 +82,8 @@ Every implementation places `A / alpha` in the all-zero ancilla block. Ancilla r
 How `"auto"` chooses:
 
 - An exact circulant goes to `banded`: a supplied `BandSpecification`, or a matrix or Pauli table whose band structure is detected with zero error.
-- Otherwise planning compares the per-query CX costs of the Pauli and dense constructions before it evaluates the dense normalization. A strict Pauli winner leaves the dense normalization uncomputed. A dense winner and an equal-cost comparison evaluate it.
-- Automatic banded detection requires exact stored structure, and automatic Pauli decomposition removes only exact zeros. Nonzero roundoff coefficients therefore stay in the term count and may change the choice. A supplied Pauli table whose exact-rational circulant residual is nonzero keeps its Pauli or dense route.
+- Otherwise planning compares the per-query CX costs of the Pauli and dense constructions before it evaluates the dense normalization. When the Pauli construction is strictly cheaper, the dense normalization is not computed. When the dense construction is cheaper or the costs are equal, it is computed.
+- Automatic banded detection requires exact circulant structure in the supplied entries, and automatic Pauli decomposition removes only exact zeros. Nonzero roundoff coefficients therefore stay in the term count and may change the choice. A supplied Pauli table whose exact-rational circulant residual is nonzero keeps its Pauli or dense route.
 
 What `error_bound` covers, in the units of the supplied operator:
 
@@ -93,9 +93,9 @@ What `error_bound` covers, in the units of the supplied operator:
 
 SVDs and limits:
 
-- `build_block_encoding(A)` computes one dense SVD and uses it for the normalization, an equal-cost comparison and the completion. `plan_block_encoding(A)` computes the normalization without keeping the singular vectors, so building that saved plan later computes its own SVD for the synthesis.
-- The plan and build functions take keyword-only `max_bytes` (default 10,000,000,000) and `max_work` (default 1,000,000,000). Dense conversion, Pauli classification and table construction, and the dense completion are checked against them before allocation or decomposition. Pass the intended limits to both a standalone plan and its later build. A larger explicit value is forwarded to the nested construction.
-- The work count is an operation estimate, and the counted array bytes do not bound undocumented SDK synthesis workspace or process memory. The `DEFAULT_MAX_BLOCK_WORK` row of [Engineering constants](../../ENGINEERING_CONSTANTS.md#budgets-and-mechanical-bounds) gives the counted terms.
+- `build_block_encoding(A)` computes one dense SVD only when it needs the dense normalization, that is, when the dense dilation is requested or, under `"auto"`, costs no more than the Pauli construction. It uses that SVD for the normalization, the equal-cost comparison and the completion. A banded plan and a strictly cheaper Pauli plan need no dense SVD. A dense-dilation plan from `plan_block_encoding(A)` keeps no singular vectors, so building it later computes its own SVD for the completion.
+- The plan and build functions take keyword-only `max_bytes` (default 10,000,000,000) and `max_work` (default 1,000,000,000). Dense conversion, Pauli classification and table construction, and the dense completion are checked against them before allocation or decomposition. Pass the intended limits to both a standalone plan and its later build. A larger explicit value is passed on to the nested construction.
+- The work count is an operation estimate, and the counted array bytes do not bound the undocumented workspace of Qiskit's synthesis or process memory. The `DEFAULT_MAX_BLOCK_WORK` row of [Engineering constants](../../ENGINEERING_CONSTANTS.md#budgets-and-mechanical-bounds) gives the counted terms.
 
 ## Source map
 
@@ -113,7 +113,7 @@ Code paths are relative to `nwqlib.subroutines`. Equation and section numbers re
 | Cyclic shifts diagonalized by the QFT | NWQLib derivation, stated in the module docstring | `block_encoding.banded.build_banded_block_encoding` |
 | Circulant normalization comparison | Camps, Lin, Van Beeumen and Yang, arXiv:2203.10236v4, Theorem 4.1 and Sec. 4.2 | `block_encoding.banded` module docstring |
 | Circulant certificate from Pauli terms | NWQLib derivation from Pauli orthogonality, stated in its docstring | `block_encoding.core._detect_banded_pauli_structure` |
-| Dense routing CX count | Shende, Bullock and Markov, quant-ph/0406176v5, Eq. (19), p. 16, and Table 1, row QSD (l = 2, optimized), p. 14 | `block_encoding.core._dense_dilation_predicted_cx` |
+| CX count of the dense dilation in the automatic choice | Shende, Bullock and Markov, quant-ph/0406176v5, Eq. (19), p. 16, and Table 1, row QSD (l = 2, optimized), p. 14 | `block_encoding.core._dense_dilation_predicted_cx` |
 | Banded UCRZ tables at `2**a` CX each, and for both Pauli and banded routes an address diagonal and a positive PREP tree at `2**a - 2` CX each | Shende, Bullock and Markov, quant-ph/0406176v5, Theorems 7 and 8, pp. 10-11, and Mottonen et al., quant-ph/0407010v1, Sec. II, p. 2, and Sec. III, Eq. (7), p. 3 | `block_encoding.core._pauli_plan_detail`, `block_encoding.core._banded_plan` |
 | Choice of construction, limit checks and plan reuse | NWQLib, described above and in `plan_block_encoding` | `block_encoding.core._plan_block_encoding` |
 

@@ -1,9 +1,10 @@
 """QPE numerical estimators in their stated radians/energy conventions.
 
-These functions consume admitted scalar data only. They do not prepare circuits,
-submit observations, redraw schedules, or obtain a reference spectrum.
+These functions take only scalar data that have passed the input checks. They do
+not prepare circuits, submit observations, redraw schedules, or obtain a
+reference spectrum.
 
-Conventions shared by every kernel. A Hamiltonian H is queried through
+Conventions shared by every estimator routine. A Hamiltonian H is queried through
 U = exp(-i tau H), so an eigenvalue E contributes the signal exp(-i p tau E)
 at evolution multiplier p and the unitary eigenphase -tau E. Unitary input reports
 the principal eigenphase phi of U v = exp(i phi) v. The Hadamard-test signal
@@ -17,10 +18,10 @@ Equation, theorem and page numbers below refer to these paper versions:
 - RFE: Kshirsagar, Katabarwa and Johnson, arXiv:2209.11322v3.
 - RWPE: Granade and Wiebe, arXiv:2208.04526v1.
 
-Each kernel docstring states which step follows its paper, where NWQLib
+Each routine's docstring states which step follows its paper, where NWQLib
 departs from it and what the departure means for the paper's guarantee. The
 family guide docs/algorithms/qpe.md collects these locations in its source
-map. Kernels work with phases in radians. Their returned value is the
+map. The routines work with phases in radians. Their returned value is the
 energy in operator units for a Hamiltonian or the principal eigenphase in
 radians for a unitary. records.public_estimate leaves that value unchanged,
 derives the phase in turns and, for Eigenphase output, rescales the interval
@@ -60,18 +61,19 @@ QCELS_BRACKET_EVALUATIONS = 64
 
 @dataclass(frozen=True)
 class NumericalEstimate:
-    """Scalar output of one estimator kernel, before conversion to a Result.
+    """Scalar output of one estimator routine, before conversion to a Result.
 
-    A kernel returns ``value=None`` when the data do not identify an estimate,
-    for example a flat objective, and names the reason in ``stop_reason``.
-    records.public_estimate derives the phase in turns and the output-frame
-    interval from these fields. No field carries a coverage or ground-state
-    identification claim.
+    A routine returns ``value=None`` when the data do not identify an
+    estimate, for example a flat objective, and names the reason in
+    ``stop_reason``. records.public_estimate derives from these fields the
+    phase in turns and the interval in the units of the requested output.
+    No field carries a coverage or ground-state identification claim.
 
     Attributes:
         value: Energy in operator units for Hamiltonian input, or principal
             eigenphase in radians for unitary input. None when unidentified.
-        phase: Principal eigenphase of U in radians. For a Hamiltonian this is -tau*value.
+        phase: Principal eigenphase of U in radians. For a Hamiltonian this is -tau*value
+            reduced to [-pi, pi).
         interval_low: Lower endpoint in the frame of ``value``, unwrapped.
         interval_high: Upper endpoint in the frame of ``value``, unwrapped.
         interval_method: Name of the estimator-specific interval construction.
@@ -112,7 +114,7 @@ def _signal_vanishes(total, terms, magnitude, mean_window, weight):
     mean per power.
 
     Otherwise the samples are exact means, each within ``mean_window`` of its
-    exact-arithmetic value (the window that admitted it, see
+    exact-arithmetic value (the window within which it was accepted, see
     records.bounded_mean). Their real and imaginary parts then put each z_k
     within sqrt(2)*mean_window of its exact value, and the exact sum within
     sqrt(2)*mean_window*weight of the sum of the computed samples. Forming
@@ -126,7 +128,7 @@ def _signal_vanishes(total, terms, magnitude, mean_window, weight):
     covers the rounding of the computed moduli and of their sum. A total
     inside the sum of the two bounds is consistent with an exact zero, and
     the signal counts as absent.
-    Revisit with the admission windows (docs/ENGINEERING_CONSTANTS.md).
+    Revisit together with the probability windows (docs/ENGINEERING_CONSTANTS.md).
     """
     if mean_window is None:
         return total == 0
@@ -137,15 +139,15 @@ def _signal_vanishes(total, terms, magnitude, mean_window, weight):
 
 
 def qcels_schedule_size(options, tau):
-    """Return (number of positive powers, maximum admitted power) for a QCELS schedule.
+    """Return (number of positive powers, maximum power) for a QCELS schedule.
 
     With a single positive power the drawn schedule uses power 1, and the
     caller _schedule_size records that maximum.
 
     Powers are dimensionless. ``max_time=None`` selects maximum power 10,
     independent of units. A supplied ``max_time`` selects floor(max_time/tau)
-    for a Hamiltonian and floor(max_time) for unitary input. Planning and
-    admission call this same preview, so the admitted size bounds the
+    for a Hamiltonian and floor(max_time) for unitary input. Planning and the
+    size check call this same preview, so the checked size bounds the
     schedule that planned_power_schedule later draws.
 
     Departure from Ding and Lin (arXiv:2211.11973v2). Their data set, Eq. (6)
@@ -189,7 +191,7 @@ def qcels_schedule_size(options, tau):
 def qcels_grid_size(requested, span):
     """Return the effective QCELS grid size G = max(requested, 8*span + 1).
 
-    ``span`` is the largest minus the smallest selected power. The reduced
+    ``span`` is the largest minus the smallest power of the schedule. The reduced
     objective contains |sum_p z_p*exp(i*p*theta)|**2, whose fastest term is
     exp(i*span*theta) with period 2*pi/span, so 8*span + 1 points on
     [-pi, pi) put at least eight points in each period. The factor eight is a
@@ -203,7 +205,7 @@ def qcels_grid_size(requested, span):
 
 
 def planned_power_schedule(options, tau, rng):
-    """Return the planned (power, ancilla phase) settings in acquisition order.
+    """Return the planned (power, ancilla phase) settings in schedule order.
 
     Each entry is one logical quadrature setting. For QCELS, SPE and RFE the
     power is an integer multiplier p of U, and each power appears twice, with
@@ -224,11 +226,11 @@ def planned_power_schedule(options, tau, rng):
       how this differs from the paper's sampling over all of S1.
     - RWPE: the relative evolution times 1/sigma_k for
       k = 0, ..., max(1, max_steps)-1, with sigma_k = rwpe_scale(prior_std, k).
-      The phase entry 0 is a placeholder. The actual feedback depends on
+      The phase entry 0 is a placeholder. The feedback applied depends on
       earlier outcomes and is chosen by rwpe_choose during execution.
 
-    The caller admits the schedule size (method._schedule_size) before this
-    function materializes it.
+    The caller checks the schedule size against the limits
+    (method._schedule_size) before this function builds it.
     """
     if options.estimator == "qcels":
         count, max_power = qcels_schedule_size(options, tau)
@@ -277,7 +279,7 @@ def qcels(powers, samples, *, tau, grid_size, mean_window=None):
     prepared state with the target eigenvector (defined on p. 4).
     Sec. IV (p. 15) treats smaller overlaps by first applying a Fourier
     filter to the data, which is not implemented here. NWQLib does not
-    check p0. This kernel is one level of QCELS on one schedule. Algorithm 1
+    check p0. This routine is one level of QCELS on one schedule. Algorithm 1
     (p. 13), the multi-level variant covered by Theorem 2, doubles the time
     step between levels as in Eq. (35) (p. 14) and is not implemented.
 
@@ -298,7 +300,7 @@ def qcels(powers, samples, *, tau, grid_size, mean_window=None):
         tau: Positive Hamiltonian time step, or None for unitary input.
         grid_size: Requested minimum number of grid cells.
         mean_window: None for count data. For exact data, the largest error
-            of one real ancilla mean, the window that admitted it.
+            of one real ancilla mean, the window within which it was accepted.
 
     Returns:
         NumericalEstimate with value theta/tau (Hamiltonian) or the principal
@@ -416,9 +418,9 @@ def spe_filter_domain(degree, beta, eta):
     between the filter error and the eta/2 decision threshold of Algorithm 1
     for sampling error.
 
-    - delta: the smallest transition half-width the selected beta supports,
+    - delta: the smallest transition half-width the given beta supports,
       asin(sqrt(W3/(4*beta))) with W3 = W(8/(pi*eta**2)). None when beta < 1
-      or W3/(4*beta) >= 1, where no delta in (0, pi/2) meets the premise.
+      or W3/(4*beta) >= 1, where no delta in (0, pi/2) meets the assumption.
     - degree_ok: whether d satisfies Eq. (A6), d**2 >= t*w1 with
       w1 = W(512/(pi*eta**2)), for an integer t that also satisfies Eq. (A7).
       With epsilon' = sqrt(2*pi*w1)*epsilon2, Eq. (A7) requires t >= beta
@@ -431,7 +433,7 @@ def spe_filter_domain(degree, beta, eta):
 
     Only scalar work is needed. The bound concerns the filter alone. It is
     not a guarantee for a finite sample count or for the grid scan in spe.
-    A missing delta or a false degree premise leaves filter support
+    A missing delta or a failed degree assumption leaves filter support
     unverified, which identification_note reports.
     """
     def positive_w(log_argument):
@@ -500,7 +502,7 @@ def spe_fourier_weights(degree, beta):
 
     F_0 = 1/2 is known exactly and the coefficient of exp(-i*j*x) is
     conj(F_j) (PDF Eq. (A1), HTML Eq. (16)), so sampling positive
-    frequencies suffices when both quadratures are acquired.
+    frequencies suffices when both quadratures are measured.
     scipy.special.ive(j, beta) = exp(-beta)*I_j(beta) evaluates the product
     without forming exp(beta), which overflows for large beta.
     """
@@ -525,9 +527,10 @@ def _draw_multiplicities(size, supplied):
 
     For SPE and RFE, method.plan makes one query per distinct
     (power, phase) setting and records how many random draws selected it.
-    Exact readout evaluates the setting once. Counts acquire shots times
-    that multiplicity fresh shots and enter as the received-shot mean
-    (records.QPEQuery states the premises of that pooling). Weighting
+    Exact readout evaluates the setting once. With counts, the setting is
+    measured with shots times that multiplicity fresh shots and enters as
+    the mean over the received shots (records.QPEQuery states the
+    assumptions of that pooling). Weighting
     each observation by count/total reproduces the empirical distribution of
     the original draws. ``supplied=None`` means one draw per observation.
     """
@@ -597,7 +600,7 @@ def spe(powers, samples, *, tau, grid_size, fourier_degree, filter_beta, overlap
     eigenvalue's weight, so the CDF C(x) of Eq. (2) (p. 2) jumps by at
     least eta there. Wan--Berta--Campbell arXiv:2110.12071v2, Algorithm 1
     (p. 4), decides at one point x whether C(x - delta) < eta or
-    C(x + delta) > 0 by comparing the sampled C~(x) with eta/2. This kernel
+    C(x + delta) > 0 by comparing the sampled C~(x) with eta/2. This routine
     makes that comparison at every point of a grid of grid_size points on
     [-pi/2, pi/2) and returns the first point at or above eta/2. A crossing
     at either end of the grid is reported as unidentified.
@@ -609,7 +612,7 @@ def spe(powers, samples, *, tau, grid_size, fourier_degree, filter_beta, overlap
       of them and sets the failure probability of each decision to xi/s, so
       a union bound gives total failure probability at most xi (Theorem 1,
       p. 4). The grid scan also reuses one sample set, which lets
-      ``analyze(grid_size=...)`` recompute the estimate without acquisition,
+      ``analyze(grid_size=...)`` recompute the estimate without new measurements,
       but it makes grid_size decisions. The same union bound would need
       failure probability xi/grid_size per decision in Eq. (11).
     - Sample count. Algorithm 1 sets C_sample by Eq. (11). num_samples is a
@@ -625,7 +628,7 @@ def spe(powers, samples, *, tau, grid_size, fourier_degree, filter_beta, overlap
 
     The periodic filter needs the scaled spectrum inside (-pi/2, pi/2) with
     the margin of spe_phase_radius. The declared eta, the filter
-    approximation, finite sampling and evolution error are separate premises,
+    approximation, finite sampling and evolution error are separate assumptions,
     and the crossing supplies no confidence interval.
     """
     if not 0 < overlap_lower_bound <= 1:
@@ -694,7 +697,7 @@ def rfe(powers, samples, *, tau, num_frequencies, multiplicities=None, mean_wind
     phase and the estimate is unavailable. The per-power sums decide this
     (_signal_vanishes), because the computed |f_j| of such a spectrum differ
     by roundoff. ``mean_window`` is None for count data and otherwise the
-    largest error of one real ancilla mean, the window that admitted it. An
+    largest error of one real ancilla mean, the window within which it was accepted. An
     exactly equal computed spectrum also counts as flat.
     """
     from nwqlib._validation import integer
@@ -756,7 +759,7 @@ def rwpe_choose(mean, std):
 
     Granade and Wiebe, arXiv:2208.04526v1, Algorithm 1 (p. 3), choose the
     relative evolution time t = 1/sigma, with sigma = std the current
-    Gaussian width, and acquire one Bernoulli datum.
+    Gaussian width, and measure one Bernoulli datum.
     NWQLib's phase coordinate is phi = -tau*E, and the circuit H, controlled
     exp(-i*tau*H*t), RZ(feedback), H on the ancilla gives
 
@@ -808,8 +811,8 @@ def rwpe_update(mean, std, datum):
     Granade and Wiebe arXiv:2208.04526v1, Eq. (7a) (p. 5), for the
     experiment chosen by rwpe_choose. ``std`` is rwpe_scale(prior_std, k),
     the width after the k updates already processed. The width after this
-    update, Eq. (7b), is rwpe_scale(prior_std, k + 1), so no width is
-    stored.
+    update, Eq. (7b), is rwpe_scale(prior_std, k + 1), so no width needs
+    to be saved.
     """
     from nwqlib._validation import integer
 
@@ -826,8 +829,8 @@ def rwpe_estimate(mean, std, *, tau):
     """Return the energy -mean/tau with its nominal Gaussian model interval.
 
     The posterior model for phi = -tau*E is N(mean, std**2). The interval is
-    mean +- q*std, with q the standard normal quantile at
-    QPE_INTERVAL_CONFIDENCE, mapped to energy by E = -phi/tau, which
+    mean +- q*std, where q is the standard normal quantile at
+    (1 + QPE_INTERVAL_CONFIDENCE)/2, mapped to energy by E = -phi/tau, which
     reverses the endpoints. The phase field is the principal branch of mean.
     Granade and Wiebe, arXiv:2208.04526v1, use the mean as the estimate
     (Algorithm 1). The interval is a property of the Gaussian model, not a
@@ -840,8 +843,8 @@ def rwpe_estimate(mean, std, *, tau):
     (pp. 8 and 14). NWQLib implements only Algorithm 1 and never tests its
     data for a failed Gaussian approximation or for a target outside that
     range.
-    records.identification_note reports the range condition from the stored
-    spectral bound instead.
+    records.identification_note reports the range condition from the
+    spectral bound recorded in the Plan instead.
     """
     from statistics import NormalDist
 
@@ -862,7 +865,8 @@ def diagonalize_hermitian(matrix):
     are the complex128 columns of a (D, D) array. A real symmetric input uses
     the real driver dsyevd, which is cheaper and gives real eigenvectors, and
     complex input uses zheevd. Both read only the lower triangle, so the
-    input must already be Hermitian. Callers admit the O(D**3) work first.
+    input must already be Hermitian. Callers check the O(D**3) work against
+    the limits first.
     """
     if np.count_nonzero(np.imag(matrix)) == 0:
         values, vectors, info = dsyevd(np.array(np.real(matrix), dtype=float, order="F"),

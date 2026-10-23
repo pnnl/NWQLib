@@ -1,4 +1,4 @@
-"""Existing selected LCHS data and its exact physical application schedule."""
+"""The saved data of an LCHS Plan and its exact physical application schedule."""
 
 from collections.abc import Mapping
 from dataclasses import dataclass, fields, is_dataclass
@@ -16,7 +16,7 @@ from .solution_error_budget import psd_recovery, psd_recovery_exponent, psd_reco
 
 @dataclass(frozen=True)
 class GridApplication:
-    """One physical application of the saved finite recipe.
+    """One physical application of the saved finite sum.
 
     Attributes:
         start: Time at which the input enters.
@@ -44,8 +44,8 @@ class SelectedGrid:
     """Saved L, H, k-nodes and coefficients with the Result's application schedule.
 
     Every field is read from the Plan's own LCHSData and checked against its
-    reconstruction, so references and refinement evaluate the recipe that
-    was executed.
+    reconstruction, so references and refinement evaluate the finite sum
+    that was executed.
     """
 
     l_part: object
@@ -58,7 +58,7 @@ class SelectedGrid:
 
 
 def selected_payload(plan):
-    """Match the original selected native data without hashing or reconstructing it."""
+    """Return the Plan's original numerical payload, matched without hashing or reconstructing it."""
     from .selection import LCHSData
     from .periodic import _PeriodicPayload
 
@@ -113,13 +113,13 @@ def _specifications(plan, data):
 
 
 def host_applications(plan, result, data):
-    """Check a classical Result's receipts against the Plan and return its grid applications.
+    """Check a classical Result's application records against the Plan and return its grid applications.
 
-    Each receipt must name the Plan's application at its position, with the
+    Each record must name the Plan's application at its position, with the
     same start and elapsed time, source role, weight and recovery scale, so
     source roles are validated before any reference or component
     propagation. Per-node product-formula step counts come from the Plan's
-    host actions, the selection that execution applied. The receipts do not
+    classical actions, the choice that execution applied. The records do not
     repeat them.
     """
     rec, n = plan.reconstruction, len(data.quadrature.k_nodes)
@@ -147,7 +147,7 @@ def host_applications(plan, result, data):
 
 
 def selected_grid(plan, result, *, checks):
-    """Return the stored L, H, nodes and coefficients with the Result's application schedule, without spectral or quadrature selection."""
+    """Return the saved L, H, nodes and coefficients with the Result's application schedule, without spectral or quadrature selection."""
     from .selection import LCHSData
     data = selected_payload(plan)
     if type(data) is not LCHSData:
@@ -209,7 +209,7 @@ def grid_arguments(grid):
 
 
 def selected_pf_vector_requirements(circuit, dimension):
-    """Charge a realized elementary PF branch, without calling to_matrix.
+    """Count the work and bytes of applying one built elementary product-formula branch to a vector, without calling to_matrix.
 
     The circuit is the branch after its one requested decompose(), with
     the saved identity phase already attached. Work uses complex
@@ -227,15 +227,15 @@ def selected_pf_vector_requirements(circuit, dimension):
     1 + [phase != 0]*(D+3). The weighted accumulation
     ``reference += (scale*coefficient)*evolved`` costs 2*D + 1. So
     W_vec = D*sum_j 2**k_j + sum_j (4**k_j + s_j) + H + (D+3)*H_nz + 2*D + 1,
-    and the admitted work adds up to 2*D reshape/reordering copy visits and
-    one census visit per elementary gate, W_admit = W_vec + 2*D*G + G.
+    and the work checked against the limit adds up to 2*D reshape/reordering
+    copy visits and one counting visit per elementary gate, W_admit = W_vec + 2*D*G + G.
     The known local arrays are six complex D-vectors (96*D bytes: the
     current vector, a transposed/reshaped copy, the contraction result, the
     final reordered copy, the reference accumulator and the weighting
     temporary) and one gate matrix at a time, 16*max_j 4**k_j bytes. An
     operation outside this elementary vocabulary is refused rather than
-    priced by its arity. These units are admission proxies, not timings or
-    equal-cost CPU operations.
+    priced by its arity. These units are proxies for the limit checks, not
+    timings or equal-cost CPU operations.
     """
     from qiskit.circuit.library import (
         HGate, SXGate, SXdgGate, CXGate,
@@ -289,19 +289,20 @@ def selected_pf_vector_requirements(circuit, dimension):
 def pf_reference_held_payload(grid, *, held_inputs=(), max_work, max_bytes):
     """Return (held bytes, metadata visits) without copying numerical arrays.
 
-    Count the selected LCHS numerical data, its grid schedule, and explicit
-    caller-held input arrays. Follow array bases so shared buffers are
-    counted once and a view pays for its complete backing allocation.
+    Count the planned LCHS numerical data, its grid schedule, and the input
+    arrays the caller holds. Follow array bases so shared buffers are
+    counted once and a view is counted with its complete backing allocation.
     The Method, compiled SDK objects, interpreter frames, allocator arenas
-    and process RSS are outside this logical payload/native-wrapper law.
+    and process RSS are outside this formula for the logical data and the
+    Python wrapper objects.
 
-    Native allowances are 2048+16f for an f-field dataclass, 128+64n for
+    Python object allowances are 2048+16f for an f-field dataclass, 128+64n for
     an n-entry frozen mapping, 64+16n for a tuple, 128+16n for a list,
     256+16k for a k-axis
     array descriptor, and 64+4n for an n-character string. Integers use
-    32+4*ceil(max(1,bit_length)/30). Float and complex slots use 32 and
-    48. A 128-byte slot per visit reserves the temporary inventory set
-    and traversal frontier. These are qualified engineering allowances.
+    32+4*ceil(max(1,bit_length)/30). Float and complex values use 32 and
+    48. A 128-byte allowance per visit covers the temporary set of visited
+    objects and the recursion of the traversal. These are qualified engineering allowances.
     """
     from .selection import LCHSData
     seen = set()
@@ -385,7 +386,7 @@ def pf_reference_held_payload(grid, *, held_inputs=(), max_work, max_bytes):
 
 
 def grid_reference(plan, grid, *, checks, counts, held_inputs=()):
-    """Stream the selected finite sum on the padded system, then project once.
+    """Accumulate the planned finite sum term by term on the padded system, then project once.
 
     ACL arXiv:2312.03916v2 Eqs.(2),(60)-(61): each application contributes
     weight*exp(shift*elapsed)*sum_j c_j U(elapsed,k_j)*physical_input.
@@ -396,55 +397,56 @@ def grid_reference(plan, grid, *, checks, counts, held_inputs=()):
     applied to the projected vector at the end. The reference is None when
     that vector is not representable.
 
-    A classical product-formula reference reads the selected coefficient
-    table at most once per distinct k-node with a nonzero coefficient
-    (time_independent_terms.stored_pf_nodes). A borrowed selected row costs
+    A classical product-formula reference reads the coefficient table at
+    most once per distinct k-node with a nonzero coefficient
+    (time_independent_terms.stored_pf_nodes). Reading a row in place costs
     one logical visit, and reading the identity coefficient and upper
-    dropped mass costs two visits per node (stored_node_read_work), charged
-    to the cumulative dense_work with the stored_node_read_work count as a
-    diagnostic subset. The table remains in the consuming phase's held
-    payload. No Pauli decomposition runs here. Vector actions and their
-    phase and accumulation have separate charges.
+    dropped mass costs two visits per node (stored_node_read_work), counted
+    in the cumulative dense_work with the stored_node_read_work count as a
+    diagnostic subset. The table is counted in the memory held by the phase
+    that reads it. No Pauli decomposition runs here. Vector actions and
+    their phase and accumulation are counted separately.
 
     A classical product-formula reference applies each saved node action
     with the saved route and step count (host_pf.apply_node), its rotations
-    formed from the stored coefficients at the application's elapsed time.
+    formed from the saved coefficients at the application's elapsed time.
     The route's work (host_pf._route_requirements), the phase path (D + 4:
     negation and the identity-coefficient product, the imaginary argument
     and its exponential, and D products) and the weighted accumulation
-    (2*D + 1, host_pf.host_phase_and_accumulation_work) are admitted under
-    this invocation's limits before it runs. A saved route that does not fit
-    is refused, never reselected.
+    (2*D + 1, host_pf.host_phase_and_accumulation_work) are checked against
+    this call's limits before it runs. A saved route that does not fit is
+    refused, never replaced by another route.
 
-    The classical product-formula reference holds the selected numerical
-    payload and the caller's explicit verification inputs while each saved
+    The classical product-formula reference holds the planned numerical
+    data and the caller's explicit verification inputs while each saved
     node action runs. That payload includes dense L and H, the coefficient
     and index tables, application records and input vectors. Shared array
     buffers are counted once. Each action adds its rotation buffer, saved
     route scratch and weighted-accumulation reserve to those held bytes.
-    Setup and the one-time metadata inventory (pf_reference_held_payload)
-    have separate phase peaks.
+    Setup and the one-time count of metadata (pf_reference_held_payload)
+    have separate memory peaks.
 
-    The selected-grid quantum reference applies each selected decomposed
-    product-formula branch directly to its application vector. Admission
-    counts the contraction arity of every executed elementary gate, its
-    matrix-entry and scalar-function work, each executed global phase, and
-    weighted accumulation. It also reserves the vector-reordering copies.
+    The quantum selected_grid reference applies each planned decomposed
+    product-formula branch directly to the input vector of its operator
+    application. The limit check counts the contraction arity of every
+    executed elementary gate, its matrix-entry and scalar-function work, each
+    executed global phase, and weighted accumulation. It also sets aside room
+    for the vector-reordering copies.
     Contractions use complex multiply-add size units, while matrix
     formation and vector operations use logical visits. The byte allowance
-    covers known arrays and the declared circuit-record payload. Opaque SDK
+    covers known arrays and the declared size of the circuit records. Opaque SDK
     storage and runtime are outside that allowance
     (selected_pf_vector_requirements).
 
     The quantum product-formula reference holds dense L and H and the full
     saved SELECT numerical payload while it builds and applies each branch.
     Held storage includes the occurrence-angle table, phases, mappings,
-    stored node coefficients, source layout, saved records and input arrays,
-    with shared buffers counted once. Circuit construction adds the two
-    logical circuit-record populations in its preconstruction envelope.
-    After decomposition, vector admission adds the surviving circuit's
+    saved node coefficients, source layout, saved records and input arrays,
+    with shared buffers counted once. Circuit construction adds the two sets
+    of logical circuit records within its byte bound before construction.
+    After decomposition, the vector check adds the remaining circuit's
     records and the known vector and elementary-gate arrays. Opaque SDK
-    storage and the process heap are outside this known-payload allowance.
+    storage and the process heap are outside this known-data allowance.
     """
     from nwqlib.problems.inputs import PhysicalScale
     from .time_independent_terms import (_spectral_host_requirements, spectral_lchs_sum,

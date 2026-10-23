@@ -33,4 +33,4 @@ The construction follows Kirby, Motta and Mezzacapo, arXiv:2208.00567v4, Section
       heading_level: 3
       members: false
 
-`solve` calls `plan` and the other hooks of a Method. [Extending NWQLib](../extending.md) describes them.
+`solve` calls the Method's `plan` function and the others that [Extending NWQLib](../extending.md) describes.

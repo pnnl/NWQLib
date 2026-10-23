@@ -1,4 +1,4 @@
-"""Actual ADAPT processed inputs and immutable controller results."""
+"""ADAPT processed inputs and the immutable results of the ADAPT iteration."""
 
 from __future__ import annotations
 from math import fsum
@@ -33,7 +33,7 @@ def label_cache(plan):
 
     A bound Plan uses its ``AdaptInputs.cache``, which sampled circuit
     construction reads too, so each row is decoded once per Plan. A Plan
-    without native inputs uses an ``adapt`` entry of its private cache.
+    without bound inputs uses an ``adapt`` entry of its private cache.
     Neither is saved.
     """
     native = plan._native
@@ -92,20 +92,20 @@ def active_screen_labels(pool, cache, removed, limit):
 
 
 class AdaptPoolMember(Record):
-    """One admitted pool generator: its raw and processed identities, terms and ``[H, A]``.
+    """One checked pool generator, with its raw and processed content hashes, terms and ``[H, A]``.
 
     ``commutator`` depends on this member's processed generator, the
     reconstruction's processed Hamiltonian, ``processing_source`` and the
     Pauli cutoff. The record asserts that relation. Portable validation does
-    not recompute either ordered product. Only quantum Plans form it:
-    classical screening applies the generator to the state directly.
+    not recompute either ordered product. Only quantum Plans form it,
+    because classical screening applies the generator to the state directly.
 
     Attributes:
-        original_input: Identity of the generator as supplied, before the
+        original_input: Content hash of the generator as supplied, before the
             anti-Hermitian projection.
-        processed_input: Identity of the processed Pauli generator that queries use.
+        processed_input: Content hash of the processed Pauli generator that queries use.
         symmetry: Evidence of the anti-Hermitian projection (``AdaptSymmetry``).
-        pool_index: Position in the admitted pool.
+        pool_index: Position in the checked pool.
         family: Pool family name. A supplied operator has family ``custom``.
         spatial_indices: Spatial orbitals of the generator, empty for a
             supplied operator.
@@ -175,7 +175,7 @@ class AdaptSymmetry(Record):
 
     No approximation is hidden as zero.
     A generator must be anti-Hermitian for ``exp(theta A)`` to be unitary and a
-    Hamiltonian Hermitian for real energies. Admission projects each generator
+    Hamiltonian Hermitian for real energies. The input check projects each generator
     onto its anti-Hermitian part within ``input_symmetry_tolerance`` and records
     the correction, so the processed operator, not the raw input, is the
     declared scientific target. A Hamiltonian must already be exactly
@@ -186,7 +186,7 @@ class AdaptSymmetry(Record):
     Attributes:
         target: ``Hermitian`` for a Hamiltonian, ``anti-Hermitian`` for a generator.
         projection: ``(H + H.adjoint)/2`` or ``(A - A.adjoint)/2``, matching ``target``.
-        input_symmetry_tolerance: Relative Frobenius correction admitted, zero for
+        input_symmetry_tolerance: Largest relative Frobenius correction allowed, zero for
             exact symmetry.
         correction_applied: Whether the projection changed any coefficient.
         correction_component_max: Largest real or imaginary component of the
@@ -254,41 +254,41 @@ class AdaptSymmetry(Record):
 
 
 class AdaptReconstruction(Record):
-    """Bounded finite laws used by live execution and SDK-free report reload.
+    """Bounded finite records and work formulas used by live execution and by report reload without Qiskit.
 
     It stores the processed Hamiltonian terms, pool members with their
-    commutators, readout groups and work laws that every later query,
+    commutators, measurement groups and work formulas that every later query,
     analysis and verification reads. Report reload uses these records without
     importing Qiskit or rebuilding the pool. Only quantum Plans store
-    commutators, and only quantum Plans with shots store readout groups.
+    commutators, and only quantum Plans with shots store measurement groups.
 
     Attributes:
         schema_version: Record layout version.
         reference: Preparation record of the reference state.
-        original_hamiltonian: Identity of the Hamiltonian as supplied.
-        processed_hamiltonian: Identity of the processed Hamiltonian the queries use.
+        original_hamiltonian: Content hash of the Hamiltonian as supplied.
+        processed_hamiltonian: Content hash of the processed Hamiltonian the queries use.
         terms: Kept Pauli terms of the processed Hamiltonian, including the
             identity term. Empty when a classical plan keeps a dense or
             sparse matrix.
-        pool: Admitted pool members in pool-index order.
+        pool: Checked pool members in pool-index order.
         pool_name: Named pool family, or ``explicit`` for a supplied pool.
         max_selections: ``min(max_iterations, pool size)``, the longest chain.
         num_qubits: System register width.
         hamiltonian_action_work: Work of one Hamiltonian action from
             ``operators.inputs._matvec_requirements``. Its Pauli case uses
-            ``operators._pauli.pauli_action_requirements``, which charges
+            ``operators._pauli.pauli_action_requirements``, which counts
             the grouped pass, a possible ordered retry and the 3L
             preprocessing visits (the AND, popcount and rotation scans that
             precede the grouped tiles), with ``g = min(L, N)`` as the upper
             bound on distinct flip masks, valid without inspecting the
             masks. The value is the one computed at planning under the
-            archive format's law.
+            archive format's work formula.
         hamiltonian_dropped_l1: Sum of the absolute Hamiltonian coefficients
             removed by ``pauli_coefficient_cutoff``, in the energy unit.
-        groups: QWC readout groups for sampled screening. Each group is a
+        groups: QWC measurement groups for sampled screening. Each group is a
             tuple of indices into the sorted distinct commutator labels of the
             pool (``screen_labels``). Empty unless the Plan samples.
-        energy_groups: QWC readout groups for sampled energy queries, as
+        energy_groups: QWC measurement groups for sampled energy queries, as
             indices into the sorted nonidentity Hamiltonian labels
             (``energy_labels``). Empty unless the Plan samples.
         processing: Human-readable processing qualifiers.
@@ -307,7 +307,7 @@ class AdaptReconstruction(Record):
             adds to one pair query's H action, from
             ``fixed_basis._offset_free_requirements``.
         offset_free_action_bytes: Bytes of the shifted sparse operator and its
-            setup scratch, from the same law.
+            setup scratch, from the same formula.
     """
 
     schema_version: Literal[4] = 4
@@ -334,7 +334,7 @@ class AdaptReconstruction(Record):
 
     @model_validator(mode="after")
     def _one_identity_source(self):
-        """A Pauli table carries its own identity term, so only a matrix plan has a host shift."""
+        """A Pauli table carries its own identity term, so only a matrix plan sets ``host_identity_shift``."""
         if self.terms and self.host_identity_shift != 0:
             raise ValueError("a Pauli-table reconstruction takes c from its identity term")
         return self
@@ -359,7 +359,7 @@ def chain(values, side):
     """Return the active chain ``((pool_index, theta), ...)`` of side ``l`` or ``r`` of a point.
 
     ``values`` maps parameter names to bound values. Only the first
-    ``{side}_count`` slots are active (``adapt._parameters``).
+    ``{side}_count`` positions are active (``adapt._parameters``).
     """
     return tuple(
         (int(number(values[f"{side}_pool_{i}"])), float(number(values[f"{side}_theta_{i}"])))
@@ -368,12 +368,12 @@ def chain(values, side):
 
 
 def _exponential_action_work(member, theta, dimension):
-    """Return the work charged for one classical normalized ``exp(theta A) @ vector``.
+    """Return the work counted for one classical normalized ``exp(theta A) @ vector``.
 
     With ``m = GENERATOR_TAYLOR_DEGREE = 18``, ``s = _taylor_steps(
     coefficients, theta)`` (including its zero and underflow branches) and
     ``W_A`` the shared packed Pauli action of the member's ``T`` stored rows
-    (``adapt_actions.action_requirements``), the envelope is
+    (``adapt_actions.action_requirements``), the bound is
 
         W_exp = s [d + m (W_A + 2d)] + 10d.
 
@@ -381,14 +381,15 @@ def _exponential_action_work(member, theta, dimension):
     performs one Pauli action, one scaling and one addition. The final 10d is
     the normalization allowance in ``adapt_acquisition._vector`` and the
     zero-step copy. It remains conservative when a suffix is used without
-    normalization. Packing is absent from ``W_A`` because it has its
-    once-per-Plan charge (``adapt_actions.build_action_tables``). The
+    normalization. Packing is absent from ``W_A`` because it is counted once
+    per Plan (``adapt_actions.build_action_tables``). The
     per-action group construction and rotated coefficients remain present on
     every action: prepacking masks does not cache flip-group dictionaries or
-    rotated coefficients. This law and ``adapt_actions.packed_exponential``
+    rotated coefficients. This formula and ``adapt_actions.packed_exponential``
     both take the step count from ``fermionic_pool._taylor_steps`` with the
-    member's stored coefficients, so the law cannot miss a step at a rounding
-    boundary. ADAPT's query and verification work laws share this function.
+    member's stored coefficients, so the formula cannot miss a step at a
+    rounding boundary. ADAPT's query and verification work formulas share
+    this function.
     These are logical pass allowances, not CPU-time or accuracy bounds.
     """
     from nwqlib.subroutines.fermionic_pool import GENERATOR_TAYLOR_DEGREE, _taylor_steps
@@ -400,7 +401,7 @@ def _exponential_action_work(member, theta, dimension):
 
 
 def _energy_gradient_work(members, thetas, dimension, hamiltonian_work):
-    """Return the work charged for one classical energy-and-gradient evaluation.
+    """Return the work counted for one classical energy-and-gradient evaluation.
 
     The units are those of ``_exponential_action_work``: one amplitude of
     ``d = dimension`` visited by one elementwise pass or reduction.
@@ -410,7 +411,7 @@ def _energy_gradient_work(members, thetas, dimension, hamiltonian_work):
     the degree ``m = GENERATOR_TAYLOR_DEGREE`` and the step counts ``s_j`` of
     ``_taylor_steps``, each nonzero-step derivative Horner term makes two A
     actions, two elementwise operations for the value and four for the
-    tangent, each step copies the value and tangent bases, and the kernel
+    tangent, each step copies the value and tangent bases, and the routine
     starts with a copy and a zero fill:
 
         W_pair,j = 2d + s_j [2d + m (2 W_Aj + 6d)]   (s_j > 0),
@@ -428,12 +429,12 @@ def _energy_gradient_work(members, thetas, dimension, hamiltonian_work):
 
         W_EG = W_H + d + sum_{j=1..k} (W_pair,j + 15d) + sum_{j=2..k} W_back,j.
 
-    The generator charges count array passes and action kernels, excluding
+    The generator terms count array passes and action calls, excluding
     scalar angle operations, Python calls and term-selector metadata visits.
-    The Hamiltonian charge uses its caller-supplied work law. There are
+    The Hamiltonian term uses its caller-supplied work formula. There are
     ``2m sum(s_j)`` forward generator actions, ``m sum_{j>=2} s_j`` backward
     actions, one more A action for each zero-angle factor with zero steps and
-    one H action. Reference materialization on a cache miss is added by the
+    one H action. Reference construction on a cache miss is added by the
     caller. Returns ``(work, steps)`` with the precomputed step counts.
     """
     from nwqlib.subroutines.fermionic_pool import GENERATOR_TAYLOR_DEGREE, _taylor_steps
@@ -485,11 +486,16 @@ class AdaptRound(Record):
         contribution_ids: Content hashes of the data first collected after
             the previous round's screening and up to this round's screening,
             including any optimizer energy queries in between.
-        basis_realization: Content hash of the query that supplied the
-            diagonal of the full selected product, which the
-            completed matrix stage must contain: the shared full-chain query
-            of an exact quantum run, whose screening values the later screen
-            reuses, or the diagonal pair query otherwise.
+        basis_realization: Content hash of a query that identifies the full
+            product state of this round's basis, or None. It is the shared
+            query on the full product state in an exact quantum run, whose
+            screening values the next screening reuses, the diagonal pair
+            query in a classical run, or the query of the first nonidentity
+            Pauli term of the diagonal pair in a sampled run. The matrix stage
+            of the round, which obtains every matrix element of the current
+            basis, must contain this query. The value is None before any
+            generator is selected and in an exact quantum run whose
+            Hamiltonian has no nonidentity term.
         analysis_attempt: Analysis attempt of the run that produced this round.
         optimizer_attempts: Cumulative optimizer invocations at this round.
         optimizer_rounds: Cumulative completed BFGS iterations at this round.
@@ -567,8 +573,8 @@ class ADAPTResult(Result):
         pending: Labels of queries or statuses that blocked further progress.
         optimizer_attempts: Number of optimizer invocations started.
         optimizer_rounds: Completed BFGS iterations over all invocations.
-        optimizer_restarts: Records of BFGS restarts from a saved incumbent
-            after the run was resumed.
+        optimizer_restarts: Records of BFGS restarts from the saved best
+            point after the run was resumed.
         energy_queries: Energy queries counted against
             `optimize_max_evaluations`.
         analysis_attempts: Projected analyses started by the run.

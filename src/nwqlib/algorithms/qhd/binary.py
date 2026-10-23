@@ -23,22 +23,22 @@ convention gives the same operator as the classical ``F_-^dagger D F_-`` and
 builds the permuted phase table that removes the swap layers, and
 ``qft_gates`` lists the circuit and its bit-reversal convention.
 
-Potential term. Each admitted support table is a real diagonal on ``|S| b``
+Potential term. Each support table of the Plan is a real diagonal on ``|S| b``
 qubits, synthesized either as an exact phase diagonal (the recursion of
 Shende, Bullock and Markov, quant-ph/0406176v5, Theorem 7 on p. 10, whose
 multiplexed Rz with k select bits costs ``2**k`` CX by the count after their
 Theorem 8 on p. 11, so the diagonal costs ``2**n - 2`` CX on n qubits) or as
 one parity-ladder Z rotation per Walsh coefficient (Liu et al.,
 arXiv:2607.16996v1, Sec. IV A, Eqs. (53)-(58), ``2 (w - 1)`` CX for a
-weight-w string). ``PhaseTable.synthesize`` owns both constructions and
-their CX and rotation counts, ``BinarySynthesis`` selects between them, and
-``native.append_binary_steps`` and ``theory.run_binary_product`` apply the
-same emitted constructions to a circuit and to a restricted state.
+weight-w string). ``PhaseTable.synthesize`` implements both constructions
+and their CX and rotation counts, ``BinarySynthesis`` selects between them,
+and ``native.append_binary_steps`` and ``theory.run_binary_product`` apply
+the same constructions to a circuit and to a restricted state.
 
 The derivations in the docstrings below are NWQLib's unless a source is
-named. ``tests/test_qhd_binary.py`` compares the emitted circuits with
-independently written products of the finite model and the CX laws with
-Qiskit's transpiled circuits.
+named. ``tests/test_qhd_binary.py`` compares the built circuits with
+independently written products of the finite model and the recorded CX
+counts with Qiskit's transpiled circuits.
 """
 
 from __future__ import annotations
@@ -107,8 +107,8 @@ class BinarySynthesis(Record):
         quant-ph/0406176v5, Theorem 7, `2**n - 2` CX on n qubits for a nonzero table and
         none for an all-zero one. `"walsh_rotations"` applies one parity-ladder Z
         rotation per nonzero Walsh coefficient, `2 (w - 1)` CX for a weight-w string.
-        `"min_cx"` compares the two emitted CX counts of each table at its step exponent
-        and takes the smaller, preferring `"walsh_rotations"` on a tie. It minimizes
+        `"min_cx"` compares the CX counts of the two constructions of each table at its
+        step exponent and takes the smaller, preferring `"walsh_rotations"` on a tie. It minimizes
         that CX count table by table, not the Rz or T count, the depth, routed CX on
         limited connectivity, or the CX of a jointly synthesized potential.
     """
@@ -149,7 +149,7 @@ def lexicographic_register_array(register, num_variables, bits):
         z = sum_(j=0)^(d-1) n_j * K**j.
 
     The conversion reverses the variable axes, placing variable 0 first
-    in lexicographic grid order, while preserving every stored value and
+    in lexicographic grid order, while preserving every value and
     each variable's little-endian bit order: bit l of ``n_j`` is qubit
     ``j*b+l`` and has local weight ``2**l``.
 
@@ -235,7 +235,7 @@ def qft_controlled_phases(bits, cutoff):
 def qft_cx(bits, cutoff, swaps):
     """Return the CX count of one QFT at optimization level 0, ``2 C_p + 3 floor(b/2) [swaps]``.
 
-    Qiskit lowers each controlled phase to two CX (the ``CPhaseGate``
+    Qiskit decomposes each controlled phase into two CX (the ``CPhaseGate``
     definition applies ``P(lambda/2)`` to the control, a CX, ``P(-lambda/2)``
     to the target, a second CX and ``P(lambda/2)`` to the target) and each
     swap to three CX, and H needs none. The exact QFT therefore costs
@@ -260,8 +260,8 @@ def qft_error_bound(bits, cutoff):
     with one sine (at most one ulp, a platform assumption) and one product,
     and ``fsum`` rounds the sum once, so the computed sum has relative error
     below 5u, and the returned value is multiplied by ``1 + 8u``, which
-    rounds it outward. ``aqft_error_bound`` of a Plan charges ``2 e_F`` per
-    kinetic conjugation. The one-ulp premise for ``math.sin`` is
+    rounds it outward. ``aqft_error_bound`` of a Plan counts ``2 e_F`` per
+    kinetic conjugation. The one-ulp assumption for ``math.sin`` is
     conditional. The bound was tested on macOS arm64 and Linux aarch64, and
     the sine of Linux x86-64 hosts has not been checked
     (docs/dependency_issues.md, "Platform math libraries").
@@ -280,7 +280,7 @@ def walsh_coefficients(values):
     orthogonality gives ``diag(v) = sum_m c_m Z_m``. The fast Walsh-Hadamard
     butterfly uses ``n 2**n`` additions and ``O(2**n)`` storage.
 
-    Range admission (``walsh_admission``). Every butterfly addition and
+    Range check (``walsh_admission``). Every butterfly addition and
     subtraction must be finite. An overflow cannot become finite again in
     later additions, so the final outputs show it. A subnormal scratch
     result is exact under gradual underflow. A nonzero output s with
@@ -288,7 +288,7 @@ def walsh_coefficients(values):
     normalized, as for the normal entries ``2**-1022`` and
     ``nextafter(2**-1022, inf)``, whose normalized difference would be
     ``-2**-1075``, and every other output is normalized exactly. For
-    ``N = 2**n`` the admitted coefficient errs from the exact Walsh
+    ``N = 2**n`` the returned coefficient errs from the exact Walsh
     coefficient of the stored table by at most ``gamma_n a + d_m``, with a
     the mean absolute table value, ``gamma_n = n u/(1 - n u)``, ``n u < 1``,
     and ``d_m = |s_m|/N`` for an omitted coefficient and zero otherwise, and
@@ -313,15 +313,17 @@ def walsh_coefficients(values):
 
     Identity coefficient. For N = 2**n stored binary64 entries let
     ``a = sum_r |v_r|/N`` and ``c0_star = sum_r v_r/N``, both sums read
-    exactly. For the admitted, computed identity coefficient c0 the bound
+    exactly. For the computed identity coefficient c0 returned by the range
+    check, the bound
     above at m = 0 gives ``|c0 - c0_star| <= gamma_n a + d_0``, with
     ``gamma_r = r u/(1 - r u)``, ``u = 2**-53``, ``r u < 1`` and ``d_0``
     from the normalization above. The bound needs finite intermediates and
     depends on the mean absolute value a even when the computed identity is
     zero. For example, the table ``(2**53, 1, -2**53, 0)`` has exact mean
     1/4 and computed identity 0, so at exponent 16 the computed phase misses
-    ``-4`` by 4 rad. ``compile_binary_steps`` charges the identity phase
-    formed from ``c0`` in each Walsh block.
+    ``-4`` by 4 rad. ``compile_binary_steps`` bounds the formation error of
+    the identity phase formed from ``c0`` in each Walsh block (``F_W`` of
+    ``WalshPhaseTerms``), which the phase check of the kept state uses.
     """
     return walsh_admission(values)[0]
 
@@ -332,8 +334,10 @@ class WalshOmission(NamedTuple):
     Attributes:
         coefficients: Omitted nonidentity coefficients.
         identity: Whether the identity coefficient was omitted.
-        identity_charge: ``d_0``, the exact ``|s_0|/N`` of an omitted identity, else zero.
-        charge: The exact ``sum_(m != 0) d_m`` over the omitted nonidentity coefficients.
+        identity_charge: ``d_0``, the exact ``|s_0|/N`` of an omitted identity, else
+            zero, its contribution to the coefficient error bound.
+        charge: The exact ``sum_(m != 0) d_m`` over the omitted nonidentity
+            coefficients, their contribution to the coefficient error bound.
     """
 
     coefficients: int
@@ -346,13 +350,13 @@ NO_WALSH_OMISSION = WalshOmission(0, False, Fraction(0), Fraction(0))
 
 
 def walsh_admission(values):
-    """Return ``(coefficients, omission)``: the admitted Walsh coefficients of a table and what their normalization omitted.
+    """Return ``(coefficients, omission)``: the range-checked Walsh coefficients of a table and what their normalization omitted.
 
     With the butterfly outputs s_m of ``walsh_sum``, ``z_m = s_m/N`` and
-    ``N = 2**n``, the admitted coefficient is zero when ``0 < |z_m| < 2**-1022``
+    ``N = 2**n``, the returned coefficient is zero when ``0 < |z_m| < 2**-1022``
     and ``z_m`` otherwise, decided by the exact test ``|s_m| < 2**(n - 1022)``
     before any division, so the kept ``z_m`` is an exact power-of-two scaling
-    and ``|z_m| = 2**-1022`` is admitted. The omission ``d_m = |z_m|`` of an
+    and ``|z_m| = 2**-1022`` is kept. The omission ``d_m = |z_m|`` of an
     omitted coefficient enters the coefficient error bound
     ``gamma_n a + d_m`` (``walsh_coefficients``), ``d_0`` for the identity
     and the nonidentity sum for ``circuit_errors.binary_angle_formation``.
@@ -462,7 +466,7 @@ def kinetic_walsh(model, bits, spacing):
     because ``Re(exp(i pi (K-1)/K) (-i)**w) = -cos(pi/K + pi w/2)`` and
     ``c_m = -Re(...)/h**2``. For ``b >= 2`` every factor is nonzero, and at
     ``b = 1`` the single mask has ``s_1(pi/2) = -1``, so all ``2**(b-1)`` masks
-    that contain the top bit are emitted and
+    that contain the top bit are in the circuit and
     ``walsh_rotations`` costs ``(b - 1) 2**(b-1)`` CX. A Walsh transform of
     the rounded table would instead leave rounding noise of order ``u/h**2``
     on the masks without the top bit, which are exactly zero.
@@ -472,11 +476,11 @@ def kinetic_walsh(model, bits, spacing):
     butterfly output, so its formation allowance comes from
     ``kinetic_identity_enclosure``.
 
-    Range admission (``validation._normal_range``). The Nyquist energy and
+    Range check (``validation._normal_range``). The Nyquist energy and
     its factor ``pi/(2 h)``, every trigonometric-factor product, every
-    division by ``h**2`` and every nonzero coefficient are normal binary64
+    division by ``h**2`` and every nonzero coefficient must be normal binary64
     numbers. The known zero masks stay exactly zero, and a computed zero in
-    a mask whose formula is nonzero is refused with the kinetic-scale remedy
+    a mask whose formula is nonzero is rejected with the kinetic-scale remedy
     (``validation._kinetic_range_error``), since these coefficients depend
     only on the grid.
     """
@@ -487,7 +491,7 @@ def kinetic_walsh(model, bits, spacing):
 
 
 def _kinetic_walsh(model, bits, spacing):
-    """Return the coefficients of ``kinetic_walsh``, raising ValueError for a value outside the admitted range."""
+    """Return the coefficients of ``kinetic_walsh``, raising ValueError for a value outside the normal range."""
     if model == "spectral":
         # E_Nyq c_m(q**2)/(K/2)**2 with E_Nyq = 2 (pi/(2h))**2
         wave = _normal_quotient(math.pi, 2.0 * spacing, "the spectral Nyquist wave number pi/(2 h)")
@@ -498,14 +502,14 @@ def _kinetic_walsh(model, bits, spacing):
 
 
 def checked_product_level(previous, factors, masks):
-    """Return one level of the finite-difference partial products, admitting each exact product.
+    """Return one level of the finite-difference partial products, range-checking each exact product.
 
     One elementwise multiplication executes for every mask the same binary64
     operation that a per-mask scalar loop would. The normal-range check is
-    on the exact product of the stored previous partial and factor. Min/max
+    on the exact product of the binary64 previous partial and factor. Min/max
     of the rounded output certify an open normal interval only, so an entry
     at or beyond nu or Omega, or nonfinite, calls the exact boundary test. A zero
-    output on these structurally nonzero masks is a refusal, as it is in
+    output on these structurally nonzero masks is rejected, as it is in
     ``_normal_product``.
     """
     with np.errstate(all="ignore"):
@@ -525,12 +529,12 @@ def kinetic_finite_difference_array(bits, spacing):
 
     The finite-difference coefficients use scalar ``math.sin`` and
     ``math.cos`` factors and multiply them in increasing level order. Each
-    entry therefore follows the scalar binary64 product sequence. Range
-    admission checks exact products at the normal-range endpoints. The
+    entry therefore follows the scalar binary64 product sequence. The range
+    check tests exact products at the normal-range endpoints. The
     summary of ``circuit_errors.kinetic_fd_summary_up`` reuses one analytic
     enclosure per distinct trigonometric factor and propagates interval
     products outward. Its radii enclose the exact analytic coefficients
-    under the stated one-ulp premise and can exceed the exact-rational
+    under the stated one-ulp assumption and can exceed the exact-rational
     enclosure's radii.
 
     For top-bit masks, ``s_w = cos(pi/K), -sin(pi/K), -cos(pi/K), sin(pi/K)``
@@ -629,7 +633,7 @@ def lexicographic_table(values, support_size, num_grid_points):
 
 @dataclass(frozen=True)
 class DiagonalConstruction:
-    """The emitted construction of ``exp(-i x diag(v))`` on n qubits for one exponent x.
+    """The circuit construction of ``exp(-i x diag(v))`` on n qubits for one exponent x.
 
     Attributes:
         synthesis: ``"dense_diagonal"`` or ``"walsh_rotations"``.
@@ -640,11 +644,11 @@ class DiagonalConstruction:
         identity_phase: Walsh construction: the circuit global phase
             ``-x c_0`` of the identity coefficient. Zero for the dense
             construction, whose helper keeps the identity inside its phases.
-        masks: Walsh construction: the emitted masks, in increasing order.
+        masks: Walsh construction: the masks in the circuit, in increasing order.
         angles: Walsh construction: the ``Rz`` angle ``2 x c_m`` of each
-            emitted mask.
+            mask in the circuit.
         cx: CX count of the construction at optimization level 0.
-        rotations: Rotation gates emitted: one per Walsh string, or the
+        rotations: Rotation gates in the circuit: one per Walsh string, or the
             ``2**n - 1`` angles of the dense construction's multiplexor
             schedule, of which exact-zero angles are omitted in the circuit.
         dropped_count: Nonzero Walsh rotations removed by the angle threshold.
@@ -652,8 +656,9 @@ class DiagonalConstruction:
             as an integer count of ``2**-1074`` (``validation.angle_units``).
         range_omitted: Walsh rotations, or dense phase entries, omitted
             because their product would fall below the normal range.
-        range_charge: Their exact charge: ``sum |x c_m|`` over the omitted
-            rotations, or ``max |x v_z|`` over the omitted dense entries.
+        range_charge: Their exact contribution to the error bound:
+            ``sum |x c_m|`` over the omitted rotations, or ``max |x v_z|``
+            over the omitted dense entries.
         identity_omitted: Whether the Walsh identity phase ``-x c_0`` was
             omitted for the same reason.
     """
@@ -673,9 +678,9 @@ class DiagonalConstruction:
     identity_omitted: bool = False
 
     def emitted_phases(self):
-        """Return binary64 diagonal phase parameters in address order for the host reference.
+        """Return binary64 diagonal phase parameters in address order for the classical reference.
 
-        Dense constructions return their stored ``phases``. For Walsh
+        Dense constructions return their ``phases``. For Walsh
         constructions, ``Rz(theta) = exp(-i theta Z/2)`` gives the exact
         angle ``phi_z = identity_phase - sum_m theta_m chi_m(z)/2`` of the
         separate kept rotations, with ``chi_m(z) = (-1)**popcount(m & z)``.
@@ -687,8 +692,9 @@ class DiagonalConstruction:
 
         ``theory.run_binary_product`` applies phases from this array.
         ``theory.binary_product_state_error`` treats its entries as exact
-        parameters and prices their application, not their formation or
-        their difference from native gate lowering.
+        parameters and bounds the error of their application, not of their
+        formation or their difference from the decomposition into Qiskit
+        gates.
         """
         if self.phases is not None:
             return self.phases
@@ -752,7 +758,7 @@ class PhaseTable:
 
     @classmethod
     def from_values(cls, values, largest=None):
-        """Return the table of ``values`` with its admitted Walsh coefficients and their omission (``walsh_admission``).
+        """Return the table of ``values`` with its range-checked Walsh coefficients and their omission (``walsh_admission``).
 
         ``largest`` is ``max |v|`` when the caller already holds it, such as
         ``SupportValues.magnitude`` of the stored table.
@@ -764,7 +770,7 @@ class PhaseTable:
         """Return the table of ``values`` without Walsh coefficients, for a diagonal that only the dense construction synthesizes.
 
         The dense construction reads the values alone, so neither the Walsh
-        transform nor its range admission (``walsh_admission``) applies, and
+        transform nor its range check (``walsh_admission``) applies, and
         a table whose butterfly sums would leave the binary64 range, such as
         ``1e308 x`` on eight points, keeps its dense Plan.
         """
@@ -782,10 +788,10 @@ class PhaseTable:
                           self._largest)
 
     def dense_cx(self, exponent):
-        """Return ``2**n - 2`` CX when some nonzero dense phase survives range admission, and 0 otherwise.
+        """Return ``2**n - 2`` CX when some nonzero dense phase survives the range check, and 0 otherwise.
 
-        ``append_control_diagonal_phases`` builds no gate when every admitted
-        phase is zero. A nonzero exact product below ``2**-1022`` is omitted
+        ``append_control_diagonal_phases`` builds no gate when every
+        range-checked phase is zero. A nonzero exact product below ``2**-1022`` is omitted
         even when its rounded binary64 value would be a nonzero subnormal.
         Otherwise it builds one uniformly controlled Rz on each level
         k = 1..n-1 of the Theorem 7 recursion of
@@ -803,13 +809,13 @@ class PhaseTable:
         return (1 << self.qubits) - 2 if self._dense_nonzero(exponent) else 0
 
     def _dense_nonzero(self, exponent):
-        """Whether some admitted dense phase ``fl(-x v[z])`` is nonzero.
+        """Whether some range-checked dense phase ``fl(-x v[z])`` is nonzero.
 
-        On the admitted finite range, a nonzero phase product survives
-        exactly when its exact magnitude is at least ``2**-1022``. If the
-        largest exact magnitude is smaller, every nonzero product is
+        On the finite range that the check accepts, a nonzero phase product
+        survives exactly when its exact magnitude is at least ``2**-1022``. If
+        the largest exact magnitude is smaller, every nonzero product is
         omitted. Otherwise at least that largest product survives. This
-        decides whether the admitted diagonal is nonzero without forming
+        decides whether the range-checked diagonal is nonzero without forming
         all phases.
         """
         product = abs(exponent) * self._largest
@@ -825,22 +831,22 @@ class PhaseTable:
         ``exp(-i x c_m Z_m)`` is ``Rz(2 x c_m)`` on the parity of the string's
         w qubits, computed with ``w - 1`` CX and undone with ``w - 1`` more.
         The identity coefficient is the global phase ``-x c_0``, whose
-        formation error ``compile_binary_steps`` charges to kept-state phase
-        admission (``walsh_coefficients``). A mask with ``c_m = 0``, or with
-        an angle omitted below the normal range (below), emits nothing. A
-        nonzero angle below ``threshold`` is dropped, the rule of
+        formation error ``compile_binary_steps`` includes in the phase check
+        of the kept state (``walsh_coefficients``). A mask with ``c_m = 0``,
+        or with an angle omitted below the normal range (below), adds no
+        gate. A nonzero angle below ``threshold`` is dropped, the rule of
         ``QHD.rotation_threshold``, and counted with its absolute angle. A
         small floating-point coefficient is not a proved zero, so without a
-        threshold it is emitted.
+        threshold its rotation stays in the circuit.
 
         Dense diagonal. The phase angles ``-x v[z]`` go to the exact phase
         diagonal (``dense_cx``), which keeps every nonzero phase that the
-        range admission below keeps, and the threshold never prunes it.
+        range check below keeps, and the threshold never prunes it.
 
         ``"min_cx"`` compares the dense CX count with the Walsh count at this
         exponent and takes Walsh rotations when they cost at most as many.
 
-        Range admission happens before the threshold and the ``min_cx``
+        The range check happens before the threshold and the ``min_cx``
         choice. The exponent and ``2 x`` are normal (``compile_binary_steps``).
         A Walsh angle ``fl(2 x c_m)`` of a nonzero coefficient, a dense phase
         ``fl(-x v[z])`` of a nonzero value or the identity phase
@@ -850,16 +856,16 @@ class PhaseTable:
         ``||exp(-i a G) - I|| <= |a| ||G||`` for a Hermitian G, removing
         ``Rz(2 x c_m) = exp(-i x c_m Z_m)`` costs ``|x c_m|``, and zeroing
         dense entries costs their largest ``|x v_z|``, because a diagonal's
-        operator norm is its largest entry magnitude. Both charges belong to
-        the ``rotation_pruning`` entry, while an omitted identity phase
-        enters ``F_W`` (``compile_binary_steps``). Only the selected
+        operator norm is its largest entry magnitude. Both contributions
+        belong to the ``rotation_pruning`` entry, while an omitted identity
+        phase enters ``F_W`` (``compile_binary_steps``). Only the selected
         construction carries these omissions, and dense cost selection reads
-        the admitted table.
+        the range-checked table.
 
-        Range admission applies to the exact products represented by the
-        stored operands. Walsh rotations use the doubled exponent, and the
+        The range check applies to the exact products of the binary64
+        operands. Walsh rotations use the doubled exponent, and the
         identity phase uses the undoubled exponent. When scalar extrema
-        establish that every nonzero product lies in the admitted normal
+        establish that every nonzero product lies in the normal
         range and the threshold is zero, the nonidentity mask and its CX count
         are independent of the nonzero exponent. The phase angles remain
         exponent-dependent. Reusing a construction preserves the count and
@@ -933,15 +939,15 @@ def all_scaled_normal(factor, nonzero_min, maximum):
     """Return whether every nonzero exact product ``factor * c`` lies in ``[nu, Omega]``.
 
     A sufficient all-normal test is ``nu <= |2x| c_min`` and
-    ``|2x| c_max <= Omega`` for the admitted ``2x``, with ``(c_min, c_max)``
+    ``|2x| c_max <= Omega`` for the range-checked ``2x``, with ``(c_min, c_max)``
     the minimum nonzero and maximum magnitudes, ``nu = 2**-1022`` and
     ``Omega`` the largest finite binary64 number. These comparisons concern
-    exact products of stored operands. The test ``|x| c_max <= Omega`` would be
+    exact products of binary64 operands. The test ``|x| c_max <= Omega`` would be
     insufficient (x = 2, ``c_max = Omega/2`` passes while ``2 x c_max``
     overflows). Only two extremal products are checked, as exact Fraction
     comparisons that avoid every boundary ambiguity. None means there are no
     nonzero entries. A zero factor is handled by the full zero-bookkeeping
-    path of the synthesis owner.
+    path of ``PhaseTable.synthesize``.
     """
     if nonzero_min is None:
         return True
@@ -955,7 +961,7 @@ def _integer_storage(bits):
     """Return ``L(b) = 32 + 4 ceil(max(1, b)/30)`` bytes for a CPython integer of b magnitude bits.
 
     The qualified heap allowance of one integer on 64-bit CPython 3.12.14.
-    The resource-inspection census (``resources._census_sizes``), the level-table files
+    The rotation count of resource inspection (``resources._census_sizes``), the level-table files
     (``refinement._level_table_phase_bytes``) and the construction cache
     (``_construction_entry_cap``) size their integers with it.
     """
@@ -965,10 +971,11 @@ def _integer_storage(bits):
 def _require_bytes(limit, *, held, local, stage, later=False):
     """Return ``held + local`` bytes after checking them against ``limit``, a QHD ``max_bytes``.
 
-    ``held`` prices the data that stay live through the phase and ``local``
-    the phase's own workspace. The refusal names the phase and the smallest
-    ``max_bytes`` that admits it. With ``later`` it says that the phases
-    admitted after this one need more, so that value is a lower bound.
+    ``held`` counts the bytes of the data that stay in memory through the
+    phase and ``local`` the phase's own workspace. The error names the phase
+    and the smallest ``max_bytes`` that accepts it. With ``later`` it says
+    that the phases checked after this one need more, so that value is a
+    lower bound.
 
     Raises:
         ValueError: ``held + local`` exceeds ``limit``.
@@ -995,7 +1002,7 @@ def _construction_entry_cap(entries, support_size):
     sum of at most E such values adds at most ``ceil(log2 E)`` bits.
     Multiplying two dyadic binary64 operands gives a numerator of at most
     ``4196 + ceil(log2 E)`` bits and a denominator of at most 2149 bits. This
-    covers the dropped-unit sum and range-charge numerator/denominator, as
+    covers the dropped-unit sum and ``range_charge`` numerator/denominator, as
     well as the much smaller counts. The allowance is
 
     ``h = 4096 + 16*support_size + 8L(4200 + ceil(log2(E)))``.
@@ -1003,7 +1010,7 @@ def _construction_entry_cap(entries, support_size):
     The 4096 covers the construction, arrays' headers, key tuple/hex string,
     mapping-entry resize storage and fixed scalars on this stack. The
     support-index objects already belong to the source/model. The slot
-    charge is conservative. Eight L-width slots also cover count/cx/scalar
+    allowance is an overestimate. Eight L-width slots also cover count/cx/scalar
     integers. The same h serves the baseline and the optional-entry
     accounting (``BinaryModel.construction``). This intentionally avoids a
     production recursive object-size walk or a synthesis trial to discover
@@ -1018,17 +1025,18 @@ def _construction_entry_cap(entries, support_size):
 
 
 def _construction_cache_capacity(max_bytes, *, held_bytes, model_bytes, latest_bytes, build_bytes, use_bytes):
-    """Admit a ``BinaryModel``'s baseline ``B_base`` and return the capacity left for optional cache entries.
+    """Check a ``BinaryModel``'s baseline ``B_base`` against ``max_bytes`` and return the capacity left for optional cache entries.
 
     ``B_base = held + model + latest + max(build, use)`` covers the caller's
-    residents, the model, one latest construction per table and the largest
-    construction or use workspace, and is admitted against ``max_bytes``
-    before any model or build allocation. Only the remaining capacity
-    ``cache_capacity = max_bytes - B_base`` funds optional whole-model
-    retention, ``cache_bytes + new_entry_bytes <= cache_capacity``. Because
-    the baseline already funds a miss and its latest-per-table result, the
-    retention decision may use the actual payload after synthesis. A
-    negative residual is a refusal of the baseline, never clamped to zero.
+    data held in memory, the model, one latest construction per table and
+    the largest construction or use workspace, and is checked against
+    ``max_bytes`` before any model or build allocation. Only the remaining
+    capacity ``cache_capacity = max_bytes - B_base`` is available for
+    optional whole-model caching, ``cache_bytes + new_entry_bytes <=
+    cache_capacity``. Because the baseline already covers a cache miss and
+    its latest result per table, the caching decision may use the payload
+    measured after synthesis. A negative residual rejects the baseline and
+    is never clamped to zero.
 
     Raises:
         ValueError: ``B_base`` exceeds ``max_bytes``.
@@ -1041,7 +1049,7 @@ def _construction_cache_capacity(max_bytes, *, held_bytes, model_bytes, latest_b
 
 
 def _construction_entry_bytes(built, *, entries, support_size):
-    """Return the optional-cache charge of one construction: its phase or mask/angle payload plus its metadata h."""
+    """Return the bytes that one construction counts against the optional cache: its phase or mask/angle payload plus its metadata h."""
     _, metadata = _construction_entry_cap(entries, support_size)
     data = (int(built.phases.nbytes) if built.phases is not None
             else int(built.masks.nbytes) + int(built.angles.nbytes))
@@ -1071,10 +1079,10 @@ def _model_metadata(d, bits, table_specs, *, cutoff=None, swaps=False):
 
 
 def _model_reservation(d, bits, table_specs, *, cutoff=None, swaps=False, potential_walsh=True):
-    """Return the model, latest-construction, build and use byte reservations.
+    """Return the model, latest-construction, build and use byte allowances.
 
     Potential table_specs are (E, support_size). Add d kinetic tables of
-    K=2**bits entries. For A=sum(E), reserve 16A bytes of values and
+    K=2**bits entries. For A=sum(E), set aside 16A bytes of values and
     coefficients, sum(8*2**n) over distinct widths n for shared popcounts,
     and sum(E-1) for the persistent nonzero masks. _model_metadata adds
     the PhaseTable objects, exact omission scalars, maps, support slots,
@@ -1093,20 +1101,20 @@ def _model_reservation(d, bits, table_specs, *, cutoff=None, swaps=False, potent
     NumPy 2.5.2, SymPy 1.14.0 and Pydantic 2.13.5, not process RSS.
 
     latest sums 16E+h for one current construction per table. build is
-    the maximum of 80E+h across all tables, preserving the qualified 64E
-    synthesis scratch premise, and (192+2L(2200+2n))*E+h across
+    the maximum of 80E+h across all tables, keeping the qualified 64E
+    allowance for synthesis scratch space, and (192+2L(2200+2n))*E+h across
     Walsh-capable potential tables. The latter covers walsh_admission's
     simultaneous Fraction-loss list, its numerator/denominator objects,
     float/list staging and arrays. A finite binary64 dyadic uses at most
     2098 numerator bits and 1075 denominator bits. Division by 2**n and
     summation of at most 2**n entries fit 2200+2n bits. A forced dense
     potential bypasses this list. h is _construction_entry_cap's metadata.
-    use reserves 64E_max for phase reconstruction and application.
+    use sets aside 64E_max for phase reconstruction and application.
 
-    No arrays or gates are built here. BinaryModel admits the caller's
-    held_bytes + model + latest + max(build,use) before allocation.
-    Step/block records and content-identity serialization belong to that
-    caller. Construction entries use their separate cache allowance.
+    No arrays or gates are built here. BinaryModel checks the caller's
+    held_bytes + model + latest + max(build,use) against max_bytes before
+    allocation. Step/block records and content-hash serialization belong to
+    that caller. Construction entries use their separate cache allowance.
     """
     table_specs = tuple((int(e), int(s)) for e, s in table_specs)
     specs = [(1 << bits, 1)] * d + list(table_specs)
@@ -1128,7 +1136,7 @@ def kinetic_setup_work(bits):
     """Bound explicit numerical value operations for one periodic kinetic table.
 
     Derivation. It applies to the current periodic ``kinetic_table``
-    implementation, ``b >= 1``, ``K = 2**b``, either admitted kinetic model,
+    implementation, ``b >= 1``, ``K = 2**b``, either supported kinetic model,
     and one invocation on one variable. Count each explicit scalar or
     array-element value operation once, including an exact sign change,
     square, sine or cosine. Exact range checks, mask/index bookkeeping,
@@ -1139,13 +1147,13 @@ def kinetic_setup_work(bits):
 
     1. ``kinetic_table`` obtains the spacing twice, once inside
        ``kinetic_eigenvalues`` and once for ``kinetic_walsh``. Each periodic
-       spacing is ``(upper-lower)/K``, two scalar operations. Charge four
+       spacing is ``(upper-lower)/K``, two scalar operations. Count four
        units in total.
     2. The periodic eigenvalue array performs ``index-K``, absolute value,
        division by K, multiplication by pi, division by h, squaring, and
        multiplication by two. These are seven K-entry operations for the
        spectral model. The finite-difference model adds the sine, for
-       eight. Thus the common array charge is ``8K``, separate from the
+       eight. Thus the common array count is ``8K``, separate from the
        four spacing units.
     3. For spectral Walsh coefficients, the Nyquist wave number and energy
        use four scalar operations. In ``signed_square_walsh``, allow b
@@ -1166,24 +1174,24 @@ def kinetic_setup_work(bits):
        masks. Each of the b-1 levels forms its angle with two operations
        and evaluates both trigonometric values once, then performs K/2
        products and at most K/2 absolute values. The final divisions and
-       absolute values add K operations. The loop charge is at most
-       ``bK + 4(b-1) <= 2bK``. The total coefficient charge is at most
+       absolute values add K operations. The loop count is at most
+       ``bK + 4(b-1) <= 2bK``. The total coefficient count is at most
        ``2bK+12``.
     5. Including spacing, the spectral total is at most
        ``10K+b**2+6b+12``. The finite-difference total is at most
        ``8K+2bK+16``. Both are bounded by ``C(b)=10K+2bK+b**2+6b+16``.
        These are integer inequalities, so no floating-point evaluation of a
        cost is needed.
-    6. A model constructs exactly d such kinetic tables. Its setup charge
-       is therefore ``d*C(b)``, paid at each model construction and outside
-       the evolution's step loop. Bit reversal merely permutes the arrays
-       and adds no unit under this convention.
+    6. A model constructs exactly d such kinetic tables. Its setup count
+       is therefore ``d*C(b)``, counted at each model construction and
+       outside the evolution's step loop. Bit reversal merely permutes the
+       arrays and adds no unit under this convention.
 
     This gives a bound on the stated explicit operations for both models.
     It is not a runtime bound. Planning (``method.QHD._admit_symbolic_work``),
-    the native construction (``method.QHD._select_binary_native``) and the
-    classical product (``theory.binary_product_sizes``) each charge ``d*C(b)``
-    for their model construction.
+    the Qiskit circuit construction (``method.QHD._select_binary_native``) and
+    the classical product (``theory.binary_product_sizes``) each count
+    ``d*C(b)`` for their model construction.
     """
     k = 1 << bits
     return 10 * k + 2 * bits * k + bits * bits + 6 * bits + 16
@@ -1224,20 +1232,21 @@ def kinetic_table(grid, var_index, model, relabel):
 
 
 class BinaryModel:
-    """The phase tables and QFT gates of one binary Plan, rebuilt from its grid and stored support tables.
+    """The phase tables and QFT gates of one binary Plan, rebuilt from its grid and support tables.
 
-    Planning, the native construction (``native.append_binary_steps``) and the
-    ``ir_product`` kernel (``theory.run_binary_product``) build this model
-    from the same Method, grid and ``SupportValues`` and synthesize every
-    block through ``construction``, so all three emit the same angles.
+    Planning, the Qiskit circuit construction (``native.append_binary_steps``)
+    and the ``ir_product`` classical evaluation (``theory.run_binary_product``)
+    build this model from the same Method, grid and ``SupportValues`` and
+    synthesize every block through ``construction``, so all three use the
+    same angles.
 
-    ``held_bytes`` prices the caller's data that stay live while the model
-    is used: the evolution states and phase buffers of
-    ``theory.run_binary_product``, the rotation census and the Plan's tables
+    ``held_bytes`` counts the bytes of the caller's data that stay in memory
+    while the model is used: the evolution states and phase buffers of
+    ``theory.run_binary_product``, the rotation count and the Plan's tables
     of resource inspection. The constructor (``__init__``, documented under
-    ``construction``) admits them with the model's baseline before building
-    any array, and raises ``ValueError`` when they do not fit
-    ``QHD.max_bytes``.
+    ``construction``) checks them, with the model's baseline, against
+    ``QHD.max_bytes`` before building any array, and raises ``ValueError``
+    when they do not fit.
 
     Attributes:
         bits: b with ``K = 2**b``.
@@ -1300,12 +1309,12 @@ class BinaryModel:
     def construction(self, kind, variables, exponent, choice):
         """Return the ``DiagonalConstruction`` of one block's phase diagonal, built once per construction key.
 
-        The construction cache is admitted from distinct model-bound keys,
-        their actual phase or mask/angle payloads, each entry's metadata
+        The construction cache is sized from the distinct keys of this
+        model, their phase or mask/angle payloads, each entry's metadata
         allowance h (``_construction_entry_cap``) and the largest
         new-construction workspace. Cache hits avoid construction
-        work while every block occurrence still contributes its execution and
-        error ledger.
+        work while every block occurrence still contributes its gate counts
+        and error contributions.
 
         Within this immutable model, which fixes table content, grid spacing,
         kinetic model and bit-reversal choice, the key is
@@ -1314,27 +1323,29 @@ class BinaryModel:
         forced choice. At equal keys every computed
         array and count is identical, so both second-order halves reuse one
         construction, and each occurrence still counts its CX, rotations,
-        omissions and phase charges. The caller forms each occurrence's
-        formation allowance.
+        omissions and phase error contributions. The caller forms each
+        occurrence's formation allowance.
 
-        Admission. The constructor first admits the caller's live data
-        (``held_bytes``), the model's arrays and metadata, one current
+        Memory check. The constructor first checks the caller's data held in
+        memory (``held_bytes``), the model's arrays and metadata, one current
         construction per table, and the largest synthesis or use workspace
-        against QHD.max_bytes. For host evolution the reservation includes the
-        state buffers and the complex phase tables that stay live. For
-        inspection it includes the rotation census. The remaining bytes fund
-        optional whole-model cache entries. A miss is built within the admitted
-        current-construction envelope and kept in the whole-model cache only
-        when its phase or mask/angle payload and key/scalar metadata fit that
-        remainder. A fallback still uses admitted bytes and repeats synthesis
-        work, which construction_counts records. Every block occurrence keeps
-        its original execution and error-ledger multiplicity.
+        against QHD.max_bytes. For classical evolution the allowance includes
+        the state buffers and the complex phase tables that stay in memory.
+        For inspection it includes the rotation count. The remaining bytes are
+        available for optional whole-model cache entries. A miss is built
+        within the bytes already counted for the current construction and
+        kept in the whole-model cache only when its phase or mask/angle
+        payload and key/scalar metadata fit that remainder. A fallback still
+        stays within the counted bytes and repeats synthesis work, which
+        construction_counts records. Every block occurrence keeps its
+        original multiplicity in the gate counts and error contributions.
 
         The baseline is ``_model_reservation`` plus the caller's
         ``held_bytes``, checked by ``_construction_cache_capacity`` in
         ``__init__`` before the model's arrays are built, and an entry's
-        charge is ``_construction_entry_bytes``. A capacity of zero disables
-        only whole-model retention and keeps the admitted fallback.
+        bytes are ``_construction_entry_bytes``. A capacity of zero disables
+        only whole-model caching and keeps the fallback within the counted
+        bytes.
         """
         table = self.kinetic[variables[0]] if kind == "binary_kinetic" else self.potential[tuple(variables)]
         key = (kind, tuple(variables), float(exponent).hex(), choice, self.threshold)
@@ -1392,8 +1403,8 @@ class WalshPhaseTerms(NamedTuple):
 
     Every executed Walsh block occurrence counts, kinetic blocks, both
     second-order potential halves and blocks without kept rotations
-    included (``compile_binary_steps``). Kept-state phase admission uses
-    them (``method._admit_compiled_phase``).
+    included (``compile_binary_steps``). The phase check of the kept state
+    uses them (``method._admit_compiled_phase``).
 
     Attributes:
         count: B, the number of Walsh blocks, each of which assigns its
@@ -1414,7 +1425,7 @@ class WalshPhaseTerms(NamedTuple):
 
 
 def _admit_reconstruction(identity_phase, half_sum, qubits):
-    """Admit the finite arithmetic of reconstructing a selected Walsh diagonal (``DiagonalConstruction.emitted_phases``).
+    """Check that reconstructing a selected Walsh diagonal stays finite (``DiagonalConstruction.emitted_phases``).
 
     Let A bound the exact sum of the kept absolute angles, n be the number
     of qubits, and ``gamma_n = n u/(1 - n u)``, with ``n u < 1``. Each
@@ -1450,7 +1461,7 @@ def _admit_reconstruction(identity_phase, half_sum, qubits):
 
 
 def compile_binary_steps(model, method, step_weights, constant):
-    """Return the binary step blocks and their ledgers.
+    """Return the binary step blocks and the record of their phases and error bounds.
 
     Step k applies, in list order, the potential blocks of every support
     table for its full duration dt and then one kinetic block per variable
@@ -1478,36 +1489,37 @@ def compile_binary_steps(model, method, step_weights, constant):
     ``-exponent * E``. Each kinetic block costs two QFTs (``qft_cx``) plus
     its phase diagonal, and three phase gates per controlled phase in each
     QFT. The objective's constant contributes the physical phase
-    ``-dt * weight * constant`` per step, the only entry of the phase ledger,
-    because both diagonal syntheses keep each table's identity component
-    (``PhaseTable.synthesize``).
+    ``-dt * weight * constant`` per step, the only entry of the running
+    phase total, because both diagonal syntheses keep each table's identity
+    component (``PhaseTable.synthesize``).
 
     Walsh identity phases. A Walsh block keeps its identity phase
-    ``identity_phase = fl(-x c0)`` apart from its rotations, so kept-state
-    phase admission charges its formation on both routes and, on the
-    ``ir_product`` route, the reconstruction of the emitted phases
-    (``WalshPhaseTerms``). The terms come from scalars of the constructions
-    that compilation builds anyway. With ``u = 2**-53``,
+    ``identity_phase = fl(-x c0)`` apart from its rotations, so the phase
+    check of the kept state includes its formation error on both routes
+    and, on the ``ir_product`` route, the error of reconstructing the
+    circuit's phases (``WalshPhaseTerms``). The terms come from scalars of
+    the constructions that compilation builds anyway. With ``u = 2**-53``,
     ``lambda = 2**-1074`` and n the block's qubits, every operation below is
     evaluated upward (``method._add_up`` and its siblings), and each
-    ``lambda/2``, which is not a binary64 number, is charged as lambda. The
+    ``lambda/2``, which is not a binary64 number, is counted as lambda. The
     mean absolute value a and the kept-angle half-sum T divide a sum of
-    absolute values by a power of two. The correctly rounded ``math.fsum``
-    of the absolute values, the premise of the phase ledger, stepped one
-    number up and divided upward bounds it when that step is finite.
+    absolute values by a power of two. Assuming, as the running phase total
+    does, that ``math.fsum`` is correctly rounded, the ``math.fsum`` of the
+    absolute values, stepped one number up and divided upward, bounds it when
+    that step is finite.
     Otherwise each absolute value is divided upward and the quotients are
     added upward, so a finite mean never needs a representable unscaled sum.
 
     - Exponent. ``x = fl(t w)`` for the duration t and step weight w, so
       ``|x - t w| <= eps_x = u |t w| + lambda/2``. The second-order half
-      duration ``dt/2`` is exact, because planning admits it as a normal
-      number (``schedules.step_weights``). Every exponent is admitted as a
-      normal number too (``validation._normal_range``), so the lambda term
+      duration ``dt/2`` is exact, because planning requires it to be a
+      normal number (``schedules.step_weights``). Every exponent is required
+      to be a normal number too (``validation._normal_range``), so the lambda term
       is kept only as a margin of a few multiples of ``2**-1074``.
     - Identity formation. With the exact intended exponent ``X = t w``, the
-      admitted identity coefficient ``c0`` of the block's table, a radius
+      range-checked identity coefficient ``c0`` of the block's table, a radius
       ``rho_0`` that encloses its distance from the original mathematical
-      identity coefficient, and the emitted identity phase ``phi``, zero
+      identity coefficient, and the identity phase ``phi`` in the circuit, zero
       when ``-x c0`` was omitted (``PhaseTable.synthesize``), the identity
       ``phi + X c0* = (phi + x c0) + (X - x) c0 + X (c0* - c0)`` and the
       triangle inequality give
@@ -1526,7 +1538,7 @@ def compile_binary_steps(model, method, step_weights, constant):
       the final subtraction by at most
       ``u (|identity_phase| + (1 + gamma_n) T + lambda/2) + lambda/2``. Since
       ``gamma_n + u (1 + gamma_n) <= gamma_(n+1)`` and the three lambda terms
-      total less than ``2 lambda``, each emitted phase lies within
+      total less than ``2 lambda``, each reconstructed phase lies within
       ``R = u |identity_phase| + gamma_(n+1) T + 2 lambda`` of
       ``identity_phase`` minus the exact kept-angle half-sum. These errors
       can differ between basis states, so they are relative phases as well as
@@ -1537,18 +1549,19 @@ def compile_binary_steps(model, method, step_weights, constant):
     keeps its identity phase inside its gate definition, whose formation
     belongs to gate synthesis and execution, and contributes nothing here.
 
-    Range admission. Every exponent ``fl(t w)`` is normal
+    Range check. Every exponent ``fl(t w)`` is normal
     (``validation._normal_range``), and each Walsh block's reconstruction has
     finite intermediates (``_admit_reconstruction``), whatever route the
     Plan selects, since any route may later be verified against the
     ``ir_product`` reference. A constant contribution whose ``fl(b_k c)`` or
     ``fl(dt fl(b_k c))`` would be nonzero and below ``2**-1022`` records a
     zero phase, which keeps the contribution count, and its exact
-    ``|dt b_k c|`` joins the omitted identity charge of the phase ledger
-    (``method._phase_ledger``). Stored table values may be subnormal, and
-    the tables stay unchanged. The rotations and dense phase entries that
-    the selected constructions omit below the range
-    (``PhaseTable.synthesize``) add their exact charges to the pruning bound.
+    ``|dt b_k c|`` joins the omitted identity contribution of the running
+    phase total (``method._phase_ledger``). Table values may be subnormal,
+    and the tables stay unchanged. The rotations and dense phase entries
+    that the selected constructions omit below the range
+    (``PhaseTable.synthesize``) add their exact contributions to the
+    pruning bound.
 
     Returns:
         ``(steps, ledger)``. ``steps`` holds one tuple of ``QHDBinaryBlock``
@@ -1558,13 +1571,13 @@ def compile_binary_steps(model, method, step_weights, constant):
         ``dropped_count``, ``dropped_angle_sum`` (the dropped absolute ``Rz``
         angles summed exactly and rounded to nearest), ``pruning_error_bound``
         and ``aqft_error_bound``, and ``range_omissions``, the lower-range
-        omissions of this compilation with their exact charges, the Walsh
+        omissions of this compilation with their exact contributions, the Walsh
         normalization omissions of a table counted only when a selected
         Walsh block uses it. Since
         ``||Rz(theta) - I|| = 2 |sin(theta/4)| <= |theta|/2``, the pruning
         bound is half the exact sum of the absolute angles that the
         threshold dropped, which each block records as an integer count of
-        ``2**-1074``, plus the exact range charges of the omitted rotations
+        ``2**-1074``, plus the exact range contributions of the omitted rotations
         and dense entries. The sum is exact and converted to binary64 once
         upward (``evolution_bounds._upward``), so the recorded bound is never
         below the exact value and is 0.0 exactly when nothing is omitted.

@@ -68,4 +68,4 @@ The shot count for an absolute sampling tolerance follows Hoeffding (1963), doi:
       heading_level: 3
       members: false
 
-`solve` calls `sampling_shots` and the other hooks of a Method. [Choose shots for a target accuracy](../../algorithms/expectation.md#selecting-absolute-sampling-accuracy) states the shot count that `sampling_shots` returns, and [Extending NWQLib](../extending.md) describes the hooks.
+When `solve` or `plan` receives an accuracy request in place of `shots`, it calls the Method's `sampling_shots` before planning. `ExpectationMethod.sampling_shots` accepts an absolute sampling tolerance, `Accuracy(component="sampling", absolute_tolerance=...)`, and returns the shots per qubit-wise commuting group, as [Choose shots for a target accuracy](../../algorithms/expectation.md#selecting-absolute-sampling-accuracy) states. A Method without `sampling_shots` raises `ApplicabilityError` for an accuracy request. [Add a Method](../../algorithm_protocol.md) states how a new Method supplies it, and [Extending NWQLib](../extending.md) lists the other functions of a Method.

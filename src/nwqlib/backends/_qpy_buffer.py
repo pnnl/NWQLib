@@ -4,7 +4,7 @@ from io import BytesIO
 
 
 class QpyBuffer(BytesIO):
-    """Admit each write's final offset before BytesIO allocates or copies it."""
+    """Check each write's final offset against the limit before BytesIO allocates or copies it."""
 
     def __init__(self, limit, *, message):
         super().__init__()

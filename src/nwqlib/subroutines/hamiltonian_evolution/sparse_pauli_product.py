@@ -37,7 +37,7 @@ def build_sparse_pauli_product_circuit(
             Pauli-evolution representation cannot carry). The delegated
             rotation path enforces real coefficients.
         num_qubits: Width of the dense labels.
-        time_step: Total evolution time realized by the product formula.
+        time_step: Total evolution time of the product formula.
         evolution_synthesis: Delegated synthesis name
             (``"lie_trotter"`` or ``"suzuki_trotter"``).
         reps: Product-formula step count.

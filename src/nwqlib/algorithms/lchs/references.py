@@ -1,4 +1,4 @@
-"""Explicit constant-generator references and their actual numerical work.
+"""Explicit constant-generator references and the numerical work they count.
 
 ACL denotes An, Childs and Lin, https://arxiv.org/html/2312.03916v2.
 Its Eq. (2) specializes to exp(-A*T)u0 + integral exp(-A*(T-s))b ds.
@@ -10,7 +10,7 @@ from nwqlib.operators.access import _check_bytes
 
 
 def dense_work(checks, counts, *, work, peak_bytes):
-    """Admit accumulated dense-kernel size units and simultaneous known arrays.
+    """Check the accumulated dense-routine size units and the known arrays held at once against the limits.
 
     Matrix products/decompositions use D**3 units, matvecs D**2 and vector
     operations D. Vendor workspace, FLOPs and elapsed time remain unknown.
@@ -24,12 +24,12 @@ def dense_work(checks, counts, *, work, peak_bytes):
 
 
 def _exponential(matrix, held_bytes, *, checks, counts):
-    """Return expm(matrix) with its work admitted first, or None when it is unavailable.
+    """Return expm(matrix) with its work checked first, or None when it is unavailable.
 
     The exponential is unavailable when the 1-norm of the matrix exceeds
     _linalg_laws.MAX_EXPONENTIAL_NORM or when the result has a nonfinite
     entry, for example when ||A|| T overflows it. held_bytes counts the
-    caller's arrays that stay alive during the call.
+    caller's arrays that stay in memory during the call.
 
     For a triangular input, SciPy 1.18.1's scipy.linalg.expm recomputes the
     first superdiagonal after each squaring as t (exp(l2) - exp(l1))/(l2 - l1)
@@ -45,12 +45,12 @@ def _exponential(matrix, held_bytes, *, checks, counts):
     I + 2 (V - U)^{-1} U, and its closed form was several hundred times less
     accurate (2.3e-13 against 3.1e-16 at ||A|| T of about 1e4). A triangular
     matrix therefore goes to scipy.sparse.linalg.expm, a lower triangular one
-    through its transpose because that kernel detects only upper
+    through its transpose because that routine detects only upper
     triangularity, and every other matrix to scipy.linalg.expm. The
     measurements and their inputs are in docs/dependency_issues.md, section
     "Triangular matrix exponential".
 
-    The work and bytes of either kernel are those of
+    The work and bytes of either SciPy routine are those of
     _linalg_laws.expm_requirements.
 
     From n = 200 scipy.sparse.linalg.expm estimates the norms of the matrix

@@ -1,11 +1,11 @@
-"""SDK-free size laws of the direct state-preparation kernels."""
+"""Size formulas (laws) of the direct state-preparation routines, computed without a quantum SDK."""
 
 def direct_preparation_cx_bound(num_qubits: int, *, complex_phases: bool = True) -> int:
-    """Return the generic magnitude-tree and optional phase-diagonal CX slot bound.
+    """Return the CX slot bound of the generic magnitude tree and the optional phase diagonal.
 
     Each tree has sum(2**k, k=1..n-1) = 2**n-2 CX gates. Exact fast paths
-    and zero tables can use fewer slots. This law counts the native
-    constructor without synthesis or simulation.
+    and zero tables can use fewer slots. This formula counts the library's
+    own constructor without synthesis or simulation.
 
     The magnitude tree is the cascade of uniformly controlled RY rotations
     with k = 0, ..., n-1 controls of Mottonen, Vartiainen, Bergholm and
@@ -18,7 +18,7 @@ def direct_preparation_cx_bound(num_qubits: int, *, complex_phases: bool = True)
     CX in each uniformly controlled rotation with at least one control, two
     per level, by mirroring (Sec. III, pp. 3-4), and state that preparation
     from a basis state needs half of their total (Sec. IV, p. 4). That gives
-    ``2**(n+1) - 2n - 2`` CX. This law does not assume the cancellation, so
+    ``2**(n+1) - 2n - 2`` CX. This formula does not assume the cancellation, so
     its complex-case value ``2*max(0, 2**n - 2)`` is never smaller.
     """
 
@@ -28,14 +28,14 @@ def direct_preparation_cx_bound(num_qubits: int, *, complex_phases: bool = True)
 
 
 def _uniform_superposition_gate_slots(num_qubits: int) -> dict[str, int]:
-    """Bound elementary slots in the selected contiguous-uniform fast path.
+    """Bound the elementary gate slots of the selected contiguous-uniform fast path.
 
     For non-power-of-two support, UniformSuperpositionGate has at most n-1
     initial X, n-2 H, one RY, n-1 open CH and n-2 open CRY. CH expands to two
     H, four phase gates and one CX. CRY expands to two RY and two CX. Each
     open control adds two X. Summing gives the returned counts, for example
     ``x = (n-1) + 2(n-1) + 2(n-2) = 5n-7`` and ``cx = (n-1) + 2(n-2) = 3n-5``.
-    The resulting envelope also covers the power-of-two H-only path.
+    The resulting bound also covers the power-of-two H-only path.
 
     The gate structure is Qiskit's ``UniformSuperpositionGate`` definition,
     which implements Algorithm 1 of Shukla and Vedula, arXiv:2306.11747v2,
@@ -48,8 +48,8 @@ def _uniform_superposition_gate_slots(num_qubits: int) -> dict[str, int]:
     In Qiskit 2.6.0, the lower bound of the declared dependency, the sampled
     support sizes 2**(n-1)+1, 3*2**(n-2)+1 and 2**n-1 for n = 2, ..., 6 stay
     within these top-level counts, and support 2**n-1 reaches the 3n-5 CX
-    envelope after lowering. A different Qiskit construction needs a new
-    count.
+    bound after decomposition into elementary gates. A different Qiskit
+    construction needs a new count.
     """
     if num_qubits < 0:
         raise ValueError("num_qubits must be nonnegative")
@@ -61,17 +61,17 @@ def _uniform_superposition_gate_slots(num_qubits: int) -> dict[str, int]:
 
 
 def direct_preparation_controlled_cx_bound(num_qubits: int) -> int:
-    """Bound one-control direct PREP using the complete complex tree envelope.
+    """Bound the CX slots of a direct PREP with one control, using the bound of the two complete complex trees.
 
     With D = 2**n, each magnitude or phase tree has at most D-1 rotation
     slots and D-2 CX slots. One extra control costs at most two CX per
     rotation and six per CX, so the two complex trees cost at most
     ``2 * 2(D-1) + 6 * 2(D-2) = 16D - 28`` CX. A controlled global phase is a
-    one-qubit phase. The contiguous-uniform fast path is also covered: for
-    n>=2 its open CH/CRY decomposition costs at most 41*n-59 CX, below
-    16*2**n-28. Basis and full-uniform inputs admit tighter counts at their
-    known structural owner. This counts elementary synthesis slots before
-    cancellation, not a hardware mapping guarantee.
+    one-qubit phase. The contiguous-uniform fast path is also covered, because
+    for n>=2 its open CH/CRY decomposition costs at most 41*n-59 CX, below
+    16*2**n-28. Basis and full-uniform inputs get tighter counts from the
+    code that knows their structure. This counts elementary synthesis slots
+    before cancellation and gives no guarantee about a hardware mapping.
 
     The two-CX controlled one-qubit gate is the circuit of Shende, Bullock and
     Markov, arXiv:quant-ph/0406176v5, Sec. 3.1 (p. 9). The six-CX count is

@@ -31,7 +31,7 @@ _STANDARD_GATE_NAMES = frozenset((
 
 
 def conversion_requirements(operator, *, input_conversion, max_conversion_work, max_bytes):
-    """Admit one dense-to-Pauli conversion and return (q, D, work) before allocation.
+    """Check one dense-to-Pauli conversion against the limits and return (q, D, work) before allocation.
 
     q=max(1, ceil(log2 d)) qubits embed the original dimension d in D=2**q.
     The block transform of operators._pauli.pauli_coefficients makes q passes
@@ -69,7 +69,7 @@ def dense_pauli_matrix(
 ):
     """Return A embedded in a complex128 D-by-D matrix, D=2**max(1, ceil(log2 d)).
 
-    The conversion is admitted before the matrix is allocated. Dense input is
+    The conversion is checked against the limits before the matrix is allocated. Dense input is
     copied and CSR/CSC input is scattered row by row or column by column.
     padding="zero" leaves the dummy diagonal at zero. padding="mean" writes
     trace(A)/d there, the choice eigen_operator explains.
@@ -108,10 +108,10 @@ def eigen_operator(
     max_conversion_work=DEFAULT_CONVERSION_WORK,
     pad_classical=False,
 ):
-    """Select Pauli access.
+    """Choose Pauli access.
 
-    Explicit dense padding adds trace(A)/d on dummy states. The original
-    input owner already checked exact Hermiticity. This finite transform has
+    Explicit dense padding adds trace(A)/d on dummy states. The input object
+    already checked exact Hermiticity. This finite transform has
     O(q D²) numerical traffic and O(D²) known array storage. It
     never diagonalizes A. Structured Pauli access stays compact.
 
@@ -254,27 +254,27 @@ def draw_padded_state(d, target, rng, max_bytes):
 
     Draw the original-dimensional Gaussian state into the nonzero prefix of
     one padded complex128 vector, normalize that prefix with the established
-    reduction, and admit four simultaneous padded complex arrays for input
-    ingestion.
+    reduction, and count four simultaneous padded complex arrays against the
+    byte limit for input ingestion.
 
     Byte accounting: float64 entries take eight bytes and complex128 entries
     sixteen. With T = target, drawing holds the 16T-byte padded vector and
     two 8d-byte normal arrays, at most 32T. The contiguous [:d] prefix is
     normalized, preserving the reduction length and arithmetic of a
     length-d draw, and the draws are released. ingest_vector can then hold
-    the padded vector, its immutable physical snapshot, the mutable
-    normalized direction and its immutable snapshot at once: four 16T
-    populations, 64T numerical bytes. The digest reads a memoryview and
+    the padded vector, its immutable physical copy, the mutable normalized
+    direction and its immutable copy at once, four arrays of 16T bytes, 64T
+    numerical bytes. The digest reads a memoryview and
     creates no full hash buffer. H0 = 65536 bytes is the engineering
     allowance for scalar bookkeeping, ndarray headers, iterators and fixed
     sort stacks on the checked 64-bit CPython/NumPy stack. It is not a
-    universal interpreter or process-RSS bound. The charge is therefore
+    universal interpreter or process-RSS bound. The counted size is therefore
     64*T + 65536 bytes. The multiply and add below reproduce real+1j*imag,
     including signed-zero operations, without a complex draw buffer.
-    Replacing the prefix norm by norm(vector) or another norm kernel can
+    Replacing the prefix norm by norm(vector) or another norm routine can
     change the resulting bits. This branch covers 0 < d < target, including
     d = 1 with target 2. A zero or nonfinite draw still fails normalization
-    or admission.
+    or the input check.
 
     Args:
         d: Original dimension.
@@ -299,12 +299,13 @@ def draw_padded_state(d, target, rng, max_bytes):
 
 
 def preparation_requirements(state):
-    """Return (bytes, work) of materializing a state's length-d vector classically.
+    """Return (bytes, work) of computing a state's length-d vector classically.
 
     A k-qubit dense gate applies 2**k products per full-state amplitude.
-    Only standard gates with known fixed action use this envelope. Custom,
+    Only standard gates with known fixed action use this bound. Custom,
     opaque or composite instruction simulation work remains unknown (None).
-    Host invocation is synchronous. This is not an SDK runtime or RSS bound.
+    The classical call is synchronous. This is not a bound on Qiskit run
+    time or RSS.
 
     Returns:
         (bytes, work). A product state needs 32*d bytes, the final and
@@ -367,11 +368,11 @@ def gershgorin_frame(operator, *, max_bytes):
     ``(8*n+16)*eps``, where n counts stored off-diagonal entries and eps is
     2**-52. It covers sequential or pairwise positive summation under
     round-to-nearest binary64 arithmetic, gradual underflow and a one-ulp
-    hypot premise. This is a conditional numerical enclosure, not a
+    hypot assumption. This is a conditional numerical enclosure, not a
     directed-rounding certificate. Scalar operators return their exact
     scalar value and zero half-width.
 
-    Premises: the stored matrix is Hermitian with a real diagonal, finite
+    Assumptions. The stored matrix is Hermitian with a real diagonal, finite
     entries and canonical CSR/CSC coordinates when compressed. IEEE binary64
     with gradual underflow, round-to-nearest, and hypot relative error at
     most 2u on normal results. By the Gershgorin circle theorem every
@@ -380,7 +381,7 @@ def gershgorin_frame(operator, *, max_bytes):
     ``r_i = sum_{j != i} |a_ij|``. For a Hermitian matrix the column radii
     are equal, so CSC reduces columns without conversion.
 
-    Steps: the scale is the largest absolute real or imaginary component,
+    Steps. The scale is the largest absolute real or imaginary component,
     computed without forming a possibly overflowing complex modulus. A zero
     scale returns the exact zero frame. With n_i
     stored off-diagonal entries in row i, including explicit zeros, the
@@ -395,9 +396,9 @@ def gershgorin_frame(operator, *, max_bytes):
     tiny = 2**-1022, widens row i to [c_i - r_i - M_i, c_i + r_i + M_i],
     rounded outward. Row counts are int64 before 8*n_i+16 is evaluated,
     since int32 arithmetic can wrap. For CSR/CSC only nonempty segments are
-    reduced and every empty segment's sum is zero: duplicate ``indptr``
-    starts do not denote empty sums to ``reduceat``, and a start equal to
-    ``len(data)`` raises. Sparse input is never densified. The endpoints are
+    reduced and every empty segment's sum is zero, because duplicate
+    ``indptr`` starts do not denote empty sums to ``reduceat`` and a start
+    equal to ``len(data)`` raises. Sparse input is never densified. The endpoints are
     unscaled and rounded outward, and the final alpha covers both already
     outward-rounded physical endpoints around the computed center, which
     protects the affine frame after midpoint rounding. It can enlarge alpha
@@ -406,15 +407,15 @@ def gershgorin_frame(operator, *, max_bytes):
     Workspace: O(nnz+D) for compressed and O(D²) for dense storage. The scale
     expression peaks at three float arrays per stored value, and the sparse
     major-coordinate and mask arrays are released before the row endpoints
-    are assembled. Gershgorin frame construction admits 32*N+256*D
+    are assembled. Gershgorin frame construction counts 32*N+256*D
     additional array-data bytes and a 65,536-byte fixed bookkeeping
     allowance. Here N includes every stored entry for CSR/CSC, including
     explicit zeros, and equals D squared for dense storage. The input matrix
-    is excluded. The array law covers the simultaneous magnitude,
+    is excluded. The array formula covers the simultaneous magnitude,
     coordinate, reduction and endpoint arrays. The fixed allowance is
-    qualified for the declared native stack and is separate from process RSS
-    and external library workspace. Derivation: the live array schedule has
-    the envelopes 24N for the maximum/scale expression, 17N+40D for
+    qualified for the declared software stack and is separate from process RSS
+    and external library workspace. Derivation. The live array schedule has
+    the peaks 24N for the maximum/scale expression, 17N+40D for
     compressed diagonal/index handling, 8N+56D for segmented reduction and
     8N+80D for final endpoints, each at most 32N+256D
     (ENGINEERING_CONSTANTS.md, "Eigen input conversion and classical
@@ -422,7 +423,7 @@ def gershgorin_frame(operator, *, max_bytes):
 
     Returns:
         ``(low, high, center, alpha)`` with low <= every eigenvalue <= high
-        under the premises, ``center`` the midpoint and ``alpha`` the
+        under the assumptions, ``center`` the midpoint and ``alpha`` the
         half-width, all in the operator's units. A scalar operator returns
         alpha = 0.
     """

@@ -108,7 +108,7 @@ def normalized_vector(vector: np.ndarray, norm: float) -> np.ndarray:
 
 
 def normalize_state_vector(vector: Any) -> tuple[np.ndarray, float]:
-    """Return direction and rounded float norm for scalar numerical consumers."""
+    """Return direction and rounded float norm, for numerical code that needs only a scalar norm."""
     normalized, norm, _ = normalize_state_vector_with_scale(vector)
     return normalized, norm
 

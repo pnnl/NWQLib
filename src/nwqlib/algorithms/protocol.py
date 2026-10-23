@@ -1,4 +1,4 @@
-"""Immutable scientific Method configuration and direct execution behavior."""
+"""The Method base class and its descriptor."""
 
 from typing import ClassVar
 
@@ -84,9 +84,14 @@ class Method(Record):
     - `error_model`: the known and unavailable error sources of a Plan.
     - `verify` and `recover_analysis`: explicit extra operations, unavailable by
       default.
-    - `reduction_allowance`, for a Plan that reduces data while it is collected:
-      check the reduction's workspace and return the Method's remaining work
-      allowance.
+    - `reduction_allowance(self, plan, point, *, observation, width, run) -> int`,
+      required when a Plan reduces data while it is collected. It receives
+      the Plan, the point's `Realization`, its resolved trajectory
+      `ObservationSpec`, the Program's logical width and the Run. It checks
+      the reduction's workspace, raises `ValueError` if the point exceeds
+      the limit, and returns the remaining nonnegative work allowance in
+      the registered reducers' work units. It reads the work already used
+      without changing it. The base Method supplies no implementation.
     - `before_submit`: check data collection before its submission is recorded.
     - `validate_point`, `specialize_experiment` and `selected_kernels`: check and
       derive one resolved point without planning again.
@@ -116,8 +121,10 @@ class Method(Record):
             output (Record): The requested output.
             execution (str): The requested execution, such as `"quantum"` or
                 `"classical"`.
-            shots (int | None): Requested shots, or `None` for exact readout or the
-                Method's default.
+            shots (int | None): Requested shots. `None` selects exact readout
+                or the Method's default. Exact readout provides probabilities,
+                Pauli expectation values, amplitudes or classically computed
+                scalars without shot sampling. Numerical errors can remain.
             rng (RandomStreams): The Plan's named random streams. Draw from them, so
                 that one seed reproduces the same choice.
             accuracy (Accuracy | None): Requested accuracy criterion. It is passed
@@ -214,7 +221,7 @@ class Method(Record):
         raise ValueError("this Method has no interrupted controller analysis to recover")
 
     def before_submit(self, plan, prepared, *, run):
-        """Check the prepared circuits or classical computation of one submission before the Run records it, and raise to refuse it.
+        """Check the prepared circuits or classical routines (host kernels in the code) of one submission before the Run records it, and raise to refuse it.
 
         The Run calls it with the tuple of `PreparedHandle` objects that the
         submission sends, before it records the submission, so a refusal
@@ -230,7 +237,7 @@ class Method(Record):
     def error_model(self, plan):
         """Return the known and unavailable error sources of a Plan, each with the quantity and unit it refers to.
 
-        The default returns the error model stored in the Plan (`plan.error_model`).
+        The default returns the error model recorded in the Plan (`plan.error_model`).
 
         Args:
             plan (Plan): The Plan.
@@ -276,7 +283,7 @@ class Method(Record):
         return experiment
 
     def selected_kernels(self, plan, experiment, program):
-        """Return the declarations of the classical computations that one point runs on this computer.
+        """Return the declarations of the classical routines that one point runs on this computer.
 
         It is called when the construction of a point is built. A Method may
         revise a declaration of the Plan's `construction.kernels` for the
@@ -284,7 +291,7 @@ class Method(Record):
         but each returned declaration must be a revision of the Plan's
         declaration of the same name, with the same implementation, inputs
         and dependencies, so that a point cannot substitute another
-        computation or another input. The default returns the Plan's
+        routine or another input. The default returns the Plan's
         declarations unchanged.
 
         Args:

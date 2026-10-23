@@ -221,10 +221,10 @@ show_card(result, baseline, probability, values, predicted, seconds, peak_bytes)
 # **The grid fixes the circuit's size before anything is built, and a run that does not fit is refused with the limit to change.**
 #
 # - **Input.** A SymPy expression that is real everywhere in a box, the tuple of its variables, and one `(lower, upper)` interval per variable.
-# - **Output.** Probabilities of grid points. `result.most_probable_coordinates` is where the probability concentrates, and `result.candidate` the observed grid point with the least evaluated objective.
+# - **Output.** Probabilities of grid points. The main solve uses exact readout, in which the simulator computes these probabilities without shot sampling, subject to numerical rounding. `result.most_probable_coordinates` is where the probability concentrates, and `result.candidate` the observed grid point with the least evaluated objective.
 # - **Size.** Each variable takes `num_grid_points` interior grid points. The one-hot encoding uses one qubit per grid point and variable, so $d$ variables with $K$ points each need $dK$ qubits for $K^d$ grid points.
 # - **Qubit limit.** The local simulator accepts 20 qubits by default, so two variables fit at most 10 grid points each on the circuit route.
-# - **Work and memory.** `plan` checks the objective tables and the evolution against `max_work` and `max_bytes` and refuses before forming them (Section 4).
+# - **Work and memory.** `plan` counts the work and the bytes of the objective tables and the evolution, checks them against `max_work` and `max_bytes` and refuses before forming them (Section 4). Work is a nominal measure of classical computation that NWQLib derives from the problem sizes by formula ([work units](../docs/glossary.md#work-units)). It combines estimates such as one unit for each node of the symbolic expression evaluated at each table entry, and it is neither a uniform count of scalar operations nor a time.
 #
 # The cell asks for 11 grid points per variable, 22 qubits. `solve` refuses before building the circuit, and the error names the limit and the amount. The remedy here is `execution="classical"`, which evolves the 121 grid amplitudes classically, one solve in under a second.
 
@@ -254,13 +254,13 @@ show_table([
 ], headers=('After switching to execution="classical"', "Value", "Meaning"))
 
 # %% [markdown]
-# Raising `max_simulation_qubits` to 22, the error's own remedy, would simulate the 22-qubit circuit, beyond this notebook's budget.
+# Raising `max_simulation_qubits` to 22, the remedy that the error message names, would simulate the 22-qubit circuit, beyond this notebook's budget.
 #
 # ## 2. What it costs
 #
 # **`estimate` predicts the quantum cost before the circuit exists, and `plan` and the run record the classical cost.** Quantum cost means qubits, gates and shots, and classical cost means memory, work and time on this computer.
 #
-# `estimate` adds up a gate-count formula for each block of the selected construction without building a circuit. `prepare` builds the circuit without running it, and `inspect_resources` compiles a copy with Qiskit. The formulas of this construction give no depth, single-qubit or T count.
+# `estimate` adds up a gate-count formula for each block of the construction that `plan` chose, without building a circuit. `prepare` builds the circuit without running it, and `inspect_resources` compiles a copy with Qiskit. The formulas of this construction give no depth, single-qubit or T count.
 
 # %%
 from nwqlib import prepare
@@ -299,8 +299,8 @@ show_table([
 ], headers=("Classical cost", "Before the run", "Measured or recorded by the run"))
 
 # %% [markdown]
-# - **Peak memory** is the largest total of Python allocations, traced with `tracemalloc` while the card cell repeats plan and solve. Memory that Aer allocates in C++ is not traced. `estimate` counts only the arrays of the selected construction.
-# - **Work.** `estimate` bounds the work of each distinct block definition once. The run records the work it counted while building the Qiskit circuit, so the two differ.
+# - **Peak memory** is the largest total of Python allocations, traced with `tracemalloc` while the card cell repeats plan and solve. Memory that Aer allocates in C++ is not traced. `estimate` counts only the arrays that the construction itself holds.
+# - **Work.** `estimate` bounds the work counted once for each distinct circuit definition. The run records that contribution plus the work counted for each use of a definition in circuit construction. Here the two contributions are equal, so the recorded total is twice the estimate. These are nominal work counts, not measured CPU time, and the estimate does not bound the total recorded preparation work.
 # - **Baseline budget.** The baseline runs 500 descents from random starts, 9 from a 3 × 3 set of starts to locate the minima, and 36 from the grid points to mark the valley of each.
 # - **Not estimated:** physical qubits, error correction, run time on hardware and price.
 #
@@ -380,7 +380,7 @@ show_table([
 #
 # **The runs are noiseless, every count is a logical count, and the answer is a grid point.**
 #
-# The circuit is read out exactly, or sampled with finite shots without noise (Go deeper B). The same finite-shot request runs with a noise model on the local simulator ([Local Aer](../docs/aer.md)), and [Choose a backend](../docs/backends.md) lists the other backends.
+# The circuit uses exact readout, without shot sampling and subject to numerical rounding, or is sampled with finite shots without noise (Go deeper B). The same finite-shot request runs with a noise model on the local simulator ([Local Aer](../docs/aer.md)), and [Choose a backend](../docs/backends.md) lists the other backends.
 #
 # The library gives no bound on how far the best grid point lies from the continuous minimum (Section 3). A finer grid lowers the spacing and adds one qubit per point and variable. The grids need not be nested, so the best objective need not improve at every increase.
 #
@@ -451,7 +451,7 @@ disk_reference = constrained_grid_minimum(disk)  # evaluates f and g at all 16 g
 # %% [markdown]
 # With `execution="classical"` the rounds evolve the finite-difference grid model classically and simulate no circuit. A circuit for a round's effective objective also splits the potential, the kinetic operator and the one-hot links, so its distribution can differ at the same step count.
 #
-# The next cell therefore prices that circuit for each round and runs it at the same 80 steps. Its table sets the classical work beside the circuit cost and each round's point beside the circuit's probability there.
+# The next cell therefore estimates the cost of that circuit for each round and runs it at the same 80 steps. Its table sets the classical work beside the circuit cost and each round's point beside the circuit's probability there.
 #
 # Compare the two distributions before reading the circuit cost as the cost of reproducing the classical rounds.
 
@@ -541,13 +541,13 @@ show_table([(item.iteration + 1, item.penalty, item.inequality_multipliers[0], i
 #
 # The multiplier that the run reports is the method's iterate after its last round on the 16-point grid. Nothing requires it to equal the continuous multiplier $\sqrt2-1$.
 #
-# `constrained_grid_minimum(result)` checks its work against its limit before evaluating. Its signed difference subtracts the freshly evaluated minimum from the result's stored best objective.
+# `constrained_grid_minimum(result)` checks its work against its limit before evaluating. Its signed difference subtracts the freshly evaluated minimum from the best objective recorded in the result.
 #
-# That difference can be negative, including when the stored point belongs to the evaluated feasible grid, because the two values can have different rounding errors. An off-grid or infeasible stored point gives no grid-optimality conclusion.
+# That difference can be negative, including when the result's best point belongs to the evaluated feasible grid, because the two values can have different rounding errors. An off-grid or infeasible best point gives no conclusion about optimality on the grid.
 #
 # If no grid point passes computed feasibility, its point, objective and gap are `None`. The gap is also `None` when the result has no best point.
 #
-# The signed difference is an evaluated-value diagnostic. A bound for the mathematical objective requires bounds for objective-evaluation error and an appropriate feasible comparison set, and no conclusion about the continuous problem follows.
+# The signed difference compares evaluated values. A bound for the mathematical objective requires bounds for objective-evaluation error and an appropriate feasible comparison set, and no conclusion about the continuous problem follows.
 #
 # </details>
 #
@@ -612,11 +612,11 @@ plt.show()
 # %% [markdown]
 # ### B. A finite number of measurements
 #
-# **What does a run on hardware return, and how often does it miss the best grid point?** One solve with 20 shots on the noiseless Aer simulator, under 2 s.
+# **What does a run on hardware return, and how often does it miss the best grid point?** The cell runs one solve with 20 shots on the noiseless Aer simulator, under 2 s.
 #
-# Each shot measures the encoded register. A one-hot outcome can be invalid, and the analysis reports that mass separately. The sampled candidate has the least evaluated objective among positive-count valid outcomes and is unavailable if none was observed.
+# Each shot measures the encoded register. An outcome of the one-hot register can encode no grid point, and the analysis reports the probability of such invalid outcomes separately. The sampled candidate has the least evaluated objective among the valid outcomes observed at least once and is unavailable if none was observed.
 #
-# For a fixed circuit and a success event with unconditional probability $p$, $S$ independent repetitions all miss it with probability $(1-p)^S$. The table takes as the event a shot at the best grid point, with $p$ its exact probability from Go deeper A, and $S=20$.
+# For a fixed circuit and a success event with unconditional probability $p$, $S$ independent repetitions all miss it with probability $(1-p)^S$. The table takes as the event a shot at the best grid point, with $p$ its probability from the exact readout of Go deeper A, and $S=20$.
 
 # %%
 sampled = solve(plan(problem, method=method, shots=20, seed=7), progress=False)
@@ -676,9 +676,9 @@ plt.show()
 #
 # **When does an inequality become an extra grid variable, and what does it cost?** The first cell plans round 0 of three options and runs nothing. The second solves the disk problem of Section 7 with a slack variable, classically.
 #
-# `AugmentedLagrangian(inequality_form="phr")` is the default. It keeps the Powell–Hestenes–Rockafellar (PHR) term for every kept inequality. `inequality_form="slack"` requests explicit slack coordinates after the eligible quadratic and constant branch tests.
+# `AugmentedLagrangian(inequality_form="phr")` is the default. It uses the Powell–Hestenes–Rockafellar (PHR) term for every kept inequality, that is, every inequality that preprocessing has not turned into a box bound (`absorb_bounds=True`). `inequality_form="slack"` requests explicit slack coordinates, except where a test on the grid shows that the PHR term equals its quadratic or its constant branch.
 #
-# `inequality_form="auto"` selects a representation by the execution rule below. Each converted inequality appends one normalized slack coordinate to the inner problem, after the original variables and in constraint order.
+# `inequality_form="auto"` selects a representation by the execution rule below. Each round of Section 7 solves an inner problem, the QHD problem of its effective objective, and the outer iteration updates the multipliers and the penalty between rounds. Each converted inequality $g_j\le0$ appends one slack coordinate to the inner problem, after the original variables and in constraint order. The slack belongs to the normalized inequality $G_j=g_j/s_{g,j}$, where $s_{g,j}$ is the scale of that inequality (`inequality_scales`, 1 by default).
 #
 # An unsimplified PHR term involving $r$ variables needs a support table with `K**r` entries. If the normalized inequality is additively separable after grouping by variable, expanding its slack term produces supports of at most two variables.
 #
@@ -712,17 +712,17 @@ show_table([("Planned classical work", trial.current_work, trial.trial_work),
 display(HTML(f"<p>Trial accepted: {trial.accepted}, {escape(trial.reason)}.</p>"))
 
 # %% [markdown]
-# Automatic conversion is enabled only for `execution="quantum"`, including Plans that will run on Aer and quantum planning without execution. It makes one deterministic pass through kept inequalities in original order.
+# Automatic conversion is enabled only for `execution="quantum"`, including Plans that will run on Aer and quantum planning without execution. It makes one deterministic pass through the kept inequalities in their original order.
 #
-# Each trial adds one slack to the representation accepted so far. When planning accepts both Plans, the rule accepts the trial only if planned classical work and CX per circuit are both no larger and at least one is strictly smaller.
+# Each trial adds one slack to the representation accepted so far. When planning refuses neither Plan, the rule accepts the trial only if the planned classical work and the CX count per circuit are both no larger and at least one is strictly smaller.
 #
-# The classical-work comparison is the work counted by QHD's symbolic and table checks plus the circuit construction work. It is a planning metric, not a runtime measurement or a sum of the work of all trials.
+# The classical work compared is the work counted by QHD's symbolic and table checks plus the circuit construction work. It is a planning quantity, not a runtime measurement or a sum of the work of all trials.
 #
 # Quantum Plans use this circuit-cost rule even when their eventual backend is a statevector simulator, so a lower CX count alone does not promise a faster Aer run.
 #
 # For fourteen original variables of the same family, the guide reports that PHR was refused before its table was formed, while forced slack required 1,830 CX per circuit. These are planning numbers from the guide, not runs of this notebook.
 #
-# Under `execution="classical"`, automatic selection keeps every inequality in PHR form for both `theory_flavor="schrodinger"` and `theory_flavor="split_step"`. Their restricted state has `K**d` amplitudes and becomes `K**(d+m_s)` with $m_s$ added slack axes.
+# Under `execution="classical"`, automatic selection keeps every inequality in PHR form for both classical evaluations, `theory_flavor="schrodinger"`, the default, which applies the exponential of each step's grid Hamiltonian, and `theory_flavor="split_step"`, a symmetric split-step product. Their state, restricted to the grid points, has `K**d` amplitudes and becomes `K**(d+m_s)` with $m_s$ added slack axes.
 #
 # Forced slack remains available on either route. The next cell therefore solves the disk problem of Section 7 again with `inequality_form="slack"` and `execution="classical"`, and compares its result with `constrained_grid_minimum`.
 
@@ -749,9 +749,9 @@ show_table([(item.iteration + 1, ", ".join(slack_forms[item.iteration]["forms"].
                     "inner_value, source"))
 
 # %% [markdown]
-# The slack changes the inner problem, and the outer state remains that of the PHR algorithm. The round selects a joint inner point, projects it to x, and evaluates the original f, h and kept g there.
+# The slack changes the inner problem, and the outer iteration remains that of the PHR algorithm. The round selects a joint inner point, projects it to x, and evaluates the original f, h and kept g there.
 #
-# Its tentative multipliers are `lambda+ = lambda_bar + rho H(x)` and `mu+ = max(0, mu_bar + rho G(x))`. The safeguard, penalty rule, stopping tests and stationarity diagnostic use those projected original residuals. The sampled slack and `G_j(x) + s_j` do not replace them.
+# With H and G the equality and inequality residuals divided by their scales, lambda_bar and mu_bar the multipliers that the round entered with and rho its penalty, the tentative multipliers are `lambda+ = lambda_bar + rho H(x)` and `mu+ = max(0, mu_bar + rho G(x))`. The safeguard, penalty rule, stopping tests and stationarity diagnostic use those projected original residuals. The sampled slack and `G_j(x) + s_j` do not replace them.
 #
 # The slack coordinate has the units of normalized G_j, so the corresponding original-unit expression is `g_j(x) + s_{g,j} s_j`.
 #
@@ -765,25 +765,25 @@ show_table([(item.iteration + 1, ", ".join(slack_forms[item.iteration]["forms"].
 #
 # </details>
 #
-# **Reading the table.** For any round with an `InnerRepresentation`, including one with no added slack, `effective_value` is the PHR value L_k evaluated from the original f, h and kept g at the projected point. Its `effective_value_source` is `evaluated`.
+# **Reading the table.** For any round with an `InnerRepresentation`, including one with no added slack, `effective_value` is the PHR value L_k, the effective objective of round k, evaluated from the original f, h and kept g at the projected point. Its `effective_value_source` is `evaluated`.
 #
-# The selected inner value and its `table` or `evaluated` source are stored separately as `inner_value` and `inner_value_source`. `most_probable` selects a joint grid mode, whose projection need not be the mode of the marginal distribution on x.
+# The value of the inner objective at the selected joint point and its `table` or `evaluated` source are recorded separately as `inner_value` and `inner_value_source`. `most_probable` selects a joint grid mode, whose projection need not be the mode of the marginal distribution on x.
 #
 # The recorded probability, tie deficit and tie window belong to the selected joint inner grid point. They are not marginal probabilities or tie diagnostics after summing over the slack coordinates.
 #
 # **The slack grid and its bound.** Each slack uses the Method's common `num_grid_points`, `boundary` and `include_boundary_points`, with no separate slack-grid setting. A Dirichlet slack box has upper end U = U_0.
 #
-# The cap U_0 contains every required continuous slack on the grid of the original preprocessed box for every nonnegative entering multiplier and positive penalty.
+# The cap U_0 = max(0, −ℓ), where ℓ is a lower bound of the normalized inequality on the grid, contains every required continuous slack on the grid of the original preprocessed box for every nonnegative entering multiplier and positive penalty.
 #
-# For each converted inequality, `SlackAxis.error_bound` stores an upward-rounded evaluation of the slack-grid excess formula, using this round's entering multiplier and penalty.
+# For each converted inequality, `SlackAxis.error_bound` holds an upward-rounded evaluation of the slack-grid excess formula, using this round's entering multiplier and penalty.
 #
-# Its interpretation as a bound on the excess from finite-grid rather than continuous slack minimization requires the cap and mesh assumptions stated in the [QHD guide](../docs/algorithms/qhd.md#slack-variables-for-inequality-constraints). It certifies neither the quality of a QHD-selected point, a probability-distribution error, nor a bound on the continuous constrained optimum.
+# Its interpretation as a bound on the excess from finite-grid rather than continuous slack minimization requires the cap and mesh assumptions stated in the [QHD guide](../docs/algorithms/qhd.md#slack-variables-for-inequality-constraints). It establishes no bound on the quality of a point that QHD selects, on the error of the probability distribution or on the continuous constrained optimum.
 #
-# `InnerRepresentation.error_bound` sums the stored per-axis bounds and rounds upward again, and `report()` exposes this aggregate slack-grid bound, which the table shows.
+# `InnerRepresentation.error_bound` sums the per-axis bounds and rounds upward again, and `report()` exposes this aggregate slack-grid bound, which the table shows.
 #
 # **What the slack form does not establish.** A finite slack grid, its additional kinetic operator and the selected point can change the projected distribution and multiplier trajectory. They do not establish the inner-minimization assumptions of the convergence or objective-gap statements in [Result 46 and Proposition 47](../docs/mathematics.md#r46).
 #
-# The public default stays `phr`, with `auto` and `slack` as explicit choices, because the automatic rule has no solution-quality criterion.
+# The default is `phr`, and `auto` and `slack` are explicit choices, because the automatic rule has no criterion of solution quality.
 #
 # If you choose `auto` or `slack`, compare the best feasible objective with `constrained_grid_minimum` when the unrefined original grid can be enumerated within its work and memory limits. A comparison with PHR alone can miss a gap shared by both formulations.
 #
@@ -791,7 +791,7 @@ show_table([(item.iteration + 1, ", ".join(slack_forms[item.iteration]["forms"].
 #
 # ### A. The full resource estimate
 #
-# The table lists every quantity that the resource formulas of the selected construction determine, and the last line names the gate metrics they leave unknown.
+# The table lists every quantity that the resource formulas of this construction determine, and the last line names the gate metrics they leave unknown.
 
 # %% jupyter={"source_hidden": true}
 # Display helpers for Appendix A: labels of the resource metrics and a table of the estimate.
@@ -826,7 +826,7 @@ show_estimate(predicted)
 # %% [markdown]
 # ### B. A saved result, reloaded and recomputed
 #
-# `result.save` stores the plan, the tabulated objective and the probabilities of the readout. Loading restores them without evaluating the objective or repeating the evolution. The cell recomputes the grid probabilities and the candidate from the loaded result and compares them with the card's.
+# `result.save` saves the plan, the tabulated objective and the probabilities of the readout. Loading restores them without evaluating the objective or repeating the evolution. The cell recomputes the grid probabilities and the candidate from the loaded result and compares them with the card's.
 
 # %%
 from pathlib import Path

@@ -1,13 +1,16 @@
-"""Simultaneous population-mass bounds for QHD's selected old-grid regions.
+"""Simultaneous confidence lower bounds on the probability mass of the regions that QHD box refinement selects.
 
+The bounded mass is that of each level's backend sampling distribution conditioned on valid
+decoding, not the empirical mass of the counts, and the regions are chosen from the same samples.
 NWQLib derives this coverage bound in Proposition 49 of docs/mathematics.md
 from Hoeffding and one-sided Clopper–Pearson bounds. The refinement
 procedure follows Wu et al., arXiv:2605.12066v1, Sec. V.
 Given earlier history and validity indicators, the S valid
-positions of a level are iid from its conditional population. Its raw shot
-count, grid, seam and distribution were fixed before seeing those positions.
-The total failure probability alpha and maximum number H of levels are also
-fixed in advance. For AL, H is max_iterations * max_levels. Dimensions may
+positions of a level are iid from its conditional distribution. Its raw shot
+count, grid (with the place where a periodic axis is cut) and distribution
+were fixed before seeing those positions. The total failure probability alpha
+and maximum number H of levels are also fixed in advance. For the
+augmented-Lagrangian layer, H is max_iterations * max_levels. Dimensions may
 depend on earlier rounds and include slack coordinates.
 
 There are I = K (K + 1)/2 nonempty nonwrapping intervals per axis, hence
@@ -18,7 +21,7 @@ per level are at most alpha/(2H). Conditional averaging and a union bound
 over H levels give total failure at most alpha. No independence between
 the two methods or different levels is required. Taking the larger lower
 bound is valid on their common simultaneous event. Each bound concerns its
-own level population. Multiplying them does not give final-box coverage.
+own level's distribution. Multiplying them does not give final-box coverage.
 
 All numerical formulas use ordinary binary64 evaluation, not directed
 rounding. Reporting reads the integer sufficient statistics already stored
@@ -48,7 +51,7 @@ def validate_alpha(value):
 
 
 def selected_intervals(level, k):
-    """Return the kept old-grid event, including the valley of a selected split side."""
+    """Return the kept intervals on the level's grid, including the valley of a chosen split side."""
     if level.split is None:
         return level.intervals
     split = level.split
@@ -77,7 +80,7 @@ def interval_radius(d, k, horizon, alpha, n):
 def cp_lower(m, n, log_beta):
     """Evaluate the one-sided Clopper-Pearson lower endpoint for M=m successes in S=n draws.
 
-    For a fixed candidate region, M is Binomial(S, p). Its right tail is
+    For a fixed region, M is Binomial(S, p). Its right tail is
     I_p(M, S-M+1), which increases with p. Inverting its level-beta test
     gives Pr(L_CP(M,S;beta) > p) <= beta, with L_CP=0 when M=0 and
     I_beta**(-1)(M, S-M+1) otherwise. For M=S, the tail is p**S, so
@@ -86,7 +89,7 @@ def cp_lower(m, n, log_beta):
     doi:10.1093/biomet/26.4.404. SciPy's scipy.special.betaincinv implements
     the inverse regularized incomplete beta function.
 
-    bounds_from_counts allocates beta=alpha/(2 H I**d) to every candidate
+    bounds_from_counts allocates beta=alpha/(2 H I**d) to every possible
     joint box. The module docstring supplies the selection and horizon
     union bounds. Exact integer shapes and a normal target beta delimit
     the nonanalytic evaluation. They do not establish an inverse error
@@ -121,12 +124,12 @@ def cp_lower(m, n, log_beta):
 def bounds_from_counts(*, n, axis_counts, joint_count, intervals, k, horizon, alpha):
     """Bound the mass of the selected region from its sufficient integer counts.
 
-    The producer supplies C_j and M for the same S = n valid draws.
-    Whole axes have population mass one exactly. For q other axes,
+    The caller supplies C_j and M for the same S = n valid draws.
+    Whole axes have mass one exactly. For q other axes,
     the complement union bound and interval_radius give
-    max(0, 1 - sum_j(1 - C_j/S) - q epsilon). Form the misses as integers
-    before dividing, so rounded marginal masses never enter this formula.
-    CP protects every candidate joint box with beta = alpha/(2 H I**d).
+    max(0, 1 - sum_j(1 - C_j/S) - q epsilon). The misses are formed as
+    integers before dividing, so rounded marginal masses never enter this
+    formula. CP covers every possible joint box with beta = alpha/(2 H I**d).
     Both corrections use d even when q is selected after observing counts.
     """
     radius = interval_radius(len(intervals), k, horizon, alpha, n)
@@ -190,7 +193,7 @@ def coverage(entries, *, k, horizon, failure_probability=DEFAULT_FAILURE_PROBABI
 
 
 def coverage_lines(confidence):
-    """Format the same evaluated bounds for standalone and AL summaries."""
+    """Format the same evaluated bounds for standalone and augmented-Lagrangian summaries."""
     if confidence is None:
         return []
     alpha = confidence["failure_probability"]

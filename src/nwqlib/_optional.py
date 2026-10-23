@@ -1,10 +1,14 @@
-"""Actionable missing-package errors at explicitly selected operation owners."""
+"""Missing-package errors that name the extra to install, raised by the operation that needs the package."""
 
 from importlib import import_module
 
 
 def optional_import(module, *, extra):
-    """Import the selected package, preserving dependency-internal failures."""
+    """Import a package and add the install command of ``extra`` when the package itself is missing.
+
+    An import error raised inside the package's own dependencies passes on
+    unchanged.
+    """
     try:
         return import_module(module)
     except ModuleNotFoundError as error:

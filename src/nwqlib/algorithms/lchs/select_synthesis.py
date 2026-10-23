@@ -38,12 +38,15 @@ class LCHSProductFormulaSelectPlan:
             (B*W, padded_node_count): block-major rows, one per scheduled occurrence
             in each of the B compressed repetition blocks of W occurrences. Each row
             holds the rotation angles in radians of every address. Completed or
-            inactive branches have zero angles. Consumers read its ``array``. The
-            selected identity digests the array as one byte block.
+            inactive branches have zero angles. Code that uses the table reads its
+            ``array``. The content hash of the planned data (selected_identity)
+            covers the array as one byte block.
         occurrence_block_repetitions: Number of consecutive formula steps sharing each
-            block of angle tables. Emission expands these counts. Planning keeps them compact.
-        branch_step_counts: Actual per-address product-formula step counts, including
-            zero for inactive/padding branches and node-dependent budgeted selections.
+            block of angle tables. Circuit construction expands these counts. Planning
+            keeps them compact.
+        branch_step_counts: Per-address product-formula step counts, including zero
+            for inactive or padding branches and the node-dependent counts of the
+            budgeted backend.
         identity_phases: Per-address scalar phases in radians from the kept identity
             Hamiltonian term, -elapsed_time*identity_coefficient, and zero on padding.
         coefficient_phases: Per-address arguments of the complex LCU coefficients,
@@ -58,16 +61,16 @@ class LCHSProductFormulaSelectPlan:
         pruned_l1_mass: Per-address finite upper bound on the summed moduli of the
             omitted Pauli coefficients (error_budget.upper_dropped_mass), before
             multiplication by elapsed time. It is not a complete product-formula error bound.
-        formula_order: Selected Lie-Trotter order 1 or symmetric Suzuki order 2.
+        formula_order: Lie-Trotter order 1 or symmetric Suzuki order 2.
         repetitions: Largest ``branch_step_counts`` entry in the generated
             compact schedule. This value equals the sum of the
             ``occurrence_block_repetitions`` multiplicities and is zero when
             every ``branch_step_counts`` entry is zero.
-        structure_certificate: Optional affine-address structural relation used to admit
+        structure_certificate: Optional affine-address structural relation used to accept
             structured SELECT. None means no such relation is attached. It does not
             certify total dynamical accuracy.
-        structured_generator_payload: Optional affine occurrence tables consumed by
-            structured lowering. None selects no structured payload.
+        structured_generator_payload: Optional affine occurrence tables used to build
+            the structured SELECT. None selects no structured payload.
     """
 
     pauli_labels: tuple[str, ...]
@@ -90,7 +93,7 @@ class LCHSProductFormulaSelectPlan:
 
 
 def _validate_affine_pauli_domain(terms: Sequence[tuple[str, complex]]) -> None:
-    """Admit real Pauli coefficients on equal-width labels for affine lowering."""
+    """Accept only real Pauli coefficients on equal-width labels for the affine construction."""
     terms = tuple(terms)
     if not terms:
         raise ValueError("affine_pauli requires at least one Pauli term")
@@ -169,7 +172,7 @@ def _build_product_formula_branch(
     *,
     num_system_qubits: int,
 ) -> QuantumCircuit:
-    """Realize the selected elementary branch using its existing step decision."""
+    """Build the elementary branch with its planned step count."""
 
     terms = _product_formula_branch_terms(plan, branch)
     steps = plan.branch_step_counts[branch]

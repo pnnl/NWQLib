@@ -118,13 +118,13 @@ def resolve_lcu_select_implementation(method, *, select_plan: Any | None = None)
 
 
 def construct_preparation(block, arguments, method_context):
-    """Lower one selected PREP leaf from its saved tensor and optional MPS cores.
+    """Build the circuit of one planned PREP block from its saved tensor and optional MPS cores.
 
     Direct preparation builds the exact normalized state with the direct
     magnitude/phase tree. Its record declares a ``qiskit.direct``
-    preparation, so lowering and the Run compare its 2**q amplitudes with
+    preparation, so circuit construction and the Run compare its 2**q amplitudes with
     ``max_direct_amplitudes`` before this constructor runs. MPS preparation
-    reuses the cores chosen at planning, so lowering never repeats the TT-SVD.
+    reuses the cores chosen at planning, so circuit construction never repeats the TT-SVD.
     """
     _no_arguments(arguments)
     target, decomposition, layers, max_bytes, max_svd_work = block._payload
@@ -144,7 +144,7 @@ def _source_preparations(data):
     These trees are built inside SELECT and are not declared as PREP blocks,
     so ``max_direct_amplitudes`` does not apply. Each direction fills the
     system register of padded dimension D, which ``selection.select_dense``
-    admits at ``64*D**2 + 128*D`` bytes before planning continues. At the default
+    checks at ``64*D**2 + 128*D`` bytes before planning continues. At the default
     ``max_bytes`` of 10**10 a tree therefore has at most 8192 amplitudes. When
     the dissipative part L is nonzero, the eigensolve also requires
     ``D**3 <= max_spectral_work`` for the unpadded dimension, which by
@@ -159,15 +159,15 @@ def _source_preparations(data):
 
 
 def construct_select(block, arguments, method_context):
-    """Lower the selected LCHS SELECT leaf from its saved LCHSData, without reselection.
+    """Build the circuit of the planned LCHS SELECT block from its saved LCHSData, without choosing anything again.
 
     SELECT applies sum_j |j><j| (x) e^{i*arg(c_j)} U_j on the coefficient
     address and system registers. The coefficient magnitudes live in the
     separate PREP pair, so PREP, SELECT and inverse PREP form the LCU of ACL
     arXiv:2312.03916v2, Appendix A.3, Lemma 24, with the complex phases moved
-    from the two state-preparation oracles into SELECT. The leaf follows the
-    selected route: dense_exact controls classically exponentiated branches,
-    identity_evolution applies only the coefficient phases, QSP realizes the
+    from the two state-preparation oracles into SELECT. The block follows the
+    planned route. dense_exact controls classically exponentiated branches,
+    identity_evolution applies only the coefficient phases, QSP builds the
     saved joint generator and phases, and product formulas use the saved
     multiplexed or structured tables. Branch-controlled product formulas and
     dense source branches control each branch circuit separately. With a
@@ -306,18 +306,18 @@ def _dense_branches(data, specifications, finish=None, *, cache=False):
     (_branch_unitary), with eigenvectors V and eigenvalues lambda, and t the
     elapsed time. It is the identity at zero elapsed time or when L and H
     are both zero. Each branch matrix is released once its circuit is
-    yielded, so only the current branch's matrix is alive while SELECT
+    yielded, so only the current branch's matrix is in memory while SELECT
     controls and appends it. With ``cache`` (the source layouts, whose nodes
     recur across applications), the eigensystem arrays occupy at most
     ``K*(16*D**2 + 8*D)`` bytes, where K is the number of distinct nonpadding
     k-node keys and D is the encoded system dimension. Each computed
-    eigensystem stays alive for this invocation, with the shared H
+    eigensystem stays in memory for this invocation, with the shared H
     eigensystem used when L is exactly zero. Without ``cache`` and with
-    nonzero L, only the current node's eigensystem is alive and a recurring
+    nonzero L, only the current node's eigensystem is in memory and a recurring
     k would be factorized again, so parameters.construction_work counts
     one eigensystem per nonzero-time homogeneous branch.
     ``finish(branch, unitary)`` builds a source branch circuit. Otherwise the
-    circuit holds the matrix as one UnitaryGate. The selected unitary skips
+    circuit holds the matrix as one UnitaryGate. The branch unitary skips
     the redundant input check (check_input=False), which does not project it
     onto the unitary group.
     """
@@ -365,7 +365,7 @@ def _whole_matrix(route, controls):
 def dense_branch_select_cx(num_system_qubits: int, address_bits: int, route: str = "gatewise") -> int:
     """Upper bound on the CX of one controlled dense branch of the dense_exact SELECT.
 
-    It prices the branch's dense unitary. A source preparation inside a
+    It counts the CX of the branch's dense unitary. A source preparation inside a
     constant-source branch is priced separately in
     parameters.construction_work, except on the whole-matrix route, where
     it is part of the branch unitary.
@@ -382,9 +382,9 @@ def dense_branch_select_cx(num_system_qubits: int, address_bits: int, route: str
     that is qiskit_compat.controlled over the exact synthesis of
     _dense_synthesis.py. Qiskit's add_control then controls every gate of
     that circuit with the a address bits (qiskit/circuit/_add_control.py,
-    apply_basic_controlled_gate), so the count is a sum over the gate census
+    apply_basic_controlled_gate), so the count is a sum over the gate counts
     of _dense_synthesis.dense_synthesis_gate_census with these costs after
-    lowering to CX and U gates:
+    decomposition into CX and U gates:
 
     - CX becomes an X with a + 1 controls, and H becomes an X with a
       controls between one-qubit gates. Their counts are Qiskit 2.6.0's
@@ -405,12 +405,13 @@ def dense_branch_select_cx(num_system_qubits: int, address_bits: int, route: str
     Open controls add only X gates. Inside a branch the multi-controlled X
     gates may instead use idle system qubits as ancillas. For a from 1 to 8
     with one or three idle qubits, clean or already used, every gate kind of
-    the census lowered to at most its ancilla-free count, which the law uses
+    the synthesis decomposed into at most its ancilla-free count, which the
+    formula uses
     (tests/test_lchs_resource_structural_law.py).
     With no address bits the single branch stays a UnitaryGate, whose
-    synthesis takes at most the census CX. The bound is recorded as an
-    estimate, because another Qiskit version can control or lower these
-    gates differently. tests/test_lchs_resource_structural_law.py compares
+    synthesis takes at most the CX of those gate counts. The bound is
+    recorded as an estimate, because another Qiskit version can control or
+    decompose these gates differently. tests/test_lchs_resource_structural_law.py compares
     it with the transpiled built SELECT.
     """
     from nwqlib.subroutines._dense_synthesis import controlled_synthesis_gate_census, dense_synthesis_gate_census
@@ -426,7 +427,7 @@ def dense_branch_select_cx(num_system_qubits: int, address_bits: int, route: str
 def _controlled_gate_cx(address_bits: int) -> dict[str, int]:
     """CX of each gate of the dense synthesis after Qiskit adds address_bits >= 1 controls.
 
-    The keys are the census gates and the branch's global phase. The
+    The keys are the gate kinds of the dense synthesis and the branch's global phase. The
     derivation of each entry is in dense_branch_select_cx.
     """
     from nwqlib.subroutines._mcx_counts import MCX_CX_BY_CONTROLS
@@ -447,8 +448,8 @@ def build_branch_select(data, branches, route="gatewise"):
 
     Each branch is controlled on its address through
     ``qiskit_compat.controlled`` on the dense control route ``route``.
-    ``branches`` may be a generator: each branch and its copy are released
-    after its controlled circuit is appended, before the next is produced.
+    ``branches`` may be a generator, and each branch and its copy are
+    released after its controlled circuit is appended, before the next is produced.
     """
     import numpy as np
     from qiskit import QuantumCircuit
@@ -470,7 +471,7 @@ def build_branch_select(data, branches, route="gatewise"):
 
 def build_selected_evolution(selected, *, max_bytes=DEFAULT_MAX_BYTES, max_work=1_000_000_000,
                              dense_control_route="gatewise"):
-    """Realize the selected joint generator and saved QSP phases without solving again.
+    """Build the planned joint generator with the saved QSP phases without solving again.
 
     The joint generator is D_L (x) L + D_H (x) H, with the saved diagonals, and
     QSP evolves it for evolution_time using the phases prepared at planning.
@@ -526,7 +527,7 @@ def _compiled_coefficient_phase_gate(
     """Return the diagonal gate sum_j exp(i*arg(c_j))|j><j| on the address register.
 
     Every nonzero coefficient keeps its exact phase, however small, and zero
-    or padding slots get phase zero. None means that all phases are zero.
+    or padding address slots get phase zero. None means that all phases are zero.
     """
 
     import numpy as np
@@ -543,7 +544,7 @@ def _compiled_coefficient_phase_gate(
 
 
 def _build_compiled_qsp_part_encoding(plan, *, max_bytes=DEFAULT_MAX_BYTES, max_work=1_000_000_000):
-    """Realize one nonzero child from its shared immutable block plan.
+    """Build one nonzero child from its shared immutable block plan.
 
     The returned encoding keeps the plan's alpha and error_bound (the
     block-encoding error plus the pruned Pauli mass, in the operator frame of

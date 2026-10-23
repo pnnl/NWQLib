@@ -1,4 +1,4 @@
-"""SDK-free coefficient amplitudes shared by LCU selection and analysis."""
+"""Coefficient amplitudes of an LCU, computed without a quantum SDK and shared by planning and analysis."""
 
 from math import fsum, isfinite
 import numpy as np
@@ -11,8 +11,8 @@ from nwqlib.subroutines._power_of_two import next_power_of_two as _next_power_of
 def _lcu_prep_stage_requirements(padded_term_count, num_control_qubits):
     """Return the bytes and work of the coefficient and PREP stage of an LCU.
 
-    With P padded addresses on a = log2(P) qubits, the stage is charged an
-    untuned 128 bytes per address and ``16 P (a + 1)`` work for the a-level
+    With P padded addresses on a = log2(P) qubits, the stage is counted at
+    an untuned 128 bytes per address and ``16 P (a + 1)`` work for the a-level
     preparation tree. ``lcu.core._admit_lcu`` adds the dense SELECT stage to
     these terms.
     """
@@ -20,13 +20,14 @@ def _lcu_prep_stage_requirements(padded_term_count, num_control_qubits):
 
 
 def lcu_coefficient_intake(coefficients, *, system_dimension, coefficient_atol=0.0, max_bytes, max_work):
-    """Admit the coefficients of a gate-level LCU SELECT and return their bookkeeping.
+    """Check the coefficients of a gate-level LCU SELECT against the limits and return their bookkeeping.
 
-    This is the coefficient intake of ``lcu.core.prepare_lcu_gate_data``. It
-    imports no SDK, so LCHS planning can refuse a branch-controlled SELECT
-    that construction would refuse. The PREP-stage law is checked from the
-    container length before the coefficients are converted to an array, and
-    again from the padded address count after conversion.
+    This is the coefficient check of ``lcu.core.prepare_lcu_gate_data``. It
+    imports no quantum SDK, so LCHS planning can reject a branch-controlled
+    SELECT that construction would reject. The PREP-stage formula is checked
+    from the length of the input sequence before the coefficients are
+    converted to an array, and again from the padded address count after
+    conversion.
 
     Returns:
         ``(coefficient_array, dimension, bookkeeping)``. ``bookkeeping`` is the
@@ -60,7 +61,7 @@ def _coefficient_bookkeeping(
     coefficient_atol: float,
     max_bytes: int = DEFAULT_INPUT_BYTES,
 ) -> tuple[float, np.ndarray, np.ndarray, int, int, int]:
-    """Shared LCU coefficient bookkeeping for dense and gate-level data.
+    """Return the LCU coefficient bookkeeping shared by dense and gate-level data.
 
     Returns ``(coefficient_l1_norm, positive, prep_amplitudes,
     padded_term_count, num_control_qubits, num_system_qubits)``. The PREP

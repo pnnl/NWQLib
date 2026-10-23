@@ -1,4 +1,4 @@
-"""Scientific Result values with immutable acquisition data shared by reference."""
+"""Results of a Method, with the immutable run data they were computed from, shared without copying."""
 
 from dataclasses import dataclass
 from importlib.metadata import PackageNotFoundError, version
@@ -94,17 +94,17 @@ class RunData:
         observations: Every observation the Run collected, as an
             `ObservationView`. Its `chunks` are the
             [`ObservationChunk`][nwqlib.execution.ObservationChunk] records,
-            each holding the statistics of one measurement.
+            each holding one recorded batch of outputs or the outputs of one
+            trajectory point.
         trace: The [`ExecutionTrace`][nwqlib.execution.ExecutionTrace]: every
             attempt, its status and the work counted against the limits,
             failed and uncertain attempts included.
         receipts: The preparation records (`PreparedArtifact`) of the
-            circuits and of the host computations (classical computations
-            that the Method runs on this machine) that ran. Reading `RunData`
-            builds none of them again.
-        artifacts: Handles of the saved arrays
-            ([`ArtifactHandle`][nwqlib.artifacts.ArtifactHandle]). Reading a
-            handle copies no data.
+            circuits and of the classical computations on this machine that
+            the Method ran. Reading `RunData` builds none of them again.
+        artifacts: The saved arrays, as
+            [`ArtifactHandle`][nwqlib.artifacts.ArtifactHandle] objects.
+            Reading one copies no data.
         controller: The saved iteration state and decision history of an
             adaptive Method, as JSON text, or `None`.
         method_context: Analysis data that the Method keeps with the Result,
@@ -123,15 +123,15 @@ class RunData:
     allocation: object = None
 
     def artifact(self, manifest):
-        """Return the handle of one saved array, without copying its data.
+        """Return the `ArtifactHandle` of one saved array, without copying its data.
 
         Args:
             manifest (ArtifactManifest | str): The array's manifest, or its
                 content hash.
 
         Returns:
-            handle (ArtifactHandle): The handle. Read the values with
-                `handle.array`.
+            handle (ArtifactHandle): The array's `ArtifactHandle`. Read the
+                values with `handle.array`.
 
         Raises:
             ValueError: If this Run's data holds no such array.
@@ -167,7 +167,7 @@ class Result(Record):
     the answer with its main conditions. `analyze` recomputes the Result
     from the same data with other settings, `assess` compares it with an
     accuracy criterion, `verify` runs a named check, `report` returns its
-    stored values as a dictionary and `save` writes it to a folder. The
+    values as a dictionary and `save` writes it to a folder. The
     Plan (`result.plan`) and run data (`result.data`) are attached to the
     Result rather than stored in its fields, and `save` writes them with it.
 
@@ -179,7 +179,7 @@ class Result(Record):
         plan_id: Content hash of the Plan the Result was computed from.
         construction_id: Content hash of the circuit description the Result
             was computed from, either that Plan's `construction` or the
-            construction the Plan selects for one experiment point.
+            construction the Plan chooses for one experiment point.
         observation_id: Content hash of the observations attached to the
             Result.
         contribution_ids: Content hashes of the parts of the observations
@@ -504,7 +504,7 @@ class Result(Record):
         return "" if unit is None or unit.same_unit(UNSPECIFIED_UNIT) else " " + unit.symbol
 
     def _summary_lines(self):
-        """Return the first lines of `print(result)`, built from the Result's stored values.
+        """Return the first lines of `print(result)`, built from the values the Result holds.
 
         A supported hook for Method authors ([Add a
         Method](../algorithm_protocol.md#supported-protected-extension-hooks)).
@@ -520,9 +520,10 @@ class Result(Record):
         """Summarize the Result from records it already holds, without computing anything.
 
         The lines are the Method's ``_summary_lines``, then the Method and
-        execution route, then the first prepared target, how many observation
-        chunks this reduction used out of those acquired, and the attempt
-        count with uncertain attempts and failed host invocations. Without an
+        execution mode, then the first prepared target, how many of the
+        collected observation records this Result used, and the number of
+        attempts with the uncertain attempts and the failed classical
+        computations. Without an
         attached Plan or run data, the corresponding line says so. The last
         line always says ``accuracy not assessed``, because a Result stores no
         assessment and only an explicit ``assess`` call compares it with an
@@ -554,13 +555,13 @@ class Result(Record):
         printer.text(f"{type(self).__name__}(...)" if cycle else str(self))
 
     def report(self):
-        """Return the Result's stored values, Plan and run records as a dictionary.
+        """Return the Result's values, Plan and run records as a dictionary.
 
         The dictionary holds the printed summary and the JSON forms of the
         Plan, the Result, the attempt history, the observations, the
         preparation records, the manifests of the saved arrays, the forecast,
         the Allocation and the iteration state of an adaptive Method. It
-        reads stored records only. It loads no array, runs no check,
+        reads only the records the Result already holds. It loads no array, runs no check,
         reassesses no accuracy, reanalyzes nothing and does not refresh a
         Run. Each array manifest
         comes with `available`, which says whether the array can be read,
@@ -569,7 +570,7 @@ class Result(Record):
         `content_id`, the content hash that `contribution_ids` name. The
         records nested in an observation, such as its statistics, are listed
         without their own content hashes, so the report computes none per
-        stored entry. The dictionary describes the Result, and it cannot be
+        entry. The dictionary describes the Result, and it cannot be
         loaded back. Save with `save`, and read a saved folder without
         loading Method code with `nwqlib.saved_evidence.read_report`.
 

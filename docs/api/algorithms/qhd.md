@@ -1,6 +1,6 @@
 # QHD
 
-<a id="qhd-api"></a>Use an `Optimization` with `QHD` to find a candidate minimizer of an objective over a box, and use the entries below to choose its schedule and initial state, read the observed points and estimate fault-tolerant resources. Import every name on this page from `nwqlib.algorithms.qhd`, for example `from nwqlib.algorithms.qhd import QHD, circuit_resources`.
+<a id="qhd-api"></a>Use an `Optimization` with `QHD` to search for a minimizer of an objective over a box, and use the entries below to choose its schedule and initial state, read the observed points and estimate fault-tolerant resources. Import every name on this page from `nwqlib.algorithms.qhd`, for example `from nwqlib.algorithms.qhd import QHD, circuit_resources`.
 
 The [QHD guide](../../algorithms/qhd.md) explains the model, the readout and the measured evidence, and its [source map](../../algorithms/qhd.md#source-map) gives the paper, version and equation behind each step. <a id="constrained-problems"></a><a id="box-refinement"></a>The augmented-Lagrangian layer for constrained problems and box refinement are on [QHD constrained problems and box refinement](qhd_constrained.md). The `QHD` entry below has a complete example.
 
@@ -119,7 +119,7 @@ Each initial state is a product of nonnegative per-variable amplitude vectors, a
 
 ## Limits
 
-- QHD is not a global optimizer. The candidate and the most probable point are points of a finite grid of the box, and the candidate is the least evaluated objective only among the observed points with positive weight.
+- QHD is not a global optimizer. The candidate and the most probable point are points of a finite grid of the box, and the candidate has the least evaluated objective only among the observed points with positive weight.
 - `max_work` and `max_bytes` limit the work and bytes that planning counts. They do not bound the process memory or undocumented SymPy, SciPy or Qiskit costs.
 - The error sources of `circuit_resources` compare the circuit with its finite model. None concerns grid discretization or the optimization gap, and the record forms no total.
 - The T estimate is the leading term of the typical Ross-Selinger count, without an error bar, and a requested synthesis budget is not an achieved error.

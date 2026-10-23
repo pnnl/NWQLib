@@ -1,4 +1,4 @@
-"""Selected PF/QSP/MPS data and component laws consumed by LCHS execution."""
+"""Planned product-formula, QSP and MPS data and the component formulas that LCHS execution uses."""
 
 from dataclasses import fields, is_dataclass, replace
 from collections.abc import Mapping
@@ -17,15 +17,15 @@ from .primary_records import METHOD
 
 
 def freeze_selected(value, *, max_bytes):
-    """Snapshot the selected numerical arrays once. Metadata does no numerical work.
+    """Make read-only copies of the planned numerical arrays once. Metadata does no numerical work.
 
-    Writable arrays are copied read-only and their bytes are admitted against
+    Writable arrays are copied read-only and their bytes are checked against
     max_bytes first. Already frozen arrays are shared, not copied, so a Plan
-    holds one immutable copy of each selected array.
+    holds one immutable copy of each planned array.
     """
     copied = 0
     def freeze(item):
-        """Return item with every writable array replaced by a read-only snapshot.
+        """Return item with every writable array replaced by a read-only copy.
 
         Containers are rebuilt recursively. Mappings become MappingProxyType,
         lists become tuples, dataclasses are rebuilt from their frozen fields
@@ -58,7 +58,7 @@ def freeze_selected(value, *, max_bytes):
 
 
 def _feed_selected_value(digest, value):
-    """Feed one frozen selected value into ``digest`` as a prefix-free encoding.
+    """Feed one frozen planned value into ``digest`` as a prefix-free encoding.
 
     Every value starts with a one-byte kind tag, and every container states
     how many children follow. The byte stream therefore determines the nested
@@ -75,7 +75,7 @@ def _feed_selected_value(digest, value):
     - ``S``: a tuple or list, as its length and then its items.
     - ``f`` and ``c``: a float or complex number, as exact little-endian
       binary64.
-    - ``r``: any other scalar that ``freeze_selected`` admits (int, str, bool
+    - ``r``: any other scalar that ``freeze_selected`` accepts (int, str, bool
       or None), as its type name and repr, ended by ``;``. The repr of a
       string escapes its quote character, so the terminator is unambiguous.
 
@@ -115,12 +115,12 @@ def _feed_selected_value(digest, value):
 
 
 def selected_identity(data, problem, method):
-    """Bind one selected numerical recipe to its already ingested scientific inputs.
+    """Return the content hash that ties the planned numerical data to its Problem and Method.
 
-    The SHA-256 covers the Problem and Method identities and every selected
-    array, record and scalar in LCHSData, with dtype, shape and exact binary64
-    bytes, encoded by ``_feed_selected_value``. The SELECT record or host
-    kernel stores this identity to name the selected numerical recipe.
+    The SHA-256 covers the content hashes of the Problem and Method and every
+    planned array, record and scalar in LCHSData, with dtype, shape and exact
+    binary64 bytes, encoded by ``_feed_selected_value``. The SELECT record or
+    classical routine saves this hash to identify the planned numerical data.
     """
     if data.method != method:
         raise ValueError("selected LCHS data belongs to another Method")
@@ -134,23 +134,24 @@ def selected_identity(data, problem, method):
 
 
 def select_parameters(method, problem, data):
-    """Select every numerical SELECT and PREP product once, before any circuit exists.
+    """Choose every numerical SELECT and PREP quantity once, before any circuit exists.
 
-    This owns the planning choices made after the coefficient grid is known.
+    This function makes the planning choices that follow once the coefficient
+    grid is known.
     It resolves the SELECT implementation, lays out constant-source branches,
     builds the product-formula or QSP joint-generator plan, and computes the
     coefficient PREP amplitudes and any requested MPS decompositions. The
     results are frozen into LCHSData, whose content hash (selected_identity)
-    is bound to the SELECT record, so execution, archive loading and
-    verification reuse these exact numbers and never reselect them.
+    is recorded in the SELECT record, so execution, archive loading and
+    verification reuse these exact numbers and never choose them again.
 
-    A dense_exact selection whose padded slot count exceeds
-    max_dense_select_slots is refused here, before native construction. Each
+    A dense_exact plan whose address-slot count exceeds
+    max_dense_select_slots is refused here, before circuit construction. Each
     dense branch is a controlled, classically computed matrix exponential, so
-    construction cost and memory grow with both the slot count and the system
-    dimension. The refusal names the choices the caller can change. It never
+    construction cost and memory grow with both the address-slot count and
+    the system dimension. The refusal names the choices the caller can change. It never
     lowers the k-quadrature, the Duhamel node count or the tolerance to fit,
-    because that would silently change the selected approximation.
+    because that would silently change the planned approximation.
 
     For qsp_block_encoding the joint generator is D_L (x) L + D_H (x) H on the
     address register, the effective Hamiltonian of Pocrnic et al.,
@@ -165,8 +166,8 @@ def select_parameters(method, problem, data):
         data: LCHSData from select_dense, holding the homogeneous coefficient plan.
 
     Returns:
-        A pair of the frozen LCHSData with its selected SELECT products and a
-        dict of selected values for reconstruction and resource laws: the
+        A pair of the frozen LCHSData with its SELECT data and a dict of
+        planned values for reconstruction and resource formulas: the
         physical branch count, SELECT ancillas, QSP recovery scale, PREP
         amplitude array and, where applicable, step counts and Duhamel nodes
         and weights.
@@ -324,8 +325,9 @@ def construction_work(data,extra,*,method,elapsed):
     Returns:
         A pair (work, counts). work is the classical construction work in size
         units. counts holds select_cx, the projected CX count of the SELECT
-        leaf including any source-input preparations inside it, and
-        known_peak_bytes, the peak known array bytes of that construction.
+        block including any source-input preparations inside it, and
+        known_peak_bytes, the declared peak allowance for the numerical arrays
+        and circuit data of that construction.
     """
     dimension = len(data.initial)
     physical = extra['physical_branches']
@@ -470,17 +472,18 @@ def construction_work(data,extra,*,method,elapsed):
 
 
 def selected_error_facts(payload, *, problem, raw):
-    """Publish each selected circuit-path error stage as a planning fact.
+    """Report each error stage of the planned circuit path as a planning fact.
 
     One application record is built per physical application (the
-    homogeneous term, or each constant-source application with its own slots
-    and synthesis bound). Kernel stages come from the provider record in raw.
+    homogeneous term, or each constant-source application with its own
+    address slots and synthesis bound). Kernel stages come from the
+    kernel-quadrature record in raw.
     The QSP stage uses the compensated recovery bound of the saved phases and
     child encodings. Direct PREP stages are exact zero, and MPS PREP stages
     are unknown until an explicit circuit validation. gamma is the coefficient
     1-norm, times the initial physical norm for homogeneous evolution.
     Source-branch coefficients already include their input norms. A stage
-    whose premise fails is published with a reason instead of a value.
+    whose assumption fails is reported with a reason instead of a value.
     """
     from .analysis import fact as _fact
     from nwqlib.problems.records import Solution

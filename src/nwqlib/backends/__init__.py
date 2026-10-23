@@ -1,4 +1,7 @@
-"""Portable target declarations. Native adapters load only when selected."""
+"""Backends, device profiles and target declarations.
+
+A backend module and its SDK are imported only when one of its names is first used.
+"""
 
 from importlib import import_module
 from typing import TYPE_CHECKING
@@ -50,7 +53,7 @@ __all__ = [
 
 
 def __getattr__(name):
-    """Import the owning module of ``name`` on first access (PEP 562), as ``_OPERATIONS`` maps it."""
+    """Import the module that defines ``name`` on first access (PEP 562), as ``_OPERATIONS`` maps it."""
     if name == "export_qasm":
         return import_module("nwqlib.io.qasm").export_qasm
     if name in _OPERATIONS:

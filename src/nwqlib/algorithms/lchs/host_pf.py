@@ -1,4 +1,4 @@
-"""Selected Pauli product-formula actions for finite classical LCHS outputs."""
+"""Planned Pauli product-formula actions for finite classical LCHS outputs."""
 
 from math import cos, sin
 import numpy as np
@@ -28,14 +28,14 @@ def integer_bytes(value):
 
 
 def host_position_record_reserve(union, *, budgeted, fixed_steps, max_work):
-    """Pre-admit one host position before its record or route is constructed.
+    """Return the byte allowance for one classical quadrature position before its record or route is constructed.
 
     8192 covers the fixed-layout wrappers, floats and status strings.
     All integer fields are additional. A budgeted independent selection
     has at most 8500 step-count bits under the finite binary64 coefficient,
-    time and remainder premises. Fixed steps use their actual width.
-    The candidate reserve also covers a budgeted count refused by the
-    method's step cap. Position work cannot exceed max_work when admitted.
+    time and remainder assumptions. Fixed steps use their own width.
+    This allowance also covers a budgeted count that the method's step limit
+    refuses. Position work cannot exceed max_work once accepted.
     """
     pairs = union*(union-1)//2
     nested = union*(union-1)*(2*union-1)//6
@@ -49,7 +49,7 @@ def host_position_record_reserve(union, *, budgeted, fixed_steps, max_work):
 
 
 def host_phase_and_accumulation_work(dimension):
-    """Charge -elapsed*c_I, exp(1j*phase)*v and one weighted accumulation.
+    """Count the work of -elapsed*c_I, exp(1j*phase)*v and one weighted accumulation.
 
     Negation and the identity-coefficient product cost two scalar visits.
     Forming and exponentiating the imaginary argument cost two more, and
@@ -60,18 +60,18 @@ def host_phase_and_accumulation_work(dimension):
 
 
 def _action_route(dimension, steps, rotations, *, max_work, max_bytes, retained_bytes=0):
-    """Choose the cheaper admitted action route for one node.
+    """Choose the cheaper action route within the limits for one node.
 
     These are matrix/vector operation size proxies, not a wall-time ranking.
-    The work excludes shared selection and accumulation, admitted by the caller.
+    The work excludes shared selection and accumulation, checked by the caller.
 
     The vector route applies r*R Pauli rotations to one vector, with
     r = max(1, steps). Each rotation uses one single-label apply_terms action,
     priced by pauli_action_requirements(D, 1, 1, complex_input=True,
     label_width=q), followed by a D-entry scaling and a D-entry scaled
-    addition. Its work is r*R*(W_action + 2*D) kernel/pass units. The scalar
+    addition. Its work is r*R*(W_action + 2*D) action/pass units. The scalar
     cosine, sine and imaginary-factor preparations are bundled into these
-    update kernels. The three elementwise vector operations would instead
+    update operations. The three elementwise vector operations would instead
     cost 3*D visits under literal scalar counting.
     The dense route builds the D-by-D step matrix with R rotations (R*D**2),
     raises it to the r-th power by binary powering and applies it once (D**2).
@@ -96,7 +96,7 @@ def _action_route(dimension, steps, rotations, *, max_work, max_bytes, retained_
 
 
 def _route_requirements(dimension, steps, rotations, route):
-    """Return (work, scratch bytes, dense matrix products) of one saved action route (_action_route's laws)."""
+    """Return (work, scratch bytes, dense matrix products) of one saved action route (the formulas of _action_route)."""
     r = max(1, steps)
     if route == "vector":
         action_bytes, action_work = pauli_action_requirements(
@@ -121,14 +121,14 @@ def _route_requirements(dimension, steps, rotations, route):
 
 
 def _rotation_sequence(terms, elapsed, steps, order):
-    """The same ordered Lie/Suzuki-2 step as the selected circuit synthesis.
+    """The same ordered Lie/Suzuki-2 step as the circuit synthesis.
 
     For terms P1,...,PM, Suzuki applies P1/2,...,P(M-1)/2,PM,
     P(M-1)/2,...,P1/2. Angles here are exponent angles, half Qiskit RZ angles,
     formed with the exact original operand order
     float(real(c))*elapsed/steps, followed by /2 for the order-two half
     occurrences, never real(c)*(elapsed/steps). The sequence is formed for
-    the current application and node at application time from the stored
+    the current application and node at application time from the saved
     coefficient rows, and ``terms`` may be a repeatable view of them.
     """
     if not len(terms):
@@ -160,13 +160,13 @@ def compact_pf_peak_bytes(
 
     B_coeff = B_dec,out + B_align + B_nodes + B_apps + 24u + 128: the
     decomposition output, the alignment, the node tables, the application
-    records, a current node's mutable coefficients/indices before its
-    snapshot (24u) and the streamed upper dropped-mass accumulator (128
+    records, a current node's mutable coefficients/indices before they are
+    made read-only (24u) and the streamed upper dropped-mass accumulator (128
     logical bytes, one node at a time). B_angles = 16*max_k R_k is the
-    single shared angle buffer. The action maximum covers the routes
-    actually selected, excluding held inputs. ``other_phase_peak`` is a
+    single shared angle buffer. The action maximum covers the chosen
+    routes, excluding inputs already held. ``other_phase_peak`` is a
     separately reached phase, here the shared census. Inputs are logical
-    populations from the actual representation, not RSS measurements.
+    sizes of the arrays as represented, not RSS measurements.
     """
     coefficient_phase = (
         decomposition_output + alignment + nodes + applications
@@ -179,26 +179,27 @@ def compact_pf_peak_bytes(
 
 
 def select_actions(data, *, elapsed, source_nodes, source_weights, has_initial):
-    """Select actual per-node steps and route once, before host action.
+    """Choose the per-node steps and routes once, before any classical action.
 
-    Store the selected coefficient table once per k node and the elapsed
-    time, step count and route per application. Derive rotations with the
-    selected coefficient-times-elapsed-divided-by-steps order. Admission
-    follows the maximum of decomposition, node-table construction and
-    action phases, while every selected payload still live remains charged.
+    Save the coefficient table once per k node and the elapsed time, step
+    count and route per application. Rotations are derived as coefficient
+    times elapsed time divided by steps, in that order. The limit check
+    takes the largest of the decomposition, node-table construction and
+    action phases, and every saved table still in memory stays counted.
 
     The node table (time_independent_terms.LCHSProductFormulaNodes) holds
     one shared union label table, each distinct node's coefficient and
     union-index arrays, its identity coefficient and upper dropped mass.
     Each application (the initial state, then each Duhamel node) keeps, for
     every quadrature position, its step record (fixed, or budgeted per node)
-    and the cheaper admitted route. Per-application records stay separate
-    even when two durations coincide. Every distinct k-node is combined and
-    pruned once, and its bound coefficient comes from one admitted shared
-    census (_node_bound_coefficients). Each application then selects its
-    own steps at its elapsed time, pruning bound and remaining allowance.
-    Routes are chosen only after every record is admitted, so a later
-    record cannot invalidate an earlier dense route. Execution replays these
+    and the cheaper route within the limits. Per-application records stay
+    separate even when two durations coincide. Every distinct k-node is
+    combined and pruned once, and its bound coefficient comes from one shared
+    census that passed the limit checks (_node_bound_coefficients). Each
+    application then selects its own steps at its elapsed time, pruning bound
+    and remaining allowance.
+    Routes are chosen only after every record is accepted, so a later
+    record cannot invalidate an earlier dense route. Execution applies these
     choices unchanged and forms each rotation sequence at application time
     (_rotation_sequence).
 
@@ -212,41 +213,43 @@ def select_actions(data, *, elapsed, source_nodes, source_weights, has_initial):
     B_records = 8*sum_k d_k + 8*N_grid + A*N_grid*R_pos, where R_pos is
     host_position_record_reserve's fixed metadata allowance plus the typed
     integer fields of the node record, independent step selection and route
-    work. Fixed steps use their actual integer width. Budgeted candidates use
-    the finite-binary64 8500-bit step-count envelope. The cached rational
-    bound coefficients belong to _node_cache_bytes. The census arrays,
-    including each node's restricted pair and triple tables, belong to the
-    envelope that _lchs_census_choice admits: the shared census_bytes law
-    plus 9*max(E, F) bytes for one node's row selection, with E pair rows
-    and F reserved triple rows. These are logical payload and qualified
-    native object allowances, not a process heap bound. The cached
-    combined nodes (_node_cache_bytes) stay live through record selection
-    and are held in every phase.
+    work. Fixed steps use their own integer width. Budgeted step counts use
+    the 8500-bit step-count bound of finite binary64 inputs. The cached
+    rational bound coefficients belong to _node_cache_bytes. The census
+    arrays, including each node's restricted pair and triple tables, belong
+    to the byte bound that _lchs_census_choice checks, the shared
+    census_bytes formula plus 9*max(E, F) bytes for one node's row
+    selection, with E pair rows and F reserved triple rows. These are
+    allowances for the logical data and for the Python objects on the
+    qualified stack, not a process heap bound. The cached combined nodes
+    (_node_cache_bytes) stay in memory through record selection and are
+    held in every phase.
 
     Work, with d the padded dimension, ``q = log2(d)``, ``N = d**2``,
     K distinct node keys, M applications and N_grid quadrature positions:
     ``W_coeff = W_dec + W_align + K*(2*m_L + 23*u + 8)``, where m_L is the
     L support size and u the union size including identity. W_dec is the
     decomposition work (_pauli_decomposition_requirements), and W_align
-    is the one-time alignment work of the actual L/H supports
+    is the one-time alignment work of the L/H supports
     (_coefficient_preparation_work). Each distinct node's contribution
     covers combination, pruning and streamed upper dropped mass.
     Budgeted selection adds scalar selections ``16*M*N_grid`` and, when
     there are active nodes, the census ``p*q + G + K_n*V``. Here p counts
     shared nonidentity labels, G is the structural census work, K_n counts
     distinct active nodes, and V is the per-node contraction work
-    (_lchs_census_choice). With no active nodes the census charge is zero.
-    Every route adds ``M*N + 4*M*N_grid*d + 4*d`` and each selected action
-    route (_action_route). Align the actual L/H support once in lexical
-    order, then combine and prune it once per distinct k node. Selection
-    charges the alignment and each reached coefficient operation.
+    (_lchs_census_choice). With no active nodes the census work is zero.
+    Every route adds ``M*N + 4*M*N_grid*d + 4*d`` and each chosen action
+    route (_action_route). The L/H support is aligned once in lexical
+    order, then combined and pruned once per distinct k node. Selection
+    counts the alignment and each coefficient operation it reaches.
     Application count affects step records and actions, not repeated
     coefficient preparation or table storage. With full support, K = 200
     and M = 9, W_coeff alone is 21,547,072, 86,790,720, 349,573,184 and
-    1,407,991,872 units at q = 6 to 9, so W_coeff alone refuses full-support
-    q = 9 under the default max_select_work=1_000_000_000 while sparse
-    supports may fit. Decomposition and later action work are additional. These
-    units are admission proxies, not timings or equal-cost CPU operations.
+    1,407,991,872 units at q = 6 to 9, so full-support q = 9 is refused on
+    W_coeff alone under the default max_select_work=1_000_000_000, while
+    sparse supports may fit. Decomposition and later action work are
+    additional. These units are proxies for the limit checks, not timings or
+    equal-cost CPU operations.
     """
     method, d = data.method, len(data.initial)
     specifications = ([(0.,1.,False)] if has_initial else [])
@@ -381,9 +384,9 @@ def select_actions(data, *, elapsed, source_nodes, source_weights, has_initial):
 
 
 def application_actions(table, application, *, elapsed, order):
-    """Yield (position, sequence, phase, steps, route) of one stored application, in position order.
+    """Yield (position, sequence, phase, steps, route) of one saved application, in position order.
 
-    Each position's rotation sequence is formed from its node's stored
+    Each position's rotation sequence is formed from its node's saved
     coefficient rows at this application's elapsed time and saved
     max(1, steps) (_rotation_sequence), once per current application and
     position, and released by the caller after use. The identity phase is
@@ -407,7 +410,7 @@ def apply_node(sequence, phase, steps, route, vector):
     P from the left with the bit masks from _pauli_masks. With Y = i*X*Z,
     P|j> = i**n_Y * (-1)**popcount(j & z) |j ^ x>, where x marks X or Y
     positions, z marks Y or Z positions and n_Y counts Y. The route saved
-    at selection is used. Nothing is reselected here.
+    at planning is used. Nothing is chosen again here.
     """
     d = len(vector)
     steps = max(1,steps)

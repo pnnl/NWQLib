@@ -1,6 +1,6 @@
 """Exact compact circuits for normalized fermionic generator exponentials.
 
-``build_generator_circuit`` returns ``exp(theta*A)`` for one admitted
+``build_generator_circuit`` returns ``exp(theta*A)`` for one checked
 anti-Hermitian generator ``A``. ``_plan_generator_circuit`` chooses one of
 four routes. Each is exact in real arithmetic and is evaluated in binary64.
 
@@ -64,9 +64,12 @@ fermion terms, so it checks the four items together.
    those of Eq. (E8).
 
 Factors that share one excitation commute, so the four-distinct route
-combines them into one occupation-dependent angle before synthesis. The
-paper's tabulated gate counts do not include the routing and outer-control
-cost of these library circuits.
+combines them into one occupation-dependent angle before synthesis. Table III
+of Magoulas and Evangelista, arXiv:2511.13485v2 (p. 18), reports fixed gate
+counts for its optimized circuits and lists the index-dependent fermionic-sign
+ladders separately. These counts
+do not directly give the gate counts of NWQLib's synthesis or of its
+outer-controlled circuits.
 """
 
 from __future__ import annotations
@@ -98,12 +101,12 @@ if TYPE_CHECKING:
 
 @dataclass(frozen=True)
 class _GeneratorCircuitPlan:
-    """Theta-independent circuit route and local blocks for one admitted generator.
+    """Theta-independent circuit route and local blocks for one checked generator.
 
     Attributes:
         kind: ``commuting``, ``pair_split``, ``four_distinct`` or
             ``shared_index`` (see the module docstring).
-        generator: The admitted generator snapshot this plan compiles.
+        generator: The checked copy of the generator that this plan compiles.
         active_modes: Sorted spin-orbital modes the generator acts on. Only
             the ``shared_index`` route sets it.
         occupation_blocks: ``(occupation indices, matrix)`` pairs from
@@ -122,7 +125,7 @@ class _UnsupportedDefaultGenerator(ValueError):
 
 
 def _plan_generator_circuit(generator, *, max_bytes=DEFAULT_INPUT_BYTES, max_products=1_000_000_000):
-    """Classify one admitted generator into the exact circuit route it will use.
+    """Classify one checked generator into the exact circuit route it will use.
 
     ``commuting`` applies when all Pauli terms pairwise commute. Two Pauli
     words with bit masks ``(x_i, z_i)`` and ``(x_j, z_j)`` commute exactly when
@@ -517,7 +520,7 @@ def _singlet_parameters(theta):
 
 
 def _triplet_parameters(theta):
-    """Evaluate the twelve trigonometric angle functions consumed by the triplet factor tables.
+    """Evaluate the twelve trigonometric angle functions used by the triplet factor tables.
 
     These are c_1, c_2, c_3, c_4, c_7, c_8 and c_11-c_16 of Magoulas and
     Evangelista, arXiv:2511.13485v2, Table II. The table's c_5, c_6, c_9 and

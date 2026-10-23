@@ -18,13 +18,13 @@ index, reads ``sum_j s_j P_j (x) |j><j|``.
 
 The blocks ``select_signed_pauli``, ``select_pauli_readout`` and
 ``select_zero_reflection`` in ``nwqlib.blocks.selection`` bind these
-functions as the constructors that lowering calls, and the CX laws of those
-blocks describe these circuits. The Lanczos method uses all three for the
+functions as the constructors called when the circuit is built, and the CX
+count formulas of those blocks describe these circuits. The Lanczos method uses all three for the
 qubitized walk of Kirby et al., arXiv:2208.00567v4, and its readout,
 FixedGCIM's sampled route uses the readout of single Pauli words, one for
 each ancilla axis and one for each qubit-wise-commuting group, and QSP
 evolution uses ``zero_reflection`` for oblivious amplitude amplification.
-Keeping one construction per block makes the lowered circuit match the
+Keeping one construction per block makes the built circuit match the
 counted one. This module imports Qiskit when loaded, so
 ``blocks.selection`` imports it only inside those constructors and
 planning stays free of Qiskit.
@@ -51,7 +51,7 @@ def signed_pauli_select(labels, coefficients, num_index_qubits, num_system_qubit
     its address zero amplitude. The signs become a ``pi`` phase diagonal on
     the index register, which occupies the first ``a`` circuit qubits (the
     low-order bits), and each system qubit then receives one
-    dependency-projected UCG. Every branch is a Hermitian unitary, so SELECT
+    dependency-projected uniformly controlled gate (UCG). Every branch is a Hermitian unitary, so SELECT
     squares to the identity, which the qubitized iterate
     ``((2|G><G| - I) (x) I) SELECT`` requires (Low and Chuang,
     arXiv:1610.06546v3, Corollary 9).

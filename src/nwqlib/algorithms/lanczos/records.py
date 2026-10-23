@@ -9,30 +9,31 @@ from nwqlib.problems.inputs import PhysicalScale
 
 
 class MomentSetting(Record):
-    """degree, experiment and point bind one signed parity or positive reflection readout.
+    """Degree, Experiment and trajectory point of one signed-parity or positive-reflection readout.
 
     Degree k is read after walk_steps=floor(k/2) walk steps (Kirby et al.,
     arXiv 2208.00567v4, Eq. (24)). readout is ``reflection`` for even k,
-    ``select`` for odd k and ``classical`` for the host recurrence. qubits
-    are the wires the readout uses, and histogram_width is the admitted bit
-    width of a returned outcome key.
+    ``select`` for odd k and ``classical`` for the classical recurrence.
+    qubits are the wires the readout uses, and histogram_width is the
+    allowed bit width of a returned outcome key.
 
-    Exact-probability settings share one acquisition: every exact setting
-    names the one trajectory experiment and its own observation point, which
-    reads the walk state after walk_steps steps through the even or odd
-    view. Its qubits are the point's marginal and histogram_width their
+    Exact-probability settings share one simulated trajectory. Every exact
+    setting names the one trajectory experiment and its own probability
+    observation point, which reads the walk state after walk_steps steps
+    through the even or odd view. Its qubits are the point's marginal and
+    histogram_width their
     number. A sampled setting names its own experiment and no point, and its
     histogram_width is the full index and system width of a count outcome.
-    Classical settings name their host scalar and no point.
+    Classical settings name their classical scalar and no point.
 
     Attributes:
         degree: Moment degree k.
-        experiment: Experiment that acquires the degree.
+        experiment: Experiment that obtains the degree.
         point: Trajectory point ID of an exact setting, None for sampled and classical settings.
         walk_steps: floor(k/2).
         readout: ``reflection``, ``select`` or ``classical``.
         qubits: Wires the readout reads.
-        histogram_width: Admitted bit width of a returned outcome key.
+        histogram_width: Allowed bit width of a returned outcome key.
     """
 
     degree: PositiveInt
@@ -47,12 +48,12 @@ class MomentSetting(Record):
 class LanczosReconstruction(Record):
     """Everything analysis needs to turn moments into physical Ritz values.
 
-    The selected operator's packed Pauli table fixes the nonidentity term
+    The packed Pauli table of the Plan's operator fixes the nonidentity term
     order. Center and alpha define H = center I + alpha K. Analysis derives
     each used SELECT address's coefficient sign and system-support mask from
-    that table. Matrix-input plans use their stored affine frame without a
-    Pauli readout table. Algebraic known moments are independent of acquired
-    degree settings.
+    that table. Matrix-input plans use their recorded affine frame without a
+    Pauli readout table. Moments known algebraically are independent of the
+    settings of the other degrees.
 
     A normalized Ritz value x maps to the physical value center+alpha*x.
     Padding contributes zero without postselection. The readout table is
@@ -66,10 +67,10 @@ class LanczosReconstruction(Record):
         num_system_qubits: System qubits n.
         num_index_qubits: SELECT index qubits, zero for at most one term.
         known: (degree, value) pairs of algebraically known moments, always including mu_0=1.
-        settings: One MomentSetting per acquired degree, in ascending degree. Exact settings share one trajectory acquisition and name their points.
-        subspace: Content identity of the selected ChebyshevSubspace.
+        settings: One MomentSetting per requested degree not known algebraically, in ascending degree. Exact settings share one simulated trajectory and name their probability observation points.
+        subspace: Content hash of the ChebyshevSubspace that planning chose.
         physical_scale: Scale of the supplied reference state before normalization.
-        operator: Identity of the operator access whose moments are read. For Pauli input it names the packed Pauli table that fixes the SELECT address order.
+        operator: Identifier of the operator access whose moments are read. For Pauli input it names the packed Pauli table that fixes the SELECT address order.
         spectral_lower: Lower enclosure endpoint, center-alpha up to outward rounding, not a computed eigenvalue.
         spectral_upper: Upper enclosure endpoint, center+alpha up to outward rounding, not a computed eigenvalue.
         enclosure_source: ``pauli_l1`` for the centered coefficient L1 norm or ``scaled_gershgorin`` for scaled Gershgorin row intervals, or the equal column intervals of Hermitian CSC storage.
@@ -97,7 +98,7 @@ class LanczosReconstruction(Record):
 
     @property
     def moment_indices(self):
-        """Acquired degrees in ascending order, aligned with settings."""
+        """Requested degrees not known algebraically, in ascending order, aligned with settings."""
         return tuple(setting.degree for setting in self.settings)
 
 
@@ -146,7 +147,7 @@ class LanczosResult(Result):
     are read-only. The fields of [`Result`][nwqlib.core.analysis.Result] are
     present too.
 
-    `result.plan.reconstruction` stores `center`, `alpha` and the trial
+    `result.plan.reconstruction` records `center`, `alpha` and the trial
     dimension m as `krylov_dimension`, so `overlap` and `hamiltonian` are m
     by m, in raw Chebyshev coordinates of the trial basis rather than the
     full Hilbert space. Missing moments are `None`. Moments shared by several
@@ -262,9 +263,9 @@ class LanczosResult(Result):
     selected_construction_ids: tuple[ContentID, ...]
 
     def projected_diagnostics(self):
-        """Return the stored Gram matrix and solve diagnostics for projected checks.
+        """Return the saved Gram matrix and solve diagnostics for projected checks.
 
-        It reads stored fields and runs no reconstruction or solve.
+        It reads the Result's fields and runs no reconstruction or solve.
         `result.verify(checks=ProjectedVerificationOptions(...))` uses it.
 
         Returns:
@@ -310,16 +311,17 @@ class LanczosResult(Result):
         return lines
 
     def validate_plan(self, plan):
-        """Check that a stored or reloaded Result agrees with its Plan, without a solve.
+        """Check that a saved or reloaded Result agrees with its Plan, without a solve.
 
         The Result must name the Plan's construction and subspace. For a
         nonscalar operator its moments and variances must equal those rebuilt
-        from its stored statistics and the Plan's known moments. Missing
-        degrees must be exactly those without data. The eigenvalue must be the first stored Ritz value, and no
-        Ritz value may exist with missing moments. The cutoff source, cutoff,
-        Gram bound and empirical RMS must equal what reconstruct would choose
-        on the same branch: the scalar operator, missing data, or a
-        recomputation from stored populations in O(m) scalar work. No Gram
+        from its recorded statistics and the Plan's known moments. Missing
+        degrees must be exactly those without data. The eigenvalue must be
+        the first recorded Ritz value, and no Ritz value may exist with
+        missing moments. The cutoff source, cutoff, Gram bound and empirical
+        RMS must equal what reconstruct would choose on the same branch, that
+        is, for the scalar operator, for missing data, or by a recomputation
+        from the recorded shot counts and variances in O(m) scalar work. No Gram
         matrix, eigensolve or state application is repeated. Raises
         ValueError on the first disagreement.
         """
@@ -383,9 +385,10 @@ class LanczosResult(Result):
     def energy_endpoint(self):
         """Return this Result's EnergyEndpoint for verify_energy_shift.
 
-        The endpoint carries the Ritz value, the identities of the original
-        operator and reference preparation, the Chebyshev subspace rule and
-        Krylov dimension, and the payload of the selected operator access.
+        The endpoint carries the Ritz value, the content hashes of the original
+        operator and of the reference preparation, the Chebyshev subspace rule
+        and Krylov dimension, and the data of the operator access that the Plan
+        used.
         verify_energy_shift uses them to establish A_target-A_baseline=shift*I,
         unless that relation is asserted, before it compares two such values.
         """

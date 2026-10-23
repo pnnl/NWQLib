@@ -13,14 +13,15 @@ Draper-style modular adder (Draper, arXiv:quant-ph/0008033v1). With Qiskit's
 ``D_b`` factors into the phase ``P(2 pi b 2**q / N)`` on each system qubit
 ``q``. SELECT therefore shares one QFT/IQFT pair across all bands, applies
 one UCRZ address table per system qubit, and combines the ``P(phi)``
-half-phase corrections with coefficient phases in one address diagonal. The
-specification path needs no eigendecomposition and no dense matrix.
+half-phase corrections with coefficient phases in one address diagonal.
+Building from a band specification needs no eigendecomposition and no
+dense matrix.
 
-PREP/SELECT conventions follow ``subroutines/lcu/core.py``: coefficient
-phases are absorbed into the unitaries that SELECT applies (here, as
-controlled phases on the coefficient register), the control register precedes the system
-register, and the encoded block sits at statevector stride
-``2**num_ancillas``.
+PREP and SELECT follow the conventions of ``subroutines/lcu/core.py``.
+Coefficient phases are absorbed into the unitaries that SELECT applies
+(here, as controlled phases on the coefficient register), the control
+register precedes the system register, and the encoded block sits at
+statevector stride ``2**num_ancillas``.
 
 This implementation is periodic-only. For broader structured banded
 block-encoding constructions, see Camps, Lin, Van Beeumen, and Yang,
@@ -96,7 +97,7 @@ class BandSpecification:
 def _detect_banded_structure_with_error(
     matrix: Any, *, atol: float | None = None
 ) -> tuple[BandSpecification, float]:
-    """Detect bands and bound the supplied-to-structured operator difference during the same scan.
+    """Detect the bands and, in the same scan, bound the difference between the supplied operator and its circulant.
 
     The default ``atol`` is ``1e-12 * max(1, max|A|)``. Offsets above ``N/2``
     are reported as negative shifts, sorted ascending. Band ``b`` is the
@@ -177,8 +178,10 @@ def build_banded_block_encoding(
     The address PREP is the direct magnitude and phase tree of
     [`build_qiskit_state_preparation`][nwqlib.subroutines.state_preparation.direct.build_qiskit_state_preparation]
     over the ``2**a`` band addresses, where ``a`` is the number of address
-    qubits. It is not a declared PREP block, so a Run's
-    `max_direct_amplitudes` does not apply to it. Planning checks it
+    qubits. It is part of this circuit rather than a separate
+    state-preparation block of a `Program` (NWQLib's description of a
+    circuit as named steps), so the execution limit
+    `ExecutionLimits.max_direct_amplitudes` does not apply to it. Planning checks it
     at ``64 * 2**a * (q + 16)`` bytes and ``32 * 2**a * q**2`` work for q
     system qubits. With at most ``2**q`` distinct bands, the work check
     allows at most ``2**13`` addresses at a `max_work` of ``10**8`` and

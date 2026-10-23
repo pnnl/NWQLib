@@ -1,19 +1,20 @@
-"""Two-stage sensitivity decisions over the common Run and original acquisitions.
+"""Two-stage sensitivity allocation over the common Run and its original measurements.
 
 Oumarou et al., arXiv 2603.15552v1, Section 3.3.2, p. 29, allocate shots by
 moment sensitivity and suggest spending part of the budget on a pilot
-estimate in a hardware experiment. This controller realizes that suggestion
-as NWQLib's own design: a uniform pilot stage, one allocation decision from
-the pilot moments (numerical._sensitivity_weights) and a main stage whose
-moments alone enter the final analysis. The pilot chose the main sample
-sizes, so each main population is a fixed-size sample conditional on the
-pilot, and fresh independent main shots support the usual moment variance.
+estimate in a hardware experiment. This module implements that suggestion
+in NWQLib's own design, which consists of a uniform pilot stage, one
+allocation decision from the pilot moments (numerical._sensitivity_weights)
+and a main stage whose moments alone enter the final analysis. The pilot
+chose the main sample sizes, so each main-stage sample has a fixed size
+conditional on the pilot, and fresh independent main shots support the
+usual moment variance.
 Pooling the pilot with the main stage would need a treatment of those
 data-dependent sizes.
 
 The Run checkpoint records each decision before its side effect. A restart
-therefore reopens the same pending point and seed and reuses the frozen
-allocation. An interrupted allocation or final analysis is repeated only
+therefore reopens the same pending point and seed and reuses the
+allocation already decided. An interrupted allocation or final analysis is repeated only
 after run.resume(reanalyze=True). Physical observations are never
 resubmitted.
 """
@@ -27,14 +28,14 @@ from .numerical import _allocate, _apply_pilot_floor, _sensitivity_weights
 
 
 def _state(plan, run):
-    """Return the controller checkpoint dict, creating it on the first call.
+    """Return the checkpoint dict of the two-stage iteration state, creating it on the first call.
 
-    Before a new state is saved, the Run's caps must admit 2k preparations,
+    Before a new state is saved, the Run's limits must allow 2k preparations,
     2k circuits and the whole shot budget for k settings. The pilot shots
     are split uniformly. The fields are the stage (0 pilot, 1 main, 2 done),
     the next setting index, the pilot and main allocations, the allocation
     evidence, the pending point and seed, the in-progress markers and
-    attempt count, and the stored result.
+    attempt count, and the saved result.
     """
     if run.plan is not plan or plan.method.sampling is None:
         raise ValueError("sensitivity requires the same selected Plan and Run")
@@ -139,7 +140,7 @@ def _prepare(plan, run, state):
 
 
 def prepare_sensitivity(plan, *, run):
-    """Prepare the setting the controller will submit next, if any stage remains."""
+    """Prepare the setting that the two-stage iteration submits next, if any stage remains."""
     state = _state(plan, run)
     if plan.experiments and state["stage"] < 2:
         _prepare(plan, run, state)
@@ -148,11 +149,11 @@ def prepare_sensitivity(plan, *, run):
 def recover_sensitivity_analysis(plan, *, run):
     """Clear an interrupted allocation or final-analysis marker on explicit request.
 
-    It requires this controller's checkpoint with no pending acquisition and
-    no stored result, only completed attempts, and the complete moment
-    population of the interrupted stage. The retry is checkpointed before the
-    marker is cleared, so the history keeps every analysis attempt. Nothing
-    is acquired or resubmitted.
+    It requires the checkpoint of this iteration with no pending measurement
+    and no saved result, only completed attempts, and complete moment data
+    for the interrupted stage. The retry is checkpointed before the marker
+    is cleared, so the history keeps every analysis attempt. Nothing is
+    measured or resubmitted.
     """
     state = run.checkpoint_state
     if (
@@ -184,7 +185,7 @@ def recover_sensitivity_analysis(plan, *, run):
 
 
 def execute_sensitivity(plan, *, run):
-    """Acquire pilot moments, freeze the remaining allocation and analyze the completed main stage.
+    """Measure the pilot moments, fix the remaining allocation and analyze the completed main stage.
 
     Each stage submits one setting at a time in experiment order. After the
     last pilot setting, _sensitivity_weights and _apply_pilot_floor fix the

@@ -4,8 +4,8 @@ Two classes of error are kept apart. Discretization error separates the
 exact propagator from the ideal finite sum sum_j c_j U_j. Its stages are the
 kernel-integral error ("kernel_approximation"), the k-quadrature ("k_quadrature") and,
 with a constant source, the source-time quadrature ("duhamel_quadrature").
-Realization error separates that finite sum from the realized block. Its
-stages are product-formula or QSP branch synthesis and coefficient or
+Construction error separates that finite sum from the block the circuit
+applies. Its stages are product-formula or QSP branch synthesis and coefficient or
 input-state preparation.
 
 Each stage becomes a physical-vector bound by its own rule. The kernel_approximation,
@@ -23,21 +23,22 @@ requested output. Floating-point and sampling errors remain separate terms,
 and one missing stage makes that sum unknown.
 
 The sum bounds the distance between the exact solution of du/dt = -A u + b
-and the output that the selected construction would give in exact
+and the output that the planned construction would give in exact
 arithmetic without noise, through the stages listed above and only under
-their premises (in particular the numerical PSD decision). It does not bound
+their assumptions (in particular the numerical PSD decision). It does not bound
 binary64 rounding in classical exponentials, phases, angles and gate
 synthesis, transpiler approximations, hardware noise or shot noise. The
 controlled dense branches of dense_exact carry only rounding, because
 qiskit_compat.controlled synthesizes each branch unitary with
 subroutines/_dense_synthesis.py before adding the address controls.
-Unrolling the branch through Qiskit 2.6.0's own synthesis instead would
-snap a two-qubit unitary close to the identity to a local gate, with entry
-errors measured up to 4.2e-5 for a branch on two system qubits.
+Qiskit's own synthesis, used instead, can replace a two-qubit unitary close
+to the identity by a local gate. Entry errors up to 4.2e-5 were measured
+with Qiskit 2.5.2. The same behavior was reproduced with Qiskit 2.6.0,
+including an entry error of about 4.2e-5 for exp(i*a*XX) at a = 4.2e-5.
 Layered MPS preparation has no bound until an explicit circuit validation,
 so its stage stays unknown. The construction tolerance of the LCHS Method
-supplies the kernel and k-quadrature allowances of a provider pair with
-bounds (half each for the default pair, a third each for Low-Somma
+supplies the kernel and k-quadrature allowances of a kernel-quadrature pair
+with bounds (half each for the default pair, a third each for Low-Somma
 arXiv:2508.19238v2), and 0.1 times its value is the QSP synthesis
 allowance or the per-node allowance of trotter_error_budgeted. Fixed-step
 trotter, the Duhamel stage and the preparation stages receive no allowance
@@ -140,7 +141,7 @@ def propagate_physical_error(output, components, *, radius, observable_norm=None
     has rank at most two, trace zero and tr(D**2) = 2*s**2. Its possibly
     nonzero eigenvalues are +s and -s, hence its trace norm is 2*s.
     Trace duality then gives abs(u†Ou-v†Ov) = abs(tr(O*D)) <=
-    ||O||*||D||_1 <= 2*w*delta/r. The public observable is Hermitian;
+    ||O||*||D||_1 <= 2*w*delta/r. The public observable is Hermitian, and
     the vectors may be complex. The factor 2 is sharp: for 0<t<1, take
     y=(1,0), x=(1-t**2, i*t*sqrt(1-t**2)) and O=(uu†-yy†)/t. Then
     r=w=1, ||x-y||=t and the expectation difference is 2*t.
@@ -148,7 +149,7 @@ def propagate_physical_error(output, components, *, radius, observable_norm=None
     These are exact-arithmetic relations evaluated with ordinary scalar
     rounding. NormalizedExpectation reuses compose_recovery to avoid
     intermediate overflow or underflow in the positive product. A true zero
-    delta or w gives zero; a positive final bound outside binary64 gives None.
+    delta or w gives zero, and a positive final bound outside binary64 gives None.
     This evaluation is not a fully outward-rounded certificate. No vector,
     observable norm solve or spectral enclosure is computed here.
 
@@ -209,7 +210,7 @@ DEFAULT_PSD_TOLERANCE = 1.0e-12
 
 @dataclass(frozen=True, kw_only=True)
 class _NumericalPSDDecision:
-    """One scale-aware numerical ruling for the LCHS PSD premise.
+    """One scale-aware numerical decision on the LCHS PSD assumption.
 
     Attributes:
         shift: s >= 0 added to L. The caller multiplies the propagator back by
@@ -238,9 +239,9 @@ def _numerical_psd_decision(
     psd_tolerance*||L||_2 for Hermitian L. A value inside the window is
     accepted unshifted, because roundoff can make an exactly PSD L look
     slightly negative. Below the window the shift s = -lambda_min + window
-    leaves the shifted minimum at +window. Every consumer (decomposition,
-    host and quantum selection) uses this one rule, so they cannot disagree
-    about the LCHS premise.
+    leaves the shifted minimum at +window. Every caller (decomposition,
+    classical and quantum planning) uses this one rule, so they cannot
+    disagree about the LCHS PSD assumption.
 
     The window is relative to ||L||_2 because that is the scale of the
     rounding it absorbs. A backward-stable Hermitian eigensolver returns the
@@ -249,12 +250,12 @@ def _numerical_psd_decision(
     3rd ed., doi:10.1137/1.9780898719604, Sec. 4.7). The default 1e-12
     covers p(n) up to about 9000. The decision is then independent of the
     time unit, because replacing A by r*A and T by T/r, for r > 0, scales
-    lambda_min, the window and the shift by r. An admitted unshifted violation
+    lambda_min, the window and the shift by r. An accepted unshifted violation
     lets ||exp(-A*T)||_2 reach at most
     exp(window*T) = exp(psd_tolerance*||L||_2*T), since ||exp(-A*T)|| <=
     ||exp(-L*T)|| (ACL arXiv:2312.03916v2, Lemma 21, Eq. (162)). An
     absolute term in the window would have units of inverse time, and for
-    ||L||_2 much smaller than 1/T it would admit a genuinely negative
+    ||L||_2 much smaller than 1/T it would accept a genuinely negative
     lambda_min with |lambda_min|*T of order one. An exactly zero L has a
     zero window and lambda_min = 0, so it needs no shift.
     """
@@ -375,7 +376,7 @@ def _stage_product(name: str, *factors: Any) -> float:
 
 
 def _validate_applications(applications: Sequence[LCHSApplicationRecord]) -> None:
-    """Reject an empty, nonfinite or sign-violating application population.
+    """Reject an empty, nonfinite or sign-violating set of applications.
 
     Weighted stages multiply every application's weight and recovery scale,
     so one invalid application would make every weighted stage meaningless.
@@ -457,7 +458,7 @@ def _weighted_synthesis_stage(applications: Sequence[LCHSApplicationRecord]) -> 
 
 
 def _stage_manifest(*, backend: str, inhomogeneous: bool, circuit: bool) -> tuple[str, ...]:
-    """Return the error stages present on one realization path, in _STAGE_ORDER.
+    """Return the error stages present on one construction path, in _STAGE_ORDER.
 
     The kernel stages are always present. Product-formula backends add
     trotter_synthesis, a constant source adds duhamel_quadrature, and a
@@ -512,7 +513,7 @@ def application_stage_bounds(raw_record, *, applications, backend, psd_premise_s
     recovery scale r_a=exp(shift*elapsed_a). The kernel-approximation and k-quadrature stages are
     sum_a w_a*r_a*e with the recorded operator-level bound e, and
     trotter_synthesis is sum_a w_a*r_a*s_a with the application's recorded
-    synthesis bound s_a. A failed PSD or application premise suppresses every
+    synthesis bound s_a. A failed PSD or application assumption suppresses every
     stage. Otherwise a missing, nonfinite, unusable, underflowed or unbudgeted
     stage suppresses only its own value. Each stage maps to (value, None) or
     (None, reason). The stages are not summed into a total bound.
@@ -564,7 +565,7 @@ def circuit_stage_bounds(raw_record, *, applications, backend, inhomogeneous,
                          psd_premise_satisfied, gamma, delta_lcu,
                          input_preparation_output_error_bound, compensated_recovery_error_bound=None,
                          duhamel_quadrature_error_bound=None, unusable_stages=()):
-    """Return the physical L2 bound of each stage on a selected circuit path.
+    """Return the physical L2 bound of each stage on a planned circuit path.
 
     The kernel-approximation, k-quadrature and trotter_synthesis stages are weighted as
     in application_stage_bounds. With gamma, the physical recovery scale of the
@@ -572,8 +573,8 @@ def circuit_stage_bounds(raw_record, *, applications, backend, inhomogeneous,
     2*gamma*delta_lcu (PREP and inverse PREP each contribute one state error
     delta_lcu) and qsp_synthesis is gamma times the compensated QSP
     recovery bound. The initial-state preparation and Duhamel stages are the
-    supplied bounds. A failed PSD or application premise suppresses only the
-    application-weighted stages. This does not publish a combined certificate
+    supplied bounds. A failed PSD or application assumption suppresses only the
+    application-weighted stages. This does not report a combined certificate
     or perform a reference solve.
     """
     manifest = _stage_manifest(backend=backend, inhomogeneous=inhomogeneous, circuit=True)

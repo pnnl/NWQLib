@@ -90,9 +90,9 @@ class BoxRefinement(Record):
             otherwise. The Point rules note below gives the details.
         potential_gain: Default `None`, which selects 8 for the search model. kappa > 0,
             the dimensionless strength of the search model's normalized potential. The
-            physical model has no gain and rejects any explicit value. `gain` resolves
-            the value each level solves. The Scaling note below gives the level
-            Hamiltonian.
+            physical model has no gain and rejects any explicit value. The property
+            `gain` gives the value that each level solves. The Scaling note below gives
+            the level Hamiltonian.
         stall_split: Default `"none"`, which stops the refinement with `box_unchanged`
             when a level's next box equals its box. `"best_region"` instead splits the
             level at a resolved valley of an axis marginal and continues on one side,
@@ -101,7 +101,7 @@ class BoxRefinement(Record):
         max_splits: Default `1`. Largest number of stall splits in one refinement, a
             nonnegative integer. A stall after the last one stops with `split_limit`,
             whether or not its level has a valley, and with `max_splits=0` the first
-            stall does. It keeps its default with `stall_split="none"`. In the
+            stall does. It must keep its default with `stall_split="none"`. In the
             augmented-Lagrangian layer the budget holds for each round's refinement.
         level_initial_state: Default `"configured"`, which plans every level with
             `QHD.initial_state`. `"best_point_gaussian"` starts every level after the
@@ -112,7 +112,7 @@ class BoxRefinement(Record):
             `level_initial_state="best_point_gaussian"`. Width sigma of the best-point
             Gaussian as a fraction of each side of the level box, which is its width in
             the search model's unit coordinates. `"configured"` rejects any value.
-            `gaussian_width` resolves it.
+            The property `gaussian_width` gives the width used.
 
     Scaling:
         `"search_model"` solves on the unit box `u in [0, 1]^d` the normalized objective
@@ -131,7 +131,8 @@ class BoxRefinement(Record):
         observed conditional marginal masses m_j (`RefinementLevel.joint_mass_bound`).
         In exact arithmetic, marginal masses at least eta imply joint mass at least
         `max(0, 1 - d(1 - eta))`. With counts these are empirical masses conditional on
-        a valid outcome, not a confidence bound for the underlying population.
+        a valid outcome, not a confidence bound for the distribution that the backend
+        samples.
 
     Point rules:
         `"most_probable"` is the most probable valid grid point of the level's QHD
@@ -140,8 +141,10 @@ class BoxRefinement(Record):
         (`QHDAnalysis.candidate`). `"mode_or_mean"` is the conditional mean position
         when its relative objective is strictly smaller than the most probable point's,
         and that point otherwise. In the augmented-Lagrangian layer
-        (`solve_augmented_lagrangian(refinement=...)`) the objective is the round's L_k,
-        this rule reads every level of the round, and it must equal
+        (`solve_augmented_lagrangian(refinement=...)`) the objective is the round's inner
+        objective, L_k under the PHR policy and L(x, s) with an inequality
+        representation, compared before projection onto the original variables. This
+        rule reads every level of the round, and it must equal
         `AugmentedLagrangian.inner_point`, so that one rule describes every point of the
         run.
 
@@ -151,7 +154,7 @@ class BoxRefinement(Record):
         side's most probable joint grid point, and continues on the lower-scoring side
         only, together with the valley cell. A level without a resolved valley still
         stops with `box_unchanged`. A periodic grid with a positive split budget is
-        refused. The other side's probability is given up, so the kept box no longer
+        rejected. The other side's probability is given up, so the kept box no longer
         holds `mass_threshold` of that level's distribution. Classical execution needs
         `QHD(keep_state=True)` for it, since the scores read the joint distribution. The
         guide states the rule's cost and risk.
@@ -349,8 +352,9 @@ class RefinementResources(Record):
             counts note below says when a level counts 0 and when the value is unknown.
         arbitrary_rotations: Sum of the arbitrary rotations of the same circuits, an
             upper bound for the binary encoding, counted as `cx` is. For quantum
-            execution it equals the body total `arbitrary_rotations` of
-            [`run_resources`][nwqlib.algorithms.qhd.resources.run_resources].
+            execution it equals `arbitrary_rotations` of
+            [`run_resources`][nwqlib.algorithms.qhd.resources.run_resources], the body
+            total that counts each compiled circuit once, not multiplied by shots.
         unavailable: `(field, reason)` for every count that is None.
 
     Read and circuit counts:
@@ -535,7 +539,7 @@ class RefinementLevel(Record):
             returned draws among which ``valid_count`` decoded to a grid point, or None
             for exact readout.
         region_axis_counts: Integer counts of valid draws in each axis interval of the
-            selected region, or None for exact readout. For a split, the selected axis
+            selected region, or None for exact readout. For a split, the split axis
             keeps its chosen side including the valley. Every other axis is whole.
         region_count: Integer count of valid draws in the intersection of those axis
             intervals, or None for exact readout. These counts describe the selected
@@ -859,7 +863,7 @@ class BoxRefinementResult(Record):
         side at or below its width floor, or for the physical model a box that the grid
         rejects), ``no_improvement`` (``max_no_improve`` consecutive levels without a
         strict decrease of the best relative objective) and ``budget_exhausted`` (the
-        remaining cumulative limits cannot fund a level), and reports the first that
+        remaining cumulative limits cannot cover a level), and reports the first that
         holds. With ``stall_split="best_region"`` a stalled last level whose next level
         could not run records no split and reports ``no_improvement`` or
         ``budget_exhausted``, or ``width_floor`` when neither region of its resolved
@@ -965,7 +969,7 @@ class BoxRefinementResult(Record):
 
     @property
     def problem(self):
-        """The refined Optimization with its live SymPy objects, or None for a record validated from JSON alone.
+        """The refined Optimization with its SymPy expressions, which can be evaluated, or None for a record validated from JSON alone.
 
         `refine_box`, both paths of `resume_box_refinement` and `load_box_refinement` attach
         it. A refinement nested in an augmented-Lagrangian record has neither this problem
@@ -995,12 +999,12 @@ class BoxRefinementResult(Record):
         return None if self.best is None else self.best.objective
 
     def __str__(self):
-        """Summarize the refinement from its stored fields, without planning, evaluating or acquiring anything.
+        """Summarize the refinement from its stored fields, without planning, evaluating or executing anything.
 
         The lines state the stop with its meaning and stored detail, the
         selected point and how it was selected, each level's interval mass
         with its readout kind, its chosen split-region mass and its readout
-        mode status, and the CX and shot accounting (``report`` gives the
+        mode status, and the CX and shot counts (``report`` gives the
         meaning of every count). Counts also give the default simultaneous
         95% coverage bounds for the selected regions.
         """
@@ -1098,9 +1102,9 @@ class BoxRefinementResult(Record):
     def _resource_report(self):
         """Return each stored count with its unavailable reason and its meaning (``_RESOURCE_TEXT``).
 
-        A rotation count is the selected blocks' count only for the one-hot
-        encoding with no positive stopped-level count, and an upper bound
-        otherwise.
+        A rotation count is the count of the planned blocks only for the
+        one-hot encoding with no positive stopped-level count, and an upper
+        bound otherwise.
         """
         stopped = self.stopped_resources
         exact = self.qhd.encoding == "one_hot" and not (stopped is not None and stopped.arbitrary_rotations)
@@ -1133,7 +1137,7 @@ class BoxRefinementResult(Record):
         no state and calls no resource estimate. `levels` gives each level's readout kind, counts, intervals,
         masses and the event they describe, its chosen split-region mass and its readout
         mode status. `resources` gives each count with its unavailable reason and its
-        meaning. By default, `confidence` gives a population-mass lower bound for each
+        meaning. By default, `confidence` gives a lower bound on the mass of each
         selected region in the level's backend-sampled distribution conditioned on valid
         decoding, with simultaneous 95% confidence over the configured maximum
         number of levels. Hoeffding and one-sided Clopper–Pearson bounds each receive
@@ -1185,11 +1189,12 @@ class BoxRefinementResult(Record):
 
         The directory holds `refinement.json` (format `qhd.refinement/4`) with the portable
         refinement record and the problem record, which keeps the bounds, units and content
-        hash of the original problem, and `problem.pickle` with its live SymPy objective and
+        hash of the original problem, and `problem.pickle` with its SymPy objective and
         variables. Each completed level z keeps its Result, saved by its own archive with
         its own Plan, under `levels/<z>/result/`. A refinement without a completed level has
-        no `levels/` folder. Saving requires the live problem and the level Results named by
-        the record, and a record without them is refused before the directory is created. It
+        no `levels/` folder. Saving requires the problem with its SymPy expressions and the
+        level Results named by the record, and a record without them is rejected before the
+        directory is created. It
         performs no planning, objective evaluation or measurement. A failed save removes the
         directory. This is a result archive, which `load_box_refinement` reads back, not a
         directory that `resume_box_refinement` continues.

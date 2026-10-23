@@ -13,11 +13,11 @@ and the
   [GSLW] arXiv:1806.01838v1, Theorem 17 and
   Lemma 19): alternate ``U_BE`` / ``U_BE^dagger`` with
   ``e^{i phi (2 Pi - 1)}`` phases, where ``Pi`` projects onto the all-zero
-  block-encoding ancillas. The phase operator is realized by the
-  X-conjugation trick: flip a signal qubit onto the ``Pi`` subspace (``X``
-  controlled on the ancillas being all zero), rotate ``RZGate(+2 phi)``
-  (``= e^{-i phi Z}``, the Qiskit sign
-  ``RZGate(theta) = exp(-i theta Z / 2)``), and flip back. Wx phases, in
+  block-encoding ancillas. The phase operator is implemented by
+  conjugation with X. A signal qubit is flipped onto the ``Pi`` subspace
+  (``X`` controlled on the ancillas being all zero), rotated by
+  ``RZGate(+2 phi)`` (``= e^{-i phi Z}``, the Qiskit sign
+  ``RZGate(theta) = exp(-i theta Z / 2)``), and flipped back. Wx phases, in
   the convention dictionary of [MRTC] arXiv:2105.02859v5, App. A, are
   converted with ``wx_phases_to_reflection`` and the ``i^d`` factor becomes
   circuit global phase, so the encoded block is exactly the Wx polynomial
@@ -25,10 +25,10 @@ and the
 - ``build_real_chebyshev_encoding``: block-encodes ``Re P(A / alpha)`` by
   averaging the ``+Phi`` and ``-Phi`` passes over one pair ancilla
   ([GSLW] arXiv:1806.01838v1, Corollary 18, Eq. (33)). Both branches
-  share the same ``U_BE``
-  ladder: a CNOT from the pair qubit onto the signal qubit conjugates every
-  ``RZ``, negating the reflection phases on the pair-one branch
-  (``X RZ(theta) X = RZ(-theta)``). A ``Z`` on the pair qubit for odd
+  share the same ladder of alternating ``U_BE`` and ``U_BE^dagger``
+  applications, because a CNOT from the pair qubit onto the signal qubit
+  conjugates every ``RZ`` and so negates the reflection phases on the
+  pair-one branch (``X RZ(theta) X = RZ(-theta)``). A ``Z`` on the pair qubit for odd
   degree fixes the ``(-1)^d`` of ``i^d <0|U_R(-Phi')|0> = (-1)^d conj(P)``.
   The shared ladder is NWQLib's circuit for Corollary 18's controlled
   ``U_Phi`` / ``U_-Phi`` pair.
@@ -47,8 +47,9 @@ and the
   phase. At block amplitude ``a = 1/(2s)`` the OAA output ``(3a - 4a^3)`` is
   quadratically insensitive to the recorded target rescale ``s``, so the
   margin costs only the recorded amplitude deficit.
-- ``build_control_diagonal_generator_encoding``: block encoding of the LCHS
-  effective Hamiltonian, adapted from Pocrnic, Johnson, Katabarwa, and
+- ``build_control_diagonal_generator_encoding``: block encoding of the
+  effective Hamiltonian of the linear combination of Hamiltonian simulation
+  (LCHS) method, adapted from Pocrnic, Johnson, Katabarwa, and
   Wiebe, arXiv:2506.20760v2, Lemma 7 (p. 15).
 
 The qubitized walk of Low and Chuang, arXiv:1610.06546v3, is an alternative
@@ -114,7 +115,7 @@ _ABSTRACT_OPERATOR_ERROR_PROVENANCE = (
 def _combined_operator_certificate_metadata(
     *children: BlockEncoding,
 ) -> dict[str, Any]:
-    """Propagate abstract-error provenance and the Hermitian premise."""
+    """Propagate the source of the abstract error bound and the Hermitian assumption."""
 
     provenance_available = all(
         child.metadata.get("error_bound_provenance")
@@ -242,11 +243,14 @@ class JacobiAngerExpansion:
     Attributes:
         tau: Effective evolution time `alpha * t`.
         epsilon: Requested truncation tolerance for the combined expansion.
-        degree: Smallest degree at or above the supplied `min_degree` among
-            usable certificates inside the finite horizon of
+        degree: Smallest degree at or above the supplied `min_degree` whose
+            complete tail bound, with a positive analytic remainder, meets
+            `epsilon` within the finite search range of
             `jacobi_anger_expansion`. Ties choose the smaller computed complete
-            tail, then the earlier `analysis_terminal`. The polynomial fallback
-            with None tail bounds carries no certified-degree minimality claim.
+            tail, then the earlier `analysis_terminal`. When the analytic
+            remainder underflows, the returned polynomial has None tail
+            bounds, and its degree is not claimed to be the smallest
+            certified one.
         cos_degree: Even-part polynomial degree.
         sin_degree: Odd-part polynomial degree.
         cos_coefficients: Chebyshev coefficients of the truncated cosine.
@@ -318,9 +322,9 @@ def _analytic_jacobi_anger_remainder(tau: float, terminal: int) -> float:
     The logarithm stays internal so a binary64 underflow is never presented
     as a usable logarithmic certificate alongside a zero ordinary bound.
     ``log(tau)-log(2)`` keeps a positive subnormal tau from underflowing
-    before the logarithm. Final exp underflow returns an unusable zero marker;
-    callers preserve polynomial-only results with None tail bounds. Overflow
-    returns infinity. The libm evaluation is not outward rounded.
+    before the logarithm. Underflow of the final exp returns zero, which
+    marks the bound as unusable, and callers then keep the polynomial with
+    None tail bounds. Overflow returns infinity. The libm evaluation is not outward rounded.
     """
 
     remainder_ratio = tau / (2.0 * (terminal + 2))
@@ -366,31 +370,36 @@ def jacobi_anger_expansion(
     tail contains its omitted finite orders and ``2R_T`` for the whole
     analytic suffix, so their sum conservatively counts the suffix twice.
 
-    Inside ``H=min(ceil(tau),max_degree)+200``, usable positive remainders
-    with finite ``C(d,T)<=epsilon`` compete by ``(d,C(d,T),T)``: smallest
-    degree, then smallest complete tail, then earlier terminal. For T>=3,
-    ``T<=tau`` implies ``R_T>1/4`` whenever q<1, hence cannot meet epsilon<1.
-    Only T=2 needs a separate candidate when min_degree=1 and tau<3.
-    The proof below leaves at most 202 terminals. The minimum is over these
-    usable certificates in H, evaluated with ordinary binary64 sums and
-    special functions; it is not a global or outward-rounded minimum.
+    Within the search range ``H=min(ceil(tau),max_degree)+200``, the
+    candidates are the pairs ``(d,T)`` with a positive remainder and finite
+    ``C(d,T)<=epsilon``, ordered by ``(d,C(d,T),T)``, that is, smallest
+    degree first, then smallest complete tail, then earlier terminal. For
+    T>=3, ``T<=tau`` implies ``R_T>1/4`` whenever q<1, so such a terminal
+    cannot meet epsilon<1. Only T=2 needs a separate candidate when
+    min_degree=1 and tau<3. The proof, given in the source of this
+    function, leaves at most 202 terminals. The minimum is taken over these
+    candidates within H, evaluated with ordinary binary64 sums and special
+    functions, and is not a global or outward-rounded minimum.
 
-    If every passing remainder underflows to zero, return the first passing
-    terminal and its first degree as a polynomial, with all tail bounds and
-    ``tail_slack`` set to None. A positive usable certificate takes priority
-    over this fallback. If neither exists, the bounded search raises.
+    If every passing remainder underflows to zero, the function returns the
+    polynomial of the first passing terminal and its first passing degree,
+    with all tail bounds and ``tail_slack`` set to None. A candidate with a
+    positive remainder takes priority over this fallback. If neither
+    exists, the search raises ValueError.
     The scaling of [GSLW] arXiv:1806.01838v1, Cor. 60,
     ``d = Theta(tau + log(1/eps)/log(e + log(1/eps)/tau))``, is the
-    documented reference form for the resulting degree. ``min_degree`` floors the selected
-    degree. The phase solver needs ``min_degree=2`` so the even (cos) part
-    is never a constant.
+    reference form of the resulting degree. ``min_degree`` is a lower limit
+    on the returned degree. The phase solver needs ``min_degree=2`` so the
+    even (cos) part is never a constant.
     ``max_degree`` bounds the returned polynomial degree. The Bessel magnitude
-    table is evaluated once through H, at most ``max_degree + 201`` orders, and the
-    fixed candidate limit keeps suffix work O(202*(H+1)). Scalar remainder
-    checks reject impossible searches before Bessel allocation. ``max_bytes``
-    bounds the known numerical-array envelope ``96*(H+1)``, separately from
-    NumPy's addressable-array limit. It excludes bounded Python bookkeeping,
-    special-function workspaces and process memory.
+    table is evaluated once through H, at most ``max_degree + 201`` orders,
+    and the fixed limit on candidate terminals keeps the work of the suffix
+    sums at O(202*(H+1)). Scalar checks of the remainder reject a search
+    that cannot succeed before the Bessel values are allocated.
+    ``max_bytes`` bounds the known numerical arrays, ``96*(H+1)`` bytes,
+    separately from NumPy's limit on addressable array size. It excludes
+    bounded Python bookkeeping, the workspace of the special functions and
+    process memory.
 
     Args:
         tau (float): Finite positive real effective evolution time `alpha * t`.
@@ -406,8 +415,8 @@ def jacobi_anger_expansion(
             polynomial with None tail evidence when the suffix underflows.
 
     Raises:
-        ValueError: If the numerical domain or controls are invalid, the
-            arrays exceed the byte or representation limit, or no eligible
+        ValueError: If `tau`, `epsilon` or a degree or byte limit is
+            invalid, the arrays exceed the byte or size limit, or no eligible
             degree meets epsilon inside the bounded search.
     """
 
@@ -621,11 +630,12 @@ def _append_projector_phase(
 def _block_gate_pair(
     encoding: BlockEncoding, *, native_ucg: bool = True
 ) -> tuple[Any, Any]:
-    """Return the child gate and its inverse for one construction.
+    """Return the gate of the encoding and its inverse for one construction.
 
-    Controlled parity passes use ``native_ucg=False`` so the child UCG
-    definitions are realized before the passes copy their occurrences.
-    Uncontrolled QSVT and real-polynomial circuits can keep native tables.
+    Controlled parity passes use ``native_ucg=False`` so that the
+    definitions of the uniformly controlled gates (UCG) of the encoding are
+    expanded before the passes copy them. Uncontrolled QSVT and
+    real-polynomial circuits can keep Qiskit's UCG tables.
     """
     from nwqlib.subroutines.qiskit_compat import inverse_realized_gate
 
@@ -685,7 +695,7 @@ def _build_real_chebyshev_encoding(
     *,
     block_gates: tuple[Any, Any],
 ) -> QuantumCircuit:
-    """Assemble the circuit of ``build_real_chebyshev_encoding`` from a realized child-gate pair.
+    """Assemble the circuit of ``build_real_chebyshev_encoding`` from a built pair of encoding gates.
 
     ``build_qsp_evolution_encoding`` calls this for its cosine and sine
     passes with one ``_block_gate_pair``, so the child encoding is converted
@@ -727,7 +737,7 @@ def _build_real_chebyshev_encoding(
 
 
 def build_real_chebyshev_encoding(encoding: BlockEncoding, wx_phases: Any) -> QuantumCircuit:
-    """Block-encode ``Re P(A / alpha)`` via the shared-ladder ``+-Phi`` pair.
+    """Block-encode ``Re P(A / alpha)`` with the ``+Phi`` and ``-Phi`` passes on one shared ladder.
 
     This is [GSLW] arXiv:1806.01838v1, Corollary 18, Eq. (33):
     ``Re P = (P + P^*)/2``, and the
@@ -757,12 +767,12 @@ def build_real_chebyshev_encoding(encoding: BlockEncoding, wx_phases: Any) -> Qu
 
 
 def _as_control_diagonal(values: Any, *, name: str) -> np.ndarray:
-    """Admit real coefficients of a Hermitian generator without projecting inputs.
+    """Check that the coefficients of a Hermitian generator are real, without projecting the input.
 
     A nonzero imaginary component changes the generator. Removing it would
     need a perturbation budget and would not establish the Hermitian target
-    premise required by GSLW arXiv:1806.01838v1, Lemma 61. This checks the
-    stored scalar table.
+    assumption required by GSLW arXiv:1806.01838v1, Lemma 61. This checks
+    the supplied table of scalars.
     """
 
     diagonal = np.asarray(values, dtype=complex).reshape(-1)
@@ -882,8 +892,8 @@ def build_control_diagonal_generator_encoding(
     and the idle ancillas keep its all-zero block. Encoded system order: control
     register first (low-order), then the child system, so the encoded matrix
     is ``kron(L, D_L) + kron(H, D_H)`` in numpy index convention. Zero
-    diagonal entries make their control state evolve trivially under
-    downstream Hamiltonian simulation (identity padding).
+    diagonal entries make their control state evolve trivially under the
+    subsequent Hamiltonian simulation (identity padding).
 
     Args:
         encoding_l: Block encoding of the Hermitian part ``L``.
@@ -1075,7 +1085,8 @@ def compiled_select_resource_law(
     (the 3-step OAA over both parity ladders), and each query costs one call
     per child encoding plus one multiplexed RY of ``2**control_qubits``
     rotation angles per child. Counts are structural (rotation angles and
-    child calls before gate synthesis), so they are qiskit-version stable.
+    child calls before gate synthesis), so they do not depend on the
+    Qiskit version.
 
     In Pocrnic et al., arXiv:2506.20760v2, Lemma 7, p. 15, each
     effective-Hamiltonian query uses one ``U_A`` plus one ``U_A^dagger`` call
@@ -1083,7 +1094,7 @@ def compiled_select_resource_law(
     quadrature nodes. Here each query uses ``child_count`` child calls and
     ``child_count * P`` multiplexed rotation angles. ``child_count`` is 2 for
     the ``L`` and ``H`` branches and 1 when ``H=0``, and
-    ``P = 2**control_qubits`` is the number of address slots after
+    ``P = 2**control_qubits`` is the number of control-register addresses after
     power-of-two padding, so ``P >= M``. With two children, the ``2P``
     multiplexed rotation angle entries per joint-generator query are at least
     the paper's ``2M`` multi-controlled rotation calls per
@@ -1133,8 +1144,9 @@ def _target_scale(
     ``sup_{[-1, 1]}`` of the truncated cosine and sine series, and
     ``s = max(1, cos_bound, sin_bound) (1 + margin)`` is the common scale that
     divides both targets. The floor at one gives ``s >= 1``, hence
-    ``a = 1/(2s) <= 1/2`` for the half-block amplitude, the range assumed by
-    the OAA error expansion in ``qsp_evolution_error_terms``.
+    ``a = 1/(2s) <= 1/2`` for the amplitude of the half block (the block
+    before OAA), the range assumed by the OAA error expansion in
+    ``qsp_evolution_error_terms``.
     """
 
     cos_bound = chebyshev_polynomial_sup_bound(expansion.cos_coefficients, max_degree=max_degree, max_bytes=max_bytes)
@@ -1270,10 +1282,10 @@ def prepare_qsp_evolution(*, tau, epsilon, expansion=None, max_degree=256,
     def solve_target(coefficients, scale):
         """Solve phases for ``coefficients / scale`` within the remaining evaluation allowance.
 
-        Evaluations of a failed solve are charged before its error propagates.
+        Evaluations of a failed solve are counted before its error propagates.
         The solver receives exactly the remainder, so its own exhaustion means
-        the whole allowance is used. It is reported under ``limit_name`` and the
-        full cap.
+        the whole allowance is used. It is reported under ``limit_name`` and
+        the full limit.
         """
         nonlocal evaluations_used
         if evaluations_used >= max_evaluations:
@@ -1325,9 +1337,11 @@ def prepare_qsp_evolution(*, tau, epsilon, expansion=None, max_degree=256,
 def qsp_evolution_error_terms(prepared, *, evolution_time, child_error_bound):
     """Return the error terms of a prepared QSP evolution without building a circuit.
 
-    NWQLib's derivation. Before amplification the combined half block is
-    ``B = a (V + E)`` with ``a = 1/(2s)`` and ``V = exp(-i t A)``, the
-    target at effective time ``tau = alpha t``. The polynomial part obeys
+    NWQLib's derivation. Before amplification, the parity qubit combines
+    the cosine and sine passes with coefficients ``1/2`` and ``-i/2``. The
+    resulting half block, named for its amplitude ``a = 1/(2s) <= 1/2``, is
+    ``B = a (V + E)`` with ``V = exp(-i t A)``, the target at effective time
+    ``tau = alpha t``. The polynomial part obeys
     ``||E|| <= tail_c + tail_s + s (resid_c + resid_s)``, where ``tail_c``
     and ``tail_s`` are the parity Bessel tail bounds and ``resid_c`` and
     ``resid_s`` the phase-solver residual bounds. The child
@@ -1460,11 +1474,12 @@ def build_qsp_evolution_encoding(
     block. For an externally constructed encoding, the caller can record
     these separately as ``target_operator_is_hermitian`` and
     ``encoded_operator_is_hermitian`` after establishing them. A dense
-    numerical check belongs to the source representation and its resource
-    budget, since a circuit matrix requires space exponential in its width.
+    numerical check is left to the caller, in the representation of the
+    source and within its resource budget, because a circuit matrix needs
+    memory exponential in the circuit width.
 
-    Dense Hermitian evidence uses exact entry equality, so even an assembly
-    roundoff asymmetry is rejected. If the intended target is Hermitian, the
+    Dense Hermitian evidence uses exact entry equality, so even an asymmetry
+    from rounding during assembly is rejected. If the intended target is Hermitian, the
     caller can explicitly choose ``(A + A.conj().T)/2`` before encoding.
     That changes the supplied target and belongs to the caller's input model.
     The check never performs this projection implicitly.
@@ -1479,8 +1494,8 @@ def build_qsp_evolution_encoding(
             evidence is treated as an assumption that the caller has checked,
             recorded in the output with a warning. Explicitly non-Hermitian
             inputs are rejected in either mode. This option reads metadata
-            only and never materializes a circuit matrix or applies an
-            operator to a state.
+            only and never forms a circuit matrix or applies an operator to
+            a state.
         max_work: Default `1_000_000_000`, the default `max_work` of the
             block-encoding builders. Limit on the work of the exact dense
             syntheses that controlling the two passes makes, and of Qiskit's
@@ -1490,9 +1505,10 @@ def build_qsp_evolution_encoding(
             ``UnitaryGate``, such as a ``dense_dilation`` encoding, has that
             unitary synthesized once for each pass, and its adjoint once
             for each pass of degree two or more, and the parity control
-            unrolls the synthesized gates at every query of the pass. The parity control
-            takes the gate-wise route on every route of the joint
-            generator, because its controlled object is the whole pass. A gate that an earlier control already synthesized, such
+            unrolls the synthesized gates at every query of the pass. The
+            parity control takes the gate-wise route whatever route the
+            joint generator uses, because its controlled object is the whole
+            pass. A gate that an earlier control already synthesized, such
             as a branch of a two-child joint generator, is controlled again
             outside this count, and LCHS planning counts it.
         max_bytes: Default 10 GB (decimal, `10_000_000_000` bytes). Limit on

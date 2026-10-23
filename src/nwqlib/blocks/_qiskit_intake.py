@@ -1,4 +1,4 @@
-"""Incrementally admitted execution-only snapshots of supported native gates."""
+"""Private copies of supplied Qiskit circuits for execution, counted against a byte limit as they are copied."""
 
 from copy import copy
 from math import isfinite
@@ -21,31 +21,32 @@ from nwqlib.operators.access import DEFAULT_INPUT_BYTES, _check_bytes
 
 
 def snapshot_circuit(circuit, *, max_bytes=DEFAULT_INPUT_BYTES):
-    """Return a private copy of a supplied circuit and its stored-data byte census.
+    """Return a private copy of a supplied circuit and the byte count of its stored data.
 
     The copy isolates the selected action from later changes the caller makes
-    to its own circuit, gates or parameter arrays. One memo preserves acyclic
+    to its own circuit, gates or parameter arrays. One cache preserves acyclic
     sharing, so a definition or array referenced twice is copied once and
-    stays shared. Active ancestors detect recursion before memo reuse.
-    Input-circuit metadata and extra attributes are omitted. Supported SDK
-    operation objects keep their SDK class and scalar execution flags.
-    Supported immutable SDK singletons are shared under their SDK contract,
-    so their global internals are outside this isolation. Top-level
-    operations must be gates or gate-based annotations, because the consumer
-    inverts and controls the copy. Barriers carry no action and are omitted
-    at every stored level.
+    stays shared. The set of objects being copied detects recursion before
+    the cache is reused. Input-circuit metadata and extra attributes are
+    omitted. Supported Qiskit operation objects keep their Qiskit class and
+    scalar execution flags. Supported immutable Qiskit singletons are shared,
+    as Qiskit permits, so their global internals are outside this isolation.
+    Top-level operations must be gates or gate-based annotations, because the
+    code that uses the copy inverts and controls it. Barriers carry no action
+    and are omitted at every stored level.
 
-    Every stored object is charged against ``max_bytes`` before it is copied
+    Every stored object is counted against ``max_bytes`` before it is copied
     or shared. The per-object allowances are registered in
     ENGINEERING_CONSTANTS.md, "Supplied circuit snapshot allowances". The
-    census counts this logical copy, not native RSS or synthesis work.
+    byte count covers this logical copy, not the process's resident memory
+    or synthesis work.
 
     Args:
         circuit: Ordinary QuantumCircuit without classical bits.
-        max_bytes: Limit on the cumulative census.
+        max_bytes: Limit on the cumulative byte count.
 
     Returns:
-        ``(snapshot, data_bytes)``: the copied circuit and the census in bytes.
+        ``(snapshot, data_bytes)``: the copied circuit and its byte count.
     """
     # CircuitInstruction.operation may materialize a temporary SDK wrapper.
     # Keep each source alive with its clone so a later wrapper cannot reuse its
@@ -54,7 +55,7 @@ def snapshot_circuit(circuit, *, max_bytes=DEFAULT_INPUT_BYTES):
     data_bytes = 0
 
     def reserve(size):
-        """Add ``size`` bytes to the census, rejecting before the copy that needs them."""
+        """Add ``size`` bytes to the count, raising before the copy that needs them is made."""
         nonlocal data_bytes
         _check_bytes(data_bytes + size, max_bytes, "circuit snapshot")
         data_bytes += size
@@ -81,7 +82,7 @@ def snapshot_circuit(circuit, *, max_bytes=DEFAULT_INPUT_BYTES):
         return result
 
     def parameter(value):
-        """Admit one bound numerical gate parameter: an ndarray or a finite int, float or complex."""
+        """Check and copy one bound numerical gate parameter: an ndarray or a finite int, float or complex."""
         if type(value) is np.ndarray:
             return array(value)
         if type(value) in (int, float, complex) or isinstance(value, np.number):
@@ -96,7 +97,7 @@ def snapshot_circuit(circuit, *, max_bytes=DEFAULT_INPUT_BYTES):
     def definition(original, *, top_level=False):
         """Copy one definition circuit instruction by instruction, once per shared circuit.
 
-        The census charges 32 bytes plus 16 per qubit for the new circuit
+        The byte count adds 32 bytes plus 16 per qubit for the new circuit
         and 16 bytes plus 8 per qubit for every stored instruction, including
         omitted barriers. ``top_level`` marks the supplied circuit, whose
         operations must be gates.
@@ -167,7 +168,7 @@ def snapshot_circuit(circuit, *, max_bytes=DEFAULT_INPUT_BYTES):
     def admit_operation(original, *, require_gate, width):
         """Check that a non-annotated operation is supported and has the stored width.
 
-        Supported operations are SDK gates whose base class is a standard or
+        Supported operations are Qiskit gates whose base class is a standard or
         listed library gate, Isometry, and plain operations. A plain operation
         has type exactly Gate, ControlledGate or Instruction, and its already
         stored definition gives its action. ``require_gate`` also rejects any
@@ -194,15 +195,15 @@ def snapshot_circuit(circuit, *, max_bytes=DEFAULT_INPUT_BYTES):
         return plain, stored
 
     def copied_parameters(original):
-        """Return admitted copies of an operation's parameters.
+        """Return checked copies of an operation's parameters.
 
         A label-form StatePreparation keeps its label characters, each one of
-        ``0 1 + - r l`` and charged one byte. Amplitudes that are all Python
-        floats or complex numbers, the form Qiskit stores, are admitted
-        together: one census charge of 16 bytes per amplitude, as
-        ``parameter`` charges each, and one finiteness check of their
-        complex128 array. The kept values are the same objects. Every other
-        parameter, including a Python int, is admitted by ``parameter``.
+        ``0 1 + - r l`` and counted as one byte. Amplitudes that are all
+        Python floats or complex numbers, the form Qiskit stores, are checked
+        together. Their 16 bytes per amplitude are counted at once, as
+        ``parameter`` counts each, and their complex128 array is checked for
+        finiteness once. The kept values are the same objects. Every other
+        parameter, including a Python int, is checked by ``parameter``.
         """
         values = original.params
         if isinstance(original, StatePreparation) and original._from_label:
@@ -220,7 +221,7 @@ def snapshot_circuit(circuit, *, max_bytes=DEFAULT_INPUT_BYTES):
         return [parameter(value) for value in values]
 
     def copy_class_data(original, result):
-        """Replace the UCGate, StatePreparation and Isometry data of ``result`` by admitted copies.
+        """Replace the UCGate, StatePreparation and Isometry data of ``result`` by checked copies.
 
         None of this data refers to another operation, so nothing here
         recurses into ``clone``.
@@ -249,9 +250,9 @@ def snapshot_circuit(circuit, *, max_bytes=DEFAULT_INPUT_BYTES):
         width is the stored instruction width minus the added controls. It
         costs 32 bytes plus 8 per modifier slot. Any other operation is
         checked by ``admit_operation`` and costs 32 bytes. An immutable one
-        is shared as is. A mutable one is shallow-copied, which keeps its SDK
+        is shared as is. A mutable one is shallow-copied, which keeps its Qiskit
         class and scalar flags, and every mutable payload that the supported
-        block-encoding families use is replaced by an admitted copy without
+        block-encoding families use is replaced by a checked copy without
         ``__deepcopy__``. A plain Gate has no hidden execution payload beyond
         its parameters and stored definition.
 

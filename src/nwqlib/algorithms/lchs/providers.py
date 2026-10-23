@@ -1,4 +1,4 @@
-"""Kernel, quadrature, and pair-resolution providers for LCHS.
+"""Kernel and quadrature rules of LCHS and the resolution of their pairs.
 
 ACL denotes An, Childs, and Lin, "Quantum algorithm for linear non-unitary
 dynamics with near-optimal dependence on all parameters", arXiv:2312.03916,
@@ -8,16 +8,15 @@ simulation of linear non-unitary dynamics", arXiv:2508.19238v2. ATAP denotes
 Trefethen, Approximation Theory and Approximation Practice,
 ISBN 978-1-61197-239-9, Chapter 19 (https://www.chebfun.org/ATAP/chap19.m).
 
-A provider pair turns an LCHS representation of exp(-A*T) as an integral of
+A kernel-quadrature pair turns an LCHS representation of exp(-A*T) as an integral of
 g(k)*exp(-i*T*(k*L+H)) over real k, with A = L + iH, into finite real nodes
 k_j and complex coefficients c_j. The representation is exact for the ACL
 kernels (Eqs. (6) and (60)) and approximate for Low-Somma (their Eq. (8)).
-The pair owns two error components, the kernel-integral error and the finite
-k-quadrature error. For Eq. (7) the kernel-integral error is the tail beyond
+The pair accounts for two error components, the kernel-integral error and the
+finite k-quadrature error. For Eq. (7) the kernel-integral error is the tail beyond
 the cutoff. For Low-Somma it is epsilon_lchs of their Theorem 2, which also
 covers the approximate representation and so is not a pure tail. Branch
-synthesis, state preparation and physical recovery have separate owners and
-separate bounds.
+synthesis, state preparation and physical recovery are bounded separately.
 
 The default pair is the Eq. (7) kernel with beta = 0.75 and composite Gauss
 quadrature. Its construction tolerance epsilon is split equally between two
@@ -114,8 +113,8 @@ class LCHSKernelProvider:
     """One registered LCHS coefficient-kernel implementation.
 
     Attributes:
-        name: Registry key accepted in the kernel slot of a ProviderConfig.
-        formula_id: Versioned identifier recorded with the selected coefficient formula.
+        name: Name accepted as the implementation of a kernel ProviderConfig.
+        formula_id: Versioned identifier recorded with the coefficient formula.
         resolve_parameters: Callable validating explicit parameter values and returning
             the complete resolved parameter mapping.
         coefficient: Callable evaluating the complex coefficient kernel at one real k
@@ -148,7 +147,7 @@ class LCHSProblemContext:
         final_time: Evolution duration T in the units paired with A in exp(-T A).
         epsilon: Requested finite-construction tolerance. The default Gauss selector
             splits it equally between kernel truncation and quadrature. Other
-            physical-output error contributions have separate owners.
+            physical-output error contributions are bounded separately.
         l_norm: Numerical spectral-norm estimate of the prepared Hermitian L used in
             exp(-i T (k L + H)). T*l_norm is dimensionless.
     """
@@ -162,18 +161,18 @@ class LCHSProblemContext:
 class LCHSQuadraturePlan:
     """The k-quadrature rule of an `LCHSCoefficientPlan`: its nodes, weights, address layout and component error bounds.
 
-    `LCHSCoefficientPlan.quadrature` holds it. The registered quadrature
-    provider builds it, except for the exact unitary reduction of an exactly
-    zero L, whose one-node rule LCHS builds directly. The fields are
-    read-only.
-    Component bounds have the selected provider pair's scope. They are not a
-    bound on state preparation, Hamiltonian synthesis or total physical output.
+    `LCHSCoefficientPlan.quadrature` holds it. The chosen quadrature rule
+    builds it, except for the exact unitary reduction of an exactly zero L,
+    whose one-node rule LCHS builds directly. The fields are read-only.
+    The component bounds cover only the error components of the chosen
+    kernel-quadrature pair. They are not a bound on state preparation,
+    Hamiltonian synthesis or total physical output.
 
     Attributes:
-        nodes: Ordered real k values for the mathematical quadrature, without LCU
-            address padding. This order also indexes base_weights.
+        nodes: Ordered real k values for the mathematical quadrature, without the
+            padding address slots of the LCU. This order also indexes base_weights.
         base_weights: Real integration weights before multiplication by the kernel.
-        range_k: Selected cutoff K used by the realized rule and its available
+        range_k: Cutoff K of the rule as built and of its available
             component bounds, or the maximum node magnitude for a signed-binary
             grid (zero for the exact unitary reduction). In composite Gauss, K
             specifies the panel interval [-K, K]. The Gauss nodes are interior.
@@ -186,16 +185,16 @@ class LCHSQuadraturePlan:
         address_structure: Read-only structural data that the SELECT check and
             cost formulas use, such as affine bit coefficients or an
             explicit-table declaration.
-        physical_node_count: Number of mathematical nodes, excluding address padding.
-        padding_count: Number of padding addresses explicitly reported by this
-            provider. An LCU circuit may need further addresses to reach a
+        physical_node_count: Number of mathematical nodes, excluding padding address slots.
+        padding_count: Number of padding address slots that this quadrature rule
+            reports. An LCU circuit may need further address slots to reach a
             power-of-two total, even when this value is ``0``.
         approximate_lchs_error_bound: Available kernel-integral approximation bound.
             For the default Eq.(7) pair this is the finite-cutoff tail bound. None
             means unavailable, while unitary reduction has an algebraic zero.
         quadrature_error_bound: Finite bound on the quadrature component of the
-            error, under the assumptions of the selected kernel and quadrature
-            providers. ``None`` means that this bound is unavailable, not that
+            error, under the assumptions of the chosen kernel and quadrature
+            rule. ``None`` means that this bound is unavailable, not that
             the error is zero or that the quadrature rule has failed.
         h1: Width of each composite-Gauss panel in the integration variable k,
             equal to ``range_k / interval_count_each_side``. ``None`` (the default)
@@ -237,12 +236,12 @@ class LCHSQuadratureProvider:
     """One registered LCHS k-quadrature implementation.
 
     Attributes:
-        name: Registry key accepted in the quadrature slot of a ProviderConfig.
-        formula_id: Versioned identifier for the selected node/weight construction.
+        name: Name accepted as the implementation of a quadrature ProviderConfig.
+        formula_id: Versioned identifier for the node and weight construction.
         resolve_parameters: Callable validating the requested parameters and filling
             the defaults applicable to this quadrature rule.
         build_nodes_and_weights: Callable receiving problem scalars, resolved settings
-            and kernel-pair context and returning the actual LCHSQuadraturePlan.
+            and kernel-pair context and returning the LCHSQuadraturePlan.
     """
 
     name: str
@@ -262,10 +261,11 @@ class LCHSPairCompatibility:
     `LCHSCoefficientPlan.compatibility` holds it.
 
     Attributes:
-        allowed: Whether the registered kernel and quadrature combination may
-            be chosen.
-        certificate_status: Pair-scope status: certified, uncertified, rejected or
-            incomplete. exact_algebraic identifies the no-k-integral unitary reduction.
+        allowed: Whether this kernel and quadrature combination may be
+            chosen.
+        certificate_status: Status of the pair's component bounds, one of
+            certified, uncertified, rejected or incomplete, or exact_algebraic
+            for the unitary reduction that needs no k integral.
             None of these by itself certifies a complete physical solution.
         reason: Explanation of the domain in which the pair is allowed, or of
             why its guarantee is absent or rejected.
@@ -360,12 +360,12 @@ class LCHSCoefficientPlan:
 
         Args:
             max_bytes (int): Default 10 GB (decimal, `10_000_000_000`
-                bytes). Upper limit on the arrays, 96 bytes per padded
-                address, checked first.
+                bytes). Upper limit on the arrays, 96 bytes per address
+                slot, checked first.
 
         Returns:
-            amplitudes (numpy.ndarray): Read-only amplitudes, one per padded
-                address.
+            amplitudes (numpy.ndarray): Read-only amplitudes, one per address
+                slot.
         """
         from nwqlib.subroutines.lcu.data import _coefficient_bookkeeping
         from nwqlib.operators.inputs import _freeze_array
@@ -382,7 +382,7 @@ class LCHSCoefficientPlan:
                       max_bytes=DEFAULT_INPUT_BYTES, max_svd_work=100_000_000):
         """Return the TT-SVD (MPS) decomposition of the `prep_amplitudes` tensor.
 
-        A stored or supplied decomposition is reused only when it was made
+        An attached or supplied decomposition is reused only when it was made
         from this exact normalized tensor with the same `max_bond_dim` and
         `threshold`. Otherwise a new TT-SVD runs under `max_bytes` and
         `max_svd_work`. No LCHS solve or circuit is run.
@@ -497,12 +497,12 @@ def eq7_truncation_range(beta: float, epsilon: float) -> float:
     With x=cos(beta*pi/2)*K**beta, solve x+log(x) >=
     log(2/(beta*C_beta*epsilon)). Scalar bisection in x avoids forming the
     potentially overflowing argument of Lambert W. The returned cutoff also
-    passes the actual binary64 bound evaluation used in the selected record.
+    satisfies the binary64 evaluation of the bound that is recorded.
 
     Args:
         beta: Eq. (7) exponent in (0, 1).
         epsilon: Tail allowance in (0, 1), in the operator norm of exp(-A*T).
-            The default provider passes half the construction tolerance.
+            The default pair passes half the construction tolerance.
 
     Returns:
         A binary64 cutoff K (k is dimensionless) at or just above the root of
@@ -550,7 +550,7 @@ def composite_gauss_grid(
     """Return all ACL Eq. (61) k-nodes and mapped weights on the symmetric grid.
 
     Single source for the ``2 * interval_count_each_side`` interval loop over
-    ``[-K, K]`` used by the composite-Gauss provider. The Gauss-Legendre base
+    ``[-K, K]`` used by the composite Gauss rule. The Gauss-Legendre base
     rule is evaluated once and affinely remapped to each interval.
 
     With m = interval_count_each_side, the panels are [j*h1, (j+1)*h1] for
@@ -636,8 +636,8 @@ def eq7_tail_bound(beta, range_k):
 def _check_quadrature_work(required, max_quadrature_work, subject):
     """Check one complete quadrature work count against ``LCHS.max_quadrature_work``.
 
-    ``required`` is the complete charge of the selected rule, known before
-    its node arrays are built. A refusal reports this charge and the limit.
+    ``required`` is the complete work count of the chosen rule, known before
+    its node arrays are built. A refusal reports this count and the limit.
     """
     if type(max_quadrature_work) is not int or max_quadrature_work < 1:
         raise ValueError("max_quadrature_work must be a positive integer")
@@ -681,14 +681,14 @@ def _ellipse_rule(problem, beta, range_k):
     improve it, so the number of candidates tried is M <= floor(Q1/2).
     Numeric failure in forming Q or its bound raises rather than extending
     the search indefinitely. The search completes before the caller checks
-    its work, so ``max_quadrature_work`` admits the search charge plus the
-    selected rule's construction, not every scalar probe. Finite
+    its work, so ``max_quadrature_work`` limits the search work plus the
+    chosen rule's construction, not every scalar probe. Finite
     termination is not a uniform cheap-runtime guarantee on all input
     scales.
 
     Args:
         problem: Scalars T, ||L|| and the quadrature allowance epsilon (the
-            default provider passes half the construction tolerance).
+            default pair passes half the construction tolerance).
         beta: Eq. (7) exponent in (0, 1).
         range_k: Cutoff K. The panels tile [-K, K] exactly.
 
@@ -696,7 +696,7 @@ def _ellipse_rule(problem, beta, range_k):
         A pair (choice, work). choice is (2*m*Q, Q, m, h, bound): the total
         node count, Gauss points per panel, panels per half-axis, panel width
         K/m, and the quadrature bound in operator norm. work is the scalar
-        work charged for the candidates tried.
+        work counted for the candidate panel counts tried.
     """
     d = LCHS_ELLIPSE_STRIP_MARGIN
     b = 1. - d
@@ -742,7 +742,7 @@ def _resolve_eq7(
     ACL arXiv:2312.03916v2, Section 2.2 (p. 14), reports [0.7, 0.8] as the
     numerically best range for truncation. Its midpoint is a working choice
     within that range, not a universal optimum. The finite tail and
-    quadrature bounds are evaluated at the selected beta before choosing the
+    quadrature bounds are evaluated at the resolved beta before choosing the
     grid.
     """
     beta = float(supplied.get("beta", 0.75))
@@ -788,7 +788,7 @@ def _cauchy_provider_coefficient(
     This is the original LCHS identity of An, Liu and Lin (PRL 131, 150603,
     2023, doi:10.1103/PhysRevLett.131.150603), which ACL arXiv:2312.03916v2
     restates as Eq. (5) and, as f(z) = 1/(pi*(1+i*z)), as Eq. (181). The
-    composite-Gauss cutoff and node laws are specific to Eq. (7), so this
+    composite-Gauss cutoff and node-count formulas are specific to Eq. (7), so this
     kernel pairs only with the uncertified signed-binary grid.
     """
     return complex(1.0 / (pi * (1.0 + k_value**2)))
@@ -801,7 +801,7 @@ def low_somma_fhat_2(k_value: float, *, gamma: float, c_value: float) -> complex
     arXiv:2508.19238v2, Eq. (6), at j=2 and y=1, which Theorems 2 and 3 use.
     It reduces to sqrt(2/pi)*exp(c-(k**2+1)/(4*gamma**2))*exp(-i*k*c)/(1+k**2).
     The 1/sqrt(2*pi) prefactor of their LCHS integral (Eq. (7)) is applied by
-    the provider coefficient, not here.
+    _low_somma_provider_coefficient, not here.
 
     exp(c) and the Gaussian factor share one exponent, so a representable
     value does not overflow in exp(c) first. An unrepresentable magnitude
@@ -897,7 +897,7 @@ def _build_composite_gauss(
     max_bytes=DEFAULT_INPUT_BYTES,
     max_quadrature_work=100_000_000,
 ) -> LCHSQuadraturePlan:
-    """Build the selected symmetric composite Gauss rule and its available component bounds.
+    """Build the symmetric composite Gauss rule and its available component bounds.
 
     ACL arXiv:2312.03916v2, Eq. (61), defines the panelled k quadrature and
     Eq. (186) the finite tail bound used to select the cutoff. Each
@@ -909,13 +909,13 @@ def _build_composite_gauss(
     limits are checked before the node arrays are built. Other
     physical-output components remain outside this tolerance.
 
-    The composite-Gauss provider first completes its scalar panel search. It
-    stops when the minimum node count of every later panel count exceeds the
+    For the composite Gauss rule, planning first completes the scalar panel
+    search. It stops when the minimum node count of every later panel count exceeds the
     best rule found. It then checks ``max_quadrature_work`` against the
-    search charge, 32 units per selected node and the cubic Gauss-rule
-    construction charge, before allocating the node arrays. A refusal names
-    the complete charge of that selected rule. The selected rule has
-    ``total = 2*m*Q`` nodes after M candidate panel counts, each charged 32
+    search work, 32 units per chosen node and the cubic Gauss-rule
+    construction work, before allocating the node arrays. A refusal names
+    the complete work of that rule. The chosen rule has
+    ``total = 2*m*Q`` nodes after M candidate panel counts, each counted as 32
     units, so ``W_quad = 32*M + 32*(2*m*Q) + Q**3``: scalar selection, node,
     weight and kernel evaluation, and the Q-point Legendre eigensystem.
     These are engineering work units, not measured equal-cost operations.
@@ -1036,7 +1036,7 @@ def _build_symmetric_uniform_trapezoid(
     max_bytes=DEFAULT_INPUT_BYTES,
     max_quadrature_work=100_000_000,
 ) -> LCHSQuadraturePlan:
-    """Build the selected symmetric finite rule and record its power-of-two padding.
+    """Build the symmetric finite rule and record its power-of-two padding.
 
     The grid and its component caps follow Low and Somma, arXiv:2508.19238v2, Theorem 3.
     Nodes are h*j for j = -J..J with equal weight h, the uniform sum I_h of
@@ -1222,11 +1222,11 @@ def resolve_provider_config(
     *,
     slot: str,
 ) -> tuple[LCHSKernelProvider | LCHSQuadratureProvider, ResolvedProviderConfig]:
-    """Resolve one provider request using its defaults and domain checks.
+    """Resolve one kernel or quadrature request using its defaults and domain checks.
 
     Returns:
-        The registered provider and a ResolvedProviderConfig holding every
-        parameter after the provider's defaults and domain checks.
+        The registered rule and a ResolvedProviderConfig holding every
+        parameter after the rule's defaults and domain checks.
     """
 
     if not isinstance(request, ProviderConfig):
@@ -1256,11 +1256,11 @@ def resolve_lchs_provider_requests(
     ResolvedProviderConfig,
     LCHSPairCompatibility,
 ]:
-    """Resolve both requests and enforce the registered pair matrix.
+    """Resolve both requests and check that the pair is allowed.
 
-    The LCHS Method calls this at construction. Each provider resolves its
+    The LCHS Method calls this at construction. Each rule resolves its
     supported parameters and checks their domains before any problem data
-    is read. An unknown provider name or a rejected pair raises ValueError.
+    is read. An unknown rule name or a rejected pair raises ValueError.
 
     Returns:
         (kernel provider, resolved kernel config, quadrature provider,
@@ -1316,11 +1316,11 @@ def _admit_coefficient_rounding(coefficient_l1_norm: float, epsilon: float, pair
     sum), about 1.2e16 at c = 50.
 
     The kernel and quadrature bounds describe exact arithmetic, and the LCHS
-    error model publishes no floating-point value, so it cannot report this
+    error model reports no floating-point value, so it cannot report this
     rounding next to them. Planning therefore refuses the table when
     u*alpha exceeds LCHS_ROUNDING_EPSILON_FRACTION*epsilon. Both sides are
     operator-level quantities for a unit input, and the input norm, Duhamel
-    weight and PSD recovery scale them alike. Equality is admitted.
+    weight and PSD recovery scale them alike. Equality is accepted.
     """
     rounding = _UNIT_ROUNDOFF*coefficient_l1_norm
     allowance = LCHS_ROUNDING_EPSILON_FRACTION*epsilon
@@ -1342,7 +1342,7 @@ def _resolve_coefficient_context(
     max_bytes=DEFAULT_INPUT_BYTES,
     max_quadrature_work=100_000_000,
 ) -> LCHSCoefficientPlan:
-    """Finalize one provider-independent immutable coefficient plan.
+    """Build one immutable coefficient plan, in the same form for every kernel-quadrature pair.
 
     Coefficients are c_j = w_j*g(k_j) in node order. A non-finite node, weight,
     coefficient or running L1 norm raises at the first offending index, so an
@@ -1457,7 +1457,8 @@ def _unitary_coefficient_plan(options):
     """L=0 eliminates the k integral: one H-evolution branch of weight one.
 
     This is an algebraic reduction of A=L+iH, not a one-node approximation to
-    the selected kernel. Requested provider settings remain provenance only.
+    the requested kernel. The requested kernel and quadrature settings are
+    kept only as a record of the request.
     """
     resolved = ResolvedProviderConfig(implementation='unitary_reduction', parameters={})
     # One node k = 0 with weight 1. The single branch is exp(-i*T*H) itself,
@@ -1502,11 +1503,11 @@ def _homogeneous_coefficient_plan(quadrature, elapsed):
     """Return the coefficient plan of the physical propagator exp(-A*elapsed).
 
     Each coefficient is multiplied by exp(shift*elapsed), the recovery of the
-    selected PSD shift, and coefficient_l1_norm becomes the sum of the
+    PSD shift, and coefficient_l1_norm becomes the sum of the
     compensated magnitudes. When binary64 cannot represent that factor, the
     coefficients carry exp(shift*elapsed)*2**-e instead, with e from
-    solution_error_budget.psd_recovery_exponent, and every consumer composes
-    2**e into its binary recovery. derived_parameters records the shift, the
+    solution_error_budget.psd_recovery_exponent, and every routine that uses
+    them composes 2**e into its binary recovery. derived_parameters records the shift, the
     elapsed time and the factor applied to the coefficients. The nodes and
     base weights are unchanged.
     """

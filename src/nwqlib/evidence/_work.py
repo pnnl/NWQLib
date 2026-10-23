@@ -1,7 +1,8 @@
-"""Exact scalar arithmetic with a finite integer representation boundary.
+"""Exact scalar arithmetic with a finite limit on the size of its integers.
 
-The guard bounds prospective integer components before an operation. It is
-conservative about unreduced fractions, and is not a CPU or memory guarantee.
+Before each operation, the bit widths of the integer components that the
+operation would produce are checked against the limit. The check is
+conservative about unreduced fractions and bounds neither CPU time nor memory.
 """
 
 from fractions import Fraction
@@ -24,7 +25,7 @@ BOOKKEEPING_BYTES = 65536
 
 
 def integer_object_bytes(bits):
-    """Return L(b), a conservative byte charge for one Python integer of at most b magnitude bits.
+    """Return L(b), a conservative byte count for one Python integer of at most b magnitude bits.
 
     ``L(b) = 32 + 4 ceil(max(1, b)/30)`` on the checked 64-bit CPython stack:
     CPython uses thirty magnitude bits per four-byte digit, and the 32 covers
@@ -34,13 +35,14 @@ def integer_object_bytes(bits):
 
     - Numerical arrays use eight-byte float64, int64, uint64 and intp
       entries, sixteen-byte complex128 entries and one-byte Boolean entries.
-    - Counts and size products are Python integers admitted before
-      allocation or intp conversion.
+    - Counts and size products are Python integers checked against their
+      limits before allocation or intp conversion.
     - Stored payload, incremental workspace, peak simultaneous storage and
       archive size are distinct quantities.
-    - ``B_held`` denotes other already admitted allocations that remain
-      live in the phase being checked, a shared buffer counted once.
-    - A gate limiting total simultaneous storage adds ``B_held`` to its
+    - ``B_held`` denotes other allocations, already counted against the
+      limit, that remain live in the phase being checked, a shared buffer
+      counted once.
+    - A check that limits total simultaneous storage adds ``B_held`` to its
       local formula or subtracts it from the available limit, and a local
       function cannot infer unrelated live child plans from its term count.
 
@@ -84,7 +86,7 @@ class ExactArithmetic:
     ENGINEERING_CONSTANTS "Exact evidence integer representation".
     Cross products are bounded before Fraction can reduce them,
     so a rejected operation may have a smaller reduced result. Raise this explicit
-    representation limit only for an intended larger exact-arithmetic domain.
+    limit only for exact arithmetic that is intended to need larger integers.
 
     With numerator and denominator widths ``(ln, ld)`` and ``(rn, rd)``, the
     unreduced results are ``a/b + c/d = (a*d + c*b) / (b*d)``, at most

@@ -1,16 +1,16 @@
 # Input cost controls
 
-The functions that accept operator and state inputs check concrete data before conversion, snapshots, hashing or explicit expansion. This page gives the default limits, what they count, and the byte or work formula of each input operation.
+The functions that accept operator and state inputs check concrete data before conversion, copying, hashing or explicit expansion. This page gives the default limits, what they count, and the byte or work formula of each input operation.
 
 ## Default and what it counts
 
-The default `max_bytes` is `10_000_000_000`. Each operation compares it with an upper bound on its peak live arrays, the bytes of the arrays alive at the same time at the peak of that operation. The bound is computed before allocation, from what the code knows at that point. Metadata projection performs no numerical action. [Byte and work budgets](../CODE_TOUR.md#byte-and-work-budgets) explains why these budgets are checked before the work they bound.
+The default `max_bytes` is `10_000_000_000`. Each operation compares it with an upper bound on its peak live arrays, the bytes of the arrays alive at the same time at the peak of that operation. The bound is computed before allocation, from what the code knows at that point. Producing the metadata description of an input performs no numerical action. [Byte and work budgets](../CODE_TOUR.md#byte-and-work-budgets) explains why these budgets are checked before the work they bound.
 
 ## What it does not count
 
-The count excludes caller-owned inputs unless the table lists them, SDK and LAPACK internal workspace, Python object overhead and process RSS.
+The count excludes the inputs that the caller holds unless the table lists them, SDK and LAPACK internal workspace, Python object overhead and the resident memory (RSS) of the process.
 
-These formulas keep the refusal before the work, but they do not measure SDK allocations or the time spent in a caller's explicit term iterator. A sized term collection that exceeds the limit is rejected before iteration. Unsized Pauli and Fermion constructors keep the accepted entries plus one lookahead. The natural numerical adapters accept only containers of known size.
+These formulas keep the refusal before the work, but they do not measure SDK allocations or the time spent in a caller's explicit term iterator. A sized term collection that exceeds the limit is rejected before iteration. Pauli and Fermion constructors given an iterator of unknown length hold the accepted entries plus one entry read ahead. `operator_input` and `state_input` accept numerical containers only when their size is known.
 
 ## Other limits
 
@@ -26,12 +26,12 @@ These formulas keep the refusal before the work, but they do not measure SDK all
 | CSR/CSC input | Converted values plus original indices and indptr bytes |
 | Physical vector | Physical float64/complex128 entries plus 16D direction bytes |
 | Product preparation input | Physical entries plus 32q direction bytes, with no 2**q vector |
-| Occupation input | q bytes plus two dimension-integer slots |
+| Occupation input | q bytes plus two dimension integers |
 | Periodic stencil | `48 + ceil(bit_length(q)/8) + 2*ceil((q+1)/8)` bytes |
 | Pauli labels | `R*(q+4L+S)`, with `L=16*ceil(q/64)+16` and `S=6q+360` |
 | Pauli masks | `R*(4L+S)` plus dimension metadata |
 | Qiskit `SparsePauliOp` | `R*(5L+S)` plus dimension metadata, because the converted masks and coefficients stay alive through the mask conversion |
-| Pauli label output | `M*(q+16)` returned payload plus `t*(q+25)+q+4` bytes for a tile of `t<=min(M,1024)` rows |
+| Pauli label output | `M*(q+16)` returned data plus `t*(q+25)+q+4` bytes for a tile of `t<=min(M,1024)` rows |
 | Ordered Pauli product | `2*M*K*L+64*C*W+128*C`, with `W=ceil(q/64)` and blocks of `C=min(max(M,K),1024)` rows of the longer factor |
 | First-fit Pauli grouping | `M*L+64*t*W+64*t+32*W`, with `W=ceil(q/64)` and candidate tiles of `t<=min(M,1024)` terms |
 | Matrix-vector action | 33D bytes for dense/sparse, `49D+24M+16g+8+max(9M,96*min(D,1024))` for M stored Pauli terms, using the metadata bound `g=min(M,D)` on distinct single-word flip masks |
@@ -49,33 +49,33 @@ The Pauli rows also reserve `S` bytes per term for the content-hash JSON of the 
 
 ## Fermion input
 
-For raw Fermion input, M strings with P ordered ladder entries use 24M+9P+8 bytes. Six layouts plus dimension metadata cover conversion, snapshots and coalescing. A p-operator string maps to 2**p raw Pauli rows. Before its first product, the complete mapper checks the local two-row ladders, every intermediate ordered product, the final scaling, the destination arrays, coalescing and the share `S` of each mapped row. Count arithmetic is capped before huge powers are formed. No nonzero coefficient is thresholded.
+For raw Fermion input, M strings with P ordered ladder entries use 24M+9P+8 bytes. Six layouts plus dimension metadata cover conversion, copying and the merging of equal terms. A p-operator string maps to 2**p raw Pauli rows. Before its first product, the complete mapper checks the local two-row ladders, every intermediate ordered product, the final scaling, the destination arrays, the merging of equal terms and the share `S` of each mapped row. Count arithmetic is capped before huge powers are formed. No nonzero coefficient is thresholded.
 
 ## Sparse products
 
-For a sparse product A*B, the candidate scalar products are `C=sum(row_nnz(B,k) for each stored A(i,k))`, and C bounds both the structural and the final nnz. Later factors use the previous nnz upper bound times the next maximum row nnz. `expand(max_products=1_000_000_000)` checks the cumulative candidates before native multiplication, and `max_bytes` covers normalization copies, multiplication and sorting workspace, and the final immutable storage. No prefix multiplication runs merely to discover a later refusal. The final output uses explicit duplicate and zero coalescing and sorted indices. SciPy's format flags are not trusted, because they can be stale.
+For a sparse product A*B, the candidate scalar products are `C=sum(row_nnz(B,k) for each stored A(i,k))`, and C bounds both the structural and the final nnz. Later factors use the previous nnz upper bound times the next maximum row nnz. `expand(max_products=1_000_000_000)` checks the cumulative candidate products before SciPy multiplies the matrices, and `max_bytes` covers normalization copies, multiplication and sorting workspace, and the final immutable storage. No prefix multiplication runs merely to discover a later refusal. The final output explicitly merges duplicate entries, removes exact zeros and sorts its indices. SciPy's format flags are not trusted, because they can be stale.
 
 ## Double-factorized input
 
-Double-factorized (DF) conversion accepts `1+2*n²+4*n⁴` raw Fermion rows and `1+8*n²+64*n⁴` raw Jordan–Wigner candidates when factors are present. The quartic contributions vanish for an empty factor tuple. For r factors and k total columns, its dense contractions use `n²*k+r*n³+r*(n(n+1)/2)²` scalar products. Numerical and mapping arrays are checked before contraction, and no full spin-orbital tensor or reference operator is constructed. The cost fields in its receipt are derived formulas, not CPU measurements.
+When factors are present, double-factorized (DF) conversion accepts `1+2*n²+4*n⁴` raw Fermion rows and `1+8*n²+64*n⁴` Pauli terms of the Jordan–Wigner conversion before equal labels are combined. The quartic contributions vanish for an empty factor tuple. For r factors and k total columns, its dense contractions use `n²*k+r*n³+r*(n(n+1)/2)²` scalar products. Numerical and mapping arrays are checked before contraction, and no full spin-orbital tensor or reference operator is constructed. The cost fields in its record of the conversion (its receipt) are derived formulas, not CPU measurements.
 
 ## Structural refinement
 
-Structural refinement streams exact `Fraction` arithmetic over binary64 input. Every finite value has a denominator dividing 2**1074 and a magnitude below 2**1024. A sum's numerator needs at most `2098+bit_length(number_of_terms)` bits, and endpoint cross comparisons add at most 1074 bits. Before each scan, `refine_operator_facts` checks an allowance of 32 exact-integer slots of `3174+bit_length(number_of_terms)` bits each, which adds two bits for the Gershgorin radius and diagonal offset to the widths above (`operators/refinement.py::_scalar_frontier`, registered in [engineering constants](../ENGINEERING_CONSTANTS.md#numerical-choices-and-representation-sizes)). It publishes the number of input entries and bytes, the derived scalar operations and the output numerator and denominator bytes under a fresh acquisition identity. Reports share the scientific facts of previous scans and never repeat a scan merely to display them.
+Structural refinement streams exact `Fraction` arithmetic over binary64 input. Every finite value has a denominator dividing 2**1074 and a magnitude below 2**1024. A sum's numerator needs at most `2098+bit_length(number_of_terms)` bits, and endpoint cross comparisons add at most 1074 bits. Before each scan, `refine_operator_facts` checks an allowance of 32 exact integers of `3174+bit_length(number_of_terms)` bits each, which adds two bits for the Gershgorin radius and diagonal offset to the widths above (`operators/refinement.py::_scalar_frontier`, registered in [engineering constants](../ENGINEERING_CONSTANTS.md#numerical-choices-and-representation-sizes)). It records the number of input entries and bytes, the derived scalar operations and the output numerator and denominator bytes under a new identifier for that scan. Reports share the scientific facts of previous scans and never repeat a scan merely to display them.
 
 ## Dense matrices that are later synthesized
 
-A dense matrix accepted here can later be synthesized into gates, which costs of order M³ work for an M-square unitary, far more than its intake. That synthesis has its own formula, `_dense_synthesis.dense_synthesis_size`, or `controlled_synthesis_size` for a directly controlled unitary. Qiskit's control of the synthesized gates has its own formula, `gatewise_control_size`. A Method that controls a unitary built from such a matrix, or a supplied circuit that holds one, counts the synthesis and Qiskit's control of it against its own work and byte limits at planning, and a subroutine builder does so before its construction. A backend that lowers an uncontrolled one to a gate basis, and lowering inside a Run that controls a transformed block, reserve the work against the Run's `max_synthesis_work`, a total over all its preparations, before the first synthesis. The backend synthesizes each distinct matrix once per Run object. `lower_qiskit` called outside a Run checks its own `max_synthesis_work` ([Exact dense synthesis](../development/dense_synthesis.md#admission-of-the-exact-synthesis)).
+A dense matrix accepted here can later be synthesized into gates, which costs of order M³ work for an M-square unitary, far more than accepting the matrix. That synthesis has its own formula, `_dense_synthesis.dense_synthesis_size`, or `controlled_synthesis_size` for a directly controlled unitary. Qiskit's control of the synthesized gates has its own formula, `gatewise_control_size`. A Method that controls a unitary built from such a matrix, or a supplied circuit that holds one, counts the synthesis and Qiskit's control of it against its own work and byte limits at planning, and a subroutine builder does so before its construction. A backend that compiles an uncontrolled one to a gate basis, and circuit building inside a Run that controls a transformed block, set aside the work from the Run's `max_synthesis_work`, a total over all its preparations, before the first synthesis. The backend synthesizes each distinct matrix once per Run object. `lower_qiskit` called outside a Run checks its own `max_synthesis_work` ([Exact dense synthesis](../development/dense_synthesis.md#admission-of-the-exact-synthesis)).
 
 ## Stored input arrays
 
-Arrays are immutable byte-backed snapshots. Sparse storage keeps its original CSR/CSC orientation and index dtype. Input hashes bind the stored dtype, shape, ordering and content once. Exact Hermitian equality is a structural input check, and no eigenvalue calculation or symmetrization is performed. Native access on a metadata-only handle is always rejected. The source identity, the preparation phase and the physical scale cannot be rebound independently on a live handle.
+Input arrays are kept as immutable copies backed by bytes objects. Sparse storage keeps its original CSR/CSC orientation and index dtype. Input hashes bind the stored dtype, shape, ordering and content once. Exact Hermitian equality is a structural input check, and no eigenvalue calculation or symmetrization is performed. Access to the numerical data through a metadata-only input object is always rejected. On an input object that holds its data, the source content hash, the preparation phase and the physical scale cannot be rebound independently.
 
 ## Input invariants and their reasons
 
-These rules are NWQLib's own design. The rules on snapshots and hashes, exact Hermitian structure, exact-zero coalescing, densification, physical scale and metadata-only records are indexed, with their tests, in [Design rationale](design_rationale.md#input-admission). The two rules below protect later code that uses the input.
+These rules are NWQLib's own design. The rules on immutable copies and hashes, exact Hermitian structure, term merging that removes only exact zeros, densification, physical scale and metadata-only records are indexed, with their tests, in [Design rationale](design_rationale.md#input-admission). The two rules below protect later code that uses the input.
 
 | Invariant | Failure it prevents | Code |
 | --- | --- | --- |
 | Size and product formulas are checked before conversion, copying or multiplication | Memory or work limits discovered only after partial computation | `operators.access._check_bytes`, `_check_products`, `operators._factorized._sparse_chain_requirements` |
-| Structural refinement publishes exact rationals and a new entry in the report's `receipts` for each scan | A rounded value is reported as a certified bound, or reused facts are relabeled as a new zero-cost scan | `operators.refinement.refine_operator_facts` |
+| Structural refinement records exact rationals and a new entry in the report's `receipts` for each scan | A rounded value is reported as a certified bound, or reused facts are relabeled as a new zero-cost scan | `operators.refinement.refine_operator_facts` |

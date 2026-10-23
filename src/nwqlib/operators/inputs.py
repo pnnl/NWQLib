@@ -1,4 +1,8 @@
-"""Explicit bounded ingestion and classical access, with no quantum oracle."""
+"""Conversion of matrices and Pauli sums into OperatorInput objects, and their classical access.
+
+Each conversion is checked against a byte limit before it copies data, and
+no quantum oracle is built.
+"""
 
 from collections.abc import Sized
 from dataclasses import dataclass, field
@@ -35,7 +39,7 @@ def _freeze_array(array):
 
 
 def _digest(kind, shape, arrays=()):
-    """Hash native content once at admission, including dtype/shape/order.
+    """Hash the array content once, when the input object is created, including dtype, shape and order.
 
     Equal numbers stored with another dtype, shape or ordering produce a
     different identity, so a Plan or saved result bound to one input cannot
@@ -51,7 +55,7 @@ def _digest(kind, shape, arrays=()):
 
 
 def _pauli_identity(table):
-    """Bind width, word order, and ordered native x/z/coefficient bytes."""
+    """Hash the width, the word order and the ordered x, z and coefficient bytes."""
     return _digest("pauli.words.q0-first.x-z", (table.num_qubits, table.x.shape[1]),
                    (table.x, table.z, table.coefficients))
 
@@ -71,7 +75,7 @@ def _array_input(value, *, ndim, max_bytes, extra_bytes_per_item=0):
     """Convert only known numerical containers, after their output-size check.
 
     Integers and real data become float64, and complex data become complex128.
-    No unknown array protocol, object conversion or unsized stream is called.
+    No other array protocol, object conversion or iterator without a length is used.
     The caller adds its known per-entry storage, such as a normalized direction.
     """
     if type(value) is np.ndarray:
@@ -166,25 +170,26 @@ class OperatorInput:
     representation it was given (dense, CSR, CSC, Pauli terms, ordered
     fermionic terms or periodic-stencil parameters) and never converts it to
     a dense matrix implicitly. Pass it wherever a matrix or operator is
-    accepted, for example `Eigenproblem(A=handle)`. Reusing one handle
-    reuses its stored copy and its content hash.
+    accepted, for example `Eigenproblem(A=handle)`, where `handle` is the
+    input object. Reusing one input object reuses its copy of the data and
+    its content hash.
 
-    The methods below read the stored data or apply it classically. Each
-    raises `ValueError` when the representation does not provide that
-    access, or when the handle was rebuilt by `from_record` and holds
-    metadata only. The fields below are read-only. Below, `D` is the
-    operator's dimension, `basis.dimension`.
+    The methods below read the data or apply it classically. Each raises
+    `ValueError` when the representation does not provide that access, or
+    when the object was rebuilt by `from_record` and holds metadata only.
+    The fields below are read-only. Below, `D` is the operator's
+    dimension, `basis.dimension`.
 
     Attributes:
         manifest: The [`InputManifest`][nwqlib.operators.access.InputManifest]:
             content hash, representation, basis, stored size, available
-            classical operations and the checks made when the input was
-            accepted.
+            classical operations and the checks made when the input object
+            was created.
         structure: `"hermitian"` or `"general"`, from an exact check with no
             tolerance. The check is equality of a stored matrix with its
             conjugate transpose, real coefficients of a Pauli sum, or zero
             `potential` of a periodic stencil. Fermionic terms are always
-            `"general"`. A handle rebuilt by `from_record` may also declare
+            `"general"`. An object rebuilt by `from_record` may also declare
             `"unitary"`.
     """
 
@@ -214,7 +219,7 @@ class OperatorInput:
         return self.manifest.reference
 
     def to_record(self):
-        """Return a JSON-ready description of this handle without its numerical data.
+        """Return a JSON-ready description of this input object without its numerical data.
 
         Returns:
             record (dict): The keys `format`, `manifest` and `structure`.
@@ -226,9 +231,9 @@ class OperatorInput:
 
     @classmethod
     def from_record(cls, record):
-        """Rebuild a metadata-only handle from a `to_record()` description.
+        """Rebuild, from a `to_record()` description, an input object that holds metadata only.
 
-        The handle reports the saved metadata, but every data method raises
+        The object reports the saved metadata, but every data method raises
         `ValueError`, even for operations its manifest lists. Saved Results
         and Runs restore their numerical inputs separately.
 
@@ -236,7 +241,8 @@ class OperatorInput:
             record (dict): A description returned by `to_record()`.
 
         Returns:
-            handle (OperatorInput): A handle without numerical data.
+            handle (OperatorInput): The rebuilt input object, named `handle`
+                here, which holds no numerical data.
 
         Raises:
             ValueError: If `record` is not such a description.
@@ -305,8 +311,8 @@ class OperatorInput:
     def periodic_stencil(self):
         """Return the stored [`PeriodicStencil`][nwqlib.operators.inputs.PeriodicStencil] parameters.
 
-        A periodic-stencil operator has no classical matrix-vector action on
-        its handle.
+        The OperatorInput of a periodic stencil provides no classical
+        matrix-vector product.
 
         Returns:
             stencil (PeriodicStencil): The stored parameters.
@@ -400,8 +406,9 @@ class OperatorInput:
             result (numpy.ndarray): The product `A @ vector`.
 
         Raises:
-            ValueError: If the handle has no classical action (a periodic
-                stencil, fermionic terms or a metadata-only handle), if a
+            ValueError: If the input object has no classical action (a
+                periodic stencil, fermionic terms or an object rebuilt from
+                metadata only), if a
                 Pauli operator acts on more than 64 qubits, if `vector` has
                 another shape, dtype or a nonfinite entry, or if a limit is
                 exceeded.
@@ -419,22 +426,24 @@ class OperatorInput:
         return self._data @ vector
 
 def _matvec_requirements(operator):
-    """Return shared ``(D, bytes, products)`` admission allowances.
+    """Return the ``(D, bytes, products)`` allowances checked before a matrix-vector product.
 
-    Capability is checked before vector access. Dense and CSR/CSC
-    storage reserve 33D bytes for an input of at most complex128 size,
-    a complex128 output and a one-byte finite mask. Work is D**2 for
-    dense storage and nnz+D for CSR/CSC. These are logical envelopes,
-    excluding the owned operator payload and allocator or RSS overhead.
+    Whether the representation provides the product is checked before the
+    vector is read. Dense and CSR/CSC storage reserve 33D bytes for an
+    input of at most complex128 size, a complex128 output and a one-byte
+    finite mask. Work is D**2 for dense storage and nnz+D for CSR/CSC.
+    These are logical upper bounds, excluding the operator's own data and
+    the overhead of the allocator or the resident memory of the process.
 
     For M stored Pauli terms use g = min(M, D), an upper bound on
     distinct single-word flip masks obtained from counts alone. Call
     ``pauli_action_requirements(D, M, g)`` for one column with possible
     input conversion. With t = min(D, _PAULI_TILE), bytes are
     ``49*D + 24*M + 16*g + 8 + max(9*M, 96*t)`` and work is
-    ``(M+g) + 3*M + D*(M+g+1) + D + M*D``. The shared owner includes
-    the pre-tile Y-count frontier, grouped action and possible ordered
-    retry. Admission inspects metadata without a flip-mask census.
+    ``(M+g) + 3*M + D*(M+g+1) + D + M*D``. ``pauli_action_requirements``
+    covers the Y counts formed before the tiles, the grouped action and a
+    possible retry in term order. The check reads metadata only and does
+    not count the distinct flip masks.
     """
     operator._require_data()
     if "matvec" not in operator.manifest.access:
@@ -452,7 +461,7 @@ def _matvec_requirements(operator):
 
 
 def _scaled_observable_requirements(operator):
-    """Return allowances for one storage-preserving scaled vector action.
+    """Return the allowances for one action of the scaled operator, kept in its own representation, on a vector.
 
     Let N be the state dimension, P the original operator payload bytes,
     and K the stored-entry count (Pauli terms, sparse nnz or dense N**2).
@@ -460,19 +469,19 @@ def _scaled_observable_requirements(operator):
     return ``B_scaled = B_action + 32*N + 3*P + 48*K`` and
     ``W_scaled = W_action + 2*N + 18*K``.
 
-    Payload copies cover compressed indices and the immutable Pauli
-    snapshot. Entry scratch covers component maxima and lost-component
+    Payload copies cover compressed indices and the immutable copy of the
+    Pauli table. Entry scratch covers component maxima and lost-component
     masks. The vector reserve includes a separate framed input and the
     final dot product. Work covers up to four maximum/reduction visits,
     two ldexp visits, eight mask visits, one initial copy and three
     immutable Pauli-array copies per entry.
 
-    For Pauli storage K=L and the shared action owner uses
+    For Pauli storage K=L, and ``pauli_action_requirements`` uses
     g=min(L,N), possible input conversion and one column. It already
-    includes the 9L pre-tile frontier and 3L preprocessing work.
-    The coefficients are scaled once per operator, so the 3P+48L
-    storage and 18L work do not depend on the number of state columns.
-    This helper itself admits one vector action.
+    includes the 9L bytes formed before the tiles and the 3L
+    preprocessing work. The coefficients are scaled once per operator, so
+    the 3P+48L storage and 18L work do not depend on the number of state
+    columns. This helper itself covers one vector action.
     """
     d, action_bytes, action_work = _matvec_requirements(operator)
     count = (
@@ -520,11 +529,12 @@ def _scaled_observable(operator, exponent):
 
 
 def _scaled_observable_moment(operator, vector):
-    """Return (v†(O/2**e)v, e) using one native action, without recovery.
+    """Return (v†(O/2**e)v, e) from one action in the operator's own representation, without multiplying back by 2**e.
 
-    When a common scale would erase a stored component, choose the original
-    action before applying anything. This preserves its supported heterogeneous
-    range without a second action or a silently pruned observable.
+    When a common scale would turn a nonzero stored component into zero,
+    use the unscaled operator before applying anything. This keeps the
+    supported range of magnitudes without a second action or a silently
+    pruned observable.
     """
     exponent = _observable_exponent(operator)
     scaled = _scaled_observable(operator, exponent)
@@ -543,8 +553,8 @@ def ingest_periodic_stencil(num_qubits: int, mass, diffusion, potential=0.0, *, 
     This is the operator of [`PeriodicStencil`][nwqlib.operators.inputs.PeriodicStencil]
     on a periodic grid of `2**q` points, with the cyclic shift
     `S|j> = |j+1 mod 2**q>`. For `q = 1` both wrap-around edges are kept.
-    Only the four parameters are stored, so the handle has no matrix, Pauli
-    expansion or matrix-vector access. With `potential = 0` the operator is
+    Only the four parameters are stored, so the input object has no matrix,
+    Pauli expansion or matrix-vector access. With `potential = 0` the operator is
     Hermitian, with spectral endpoints `mass` and `mass + 4*diffusion`.
 
     Args:
@@ -594,7 +604,7 @@ def _pauli_width(num_qubits):
 
 
 def _pauli_identity_bytes(num_qubits):
-    """Bytes per Pauli term for the identity JSON of the Plan records that hold the term.
+    """Bytes per Pauli term for the content-hash JSON of the Plan records that hold the term.
 
     A Method that plans with an admitted Pauli operator copies its terms
     into records, and ``Record.content_id`` then holds two JSON copies (the
@@ -616,8 +626,8 @@ def _pauli_identity_bytes(num_qubits):
     counts, FixedGCIM, LCHS, and QLS with a ``QuadraticForm`` or
     ``NormalizedExpectation`` output) are capped earlier by
     ``ir.expressions.AdmissionLimits``. ADAPT's commutators are products
-    that ingestion does not see, so ADAPT charges its reconstruction as a
-    running total in ``gcim/adapt_inputs.py``.
+    that input conversion does not see, so ADAPT counts its reconstruction
+    as a running total in ``gcim/adapt_inputs.py``.
     """
     return 3 * (2 * num_qubits + 120)
 
@@ -625,16 +635,17 @@ def _pauli_identity_bytes(num_qubits):
 def _pauli_label_law(num_qubits):
     """Return W, native bytes/term, and conservative label bytes/work per term.
 
-    ``pauli_table`` admits labels with these byte and work laws. Raw
-    conversion without coalescing can reserve 3L separately. These are
-    logical payload envelopes, not allocator-byte or RSS measurements.
+    ``pauli_table`` checks labels against these byte and work formulas.
+    Raw conversion without summing identical words can reserve 3L
+    separately. These are logical upper bounds on the data bytes, not
+    measurements of allocated bytes or resident memory.
 
     Returns ``(W, L, q + 4L + S, q + W + 1)``. ``W = ceil(q/64)`` uint64 words
-    hold one mask. ``L = 16W + 16`` bytes store one term: its x and z masks
-    and one complex128 coefficient. A label admission charges its q
+    hold one mask. ``L = 16W + 16`` bytes store one term, which is its x and z
+    masks and one complex128 coefficient. Each label counts its q
     characters, the four L-byte copies alive at the peak of
     ``_coalesced_input`` and the share S = ``_pauli_identity_bytes(q)`` for
-    the identity JSON of the Plan records that will hold the term, and
+    the content-hash JSON of the Plan records that will hold the term, and
     ``q + W + 1`` work units for the characters, mask words and coefficient.
     """
     w = _pauli_width(num_qubits)
@@ -643,7 +654,7 @@ def _pauli_label_law(num_qubits):
 
 
 def _pauli_label_limit(num_qubits, max_bytes):
-    """Check the width metadata bytes and return the largest number of raw terms that ``max_bytes`` admits, before any label is read."""
+    """Check the width metadata bytes and return the largest number of raw terms that ``max_bytes`` allows, before any label is read."""
     _, _, payload_bytes, _ = _pauli_label_law(num_qubits)
     _check_bytes((num_qubits + 8) // 8, max_bytes, "Pauli width metadata")
     return max_bytes // payload_bytes
@@ -715,18 +726,18 @@ def pauli_table(terms, *, num_qubits: int, max_bytes=DEFAULT_INPUT_BYTES) -> Pau
 
 
 def _coalesced_input(table):
-    """Admit a Pauli table as an operator after exact-label coalescing.
+    """Return the OperatorInput of a Pauli table after summing the terms with identical words.
 
     Identical words are summed with stable summation and only an exact-zero
     sum is removed, so no nonzero coefficient is pruned. Canonical Pauli
     words are Hermitian and linearly independent, so the sum is Hermitian
-    exactly when every coalesced coefficient is real. That exact test sets
+    exactly when every summed coefficient is real. That exact test sets
     ``structure`` without a tolerance.
 
     With L = 16W + 16 bytes per term, the peak is four L-byte copies alive
-    together when the snapshot is taken: the input table, the coalesced
-    (masks, value) pairs, the coalesced arrays and their snapshot. Callers
-    charge this as 4L per term.
+    together when the immutable copy is made, namely the input table, the
+    summed (masks, value) pairs, the summed arrays and their immutable
+    copy. Callers count this as 4L per term.
     """
     q, w = table.num_qubits, table.x.shape[1]
     combined = combine_terms(((x.tobytes(), z.tobytes()), value)
@@ -965,7 +976,7 @@ def operator_input(value, *, max_bytes=DEFAULT_INPUT_BYTES) -> OperatorInput:
             10 GB (decimal, `10_000_000_000`).
 
     Returns:
-        operator (OperatorInput): The accepted operator.
+        operator (OperatorInput): The operator, ready to use in a Problem.
 
     Raises:
         TypeError: If `value` has none of the types above, or a dispatched

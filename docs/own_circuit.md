@@ -24,13 +24,13 @@ result = solve(problem, method=ExpectationMethod(), seed=7)
 print(result.value)  # 1.5
 ```
 
-The Bell state has `<ZZ> = 1` and `<XX> = 1`, so the expectation of `ZZ + 0.5 XX` is 1.5. Without `shots`, `ExpectationMethod` evaluates the Pauli expectations exactly. `solve(problem, method=ExpectationMethod(), shots=2000, seed=7)` measures them and also prints 1.5, because both terms are deterministic for this state.
+The Bell state has `<ZZ> = 1` and `<XX> = 1`, so the expectation of `ZZ + 0.5 XX` is 1.5. Without `shots`, `ExpectationMethod` evaluates the Pauli expectations without shot sampling, subject to numerical rounding. `solve(problem, method=ExpectationMethod(), shots=2000, seed=7)` measures them and also prints 1.5, because both terms are deterministic for this state.
 
 The circuit must have no classical bits, measurements or free parameters. Other inputs that take a state accept a circuit the same way, for example `Lanczos(initial_state=qc)` and the basis states of `FixedGCIM` ([accepted input forms](inputs.md)).
 
 ## Write a Method {#write-a-method}
 
-A Method needs a `descriptor` and two hooks. `plan` builds a [Program](ir.md), NWQLib's description of a circuit as named steps, from your input and returns it in a Plan with the experiments to run, and `analyze` turns the observations into a Result.
+A Method needs a `descriptor` and two hooks, functions of your class that NWQLib calls. `plan` builds a [Program](ir.md), NWQLib's description of a circuit as named steps, from your input and returns it in a Plan with the experiments to run, and `analyze` turns the observations into a Result.
 
 NWQLib's shared steps `plan`, `prepare`, `submit` and `Run.wait` then build the Qiskit circuit, run it, count the work against the Run's limits and attach the observations to the Result. The Method below prepares a GHZ state on the requested number of qubits, measures every qubit and returns the counts. Its input and its output kind are two Records of its own, and its Result holds the counts.
 
@@ -198,15 +198,15 @@ On the default local Aer backend this prints the counts of `000` and `111`, whic
 
 ## What each part does
 
-The Problem and the output kind are ordinary Records. `nwqlib.plan` checks that the returned Plan keeps the same Problem, Method and output objects and the stream snapshot taken after planning, so the Method cannot substitute inputs or randomness. It does not check that the Method computes the requested output, so each Method must refuse, with `ApplicabilityError`, each Problem and output it does not compute, as the GHZ Method and the [Hadamard-test Method](#compare-with-a-built-in-method) do. A built-in Problem such as `Expectation` or `Eigenproblem` serves the same role when its fields describe your input.
+The Problem and the output kind are ordinary Records. `nwqlib.plan` checks that the returned Plan keeps the same Problem, Method and output objects and the state of the random-number stream saved after planning, so the Method cannot substitute inputs or randomness. It does not check that the Method computes the requested output, so each Method must refuse, with `ApplicabilityError`, each Problem and output it does not compute, as the GHZ Method and the [Hadamard-test Method](#compare-with-a-built-in-method) do. A built-in Problem such as `Expectation` or `Eigenproblem` serves the same role when its fields describe your input.
 
-`state_input` accepts only a circuit without classical bits, measurements or free parameters, so measurement belongs to the Program's `Measure` node. Building the Qiskit circuit inlines your circuit's gates. A supplied circuit carries no cost formula and no approximation bound, so its [block](blocks.md#supplied-circuits) records unknown synthesis cost and error. `nwqlib.estimate` adds up the resource counts of the Plan's blocks without any Method hook, and it reports the operations of a supplied circuit as unavailable. `state_input` and `select_preparation` each give a supplied circuit a fresh content hash, so planning the same circuit twice gives two Plans with different content hashes. A block bound to your own constructor through `SelectedBlock.bind` is the alternative. It requires a complete `SelectedDefinition`, and the archive writer stores only blocks made by the library's own factories.
+`state_input` accepts only a circuit without classical bits, measurements or free parameters, so measurement belongs to the Program's `Measure` node. Building the Qiskit circuit inlines your circuit's gates. A supplied circuit carries no cost formula and no approximation bound, so its [block](blocks.md#supplied-circuits) records unknown synthesis cost and error. `nwqlib.estimate` adds up the resource counts of the Plan's blocks without any Method hook, and it reports the operations of a supplied circuit as unavailable. `state_input` and `select_preparation` each give a supplied circuit a fresh content hash, so planning the same circuit twice gives two Plans with different content hashes. A block bound to your own constructor through `SelectedBlock.bind` is the alternative. It requires a complete `SelectedDefinition`, and saving to a folder supports only blocks made by NWQLib's own block functions.
 
-`Program` and `SelectedConstruction` check the Program's structure when they are built, before any circuit exists, as [Describe a circuit as a Program](ir.md#check-bind-and-save-a-program) describes. Every field of the Plan's portable record enters the Plan's content hash, so a different shot count is a different Plan.
+`Program` and `SelectedConstruction` check the Program's structure when they are built, before any circuit exists, as [Describe a circuit as a Program](ir.md#check-bind-and-save-a-program) describes. Every field of the Plan's portable record, the form in which the Plan is saved (`plan.to_record()`), enters the Plan's content hash, so a different shot count is a different Plan.
 
 `analyze` receives the Run's data after every experiment has an observation. NWQLib refuses a Result whose Plan or observation content hash differs from the Run's, or that names a chunk (a part of the observations) the Run did not collect. `_summary_lines` on the Result supplies the first lines of `print(result)`.
 
-The Run uses `AerBackend()` when `prepare` receives no backend. Pass `backend=` for another connection, as [Choose a backend](backends.md) describes. `limits=ExecutionLimits(...)` from `nwqlib.execution` changes the Run's circuit, shot and data allowances, and its `max_simulation_qubits`, 20 by default, bounds the width that Aer accepts.
+The Run uses `AerBackend()` when `prepare` receives no backend. Pass `backend=` for another backend, as [Choose a backend](backends.md) describes. `limits=ExecutionLimits(...)` from `nwqlib.execution` changes the Run's limits on circuits, shots and data, and its `max_simulation_qubits`, 20 by default, bounds the width that Aer accepts.
 
 <a id="beyond-counts"></a>
 
@@ -223,9 +223,9 @@ Leave out every hook your Method does not need.
 | `prepare_all_refusal` | An adaptive Method, whose later settings depend on earlier outcomes, used with `prepare(plan, settings="all")` | [Add a method](algorithm_protocol.md#optional-hooks) |
 | `Result._summary_lines` | Your own first lines of `print(result)` | [Supported protected extension hooks](algorithm_protocol.md#supported-protected-extension-hooks) |
 | `validate_plan(plan)` and `validate_data(data)` on your Result class | When your Result's fields must follow from the Plan or the data beyond their content hashes, and always for `check-method`, which requires `validate_plan` to reject the Result that your case's `invalid_result` returns | [Add a method](algorithm_protocol.md#optional-hooks) |
-| A `Registration` record | Listing and resolving your Method through a registry | [Register a Method](algorithm_protocol.md#explicit-trusted-registration) |
+| A `Registration` record | Listing your Method and finding it by name | [Register a Method](algorithm_protocol.md#explicit-trusted-registration) |
 | A `case()` factory returning a `MethodCase` | `python -m nwqlib check-method`, which runs the case with its independent expected answer against your Method | [Check a Method](algorithm_protocol.md#author-cases-and-their-limits) |
-| `reduction_allowance` and a registered reducer | A Plan that reduces readout data while the circuits run | [Add a method](algorithm_protocol.md#reduction-hooks) |
+| `reduction_allowance` and a registered reducer | A Plan that reduces saved readout data, such as saved simulator states, during data collection | [Add a method](algorithm_protocol.md#reduction-hooks) |
 
 The test suite's reference Hadamard Method, a fuller version of the one in the next section, [`tests/_hadamard_method.py`](https://github.com/pnnl/NWQLib/blob/main/tests/_hadamard_method.py) with its registration in [`tests/_hadamard_method_metadata.py`](https://github.com/pnnl/NWQLib/blob/main/tests/_hadamard_method_metadata.py), shows the error model, `_summary_lines`, the author case and the registration. These files are in the source repository and are not installed with the package.
 
@@ -360,20 +360,20 @@ hadamard_expectation 1.0
 finite_pauli_expectation 1.0
 ```
 
-Both rows print 1.0 because the measured outcomes are deterministic for this state. `compare` plans every candidate without measuring anything, keeps your order and chooses no winner ([Plan, compare and solve](scientist.md)).
+Both rows print 1.0 because the measured outcomes are deterministic for this state. `compare` plans every Method without measuring anything, keeps your order and chooses no winner ([Plan, compare and solve](scientist.md)).
 
 ## When the archive hooks are required
 
 A Run on local Aer without a `directory` keeps its state in memory and writes no folder, so the GHZ Method above runs to its Result without archive hooks. The hooks are called in four situations.
 
-- A durable Run, which keeps its state in a folder on disk, writes its Plan when it is created, and that write calls `save_archive`. A Run is durable when `prepare` receives a `directory`, or when the backend launches work that outlives the process, which IBM Runtime, IonQ, Nexus, Slurm and NWQ-Sim do. Such a Run without a `directory` uses a folder under `~/.nwqlib/runs`.
+- A Run with a folder, which keeps its state on disk, writes its Plan when it is created, and that write calls `save_archive`. A Run has a folder when `prepare` receives a `directory`, or when the backend launches work that outlives the process, which IBM Runtime, IonQ, Nexus, Slurm and NWQ-Sim do. Such a Run without a `directory` uses a folder under `~/.nwqlib/runs`.
 - `result.save` calls `save_archive` and needs `result_type`, and `run.save` calls `save_archive`.
 - `load_result(path, method=GHZMethod)` and `load_run(path, backend=..., method=GHZMethod)` call `load_archive`, and reading a saved Result needs `result_type`.
 - `check-method` saves and reloads a temporary Result, so it needs all three.
 
-Without the hooks, a durable `prepare` raises `TypeError` before any submission, and `result.save` and `run.save` raise `TypeError` before writing anything. A failed durable `prepare` keeps its folder, so remove it before retrying.
+Without the hooks, `prepare` for a Run with a folder raises `TypeError` before any submission, and `result.save` and `run.save` raise `TypeError` before writing anything. A failed `prepare` of such a Run keeps its folder, so remove it before retrying.
 
-`save_archive` and `load_archive` store and restore the block with `write_blocks` and `read_blocks` from `nwqlib.blocks._archive`. This module starts with an underscore but is a supported hook for Method authors ([supported protected extension hooks](algorithm_protocol.md#supported-protected-extension-hooks)). Add the three in a subclass that keeps the name `GHZMethod`, so the examples below use it:
+`save_archive` and `load_archive` save and restore the block with `write_blocks` and `read_blocks` from `nwqlib.blocks._archive`. This module starts with an underscore but is a supported hook for Method authors ([supported protected extension hooks](algorithm_protocol.md#supported-protected-extension-hooks)). Add the three in a subclass that keeps the name `GHZMethod`, so the examples below use it:
 
 ```python
 # Inherits descriptor, plan and analyze from the GHZMethod above.
@@ -408,9 +408,9 @@ class GHZMethod(GHZMethod):
         return plan._bind(blocks=blocks)
 ```
 
-`plan.to_record()` returns the Plan's portable record, in which the Problem, Method and output appear as a type name and their fields, and the archive stores it. `files.read_problem` and `files.read_output` rebuild only the built-in Problem and output kinds, so a Method with its own Records rebuilds them from the stored fields with `model_validate`, as above. A Problem that holds a converted operator or state stores it with `files.write_operator` or `files.write_state` and reads it back with the matching reader, as the built-in writer does.
+`plan.to_record()` returns the Plan's portable record, in which the Problem, Method and output appear as a type name and their fields, and `save_archive` saves it. `files.read_problem` and `files.read_output` rebuild only the built-in Problem and output kinds, so a Method with its own Records rebuilds them from the saved fields with `model_validate`, as above. A Problem that holds a converted operator or state saves it with `files.write_operator` or `files.write_state` and reads it back with the matching reader, as the built-in writer does.
 
-With these hooks the same Method runs on a durable Run, and its Result and Run can be saved and reopened. Each target path must not exist yet:
+With these hooks the same Method runs on a Run with a folder, and its Result and Run can be saved and reopened. Each target path must not exist yet:
 
 ```python
 from nwqlib import load_result, load_run

@@ -1,4 +1,4 @@
-"""Target of host kernels, the classical routines a Method selects.
+"""Target of the classical routines (host kernels) that a Method chooses.
 
 They run synchronously in this Python process and return the ``host_scalars`` readout.
 """

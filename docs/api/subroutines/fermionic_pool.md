@@ -40,10 +40,10 @@ The circuit of `exp(0.3 A)` for the first pool member agrees with its matrix-fre
 
 ### Cost of the matrix-free Pauli action
 
-The Pauli action of `apply_generator` groups terms by their X/Y flip mask, and NumPy population counts give the Jordan–Wigner parity signs. A group sums its coefficient phases once per coordinate and applies the resulting diagonal to every supplied state column, and the output has the same coordinates as the input. For `L` Pauli terms, `G` distinct flip masks and `N=2**n` coordinates:
+The Pauli action of `apply_generator` groups terms by their X/Y flip mask, and counting set bits with NumPy gives the Jordan–Wigner parity signs. A group sums its coefficient phases once per coordinate and applies the resulting diagonal to every supplied state column, and the output has the same coordinates as the input. For `L` Pauli terms, `G` distinct flip masks and `N=2**n` coordinates:
 
-- The number of state gathers depends on the number of distinct flip masks, while phase formation still visits every Pauli term at every coordinate, so the arithmetic costs `O(LN + GN)` for one state.
-- The action keeps one output vector of `N` complex values and tiles of at most 1,024 coordinates. A required complex input conversion is an additional state-sized allocation. It constructs no dense operator or stored `L * 2**n` table.
+- The state is read in permuted order once per distinct flip mask, while phase formation still visits every Pauli term at every coordinate, so the arithmetic costs `O(LN + GN)` for one state.
+- The action holds one output vector of `N` complex values and works in tiles of at most 1,024 coordinates. Converting the input to complex, when needed, allocates one more state-sized array. The action forms no dense operator and no table of `L * 2**n` entries.
 
 ## XACC Hamiltonian input
 
@@ -60,19 +60,19 @@ Coefficients and the cutoff:
 - The default `coefficient_cutoff=0.0` keeps every nonzero accumulated coefficient. Normal ordering merges equivalent terms before the Jordan–Wigner expansion. Both cross-input normal-order sums and cross-monomial Pauli sums use real and imaginary `math.fsum`, to keep small residues through large cancellations. Coefficients and individual bounded products use float64, and the result is not exact real arithmetic.
 - Overflow or a nonfinite accumulated component raises `ValueError`. `fsum` also rejects intermediate overflow even if a later term could cancel it.
 - To approximate the mapped operator deliberately, supply an absolute `coefficient_cutoff` to either entry point, for example `parse_xacc(text, num_modes=24, coefficient_cutoff=1e-12)`. It removes final Pauli coefficients with magnitude at most the cutoff, after all contributions have been combined, and does not discard individual input terms or normal-order terms.
-- The removed coefficient magnitudes sum to an upper bound on the operator-norm change, because each Pauli has norm one. The parser does not compute or certify a downstream energy-error bound. For an LCU, the kept label count `L` sets the SELECT index width `ceil(log2(L))`. Deliberate pruning can reduce this width and circuit work, and small coefficients are not automatically scientifically irrelevant.
+- The removed coefficient magnitudes sum to an upper bound on the operator-norm change, because each Pauli has norm one. The parser does not compute or establish a bound on the resulting energy error. For an LCU, the kept label count `L` sets the SELECT index width `ceil(log2(L))`. Deliberate pruning can reduce this width and circuit work, and small coefficients are not automatically scientifically irrelevant.
 
 Modes and width:
 
 - File mode `j` maps directly to qubit `j`. Unlike the spin-adapted pool's interleaved convention, XACC has no implied spin ordering, and blocked and interleaved indices remain as supplied. Electron count, spin ordering and reference occupations must be supplied separately by the code that uses the operator.
-- The required positive `num_modes` is both the output width and the caller's bound on the input: every written mode, including those of zero-coefficient terms, must be smaller. The width is never inferred from input indices, and invalid indices fail before the Jordan–Wigner expansion. Valid wide models used only for resource counts are not subject to local simulation limits.
+- The required positive `num_modes` is both the output width and the caller's bound on the input, so every written mode, including those of zero-coefficient terms, must be smaller. The width is never inferred from input indices, and invalid indices are rejected before the Jordan–Wigner expansion. Valid wide models used only for resource counts are not subject to local simulation limits.
 - Omitting the required `num_modes` keyword raises Python's ordinary `TypeError`. An invalid supplied bound or malformed XACC syntax raises `ValueError`.
 - The mapped identity includes contributions from number operators and quartic terms, so the file's scalar alone is not the qubit identity shift.
 
 Cost:
 
-- Parsing streams lines and keeps coefficient buckets for stable summation: `O(R)` coefficient storage for `R` raw input terms. Packed real and imaginary parts use 16 payload bytes per contribution, plus array capacity and per-key overhead, while keeping `fsum` accuracy.
-- These buckets are released before mapping, which costs `O(T n)` time and storage for `T` merged terms on `n` modes, with at most 16 branches per term. Pauli coefficient buckets keep at most `16 T` contributions during mapping and are released before Qiskit allocates the returned Pauli arrays. No dense matrix, statevector or backend is used.
+- Parsing reads the input line by line and keeps, for each distinct normal-ordered term, the list of its coefficient contributions for stable summation, which takes `O(R)` coefficient storage for `R` raw input terms. The packed real and imaginary parts take 16 bytes per contribution, plus array capacity and per-term overhead, and keep the `fsum` accuracy.
+- These lists are released before mapping, which costs `O(T n)` time and storage for `T` merged terms on `n` modes, with at most 16 Pauli strings per term. The lists of Pauli coefficient contributions hold at most `16 T` contributions during mapping and are released before Qiskit allocates the returned Pauli arrays. No dense matrix, statevector or backend is used.
 
 ::: nwqlib.subroutines.xacc
     options:
@@ -87,8 +87,8 @@ The builder supports commuting Pauli generators and the default spin-adapted GSD
 
 - Pair/split and four-distinct doubles use the closed-form excitation factors of Magoulas and Evangelista, arXiv:2511.13485v2. Pair/split doubles follow Sec. V, Eqs. (15), (21), (22) and (25)–(27). Four-distinct doubles follow Sec. VI, Tables I and II, with the generator mapping of Supplemental Tables SI and SII. The library angle is divided by `sqrt(2)` to give the paper angle, because the paper operators have coefficient norm `sqrt(2)` in the library's normalization.
 - Shared-index doubles use NWQLib's own exact block synthesis instead of those closed forms. They use at most a 64 by 64 real active-mode generator and matrix exponentials of dimension at most five.
-- Fermionic routing includes the signs on occupied spectator modes and cancels when the outer control is zero.
-- Noncommuting custom records must match a supported default family. The builder does not synthesize them through amplitudes or a generic dense unitary.
+- Fermionic routing consists of the gates that map the coupled occupations of an excitation onto one pivot qubit and attach the Jordan–Wigner signs of the occupied spectator modes. In the pair/split and four-distinct circuits these are CNOT and CZ gates, and the shared-index circuits also reorder the active modes with fermionic swaps (SWAP followed by CZ). The routing gates are undone after the rotation, so they cancel when the outer control is zero.
+- Noncommuting custom generators must match a supported default family. The builder does not synthesize them through amplitudes or a generic dense unitary.
 
 These are exact factorization formulas evaluated in floating-point arithmetic. Shared-index two-level synthesis and occupation-conditioned four-distinct rotations can require substantially more gates than small amplitude preparations. Construction is bounded in active support, and no claim of optimal gate count is made. ADAPT composes the generator circuits it chose with its initial preparation and ordered parameter values.
 

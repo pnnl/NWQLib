@@ -1,10 +1,11 @@
 """CX counts of Qiskit's multi-controlled X synthesis without ancillas.
 
-``qiskit_compat.controlled`` adds controls through Qiskit, and Qiskit lowers
-a multi-controlled X with its own synthesis. Above 32 controls no published
-closed form gives the CX count of that synthesis, so this module stores the
-counts measured with Qiskit 2.6.0. It imports nothing, so the circuit-free
-resource laws of QLS and LCHS read the counts without importing Qiskit.
+``qiskit_compat.controlled`` adds controls through Qiskit, and Qiskit
+decomposes a multi-controlled X with its own synthesis. Above 32 controls no
+published closed form gives the CX count of that synthesis, so this module
+stores the counts measured with Qiskit 2.6.0. It imports nothing, so the
+resource formulas of QLS and LCHS read the counts without building a
+circuit or importing Qiskit.
 """
 
 # CX count of ``controlled(XGate(), k)`` after Qiskit 2.6.0 lowers it without

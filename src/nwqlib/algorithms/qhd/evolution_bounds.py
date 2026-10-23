@@ -3,15 +3,18 @@
 The finite model is ``H(t) = a(t) T + b(t) V`` on the ``K**d`` grid states,
 with the exact schedule functions a and b of the Method's schedule record, T
 the Plan's kinetic operator on its grid (the binary64 spacings h_j read as
-exact reals) and ``V = c I + sum_S diag(f_S)`` from the stored support tables
-f_S and constant c. T is the finite-difference ``-Delta/2`` of the one-hot
+exact reals) and ``V = c I + sum_S diag(f_S)`` from the Plan's support tables
+f_S and objective constant c. T is the finite-difference ``-Delta/2`` of the one-hot
 grid or of the binary periodic grid, or with the binary encoding's
 ``kinetic_model="spectral"`` the periodic spectral operator with energies
 ``2 pi**2 q**2/L_j**2`` in its Fourier basis. The bounds say nothing about the
 symbolic objective between or at the grid points, the continuum problem or an
 optimization gap. For the one-hot embedding J of the grid space into the
 ``d K`` qubits as one excitation per register, a bound here is on
-``||U_emitted J - J U_exact||``, not on invalid one-hot inputs. The binary
+``||U_emitted J - J U_exact||``, not on invalid one-hot inputs. Here
+``U_emitted`` denotes the ideal compiled product with the exact exponents
+``alpha^_k`` and ``beta^_k`` defined below, before angle rounding, pruning,
+approximate QFT and global-phase bookkeeping. The binary
 encoding uses every state of its ``d b`` qubits, and a bound is on the whole
 register after the permutation between circuit and lexicographic variable
 order (``binary.lexicographic_register_array``). Times use the library's
@@ -45,14 +48,14 @@ doi:10.1103/PhysRevX.11.011020, for the splitting):
   and link factors (one-hot) or its potential and whole-kinetic factors with
   exact QFTs (binary), with the same exponents (``_splitting``).
 
-The rounding of the emitted gate angles, the omission of pruned blocks, an
-approximate QFT, the native phase bookkeeping and the preparation are
-separate entries of the circuit's error ledger
+The rounding of the circuit's gate angles, the omission of pruned blocks,
+an approximate QFT, the global-phase bookkeeping of the circuit and the
+preparation are separate entries of the circuit's error sources
 (``resources.circuit_resources``). The operator differences telescope with
 unit-norm factors, so the step bounds add over steps and stages without
 any independence assumption, and a distance between unitaries is at most 2.
 
-Every formula is evaluated outward: each quantity is formed exactly as a
+Every formula is evaluated outward. Each quantity is formed exactly as a
 rational number from the binary64 inputs and converted to binary64 upward
 (``_upward``), each step's terms are rounded upward, summed exactly and
 rounded upward once more, and the neighbor differences of the tables round
@@ -64,7 +67,7 @@ exact sum, and the dyadic denominators stay below ``2**1074`` whatever the
 step count. The reported numbers are therefore never below the
 real-arithmetic formulas. A first-order estimate evaluated this way remains
 an estimate. The work is ``O(sum_S |S| K**|S| + d K + N)`` scalar
-operations, one pass over the stored tables and the steps, with no state
+operations, one pass over the Plan's tables and steps, with no state
 vector, matrix or Pauli expansion.
 """
 
@@ -89,12 +92,13 @@ class QHDEvolutionBound(Record):
     [`evolution_bound`][nwqlib.algorithms.qhd.evolution_bounds.evolution_bound] returns
     it, and `circuit_resources` includes it as `evolution`. The fields below are
     read-only. The answer is `evolution`, a bound on the compiled product with the
-    stored exponents against the exact time-ordered evolution of the finite model, with
-    `evolution_status` saying whether it is a bound or conditional. The finite model is
-    `H(t) = a(t) T + b(t) V` on the `K**d` grid states, with the exact schedule
-    functions, T the Plan's kinetic operator on its grid and V the stored support tables
-    plus the constant. The bounds say nothing about the symbolic objective between or at
-    the grid points, the continuum problem or an optimization gap.
+    stored exponents, the exact products of the binary64 time step and the binary64
+    step weights recorded in the Plan, against the exact time-ordered evolution of the
+    finite model, with `evolution_status` saying whether it is a bound or conditional. The finite model is `H(t) = a(t) T + b(t) V` on the
+    `K**d` grid states, with the exact schedule functions, T the Plan's kinetic operator
+    on its grid and V the Plan's support tables plus the objective constant. The bounds
+    say nothing about the symbolic objective between or at the grid points, the
+    continuum problem or an optimization gap.
 
     The norm inputs and the splitting, time-ordering and midpoint-quadrature values are
     upper bounds in the spectral norm on `domain`, evaluated outward from exact
@@ -111,7 +115,7 @@ class QHDEvolutionBound(Record):
         reference: The finite model: encoding, kinetic model, boundary, grid points,
             spacings, step count and time step, schedule, coefficient rule and order.
         formula: `"one_hot_first_order"` for the potential factor followed by every link
-            in emitted order, `"one_hot_second_order"` for the symmetric potential,
+            in circuit order, `"one_hot_second_order"` for the symmetric potential,
             odd-link, even-link product, and `"binary_first_order"`,
             `"binary_second_order"` for the potential and whole-kinetic factors of the
             binary encoding with exact QFTs.
@@ -127,11 +131,10 @@ class QHDEvolutionBound(Record):
         odd_nested: J_O, a bound on `||[O, [O, E]]||`, None as J_E is.
         norm_methods: `(input, method)` pairs naming which bound attained each minimum:
             `range` for the table-range bounds ``C_0`` and ``D_(T,0)``, `neighbor`
-            for the neighbor-difference bounds ``C_edge`` and ``D_(V,edge)``,
-            and `commutator` for
-            ``2 tau C`` (``D_T``) and ``2 nu C`` (``D_V``). Here tau is the sum of the
-            per-variable centered kinetic norm bounds, and nu is the sum of the
-            half-ranges of the potential support tables, as defined in
+            for the neighbor-difference bounds ``C_edge`` and ``D_(V,edge)``, and
+            `commutator` for ``2 tau C`` (``D_T``) and ``2 nu C`` (``D_V``). Here tau
+            is the sum of the per-variable centered kinetic norm bounds, and nu is the
+            sum of the half-ranges of the potential support tables, as defined in
             [Proposition 40](../../mathematics.md#r40). ``mu_T`` and ``mu_V`` come
             from the kinetic diagonal and the table extremes, Gamma from its
             closed form and ``J_E``, ``J_O`` from the K-point graph.
@@ -148,9 +151,9 @@ class QHDEvolutionBound(Record):
         coefficient_unavailable: Why the coefficient residual is None, or None.
         evolution: `min(2, splitting + schedule + coefficient_residual)`, for the
             compiled product with the stored exponents against the exact time-ordered
-            evolution of the finite model: a bound when `evolution_status` is `"bound"`,
-            conditional on the coefficient estimate when it is `"conditional"`, and None
-            without the coefficient residual.
+            evolution of the finite model. It is a bound when `evolution_status` is
+            `"bound"`, conditional on the coefficient estimate when it is
+            `"conditional"`, and None without the coefficient residual.
         evolution_status: `"bound"`, `"conditional"` when it rests on the coefficient
             estimate, or `"unavailable"`.
         work: Scalar work: table entries reduced, support-axis comparisons, graph rows
@@ -391,14 +394,15 @@ def evolution_bound(plan):
 
     `evolution_bound(plan)` returns a
     [`QHDEvolutionBound`][nwqlib.algorithms.qhd.evolution_bounds.QHDEvolutionBound] for
-    a Plan whose step blocks were compiled, which quantum execution and `theory_flavor="ir_product"`
-    do, in either encoding. `circuit_resources` includes the same record. Its
-    `evolution` field bounds the compiled product with the stored exponents against the
-    exact time-ordered evolution, with the physical phase included, conditionally where
-    the coefficient residual is an estimate. It adds four stages: time ordering,
-    midpoint quadrature, the coefficient residual and splitting. The work is one pass
-    over the stored tables and steps, `O(sum_S |S| K**|S| + d K + N)`, with no state or
-    matrix.
+    a Plan whose step blocks were compiled, which quantum execution and
+    `theory_flavor="ir_product"` do, in either encoding. `circuit_resources` includes
+    the same record. Its `evolution` field bounds the compiled product with the stored
+    exponents, the exact products of the binary64 time step and the binary64 step
+    weights recorded in the Plan, against the exact time-ordered evolution, with the
+    physical phase included, conditionally where the coefficient residual is an
+    estimate. It adds four stages: time ordering, midpoint
+    quadrature, the coefficient residual and splitting. The work is one pass over the
+    Plan's tables and steps, `O(sum_S |S| K**|S| + d K + N)`, with no state or matrix.
 
     Splitting (Childs et al., arXiv:1912.08854v3, Eqs. (145) and (152)). For
     dimensionless Hermitian generators G_j in application order and
@@ -408,7 +412,7 @@ def evolution_bound(plan):
     Unitarity makes these valid with no exponential growth factor.
 
     First order applies ``beta_k V`` and then every link generator ``alpha_k L_(j,e)``
-    in emitted order, with ``L_(j,e) = -w_j (|p><q| + |q><p|)`` of norm
+    in circuit order, with ``L_(j,e) = -w_j (|p><q| + |q><p|)`` of norm
     ``w_j = 1/(2 h_j**2)``, the restriction of ``-(XX + YY)/(4 h_j**2)``. XX and YY on
     one link commute, so the fused hopping gate adds no split, and all projector blocks
     commute. The potential factor against all links gives ``|alpha_k beta_k| C/2``, and
@@ -599,7 +603,7 @@ def _schedule_terms(schedule, lower, upper, bounds, midpoint):
     Time ordering. For the exact propagator ``U_k`` of ``H(t)`` over the step
     and ``M_k = exp(-i (A_k T + B_k V))``, differentiating
     ``W(t) = exp(-i int_l^t H(u) du)`` and applying Duhamel's identity gives
-    ``||U_k - M_k|| <= (1/2) int_l^r du int_l^u dv ||[H(u), H(v)]||``: with
+    ``||U_k - M_k|| <= (1/2) int_l^r du int_l^u dv ||[H(u), H(v)]||``. With
     ``Z(t) = -i int_l^t H``, the right logarithmic derivative
     ``W' W^dagger = int_0^1 exp(s Z) Z' exp(-s Z) ds`` differs from Z' by at
     most ``||[Z, Z']||/2``, and bounding ``[Z, Z']`` by its time integral
@@ -634,8 +638,9 @@ def _schedule_terms(schedule, lower, upper, bounds, midpoint):
     ShiftedCubicSchedule and for QuadraticSchedule(gamma=0). The other
     branches use the derivative formula alone, because an estimated
     integral is not an upper endpoint. The minimum applies to both
-    coefficient rules, because time ordering compares the exact interval evolution with its
-    exact first integral before midpoint quadrature is considered.
+    coefficient rules, because time ordering compares the exact interval
+    evolution with its exact first integral before midpoint quadrature is
+    considered.
 
     Midpoint quadrature. ``||M_k - F_k|| <= |A_k - delta a(m_k)| mu_T +
     |B_k - delta b(m_k)| mu_V`` by the exponential perturbation inequality
@@ -673,16 +678,16 @@ def _coefficient_term(schedule, midpoint, step, delta, kinetic_weight, potential
     (midpoint), to ``exp(-i (alpha^_k T + beta^_k V))`` by the exponential
     perturbation inequality. The raw norms enter because a coefficient error
     also changes the identity phase. The residual compares schedule stages
-    only, so it does not overlap the identity-phase ledger, which compares
-    the stored-weight model with its rounded phase. With ``f`` standing for a
-    or b and ``f^`` its stored weight, ``delta f^`` is the exact product
-    with the stored step duration delta:
+    only, so it does not overlap the ``identity_phase`` error source, which
+    compares the stored-weight model with its rounded phase. With ``f``
+    standing for a or b and ``f^`` its stored weight, ``delta f^`` is the
+    exact product with the stored step duration delta.
 
     Midpoint rule. ``eps_f = |delta f^ - delta f(m_k)|`` at the exact
-    nominal midpoint ``m_k = (k + 1/2) delta``. The admitted point formulas
-    are rational (``exact_weights``), so the discrepancy is exact and covers
-    the stored evaluation time, the point-value arithmetic and any underflow
-    of the stored weight.
+    nominal midpoint ``m_k = (k + 1/2) delta``. The point formulas of the
+    schedules are rational (``exact_weights``), so the discrepancy is exact
+    and covers the stored evaluation time, the point-value arithmetic and
+    any underflow of the stored weight.
 
     Integrated rule. Where the nominal integral ``I`` over
     ``[k delta, (k + 1) delta]`` is rational (``exact_integrals``: every
@@ -691,15 +696,15 @@ def _coefficient_term(schedule, midpoint, step, delta, kinetic_weight, potential
     rounded endpoints, the integral evaluation and the division into a
     weight. Otherwise, for the quadratic kinetic integral at gamma > 0 and
     the cubic one, the routine integrates over the rounded endpoints
-    ``xbar_k = fl(k delta)`` (``schedules.step_weights``), its documented
-    error is ``|I^ - I_e| <= C u I_e + 2 lambda`` to first order, with
-    ``lambda = 2**-1074`` the smallest subnormal and ``u = 2**-53`` the unit
-    roundoff. Here ``I^`` is the computed integral and ``I_e`` is the exact
-    integral over the rounded endpoints. The division
-    into the stored weight adds ``u |I^| + delta lambda/2``, and the endpoint
-    shift adds ``R = f* (|xbar_k - x_k| + |xbar_(k+1) - x_(k+1)|)``, with
-    ``x_k = k delta`` and ``f* = a`` at the left end of the hull of both intervals because a is
-    positive and nonincreasing. So
+    ``xbar_k = fl(k delta)`` (``schedules.step_weights``), and its
+    documented error is ``|I^ - I_e| <= C u I_e + 2 lambda`` to first order,
+    with ``lambda = 2**-1074`` the smallest subnormal and ``u = 2**-53`` the
+    unit roundoff. Here ``I^`` is the computed integral and ``I_e`` is the
+    exact integral over the rounded endpoints. The division into the stored
+    weight adds ``u |I^| + delta lambda/2``, and the endpoint shift adds
+    ``R = f* (|xbar_k - x_k| + |xbar_(k+1) - x_(k+1)|)``, with
+    ``x_k = k delta`` and ``f* = a`` at the left end of the hull of both
+    intervals because a is positive and nonincreasing. So
 
     ``eps_a ~ (C + 1) u I* + 2 lambda + delta lambda/2 + R``, ``I* = (xbar_(k+1) - xbar_k) f*``,
 
@@ -710,8 +715,8 @@ def _coefficient_term(schedule, midpoint, step, delta, kinetic_weight, potential
 
     Returns:
         ``(value, False)`` for an exact residual, ``(value, True)`` when the
-        kinetic integral uses the estimate, and ``(None, reason)`` when a
-        premise is missing.
+        kinetic integral uses the estimate, and ``(None, reason)`` when an
+        assumption of the estimate fails.
     """
     mu_t, mu_v = bounds["kinetic_norm"], bounds["potential_norm"]
     if mu_t is None or mu_v is None:

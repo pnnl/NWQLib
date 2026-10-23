@@ -1,6 +1,6 @@
 # References
 
-Bibliographic references and equation locations for NWQLib's algorithms, subroutines, and research comparisons. Each algorithm guide explains which constructions are implemented and which assumptions apply. Entries marked as background describe related work rather than an available method. Equation numbers refer to the linked paper versions. This page is the public citation catalogue.
+This page lists the bibliographic references and equation locations for NWQLib's algorithms, subroutines, and research comparisons. Each algorithm guide explains which constructions are implemented and which assumptions apply. Entries marked as background describe related work rather than an available method. Equation numbers refer to the linked paper versions.
 
 ## Where each source is used
 
@@ -30,15 +30,16 @@ The rules for saving, loading, running and backends come from NWQLib's design an
     - Theorem 1, Eq. (2.3), p. 15: P(mean - mu >= t) <= exp(-2 n t^2) for independent 0 <= X_i <= 1 and 0 < t < 1 - mu. The paragraph after Eq. (2.4) on that page replaces t by t/(b-a) when a <= X_i <= b, so outcomes in [-1,1] give exp(-n t^2/2).
     - Theorem 2, Eq. (2.6), p. 16: both bounds directly for every t > 0, with b_i - a_i = 1 or 2.
     - Eq. (1.4), p. 13: the lower tail, which doubles the bound for a two-sided deviation.
-    - The Expectation shot selection and binary intervals cite Theorem 1, and the Lanczos Gram sampling bound cites Theorem 2.
+    - Eq. (2.18), p. 18, and its surrounding paragraph extend Theorems 1 and 2 to centered partial sums that form a martingale. This covers the fixed conditional-mean premise used in [Proposition 1](mathematics.md#r1).
+    - The shot counts and binary intervals of the Expectation method cite Theorem 1, and the Lanczos Gram sampling bound cites Theorem 2.
     - The count screen that accepts a stall-split valley in QHD box refinement applies Theorem 1 with both tails and a union bound over cells and levels.
     - Eqs. (4.11) and (4.16), p. 22, in the proof of Theorem 2: the exponential bound behind that count screen. The paper notes that this proof also gives a direct derivation of Eq. (2.3).
-    - The Hoeffding branch of QHD's selected region coverage ([Proposition 49](mathematics.md#r49)) applies Theorem 1 and Eqs. (1.4), (2.3) with a union bound over contiguous index intervals and levels, using half the total failure budget.
+    - The Hoeffding bound for the coverage of QHD's selected regions ([Proposition 49](mathematics.md#r49)) applies Theorem 1 and Eqs. (1.4), (2.3) with a union bound over contiguous index intervals and levels, using half the total failure budget.
     - NWQLib's binary inference uses the bounded-variable convention X in [-1,1]. Weighted Pauli sums apply the triangle inequality and a union bound over the predeclared setting family.
     - Sampling-model assumptions and binary64 evaluation remain explicit, as described in the [expectation guide](algorithms/expectation.md).
 
  - Clopper, C. J., & Pearson, E. S. (1934). *The Use of Confidence or Fiducial Limits Illustrated in the Case of the Binomial*. Biometrika 26(4), 404–413. [DOI](https://doi.org/10.1093/biomet/26.4.404).
-    - QHD's selected region coverage uses one-sided binomial-test inversion, with a union bound over all candidate joint boxes and levels. It receives the other half of the failure budget in [Proposition 49](mathematics.md#r49).
+    - The Clopper–Pearson bound for the coverage of QHD's selected regions uses one-sided binomial-test inversion, with a union bound over all candidate joint boxes and levels. It receives the other half of the failure budget in [Proposition 49](mathematics.md#r49).
 
 ## ADAPT-VQE
 
@@ -61,7 +62,7 @@ Gradient measurement references distinguish generator-spectrum assumptions, comm
  - Ramôa, M., Anastasiou, P. G., Santos, L. P., Mayhall, N. J., Barnes, E., & Economou, S. E. (2025). Reducing the Resources Required by ADAPT-VQE Using Coupled Exchange Operators and Improved Subroutines. npj Quantum Information, 11, 86. [arXiv 2407.08696v3](https://arxiv.org/abs/2407.08696v3)
     - arXiv:2407.08696v3, Sec. II.B.3, Eqs. (23)–(24): the OVP-CEO comparison pool.
 
-## Generator-Coordinate-Inspired Method (GCIM)
+## Generator-Coordinate-Inspired Method (GCiM)
 
  - Zheng, M., Peng, B., Wiebe, N., Li, A., Yang, X., & Kowalski, K. (2023). Quantum algorithms for generator coordinate methods. Physical Review Research, 5(2), 023200. [10.1103/PhysRevResearch.5.023200](https://doi.org/10.1103/PhysRevResearch.5.023200) [arXiv 2212.09205v1](https://arxiv.org/abs/2212.09205v1)
     - Eq. (13) and Eqs. (14)–(15): the discretized Hill–Wheeler problem and matrix elements. These numbers follow arXiv:2212.09205v1.
@@ -114,7 +115,7 @@ The algorithm guide states the scope of NWQLib's finite quadrature and error inf
     - Eq. 3.5.21: the Gauss–Legendre constants.
     - The constant-source remainder combines DLMF Eqs. 3.5.19 and 3.5.21.
  - Al-Mohy, A. H., & Higham, N. J. (2009). A new scaling and squaring algorithm for the matrix exponential. SIAM Journal on Matrix Analysis and Applications, 31(3), 970–989. [10.1137/09074721X](https://doi.org/10.1137/09074721X).
-    - Algorithm 5.1: the algorithm of both SciPy kernels that the `expm` and `closed_form` references use.
+    - Algorithm 5.1: the algorithm of both SciPy routines that the `expm` and `closed_form` references use.
     - Code Fragment 2.1: recomputes the diagonal and first superdiagonal of a triangular input during squaring.
  - Higham, N. J. (2008). Functions of Matrices: Theory and Computation. SIAM. [10.1137/1.9780898717778](https://doi.org/10.1137/1.9780898717778).
     - Eq. (10.42), as `_eq_10_42` in SciPy's `scipy/sparse/linalg/_matfuncs.py` cites it: evaluates the first superdiagonal of Al-Mohy and Higham's Code Fragment (above) without cancellation.
@@ -123,7 +124,7 @@ Related differential-equation algorithms and simulation constructions:
 
  - Pocrnic, Johnson, Katabarwa, and Wiebe (2025). Constant-Factor Improvements in Quantum Algorithms for Linear Differential Equations. [arXiv 2506.20760v2](https://arxiv.org/abs/2506.20760v2)
     - arXiv:2506.20760v2, Lemma 3: inverts the weaker bound of Eq. (62) of An, Childs, and Lin with Lambert W, where NWQLib integrates their pointwise decay.
-    - Section IV, Eqs. (61)–(65): the effective Hamiltonian used by the QSP route.
+    - Section IV, Eqs. (61)–(65): the effective Hamiltonian used by the QSP-based construction.
  - Aftab, An, and Trivisa (2026). Linear Combination of Hamiltonian Simulation with Commutator Scaling. [arXiv 2606.11475v1](https://arxiv.org/abs/2606.11475v1)
     - Multiproduct-formula and quadrature background.
  - An, Onwunta, and Yang (2024). Fast-forwarding quantum algorithms for linear dissipative differential equations. [arXiv 2410.13189v2](https://arxiv.org/abs/2410.13189v2)
@@ -146,7 +147,7 @@ Sources listed in other sections:
 
 Sources listed in other sections:
 
- - Epperly, Lin, and Nakatsukasa (arXiv 2110.07492v2, listed under GCIM), Algorithm 1.1: overlap thresholding. NWQLib's default cutoff uses empirical Gram noise for exploratory regularization.
+ - Epperly, Lin, and Nakatsukasa (arXiv 2110.07492v2, listed under GCiM), Algorithm 1.1: overlap thresholding. NWQLib's default cutoff uses empirical Gram noise for exploratory regularization.
  - Hoeffding (doi:10.1080/01621459.1963.10500830, listed under Expectation and sampling), Theorem 2: NWQLib's Lanczos separately reports a bound from this theorem and a union bound on the sampled moments entering the Gram matrix, and its explicit confidence policy cuts at twice that bound.
 
 ## Quantum Hamiltonian Descent (QHD)
@@ -163,7 +164,7 @@ Sources listed in other sections:
  - Kushnir, S., Leng, J., Peng, Y., Fan, L., & Wu, X. (2025). QHDOPT: A Software for Nonlinear Optimization with Quantum Hamiltonian Descent. INFORMS Journal on Computing, 37(1), 107–124. [10.1287/ijoc.2024.0587](https://doi.org/10.1287/ijoc.2024.0587) [arXiv 2409.03121v1](https://arxiv.org/abs/2409.03121v1)
     - QHDOPT, arXiv:2409.03121v1, Sec. 2.1: NWQLib's default quadratic schedule, given as an example. The paper reports that schedules of this form work well for many test problems.
  - Wu, Z., Li, M., Zheng, M., Wang, M., Liu, J., Stein, S., Li, A., Chen, Y., & Liu, C. (2026). Benchmarking and Resource Analysis for Augmented-Lagrangian Quantum Hamiltonian Descent. [arXiv 2605.12066v1](https://arxiv.org/abs/2605.12066v1)
-    - Sec. V, Eqs. (12)–(14), gives the adaptive box-refinement procedure. NWQLib derives its simultaneous selected-region coverage bound from Hoeffding and one-sided Clopper–Pearson in [Proposition 49](mathematics.md#r49).
+    - Sec. V, Eqs. (12)–(14), gives the adaptive box-refinement procedure. NWQLib derives its simultaneous coverage bound for the selected regions from the Hoeffding and one-sided Clopper–Pearson bounds in [Proposition 49](mathematics.md#r49).
     - Eq. (15) of arXiv:2605.12066v1, Sec. VI, p. 7: the shifted cubic schedule.
     - arXiv:2605.12066v1, Section IV.A, Eqs. (9)–(10): the one-hot occupation-operator encoding that NWQLib's potential follows.
     - Sec. III.B, Eqs. (6)–(8): the equality terms and multiplier update of the augmented-Lagrangian layer, whose inequality term comes from Rockafellar (below).
@@ -181,7 +182,7 @@ Sources listed in other sections:
  - Strang, G. (1968). On the construction and comparison of difference schemes. SIAM Journal on Numerical Analysis, 5(3), 506–517. [10.1137/0705041](https://doi.org/10.1137/0705041)
     - The symmetric splitting of the split-step variant.
  - Coppersmith, D. (2002). An approximate Fourier transform useful in quantum factoring. IBM Research Report RC 19642 (1994). [arXiv quant-ph/0201067v1](https://arxiv.org/abs/quant-ph/0201067v1)
-    - arXiv:quant-ph/0201067v1: the approximate quantum Fourier transform that the binary kinetic factor can select.
+    - arXiv:quant-ph/0201067v1: the approximate quantum Fourier transform that the binary kinetic factor can use.
  - Rockafellar, R. T. (1973). A dual approach to solving nonlinear programming problems by unconstrained optimization. Mathematical Programming, 5, 354–373. [10.1007/BF01580138](https://doi.org/10.1007/BF01580138)
     - The Powell–Hestenes–Rockafellar form of doi:10.1007/BF01580138: the inequality term of the augmented-Lagrangian layer.
  - Nocedal, J., & Wright, S. J. (2006). *Numerical Optimization*, 2nd ed. Springer, Springer Series in Operations Research and Financial Engineering. ISBN 978-0-387-30303-1. [10.1007/978-0-387-40065-5](https://doi.org/10.1007/978-0-387-40065-5)
@@ -204,7 +205,7 @@ Sources listed in other sections:
     - The compensated summation that the QHD compiler uses for its running phase total and that Python uses in its float `sum` since 3.12.
  - Ogita, T., Rump, S. M., & Oishi, S. (2005). Accurate sum and dot product. SIAM Journal on Scientific Computing, 26(6), 1955–1988. [10.1137/030601818](https://doi.org/10.1137/030601818).
     - Algorithm 4.1, the cascaded summation: the recurrences of Neumaier's compensated summation.
-    - Proposition 4.5: the error bound of the equivalent Algorithm 4.4. This gives the error bounds of the QHD running phase total and of the kinetic coefficient's `sum` that the kept-state phase allowance of the QHD circuit routes uses.
+    - Proposition 4.5: the error bound of the equivalent Algorithm 4.4. This gives the error bounds of the QHD running phase total and of the kinetic coefficient's `sum` that the phase allowance for kept states in QHD circuits uses.
  - Higham, N. J. (1993). The accuracy of floating point summation. SIAM Journal on Scientific Computing, 14(4), 783–799. [10.1137/0914050](https://doi.org/10.1137/0914050).
     - Sec. 3, Eq. (3.6), p. 788: the rounding bound that the QHD binary angle formation applies to the butterfly sums of the Walsh–Hadamard transform.
 
@@ -244,7 +245,7 @@ The [QPE guide](algorithms/qpe.md#implementation-map) gives the exact versions, 
     - arXiv:2110.12071v2 PDF Eqs. (A1)–(A2), HTML Eqs. (16)–(17): the Fourier filter of the approximate CDF, Eq. (6), for statistical phase estimation (SPE).
     - Algorithm 1: compares the sampled approximate CDF with the threshold η/2.
     - Theorem 3 with PDF Eqs. (A6)–(A7) and (A12), HTML Eqs. (21)–(22) and (27): the filter domain that NWQLib checks.
-    - The SPE controlled-evolution backend has a separate synthesis model from the paper's randomized LCU compiler.
+    - NWQLib synthesizes the controlled evolutions of SPE with a model separate from the paper's randomized LCU compiler.
  - Kshirsagar, R., Katabarwa, A., & Johnson, P. D. (2024). On proving the robustness of algorithms for early fault-tolerant quantum computers. Quantum, 8, 1531. [10.22331/q-2024-11-20-1531](https://doi.org/10.22331/q-2024-11-20-1531) [arXiv 2209.11322v3](https://arxiv.org/abs/2209.11322v3)
     - Equation numbers follow arXiv:2209.11322v3, which also carries the sign correction to Eq. (4) and to the output line of Algorithm 1.
     - arXiv:2209.11322v3, Algorithm 1 and Eq. (7): the largest sampled Fourier coefficient for randomized Fourier estimation (RFE).
@@ -261,13 +262,13 @@ The [QPE guide](algorithms/qpe.md#implementation-map) gives the exact versions, 
     - QHD also cites:
         - Theorem 2.2, p. 38, and Eq. (2.4), p. 40, for the rounding of a result in the normal range.
         - Eq. (2.8), p. 56, for gradual underflow, the basis of the range rule of planning.
-        - Theorem 2.5, p. 45 (Sterbenz), for the exact subtraction in the most-probable selection.
+        - Theorem 2.5, p. 45 (Sterbenz), for the exact subtraction in the choice of the most probable point.
         - Sec. 4.2, Eq. (4.6), p. 83, for the pairwise summation bound of the Walsh coefficients.
         - Sec. 4.3, Eq. (4.10), p. 85, for the backward error of compensated summation.
 
 ## Subroutines
 
-Equation and figure numbers follow the listed arXiv versions. The exact synthesis of a dense unitary, for a controlled gate, inside a controlled definition, in the MPS preparation or before a backend lowers the circuit, draws on four papers: Shende, Markov and Bullock (2004), Vatan and Williams, Krol and Al-Ars, and Shende, Bullock and Markov (2006).
+Equation and figure numbers follow the listed arXiv versions. The exact synthesis of a dense unitary, for a controlled gate, inside a controlled definition, in the MPS preparation or before a backend translates the circuit to its gate basis, draws on four papers: Shende, Markov and Bullock (2004), Vatan and Williams, Krol and Al-Ars, and Shende, Bullock and Markov (2006).
 
  - Childs, A. M., & Wiebe, N. (2012). Hamiltonian simulation using linear combinations of unitary operations. Quantum Information and Computation, 12, 901-924. [arXiv 1202.5822v1](https://arxiv.org/abs/1202.5822v1)
     - arXiv:1202.5822v1, Lemma 2: the two-term linear combination of unitaries that the PREP–SELECT–PREP† standard form of Low and Chuang (2019) generalizes.

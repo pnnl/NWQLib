@@ -52,8 +52,9 @@ def write_blocks(blocks, files):
 
     The selection limit of
     [`select_signed_pauli`][nwqlib.blocks.selection.select_signed_pauli] does not
-    bound the whole archive or the live packed operator. A transport that
-    buffers a whole archive needs its own allowance. This function takes no byte
+    bound the whole archive or the live packed operator. Code that holds a
+    whole archive in memory, for example to transfer it, needs its own
+    allowance. This function takes no byte
     limit, and the archive's byte limits apply to each file it writes.
 
     Args:

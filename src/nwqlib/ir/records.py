@@ -1,4 +1,7 @@
-"""Immutable shared Program DAG and declared interfaces, independent of SDKs."""
+"""Immutable records of a Program, whose definitions may be shared, and of the interfaces of the blocks it calls.
+
+No quantum SDK is imported.
+"""
 
 from typing import Annotated, Literal
 
@@ -103,7 +106,7 @@ class BlockSignature(Record):
     and pass it in `signatures=` of a [`Program`][nwqlib.ir.records.Program].
     `name` and `target` are required. A
     [`BlockCall`][nwqlib.ir.records.BlockCall] names the signature, and the
-    selected definition bound to it supplies the action, its cost rules and the
+    selected definition bound to it supplies the action, its declared costs and the
     circuit constructor. The signature declares an interface. It does not prove
     that an implementation performs the action.
 
@@ -220,7 +223,7 @@ class BlockCall(Record):
     Build it as `BlockCall(signature="h", ports=(PortMap(port="system", wire="q"),))`.
     `signature` is required. Each register is used by one port only. The call
     names the signature, not an implementation. The selected definition bound to
-    that signature supplies the action, cost rules and circuit constructor.
+    that signature supplies the action, declared costs and circuit constructor.
 
     Attributes:
         signature: Required. Signature name.
@@ -363,8 +366,8 @@ class ClassicalStage(Record):
     The check runs no code. Build it with keyword arguments, for example
     `ClassicalStage(implementation=source, inputs=("bits",), outputs=("value",))`.
     `implementation` is required. A stage with `boundary="host"` requires
-    every register to be released first and can name the selected kernel
-    that runs it.
+    every register to be released first and can name the classical routine
+    (`SelectedKernel`) that runs it.
 
     Attributes:
         implementation: Required. Versioned Source of the computation.
@@ -376,8 +379,8 @@ class ClassicalStage(Record):
         boundary: Default `"in_job"`, processing inside the quantum job, or
             `"host"`, a classical computation that NWQLib runs outside the
             quantum job.
-        kernel: Default `None`. Name of the selected kernel that runs a
-            `"host"` stage.
+        kernel: Default `None`. Name of the classical routine
+            (`SelectedKernel`) that runs a `"host"` stage.
         kind: Fixed `"classical_stage"`. Names the node type in the saved
             record.
     """
@@ -506,7 +509,8 @@ class MeasurementBatch(Record):
         scope: Default `"independent_experiments"`, the only accepted value.
         repetitions: Default `None`. Independent runs of the body, an integer or
             an [`ExprRef`][nwqlib.ir.expressions.ExprRef]. `None` leaves the
-            planning requirement unknown. Preparing an exact readout kind requires 1.
+            planning requirement unknown. Preparing a batch whose observation
+            kind is an exact readout requires 1.
         observation_kind: Default `None`. For the innermost batch, `"counts"` for
             sampled counts, `"pauli_expectation"` or `"probabilities"` for exact
             statistics, `"estimated_observable"` for a provider estimate, or
@@ -727,7 +731,7 @@ class Program(Record):
         """Return a Program for one experiment of a measurement batch, without expanding any range or product.
 
         The returned Program's root is the batch with the one selected setting and
-        no axes. It keeps the dependency closure of that batch, every global
+        no axes. It keeps every definition that batch depends on, every global
         constraint and the register layout, and the selected values also bind the
         global constraints. It creates no observation or execution ID, because the
         original Program identifies the whole source graph. Use it before

@@ -51,14 +51,15 @@ def support_workspace(nodes):
 
     For a slab of b entries of a support S whose NumPy-printed callable has
     ``N_S = nodes`` expression nodes (``objective.node_count``), the
-    evaluator's live numerical intermediates are charged
+    evaluator's numerical intermediates held in memory are counted as
     ``W_S(b) = 8*b*(N_S + 2)`` bytes. This is an engineering allowance, not a
-    derived bound. Its premise is that the printer's evaluation holds at most
+    derived bound. It assumes that the printer's evaluation holds at most
     one slab-sized float64 temporary per expression node, plus the output and
     one broadcast input. A primitive with complex intermediates, input-dependent
-    or hidden storage lies outside the premise. The fixed part counts
+    or hidden storage lies outside this assumption. The fixed part counts
     ``OBJECT_HEADER_BYTES`` for each of those ``N_S + 2`` array objects,
-    which enters ``H_S`` of the slab charge (``support_chunk_size``) with H0.
+    which enters ``H_S`` of the slab byte count (``support_chunk_size``)
+    with H0.
     The measurement that qualifies the allowance is registered in
     docs/ENGINEERING_CONSTANTS.md ("Budgets and mechanical bounds").
     """
@@ -69,21 +70,21 @@ def support_chunk_size(entries, support_size, remaining, evaluator_bytes_per_ent
                        evaluator_fixed_bytes, wrapper_fixed_bytes):
     """Return the largest flattened chunk of a support table whose evaluation fits ``remaining`` bytes.
 
-    For support size s and a chunk of b entries the slab charge is
-    ``B_slab,S(b) = W_S(b) + (8s+64)b + H_S``: the evaluator's intermediates
-    ``W_S(b)`` (``support_workspace``), ``8(s+4)b`` comprising ``8(s+3)b``
-    for s coordinate arrays, an index vector and quotient/remainder scratch
-    and an additional 8b allowance, ``32b`` for
+    For support size s and a chunk of b entries the slab byte count is
+    ``B_slab,S(b) = W_S(b) + (8s+64)b + H_S``, the sum of the evaluator's
+    intermediates ``W_S(b)`` (``support_workspace``), ``8(s+4)b`` comprising
+    ``8(s+3)b`` for s coordinate arrays, an index vector and
+    quotient/remainder scratch and an additional 8b allowance, ``32b`` for
     complex conversion, Boolean validation and float64 conversion, and the
     fixed headers ``H_S``, here ``evaluator_fixed_bytes + wrapper_fixed_bytes``.
-    With the linear evaluator law ``W_S(b) = A_S b`` of ``support_workspace``
-    the largest sufficient chunk is ``min(entries, floor((R - H_S)/(A_S + 8s + 64)))``
-    for the remaining allowance ``R = max_bytes - B_held - 8E - 8dK - H_tables``
-    after the final payloads, the centered coordinates and the metadata are
-    reserved.
+    With the linear evaluator formula ``W_S(b) = A_S b`` of
+    ``support_workspace`` the largest sufficient chunk is
+    ``min(entries, floor((R - H_S)/(A_S + 8s + 64)))`` for the remaining
+    allowance ``R = max_bytes - B_held - 8E - 8dK - H_tables`` after the
+    final payloads, the centered coordinates and the metadata are reserved.
 
     Raises:
-        ValueError: ``remaining`` cannot admit one entry.
+        ValueError: ``remaining`` is too small for one entry.
     """
     fixed = evaluator_fixed_bytes + wrapper_fixed_bytes
     rate = evaluator_bytes_per_entry + 8*support_size + 64
@@ -98,8 +99,8 @@ def chunk_coordinates(centered_axes, start, stop):
     Entry e of a support table with axis lengths ``K_1, ..., K_s`` has the
     mixed-radix digits ``i_j = (e // prod_(l > j) K_l) % K_j``, so the last
     support variable varies fastest and the first is most significant, the
-    order in which the table is stored. The entry count is admitted against
-    intp before this runs.
+    order in which the table is stored. The entry count is checked against
+    the intp range before this runs.
     """
     index = np.arange(start, stop, dtype=np.intp)
     arguments = []
@@ -117,7 +118,7 @@ def user_point(grid, centers, support, expression):
     support expression and the point is ``grid.grid_value`` at the entry's
     support indices, in the coordinates of the problem being tabulated (a
     refinement level's search model has its own). Both are formed only when
-    an entry is refused.
+    an entry is rejected.
     """
     def locate(indices):
         point = tuple(grid.grid_value(j, i) for j, i in zip(support, indices, strict=True))
@@ -149,15 +150,15 @@ def evaluate_support(evaluator, centered_axes, chunk, *, expression, support, na
     Array evaluations may differ from scalar evaluations by an ulp or more,
     because SIMD elementary functions and expression broadcasting can follow
     different numerical paths. No universal evaluation-error bound exists for
-    arbitrary lambdified expressions. The stored array is the selected data,
-    and every table-consuming grid evaluation must index it. Repeating the
-    vectorized function on a one-element array does not recover the original
-    slab's bits.
+    arbitrary lambdified expressions. The stored array is the data that
+    planning fixes, and every grid evaluation that uses the table must index
+    it. Repeating the vectorized function on a one-element array does not
+    recover the original slab's bits.
 
     An expression whose callable cannot be evaluated or converted on arrays
     (an ArithmeticError, ValueError, TypeError or NameError from the chunk
-    call or its complex128 conversion) keeps its admitted scalar
-    functionality: that chunk is evaluated entry by entry by
+    call or its complex128 conversion) is still evaluated as scalars, as
+    planning accepted it. That chunk is evaluated entry by entry by
     ``potential._evaluate_objective``, which raises ValueError for an entry
     that is not finite and real. Any other exception propagates. A nonfinite
     or complex array result is never re-evaluated as a scalar.
@@ -184,13 +185,14 @@ def evaluate_chunk(evaluator, axes, start, stop, out, *, expression, support, na
     ArithmeticError, ValueError, TypeError or NameError from the chunk call or
     its conversion evaluates the chunk entry by entry
     (``potential._evaluate_objective``), which raises for an entry that is not
-    finite and real. A nonfinite or complex array result is
-    never re-evaluated as a scalar: its first bad entry is mapped back to its
+    finite and real. A nonfinite or complex array result is never
+    re-evaluated as a scalar. Its first bad entry is mapped back to its
     indices and coordinates and reported under ``name``, the function the
     expression belongs to. When ``axes`` are centered coordinates,
-    ``locate(indices)`` returns the refused entry's expression and point in
-    the problem's coordinates, and it is called only when a value is refused. ``evaluate_support`` evaluates a
-    support table with it, chunk by chunk.
+    ``locate(indices)`` returns the rejected entry's expression and point in
+    the problem's coordinates, and it is called only when a value is
+    rejected. ``evaluate_support`` evaluates a support table with it, chunk
+    by chunk.
     """
     shape = tuple(len(axis) for axis in axes)
 
@@ -235,33 +237,33 @@ def evaluate_chunk(evaluator, axes, start, stop, out, *, expression, support, na
 
 
 class QHDCompiler:
-    """Compile a QHD-admitted problem into Pauli-evolution blocks.
+    """Compile a problem that QHD accepts into Pauli-evolution blocks.
 
-    Implements the one-hot finite-difference/product-formula realization of
-    Quantum Hamiltonian Descent: Hamiltonian Eq. (1) and finite differences
-    Eqs. (F.7)/(F.9) of Leng et al., arXiv:2303.01471v1. This compiler uses
-    one-hot registers, unlike that paper's radix-2/Fourier realization in
-    Algorithm 1.
+    Implements the one-hot finite-difference and product-formula
+    construction of Quantum Hamiltonian Descent, with the Hamiltonian of
+    Eq. (1) and the finite differences of Eqs. (F.7)/(F.9) of Leng et al.,
+    arXiv:2303.01471v1. This compiler uses one-hot registers, unlike that
+    paper's radix-2/Fourier construction in Algorithm 1.
 
     The one-hot potential follows the occupation-operator encoding of Wu et
     al., arXiv:2605.12066v1, Sec. IV.A, Eqs. (9)-(10). Each multivariate
     support term becomes a sum of number-operator products weighted by its
     grid values, which extends their product rule for products of
     single-variable functions to a general support term. Step k uses the
-    weights that the Method's coefficient rule selects
-    (``schedules.step_weights``), either the point values at its midpoint
-    ``(k + 1/2)*dt`` or the step averages of the interval integrals over
-    ``[k dt, (k + 1) dt]``. Eq. (E.3) and Algorithm 1 of Leng et al. use the
-    left endpoint ``t_j = j*dt``. With a time-dependent schedule the left endpoint
-    limits the step to first order in dt, while the midpoint keeps the
-    symmetric second-order step second order when the schedule is smooth. A
-    time-independent schedule makes all three choices coincide.
+    weights of the Method's coefficient rule (``schedules.step_weights``),
+    either the point values at its midpoint ``(k + 1/2)*dt`` or the step
+    averages of the interval integrals over ``[k dt, (k + 1) dt]``. Eq. (E.3)
+    and Algorithm 1 of Leng et al. use the left endpoint ``t_j = j*dt``. With
+    a time-dependent schedule the left endpoint limits the step to first
+    order in dt, while the midpoint keeps the symmetric second-order step
+    second order when the schedule is smooth. A time-independent schedule
+    makes all three choices coincide.
 
     Identity components of the Hamiltonian (the kinetic stencil diagonal, the
     constant objective and the identity part of each number-operator
-    product) are not emitted as gates. Their phases are summed in the
-    ``dropped_global_phase`` metadata, which the native builder and the
-    ``ir_product`` reference restore once as the physical phase.
+    product) are not applied as gates. Their phases are summed in the
+    ``dropped_global_phase`` metadata, which the quantum circuit construction
+    and the ``ir_product`` reference restore once as the physical phase.
     """
 
     def __init__(
@@ -276,10 +278,10 @@ class QHDCompiler:
         ``decomposer`` is the expansion of ``problem.objective`` about
         ``expansion_centers(problem.bounds)`` whose support expressions
         ``QHD._admit_symbolic_work`` counted, so the tables evaluate the
-        expressions that were admitted, and ``chunks`` maps each support to
-        the entries per evaluation chunk that the same admission chose
+        expressions whose work was checked, and ``chunks`` maps each support
+        to the entries per evaluation chunk that the same check chose
         (``support_chunk_size``). Every table is evaluated here, so a
-        nonfinite or complex objective value rejects before any block is
+        nonfinite or complex objective value raises before any block is
         compiled or pruned.
         """
         self.problem = problem
@@ -302,15 +304,16 @@ class QHDCompiler:
     def build_step_pauli_ir(self) -> tuple[tuple[PauliEvolutionBlock, ...], ...]:
         """Return the compiled Pauli-evolution blocks of every schedule step.
 
-        Blocks alternate potential and kinetic terms with the selected step
-        weights, in forward splitting or symmetric half steps. Scalar
-        identity contributions are recorded as dropped global phase.
+        Blocks alternate potential and kinetic terms with the step weights
+        of the coefficient rule, in forward splitting or symmetric half
+        steps. Scalar identity contributions are recorded as dropped global
+        phase.
 
         Blocks apply in list order. First order applies ``V(dt)`` and then
         ``K(dt)``, the operator order of Eq. (E.3) in Leng et al.,
         arXiv:2303.01471v1. Second order applies ``V(dt/2) K(dt) V(dt/2)``,
-        where ``K(dt)`` is itself the
-        symmetric parity split built by ``KineticCompiler``. Under the
+        where ``K(dt)`` is itself the symmetric parity split built by
+        ``KineticCompiler``. Under the
         integrated rule a step's weights are its whole-step averages
         ``A/dt`` and ``B/dt`` (``schedules.step_weights``), so each potential
         half applies ``B/2`` and the odd, even and odd link layers apply
@@ -377,10 +380,10 @@ class QHDCompiler:
         return tuple(step_groups)
 
     def metadata(self) -> dict[str, Any]:
-        """Return the phase and angle-threshold ledgers of the last compiled schedule.
+        """Return the phase and angle-threshold records of the last compiled schedule.
 
         ``dropped_global_phase`` holds ``phase_angle``, the total identity
-        phase in radians that the native circuit and the ``ir_product``
+        phase in radians that the quantum circuit and the ``ir_product``
         reference restore, and the per-source totals
         of angles (``per_source_total_angles``) and of Hamiltonian
         coefficients (``per_source_coefficient_totals``) for the sources
@@ -391,7 +394,7 @@ class QHDCompiler:
         count of ``2**-1074`` (``dropped_angle_units``). ``range_omissions``
         holds the projector occurrences and identity events that the
         lower-range selection omitted, with the exact sums of their traceless
-        and identity charges (``_compile_potential_with_phase_record``,
+        and identity error contributions (``_compile_potential_with_phase_record``,
         ``_record_constant_phase``).
         """
 
@@ -429,7 +432,7 @@ class QHDCompiler:
         )
 
     def _reset_metadata(self) -> None:
-        """Empty both ledgers, so a repeated compilation does not add to an earlier one."""
+        """Empty both records, so a repeated compilation does not add to an earlier one."""
         self.kinetic_compiler._reset_dropped_rotations()
         self.potential_compiler._reset_dropped_rotations()
         # Neumaier accumulators (running sum, correction) of the angle totals.
@@ -458,11 +461,12 @@ class QHDCompiler:
         (``potential.PotentialCompiler.select_occurrences``) keeps or omits
         each entry's projector and its identity event together. A product of
         s number operators ``prod (I - Z)/2`` has identity component
-        ``I/2**s``, and the native projector evolves only the traceless
+        ``I/2**s``, and the projector gate evolves only the traceless
         remainder, so a kept entry records ``-fl(t q)`` with
         ``q = fl(b v)/2**s``. An omitted entry records a zero event, which
         keeps the contribution count of ``method._phase_contributions``, and
-        its identity charge ``2**-s |t b v|`` enters the phase ledger.
+        its identity error contribution ``2**-s |t b v|`` enters the error
+        budget of the running phase total.
         """
         occurrences = self.potential_compiler.select_occurrences(
             self._potential_grid_values(), num_grid_points=self.grid.num_grid_points, dt=dt,
@@ -481,9 +485,10 @@ class QHDCompiler:
         When ``fl(b c)`` or its product with dt would be nonzero and below
         ``2**-1022`` (``validation._underflows``), the step records a zero
         event, which keeps the contribution count, and the exact
-        ``|dt b c|`` joins the omitted identity charge of the phase ledger,
-        since ``|exp(-i a) - 1| <= |a|``, as for the identity of an omitted
-        projector (``potential.PotentialCompiler.select_occurrences``). No
+        ``|dt b c|`` joins the omitted identity error contribution of the
+        running phase total, since ``|exp(-i a) - 1| <= |a|``, as for the
+        identity of an omitted projector
+        (``potential.PotentialCompiler.select_occurrences``). No
         ``rotation_pruning`` term accompanies a scalar identity.
         """
         coefficient = potential_weight * constant
@@ -517,14 +522,15 @@ class QHDCompiler:
         sentence that introduces Eq. (F.14) of arXiv:2303.01471v1, and Liu et al.,
         arXiv:2607.16996v1, write their periodic one-hot kinetic term,
         Eq. (12), without it and omit it from the circuit as an overall phase
-        of the one-hot sector (Sec. V A 1). Here it enters the physical phase
-        ledger instead, so that the circuit's global phase matches the
-        evolution of the finite model, which the error ledger compares with
+        of the one-hot sector (Sec. V A 1). Here it enters the running phase
+        total instead, so that the circuit's global phase matches the
+        evolution of the finite model, which the error sources compare with
         its phase included (``resources.circuit_resources``). Each
         ``a/h**2`` is a normal binary64 number (``validation._normal_range``),
         and their compensated sum of positive terms is finite. The built-in
         ``sum`` below is compensated for floats from Python 3.12, the minimum
-        that ``pyproject.toml`` requires. A kinetic term outside that range is refused (``validation._kinetic_range_error``).
+        that ``pyproject.toml`` requires. A kinetic term outside that range is
+        rejected (``validation._kinetic_range_error``).
         """
         try:
             coefficient = sum(
@@ -560,8 +566,8 @@ class QHDCompiler:
         no phase bound uses.
 
         Rounding of a compensated total. Assume round-to-nearest binary64
-        arithmetic, no overflow and no inexact underflow. Planning supplies
-        these premises, since every coefficient and ``x_j`` passes the range
+        arithmetic, no overflow and no inexact underflow. Planning ensures
+        these assumptions, since every coefficient and ``x_j`` passes the range
         rule (``validation._normal_range``) and ``_compensated_add`` raises
         when an accumulator stops being finite. The residual formed
         with the larger-magnitude operand first is then exactly the rounding
@@ -580,24 +586,23 @@ class QHDCompiler:
         doi:10.1137/030601818, Algorithm 4.1), and their Proposition 4.5
         proves the smaller bound ``u |X| + gamma_(m-1)**2 A`` for the
         equivalent Algorithm 4.4 (``method._compiled_phase_allowance``).
-        An ordinary running
-        sum has the allowance ``gamma_(m-1) A``, first order in ``m u``,
-        while beta_m is u plus a term of second order in ``m u``. For a long
-        schedule the compensated allowance is therefore smaller by about a
-        factor m while m stays well below ``u**(-1/2)``, about 9.5e7, which
-        matters because ``method._admit_compiled_phase`` requires the
-        allowance of a kept state to stay below pi. The total uses all M events
-        (``method._phase_contributions``), including both
+        An ordinary running sum has the allowance ``gamma_(m-1) A``, first
+        order in ``m u``, while beta_m is u plus a term of second order in
+        ``m u``. For a long schedule the compensated allowance is therefore
+        smaller by about a factor m while m stays well below ``u**(-1/2)``,
+        about 9.5e7, which matters because ``method._admit_compiled_phase``
+        requires the allowance of a kept state to stay below pi. The total
+        uses all M events (``method._phase_contributions``), including both
         second-order potential halves, and a source total uses its own event
-        count, N (``num_steps``) for the objective constant's one event per step. Cancellation
-        does not reduce the required sum of absolute contributions. Comparing with
-        the intended Hamiltonian phase adds each contribution's formation
-        allowance. For the constant, whose coefficient ``fl(b_k c)`` and
-        angle are two rounded products, this gives
-        ``[eta_2 + (1 + eta_2) beta_N] S_C`` with ``eta_2 = 2u + u**2`` and
-        ``S_C = |c| sum_k |dt b_k|``, which is ``3u S_C`` to first order.
+        count, N (``num_steps``) for the objective constant's one event per
+        step. Cancellation does not reduce the required sum of absolute
+        contributions. Comparing with the intended Hamiltonian phase adds each
+        contribution's formation allowance. For the constant, whose
+        coefficient ``fl(b_k c)`` and angle are two rounded products, this
+        gives ``[eta_2 + (1 + eta_2) beta_N] S_C`` with ``eta_2 = 2u + u**2``
+        and ``S_C = |c| sum_k |dt b_k|``, which is ``3u S_C`` to first order.
         ``method._compiled_phase_allowance`` evaluates the bound of the total
-        for the Plan. The empty ledger has zero phase and zero allowance.
+        for the Plan. The empty total has zero phase and zero allowance.
         """
         phase_angle = _normal_product(-evolution_time, coefficient, f"the {source} phase contribution -t q")
         dropped = self._metadata["dropped_global_phase"]
@@ -645,9 +650,10 @@ class QHDCompiler:
         """Evaluate the constant and every support table, raising on a nonfinite or complex value.
 
         The stored binary64 constant and table values are the exact data of
-        the phase and angle ledgers and need only be finite. A contribution
-        formed from them that would fall below the normal binary64 range is
-        omitted and charged where it is formed (``_record_constant_phase``,
+        the phase and angle error bounds and need only be finite. A
+        contribution formed from them that would fall below the normal
+        binary64 range is omitted, and its error is counted where it is
+        formed (``_record_constant_phase``,
         ``potential.PotentialCompiler.select_occurrences``).
         """
         coerce_real_scalar(self.decomposer.constant, context="constant objective")
@@ -663,17 +669,18 @@ class QHDCompiler:
     def _objective_grid_values(self, support: tuple[int, ...]) -> FrozenArray:
         """Evaluate one support expression on its ``K**len(support)`` grid tuples as one float64 array.
 
-        This is the one producer of the support tables. The entries are in C
-        order, first support variable most significant, the order that
-        ``method.objective_at`` reads. The support expression, which the
+        This is the only function that forms the support tables. The entries
+        are in C order, first support variable most significant, the order
+        that ``method.objective_at`` reads. The support expression, which the
         decomposer expanded in the centered coordinates, is evaluated at
-        ``x - m``: the one-dimensional centered coordinate vectors are formed
+        ``x - m``. The one-dimensional centered coordinate vectors are formed
         once with that binary64 subtraction, and the table is evaluated in
-        flattened C-order chunks of the admitted size (``evaluate_support``,
-        ``support_chunk_size``). A nonfinite or complex entry raises with the
-        support indices and coordinates of the first one. The finished table
-        is frozen (``core.records.FrozenArray``) before the next support is
-        evaluated, and ``SupportValues`` shares that array. The expression of
+        flattened C-order chunks of the size checked at planning
+        (``evaluate_support``, ``support_chunk_size``). A nonfinite or complex
+        entry raises with the support indices and coordinates of the first
+        one. The finished table is made read-only
+        (``core.records.FrozenArray``) before the next support is evaluated,
+        and ``SupportValues`` shares that array. The expression of
         a support is fixed for the compiler, so the cache key is the support
         and each table is evaluated once per compiler however many steps
         reuse it.

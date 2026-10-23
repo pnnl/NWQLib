@@ -1,4 +1,4 @@
-"""LCHS PREP, selected evolution and inverse PREP in the actual shared Program."""
+"""LCHS PREP, planned evolution and inverse PREP in the shared Program."""
 
 from math import fsum
 
@@ -26,16 +26,16 @@ from .solution_error_budget import psd_recovery_exponent, psd_recovery_scale
 
 
 def target_identity(target):
-    """Return the SHA-256 identity of the normalized PREP tensor, its dtype, shape and C-order bytes.
+    """Return the SHA-256 content hash of the normalized PREP tensor, its dtype, shape and C-order bytes.
 
-    Planning binds it as the PREP input and derives preparation_identity
+    Planning records it as the PREP input and derives preparation_identity
     from it.
     """
     return _digest("mps.normalized.C-order", (len(target),), (target,))
 
 
 def preparation_identity(identity,decomposition,layers):
-    """Bind the tensor's identity (target_identity), chosen cores and layered synthesis settings."""
+    """Return the hash of the tensor's content hash (target_identity), the chosen cores and the layered synthesis settings."""
     settings = None if decomposition is None else (
         decomposition.num_qubits,decomposition.original_dimension,decomposition.bond_dimensions,
         decomposition.max_bond_dim,decomposition.threshold,decomposition.discarded_weight,
@@ -45,7 +45,7 @@ def preparation_identity(identity,decomposition,layers):
 
 
 def select_vector_preparation(name, target, *, method, decomposition=None, layers=2):
-    """Bind the actual normalized tensor and optional already-selected cores."""
+    """Record the normalized tensor and the optional cores already chosen."""
     from .native import construct_preparation
     q = len(target).bit_length()-1
     identity = target_identity(target)
@@ -103,10 +103,10 @@ def select_vector_preparation(name, target, *, method, decomposition=None, layer
 def observable_terms(problem, output, *, max_bytes):
     """Return the observable's real Pauli terms in the encoded coordinates.
 
-    Exact readout contracts the stored real Pauli table on the physical
+    Exact readout contracts the saved real Pauli table on the physical
     slice and sampled readout measures its qubit-wise commuting groups, so
     the observable must be a real Pauli sum. Pauli input is used as supplied. A dense
-    observable is admitted only up to dimension AUTO_DENSE_PAULI_DIMENSION
+    observable is accepted only up to dimension AUTO_DENSE_PAULI_DIMENSION
     (16), where a full Pauli transform of the zero-padded matrix is cheap,
     and must be exactly Hermitian so that no symmetrization changes the
     requested quantity.
@@ -250,7 +250,7 @@ def plan_quantum(method, problem, data, *, output, shots, rng):
 
 
 def lchs_readout(output, terms, coordinates, *, dimension, shots, method):
-    """Select the LCHS readout acquisitions and charge QWC grouping to max_readout_work.
+    """Choose the LCHS readout settings and count the qubit-wise commuting (QWC) grouping against max_readout_work.
 
     Returns ``(settings, groups, comparisons)``. A vector output reads its
     amplitudes and Samples one counts setting. With ``shots=None`` a scalar
@@ -260,8 +260,8 @@ def lchs_readout(output, terms, coordinates, *, dimension, shots, method):
     nonidentity labels, whose label is the group's accumulated basis, and a
     padded normalized output adds the unrotated ``physical_mass`` setting.
     ``groups`` lists each group setting's member labels. The grouping
-    comparisons are admitted tile by tile against max_readout_work, and
-    comparisons is the actual evaluated count.
+    comparisons are checked tile by tile against max_readout_work, and
+    comparisons is the number evaluated.
     """
     from nwqlib._quantum_readout import PROJECTED_MOMENTS, ReadoutSetting
     identity = "I"*len(coordinates) or "I"
@@ -296,7 +296,7 @@ def observed_bits(rec):
 
 
 def _rotations(rec, setting, encoded_basis, blocks, definitions, rotations):
-    """Return the selected one-site basis changes of a group setting, selecting each once per Plan.
+    """Return the one-site basis changes of a group setting, building each once per Plan.
 
     A group basis rotates each X coordinate by H and each Y coordinate by S†
     then H, once, with no parity network.
@@ -319,17 +319,17 @@ def _rotations(rec, setting, encoded_basis, blocks, definitions, rotations):
 
 
 def finish_quantum_plan(method,problem,rec,*,output,shots,rng,blocks,definitions,calls,facts=(),select_work=0,**native):
-    """Share the selected coherent body across the selected readout acquisitions.
+    """Share the planned coherent circuit body across the planned readout settings.
 
     A vector output reads its amplitudes. With ``shots=None`` a scalar output
     has one experiment: the coherent body and one ``projected_moments``
-    reduction at its end, bound to the success bits, coordinates, original
-    dimension and stored observable. Before native acquisition its bytes are
+    reduction at its end, tied to the success bits, coordinates, original
+    dimension and saved observable. Before the circuit runs its bytes are
     checked against ``max_bytes`` and its work against the full
     ``max_readout_work`` (``LCHS.reduction_allowance``). With shots,
     each counts setting rotates its group basis and measures all success
     and system qubits. ``select_work`` is the max_select_work already
-    charged by the construction.
+    counted by the construction.
     """
     from nwqlib._quantum_readout import PROJECTED_MOMENTS, projected_parameters
     from nwqlib.core.planning import ObservationPoint

@@ -1,11 +1,11 @@
-"""Pauli decomposition helpers for matrix-valued algorithm inputs.
+"""Pauli decomposition of explicit matrices given as algorithm inputs.
 
 An ``n``-qubit matrix is ``A = sum_P c_P P`` over Pauli strings ``P`` with
 ``c_P = 2**-n Tr(P A)``, because Pauli strings are Hermitian, unitary and
 orthogonal in the trace inner product. Labels follow Qiskit, whose last
 character acts on qubit 0. Every Pauli string has operator norm one, so the
-coefficient 1-norm bounds ``||A||_2``, and it is the LCU subnormalization
-of the Pauli block encoding.
+coefficient 1-norm bounds ``||A||_2``, and it is the subnormalization of
+the Pauli block encoding as a linear combination of unitaries (LCU).
 """
 
 from __future__ import annotations

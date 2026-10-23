@@ -1,4 +1,7 @@
-"""SDK-free estimates from the selected construction, with per-metric evidence."""
+"""Resource estimates of a Plan's circuit construction (`SelectedConstruction`), with the evidence of each metric.
+
+No quantum SDK is imported.
+"""
 
 from typing import TYPE_CHECKING
 

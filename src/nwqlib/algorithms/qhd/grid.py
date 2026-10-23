@@ -10,14 +10,14 @@ from typing import Any, Literal
 class OneHotGrid:
     """Tensor-product grid encoded with one qubit per variable grid point.
 
-    The Optimization problem admits the ordered variables and finite
-    ``lower < upper`` bounds. The QHD Method admits ``num_grid_points >= 2``,
+    The Optimization problem accepts the ordered variables and finite
+    ``lower < upper`` bounds. The QHD Method accepts ``num_grid_points >= 2``,
     and with ``boundary="periodic"`` no boundary points, an even
     ``num_grid_points >= 4`` for the one-hot encoding and ``2**b`` for the
     binary encoding (``method.QHD._periodic_grid`` gives the reasons).
     This record is the one definition of the coordinates, the spacing and the
-    kinetic links that the compiler, the classical references, the native
-    builder, the analysis and the verification read. With K points per
+    kinetic links that the compiler, the classical references, the Qiskit
+    circuit construction, the analysis and the verification read. With K points per
     variable the local index i = 0..K-1 increases with the coordinate, and the
     one-hot wire for variable a and local point i is a*K+i, with adjacent
     variable blocks in the same register. The binary encoding reads the same
@@ -61,7 +61,7 @@ class OneHotGrid:
       kinetic model (``QHD.kinetic_model``) acts on the same points with
       period ``L = K h`` (``split_step.kinetic_eigenvalues``).
 
-    The record admits a box only where these numbers exist in binary64
+    The record accepts a box only where these numbers exist in binary64
     (``__post_init__``).
 
     Attributes:
@@ -85,13 +85,13 @@ class OneHotGrid:
 
         The three-point stencil weights the kinetic term by ``1/h**2`` on the
         diagonal and ``-1/(2 h**2)`` between neighbors (Leng et al.,
-        arXiv:2303.01471v1, Eq. (F.7)), and every consumer computes its
-        coefficients from ``spacing`` in binary64: ``1/(h*h)`` and
+        arXiv:2303.01471v1, Eq. (F.7)), and every routine that uses the grid
+        computes its coefficients from ``spacing`` in binary64: ``1/(h*h)`` and
         ``-0.5/(h*h)`` (``theory.restricted_kinetic_sparse``,
         ``method._schrodinger_kinetic_bounds``) and the hopping coefficient
         ``-w/(4.0*h*h)`` with the schedule weight w
-        (``kinetic.KineticCompiler``), and the phase ledger and the binary
-        kinetic table divide by ``h**2``. Each variable's spacing h must
+        (``kinetic.KineticCompiler``), and the running phase total and the
+        binary kinetic table divide by ``h**2``. Each variable's spacing h must
         therefore be finite and positive, ``h*h`` and ``h**2`` normal binary64
         numbers, ``(4 h) h`` finite and ``0.25/(h*h)`` normal, that is at least
         ``sys.float_info.min``. Then every stencil coefficient ``1/h**2``,
@@ -117,14 +117,15 @@ class OneHotGrid:
         excluded endpoint. Checking only h, only the last coordinate or only
         ``lower + h != lower`` misses such grids. The check forms each
         variable's K coordinates as one float64 array (``coordinate_array``),
-        one variable at a time, and planning admits it with its ``d K``
-        initial-state work before building the grid (``method.QHD.plan``). It does not form the Cartesian product or
+        one variable at a time, and planning counts it with its ``d K``
+        initial-state work against ``max_work`` before building the grid
+        (``method.QHD.plan``). It does not form the Cartesian product or
         require each rounded gap to equal h. A coordinate need not be
         normal, since an exact zero or subnormal coordinate is harmless when
         the spacing, distinctness, table and coefficient conditions hold.
         The check's array payload peaks at 16K bytes for one variable and 25K-1
         bytes for two or more variables, because the previous coordinates and
-        failure mask remain live while the next axis's indices and coordinates are
+        failure mask remain in memory while the next axis's indices and coordinates are
         built. Planning covers this scratch with the 320dK term of
         method._initial_state_bytes and its fixed-object allowance. Grid validation
         and initial-state evaluation share that scratch allowance as successive
@@ -196,7 +197,7 @@ class OneHotGrid:
         return self.num_variables * self.num_grid_points
 
     def qubit(self, var_index: int, grid_index: int) -> int:
-        """Return the physical qubit index for a variable/grid-point pair."""
+        """Return the circuit qubit index for a variable/grid-point pair."""
 
         if not 0 <= var_index < self.num_variables:
             raise IndexError("var_index out of range")
@@ -257,14 +258,15 @@ class OneHotGrid:
     def coordinate_array(self, var_index: int):
         """Return the K coordinates of one variable as a float64 array, bit for bit ``grid_value``.
 
-        Form each coordinate by converting its integer grid index, multiplying by the stored spacing and adding
+        Form each coordinate by converting its integer grid index, multiplying by the spacing and adding
         the lower bound, in that order. ``__post_init__`` checks finiteness, strict increase and the boundary
         conditions of the selected grid on this array. It uses the same binary64 coordinates as ``grid_value``.
 
         ``grid_value(j, i)`` is ``lower + (i + interior) h``, where interior is one only for a Dirichlet grid
         without endpoints. The multiplication converts the integer to binary64 and rounds once, then the
         addition rounds once. The integer index is generated first, converted to float64, and multiplied and
-        added by separate ufuncs, which gives the same numbers on every admitted materializable grid. A floating
+        added by separate ufuncs, which gives the same numbers on every grid that passes the checks and fits in
+        memory. A floating
         ``arange`` with a large start, a fused expression or ``linspace`` does not have this property. For K
         below ``2**53`` every index is exactly representable.
         """

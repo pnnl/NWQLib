@@ -13,7 +13,7 @@ from nwqlib.ir import (
 
 The Program records and expressions import from `nwqlib.ir`, the block functions and records from `nwqlib.blocks`, and `Experiment`, `ObservationSpec`, `ReadoutDetails`, `ObservationPoint`, `ObservableEstimateSpec`, `ReductionContext`, `Reducer`, `registered_reducer`, `Realization` and `RandomStreams` from `nwqlib.core.planning`. `PreparedHandle`, `ObservationChunk`, `Histogram`, `PreparedArtifact` and `ReducedValues` import from `nwqlib.execution`, `AmplitudeReadout` from `nwqlib.amplitudes`, `InputRef` from `nwqlib.core.records`, `MethodCase` and `check_method` from `nwqlib.algorithms.authoring`, and the registry entries from `nwqlib.algorithms`.
 
-A new Method ships a `case()` function that returns a `MethodCase`, and `check_method` runs it. The reference Hadamard Method lives in the repository's test suite, `tests/_hadamard_method.py`, and is not part of the installed package. In a source checkout with `tests/` on the import path, its case passes the check:
+A new Method provides a `case()` function that returns a `MethodCase`, and `check_method` runs it. The reference Hadamard Method lives in the repository's test suite, `tests/_hadamard_method.py`, and is not part of the installed package. In a source checkout with `tests/` on the import path, its case passes the check:
 
 ```python
 from nwqlib.algorithms.authoring import check_method
@@ -159,7 +159,7 @@ Subclass `Method`, give it a `descriptor`, and implement `plan` and `analyze`. T
 
 ## Describe a circuit as a Program
 
-A `Program` lists named nodes: register allocation, block calls, measurements, repeats and their order. It is checked when it is built. [Describe a circuit as a Program](../ir.md) explains the nodes and [Program checks](../development/program_checks.md) the lifecycle rules.
+A `Program` lists named nodes: register allocation, block calls, measurements, repeats and their order. It is checked when it is built. [Describe a circuit as a Program](../ir.md) explains the nodes and [Program checks](../development/program_checks.md) the rules of that check.
 
 ::: nwqlib.ir.records.Program
     options:
@@ -346,7 +346,7 @@ A `Program` lists named nodes: register allocation, block calls, measurements, r
 
 ## Select blocks and build the Qiskit circuit {#select-and-lower-blocks}
 
-A Program calls blocks by signature name. Each `select_*` function returns a `SelectedBlock` whose record states the block's promised action, recipe and cost rules, and `lower_qiskit` builds the Qiskit circuit from the Program and its blocks. [Compose blocks](../blocks.md) composes a Pauli block encoding from these functions.
+A Program calls blocks by signature name. Each `select_*` function returns a `SelectedBlock` whose record states the block's promised action, recipe and declared costs, and `lower_qiskit` builds the Qiskit circuit from the Program and its blocks. [Compose blocks](../blocks.md) composes a Pauli block encoding from these functions.
 
 ::: nwqlib.blocks.selection.select_preparation
     options:

@@ -11,7 +11,7 @@ from nwqlib.evidence.verification import ProjectedVerificationOptions
 
 `ProjectedVerificationOptions`, `verify_projected` and `ProjectedDiagnostics` import from `nwqlib.evidence.verification`, `EnergyShiftOptions` and `verify_energy_shift` from `nwqlib.evidence.energy_shift`, and `NumberSectorOptions` and `verify_number_sector` from `nwqlib.evidence.sector`. `VerificationReceipt` and `KernelApplication` import from `nwqlib.execution`, and every other entry on this page from `nwqlib.evidence`.
 
-Both operations read what a Result already holds: its error bounds, `result.facts`, and its stored data. Neither runs the Method again, and only an explicit `verify` call computes new check values.
+Both operations read what a Result already holds: its error bounds, `result.facts`, and its saved data. Neither runs the Method again, and only an explicit `verify` call computes new check values.
 
 ## Check a result against a tolerance
 
@@ -38,7 +38,7 @@ INCONCLUSIVE
 PASS 0
 ```
 
-The total-error criterion is INCONCLUSIVE because five of the error sources that Lanczos lists have no bound. INCONCLUSIVE does not mean the error exceeds the tolerance. With exact readout and no random draw, the sampling error is zero by definition, so the sampling component passes. A component criterion never covers total error. A relative criterion, `result.assess(relative_tolerance=0.05, reference=reference)`, needs a [`TargetReference`][nwqlib.evidence.TargetReference] that sets the scale.
+The total-error criterion is INCONCLUSIVE because five of the error sources that Lanczos lists have no bound. INCONCLUSIVE does not mean the error exceeds the tolerance. With exact readout (`shots=None`), in which observations are obtained without shot sampling, and without other random draws, the sampling error is zero by definition, so the sampling component passes. Numerical errors can remain in exact readout, and the sampling component does not cover them. A component criterion never covers total error. A relative criterion, `result.assess(relative_tolerance=0.05, reference=reference)`, needs a [`TargetReference`][nwqlib.evidence.TargetReference] that sets the scale.
 
 Each entry of `result.facts` is a [`FramedFact`][nwqlib.evidence.FramedFact]: a value with its frame and its evidence. The frame, an [`ErrorFrame`][nwqlib.evidence.ErrorFrame], names the quantity, metric, unit, scope and conditions the value refers to. The kind of its [`Evidence`][nwqlib.evidence.Evidence] says whether the value is a proof, a certified bound, a numerical estimate, an observation or an assertion, and the value is witnessed when its evidence names the record of the computation that produced it. Only witnessed proofs and certified bounds without open assumptions can make an assessment pass.
 
@@ -52,13 +52,13 @@ Each entry of `result.facts` is a [`FramedFact`][nwqlib.evidence.FramedFact]: a 
 | [`EnergyShiftOptions`][nwqlib.evidence.energy_shift.EnergyShiftOptions] | Lanczos, FixedGCIM | The energy-shift discrepancy |
 | [`NumberSectorOptions`][nwqlib.evidence.sector.NumberSectorOptions] | QHD with the one-hot encoding | The observed number-sector leakage |
 | [`AdaptVerificationOptions`][nwqlib.algorithms.gcim.adapt_verification.AdaptVerificationOptions] | ADAPT | One per scalar of the selected checks |
-| [`LCHSVerification`][nwqlib.algorithms.lchs.verification.LCHSVerification] | LCHS | The reference discrepancy, and for `ivp_closed_form` the reference consistency |
-| [`LCHSRefinement`][nwqlib.algorithms.lchs.refinement.LCHSRefinement] | LCHS | Refined output-error components for `result.assess`, which answer no check |
-| [`QLSVerification`][nwqlib.algorithms.qls.verification.QLSVerification] | QLS | The top-level fact of each selected comparison |
+| [`LCHSVerification`][nwqlib.algorithms.lchs.verification.LCHSVerification] | LCHS | The reference discrepancy, and for `ivp_closed_form` the consistency of its two references |
+| [`LCHSRefinement`][nwqlib.algorithms.lchs.refinement.LCHSRefinement] | LCHS | Refined output-error components for `result.assess`. They answer no check |
+| [`QLSVerification`][nwqlib.algorithms.qls.verification.QLSVerification] | QLS | The principal fact of each selected comparison. Its companion values stay in the verification record |
 | [`QPEVerification`][nwqlib.algorithms.qpe.records.QPEVerification] | QPE | `component_error` and `overlap_deficit` |
 | [`QHDVerification`][nwqlib.algorithms.qhd.records.QHDVerification] | QHD | `grid_minimum` and the infidelity of each selected fidelity comparison |
 
-The projected, energy-shift and number-sector checks read values the Results already store. The verification guide defines what each one computes and what it does not show: [projected quantities](../verification.md#projected-quantities), [two-result energy shift](../verification.md#two-result-energy-shift) and [measured number-sector leakage](../verification.md#measured-number-sector-leakage). The other checks can compute a reference solution, and the guide's [cost table](../verification.md#cost-of-each-check) states what each one costs.
+The projected, energy-shift and number-sector checks read values the Results already hold. The verification guide defines what each one computes and what it does not show: [projected quantities](../verification.md#projected-quantities), [two-result energy shift](../verification.md#two-result-energy-shift) and [measured number-sector leakage](../verification.md#measured-number-sector-leakage). The other checks can compute a reference solution, and the guide's [cost table](../verification.md#cost-of-each-check) states what each one costs.
 
 ## Keep an assessment and its checks together
 

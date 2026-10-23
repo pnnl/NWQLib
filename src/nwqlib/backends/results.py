@@ -11,10 +11,10 @@ from nwqlib.execution import ExecutionMode
 
 @dataclass(frozen=True, kw_only=True)
 class BackendRunResult:
-    """Native output returned by a backend adapter.
+    """Raw output returned by a backend adapter.
 
     Args:
-        execution_mode: Transport/readout mode of the native execution.
+        execution_mode: Transport and readout mode of the execution.
         backend_target: Backend target metadata.
         raw_output: Backend-specific raw output, such as counts or statevector.
         metadata: Additional execution metadata.
@@ -27,9 +27,9 @@ class BackendRunResult:
 
 
 def remap_counts(states, counts, sources):
-    """Map native count outcomes to classical outcome indices and sum equal outcomes.
+    """Map the backend's count outcomes to classical outcome indices and sum equal outcomes.
 
-    Classical bit ``b`` takes native bit ``sources[b]``, and a ``None`` source
+    Classical bit ``b`` takes backend bit ``sources[b]``, and a ``None`` source
     leaves it zero. Bit zero is the least significant bit on both sides, so an
     outcome integer ``j`` is the bit string ``format(j, f"0{len(sources)}b")``
     (rightmost character bit zero). Each count must be an integer other than
@@ -39,17 +39,17 @@ def remap_counts(states, counts, sources):
     ``MAX_COUNT`` either, so no int64 sum of equal outcomes can wrap.
 
     Args:
-        states: Native outcome integers, one per count, each below ``2**64``
+        states: Backend outcome integers, one per count, each below ``2**64``
             (a sequence or a ``uint64`` array).
         counts: Nonnegative integer counts.
-        sources: Native bit of each classical bit, in classical order, at most
+        sources: Backend bit of each classical bit, in classical order, at most
             64 classical bits.
 
     Returns:
         ``(indices, counts)``: strictly increasing ``uint64`` indices and
         positive ``int64`` counts of equal length, the layout
         ``ObservationChunk.from_histogram`` accepts for a width of at most 64.
-        The identity map (``sources == range(len(sources))``) keeps the native
+        The identity map (``sources == range(len(sources))``) keeps the backend
         integers and skips the bit gather.
     """
     import numbers
@@ -72,13 +72,13 @@ def remap_counts(states, counts, sources):
 
 
 def gather_bits(native, sources):
-    """Classical outcome indices of native outcome integers (``uint64`` in, ``uint64`` out).
+    """Classical outcome indices of backend outcome integers (``uint64`` in, ``uint64`` out).
 
-    Classical bit ``b`` takes native bit ``sources[b]`` (``None``: zero), with
+    Classical bit ``b`` takes backend bit ``sources[b]`` (``None``: zero), with
     bit zero least significant on both sides, at most 64 classical bits.
-    Native bits that no classical bit takes, such as unmeasured qubits of a
+    Backend bits that no classical bit takes, such as unmeasured qubits of a
     provider histogram over every qubit, are dropped. The identity map keeps
-    the low ``len(sources)`` native bits with one mask. Any other map gathers
+    the low ``len(sources)`` backend bits with one mask. Any other map gathers
     one bit per classical position with vectorized shifts.
     """
     import numpy as np

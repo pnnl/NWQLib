@@ -1,8 +1,10 @@
-"""Framed scalar evidence and sufficient accuracy criteria, without acquisition.
+"""Scalar error values with their error frames, and sufficient accuracy criteria.
 
-The triangle inequality combines already propagated contributions in one target
-frame. A receipt cannot change that frame, admit a parameter point, or turn a
-PREP-on-zero error or residual into a full-operator or ground-state bound.
+Nothing in this module runs circuits or takes measurements. The triangle
+inequality combines contributions already propagated into one target frame. A
+computation record (receipt) cannot change that frame, accept a
+parameter point, or turn the error of a preparation applied to the all-zero
+input (PREP-on-zero), or a residual, into a full-operator or ground-state bound.
 """
 
 from __future__ import annotations
@@ -65,7 +67,7 @@ class ErrorFrame(Record):
     domain: Literal["target", "full_operator", "projected", "zero_input"] = "target"
 
     def compatible(self, other):
-        """Compare scientific dimensions, independently of record ancestry."""
+        """Compare quantity, metric, conditioning, domain, unit and scope, ignoring revision history."""
         return ((self.quantity, self.metric, self.conditioning, self.domain)
                 == (other.quantity, other.metric, other.conditioning, other.domain)
                 and self.unit.same_unit(other.unit) and _same_scope(self.scope, other.scope))
@@ -96,9 +98,9 @@ class FramedFact(Record):
         frame: Required. The frame of the value.
         bindings: Required. Parameter values the statement is restricted
             to. `()` declares no restriction.
-        fact: Required. The value. Its `quantity` names the role the value
-            plays for the code that reads it, for example the `sampling`
-            source of an expectation value.
+        fact: Required. The value. Its `quantity` names the value's role,
+            for example the `sampling` error source of an expectation
+            value.
         failure_probability: Default `None`, which means unknown. Probability
             in `[0, 1)` that this bound fails. A bound supplied in place of
             another does not inherit the other's probability, so a
@@ -125,14 +127,16 @@ class FramedFact(Record):
 
 
 class AssessmentContext(Record):
-    """Identities and parameter point of the data that an assessment refers to.
+    """Content hashes and parameter point of the data that an assessment refers to.
 
-    observation_id names the aggregate ObservationView, and contribution_ids
-    name its chunks. Certificate keeps these roles and appends result_id.
-    `admitted` is True only for a point the Plan has admitted, which
-    restricted evidence needs (see `compatible_point`). `subjects` is
-    derived from the identities. An association between the selected
-    construction and the Result still needs direct checks.
+    `observation_id` names the combined ObservationView, and
+    `contribution_ids` name its parts (`ObservationChunk` records).
+    Certificate keeps these roles and adds `result_id`. `admitted` is True
+    only for a parameter point the Plan has accepted, which evidence
+    restricted to a parameter point needs (see `compatible_point`).
+    `subjects` is the set of these content hashes. The context alone does
+    not establish that the selected construction belongs to the Result,
+    which needs direct checks.
     """
 
     problem_id: ContentID
@@ -178,7 +182,7 @@ def compatible_point(bindings, context):
     """Return whether evidence restricted to ``bindings`` applies at the context's point.
 
     Unrestricted evidence always applies. Restricted evidence applies only
-    at a point that the Plan has admitted and that binds every restricted
+    at a point that the Plan has accepted and that binds every restricted
     parameter to the same value. A differing value raises, even at a point
     that is only proposed, because the evidence then describes another point.
     """
@@ -205,7 +209,7 @@ def applicable(statement, *, frame, context):
 
 
 def receipt_supported(evidence, *, scope, subjects, kinds):
-    """Check only the receipt and the consumer's explicit proposition kinds."""
+    """Check only the evidence record and the evidence kinds that the caller accepts."""
     return bool(evidence and evidence.kind in kinds and evidence.status == "witnessed"
                 and evidence.subject_id in subjects and _same_scope(evidence.witnessed_scope, scope))
 
@@ -213,7 +217,7 @@ def receipt_supported(evidence, *, scope, subjects, kinds):
 def supported(statement, *, frame, context):
     """Whether a statement can support an accuracy PASS in this frame and context.
 
-    It must apply at the admitted point, carry no open assumption and have
+    It must apply at the accepted point, carry no open assumption and have
     witnessed proved_relation or certified_bound evidence for a subject of
     the context. Numerical estimates, observations and assertions never
     qualify, however small their value.
@@ -225,7 +229,11 @@ def supported(statement, *, frame, context):
 
 
 def predicate_frame(frame):
-    """Dimensionless truth in the same target's conditioning/scope/domain."""
+    """Return the frame of a true-or-false predicate about the same target.
+
+    The frame has `metric="predicate"`, the dimensionless unit `"1"`, and
+    the quantity, scope, conditioning and domain of `frame`.
+    """
     return ErrorFrame(quantity=frame.quantity, metric="predicate",
         unit=Unit(symbol="1", dimension="dimensionless"), scope=frame.scope,
         conditioning=frame.conditioning, domain=frame.domain)
@@ -234,7 +242,7 @@ def predicate_frame(frame):
 def predicate_value(statement, *, frame, context):
     """Return the supported True or False value, or None.
 
-    The receipt kind is never promoted.
+    The evidence kind is never strengthened.
     """
     expected = predicate_frame(frame)
     valid = supported(statement, frame=expected, context=context)
@@ -242,9 +250,9 @@ def predicate_value(statement, *, frame, context):
 
 
 def union_bindings(*groups):
-    """Union the restrictions actually used.
+    """Return the union of the parameter restrictions in `groups`.
 
-    Distinct values declared for one parameter conflict.
+    Distinct values declared for one parameter conflict and raise.
     """
     values = {}
     for group in groups:
@@ -257,7 +265,7 @@ def union_bindings(*groups):
 
 
 def _keep_premises(statement, conditions, inputs, context):
-    """Keep used restrictions/unresolved premises when an assessed value leaves its term."""
+    """Carry the restrictions and unresolved assumptions of a term's conditions and inputs onto its assessed value."""
     if not conditions and not inputs:
         return statement
     premises = (statement, *conditions, *inputs)
@@ -276,9 +284,10 @@ def _keep_premises(statement, conditions, inputs, context):
 
 
 def scalar(statement: FramedFact, arithmetic: ExactArithmetic) -> Fraction | None:
-    """Read finite real scalar evidence.
+    """Return the exact value of a concrete real scalar fact, or None when it is not concrete.
 
-    Booleans and complex values are not errors.
+    Booleans and complex values are rejected, because they are not error
+    values.
     """
     fact = statement.fact
     if fact.availability != "concrete":
@@ -763,22 +772,23 @@ def exact_readout_sampling(plan, observations, *, random_draws):
     projection terms. A backend seed that only selects a shot stream draws
     nothing when the readout is exact.
 
-    With exact readout no observation draws outcomes. Every observation is an
-    exact probability, Pauli expectation, amplitude or host scalar, as with
-    ``shots=None``, and a population without observations draws none
-    either. The observations cannot show the draws a Method makes, so the
+    With exact readout no observation draws outcomes. Every observation is a
+    probability, Pauli expectation, amplitude or classically computed scalar
+    obtained without shot sampling, as with ``shots=None``, and an empty set
+    of observations draws none either. The observations cannot show the draws
+    a Method makes, so the
     calling Method states them in ``random_draws``. When the observations
     draw no outcomes and ``random_draws`` is false, the estimate has no
     sampling term, and its sampling error is zero by definition. The fact
-    states that zero as a proved relation, witnessed by the observation
-    population, with failure probability zero. Otherwise the function
+    states that zero as a proved relation, witnessed by the set of
+    observations, with failure probability zero. Otherwise the function
     returns ``()`` and the Method's own ``sampling`` term applies, which
-    stays unknown unless the Method bounds it. Floating-point and native
-    simulation error are other sources and stay with their own terms.
+    stays unknown unless the Method bounds it. Floating-point and simulator
+    errors are other sources and stay with their own terms.
 
     Args:
         plan: Plan whose output frame states the fact.
-        observations: Observation population the estimate was computed from.
+        observations: Set of observations the estimate was computed from.
         random_draws: Whether the estimate averages or emulates the outcomes
             of random draws that the Method makes itself, such as emulated
             measurement outcomes or a random schedule of settings.
@@ -797,9 +807,10 @@ def exact_readout_sampling(plan, observations, *, random_draws):
 
 
 def result_context(result):
-    """Return the admitted AssessmentContext of a Result's attached Plan and data, after checking that they belong together.
+    """Return the AssessmentContext, with `admitted=True`, of a Result's attached Plan and data.
 
-    Nothing is replayed.
+    The Plan and data are first checked to belong together. Nothing is
+    recomputed.
     """
     plan, data = result.plan, result.data
     result.validate_plan(plan)
@@ -831,7 +842,7 @@ def assess_result(result, *, accuracy=None, absolute_tolerance=None, relative_to
                   absolute_fallback=None, max_integer_bits=DEFAULT_MAX_INTEGER_BITS):
     """Assess a new explicit criterion on an existing Result.
 
-    Nothing is acquired.
+    Nothing is measured.
     """
     if accuracy is None:
         accuracy = Accuracy(absolute_tolerance=absolute_tolerance, relative_tolerance=relative_tolerance,
@@ -908,7 +919,7 @@ class CheckSpec(Record):
             of valid values. The threshold compares a valid value and does
             not define the domain, and the domain does not depend on how the
             metric is named.
-        source: Implementation that computes the value.
+        source: Versioned `Source` of the routine that computes the value.
         options_id: Content hash of the options record that selected the
             check, or `None` for a check of a supplied value.
         threshold: Nonnegative threshold. PASS means value `<=` threshold.
@@ -918,7 +929,7 @@ class CheckSpec(Record):
         experiments: Number of new experiments the check runs.
         classical_work: Text form of its classical computation.
         reference_work: Text form of its reference computation.
-        data_description: What the check stores.
+        data_description: What the check saves.
         schema_version: Format version of the record, 2.
     """
 
@@ -1032,12 +1043,12 @@ def _admit_check_value(check, value, arithmetic):
 
 
 def _assemble_check(check, *, artifact_id, fact, context=None, max_integer_bits=DEFAULT_MAX_INTEGER_BITS):
-    """Evaluate one check: frame and identity binding, then domain admission, then status.
+    """Evaluate one check: match frame and content hashes, apply the domain, then decide the status.
 
     A fact produced for another options record or CheckSpec raises before
-    its value is admitted. Domain admission then rejects a
-    definition-invalid value before any status, so an impossible value
-    raises instead of becoming INCONCLUSIVE or FAIL.
+    its value is checked against the domain. The domain check then rejects
+    a value outside the quantity's definition before any status is decided,
+    so an impossible value raises instead of becoming INCONCLUSIVE or FAIL.
     """
     arithmetic = ExactArithmetic(max_integer_bits=max_integer_bits)
     status, reason = "NOT_RUN", "no check evidence supplied"

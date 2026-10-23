@@ -53,8 +53,8 @@ def _ceil_log2(value: float) -> int:
     logarithm can land on the wrong side of the integer in either direction.
     ``log2(nextafter(16, inf))`` returns 4.0, and ``log(2**29, 2)`` returns
     29.000000000000004. The norm-search ladders here and the planning
-    envelope in ``host_planning.search_envelope`` call this function, so
-    planning admits exactly the rows, trials and queries that a model
+    bounds in ``host_planning.search_envelope`` call this function, so
+    planning checks exactly the rows, trials and queries that a model
     records.
     """
 
@@ -67,7 +67,8 @@ def _norm_search_candidate_ladder(kappa_be: float) -> list[float]:
 
     The rungs are the powers of two up to ``ceil(log2(kappa_be))``. The top
     rung can exceed ``kappa_be`` and is clamped to it, so every recorded t
-    replays through the user path's ``[1, kappa_be]`` bound. The Sec. 5.1
+    also satisfies the bound ``[1, kappa_be]`` that a user-supplied t must
+    satisfy. The Sec. 5.1
     grid and the Sec. 5.2 noisy search both search this ladder.
     """
 
@@ -82,13 +83,14 @@ def _noisy_binary_search_norm(
 ) -> tuple[float, str, dict[str, Any]]:
     """Run the Dalzell arXiv:2406.12086v2 Sec. 5.2 noisy binary search on the log ladder.
 
-    Validation-scale probability evaluations stand in for the sampled kernel
-    projection (KP) estimates (Eqs. 26-27: success probability
-    ``t^2/(t^2 + ||x||^2)``, equal to 1/2 exactly at ``t = ||x||``). The
-    recorded repetition counts are planned accounting, not executed
-    batches. The elimination step keeps the half of the active set
-    containing the KP threshold crossing, which is the kept-approximation
-    invariant the paper's correctness argument relies on. Because
+    Exact probability evaluations, feasible at validation scale, replace the
+    sampled kernel projection (KP) estimates (Eqs. 26-27, with success
+    probability ``t^2/(t^2 + ||x||^2)``, equal to 1/2 exactly at
+    ``t = ||x||``). The recorded repetition counts are planned counts, not
+    executed batches. The elimination step keeps the half of the active set
+    that contains the KP threshold crossing, so the active set keeps an
+    approximation of ``||x||``, the property on which the paper's
+    correctness argument relies. Because
     ``cos^2(theta_t)`` increases
     with ``t`` (Eq. (44), p. 10), a probe with success probability above 1/2
     lies above ``||x||``, so candidates above the probe are eliminated. The
@@ -173,13 +175,13 @@ def _linear_kappa_sequence_norm(
     the same for a signed eigenvalue). The weights ``|U† b_hat|**2`` come
     from ``numerical.linear_model_weights``. Each step
     runs the Sec. 5.1 detector over the property-3 window
-    ``[t/2, 4t]`` around the previous estimate (four ladder candidates,
-    first threshold crossing accepted), and the recorded per-step trial
+    ``[t/2, 4t]`` around the previous estimate (four candidate values, of
+    which the first to cross the threshold is chosen), and the recorded per-step trial
     counts carry the Sec. 5.3 log-log overhead ``1 + log2(kappa) - j``.
     Dalzell states that overhead as ``O(1 + log2(kappa) - j)`` (p. 9). The
     model takes its constant as one. The per-trial query count uses the
     step's condition number ``2^j`` (property 1, p. 9) in place of
-    ``kappa``. Recorded counts are planned accounting, not executed batches.
+    ``kappa``. Recorded counts are planned counts, not executed batches.
     The sequence terminates at the first sigma with ``f(sigma) = 0``
     (``sigma = 1/kappa_rounded``, the exact-norm system).
     """
@@ -295,13 +297,13 @@ def _resolve_shortcut_norm(
     alpha: float | None = None,
     rhs: np.ndarray | None = None,
 ) -> tuple[float, str, dict[str, Any]]:
-    """Resolve the Dalzell ``t`` value and norm-search metadata.
+    """Determine the Dalzell ``t`` value and the norm-search metadata.
 
-    A numeric ``t`` is the caller's premise and must lie in
+    A numeric ``t`` is the caller's assumption and must lie in
     ``[1, kappa_be]`` (Dalzell arXiv:2406.12086v2, Sec. 4, takes ``t`` in
     ``[1, kappa]``). The named models run only in explicit classical
     execution. ``"grid"`` is the Sec. 5.1 exhaustive search on the
-    Eq. (23) ladder: it accepts the first candidate whose predicted success
+    Eq. (23) ladder. It chooses the first candidate whose predicted success
     probability reaches ``0.725``, records ``ceil(100 ln(20 |T|))`` trials
     per candidate (Eq. (24)), and falls back to the most probable candidate
     when none reaches the threshold. That fallback is NWQLib's choice. The
@@ -312,18 +314,18 @@ def _resolve_shortcut_norm(
             ``"noisy_binary_search"`` and ``"linear_kappa_sequence"``.
         kappa_be: The reconstruction's ``polynomial_kappa`` (``method._realize``
             passes ``r.polynomial_kappa``), which bounds ``t``. It is not the
-            encoded gap parameter ``kappa_be`` of ``QLSReconstruction``.
+            encoded inverse-gap parameter ``kappa_be`` of ``QLSReconstruction``.
         encoded_norm: ``||(A/alpha)^{-1} b_hat||`` from the model's one
             reference solve, needed by the grid and noisy-search models.
         factors: Original ``OriginalSVD`` or ``OriginalEigensystem`` of
             ``A``, needed by the linear sequence.
-        alpha: Selected encoding normalization, needed by the linear
+        alpha: Normalization of the chosen encoding, needed by the linear
             sequence.
         rhs: Unit RHS direction, needed by the linear sequence.
 
     Returns:
-        ``(t, source, metadata)`` with the selected ``t``, its source label
-        and the model's rows and planned trial and query accounting.
+        ``(t, source, metadata)`` with the chosen ``t``, its source label
+        and the model's rows and planned trial and query counts.
 
     Raises:
         ValueError: When no value is supplied, a numeric ``t`` lies outside

@@ -1,4 +1,4 @@
-"""Linear-combination-of-unitaries circuit helpers.
+"""Circuits for linear combinations of unitaries (LCU).
 
 The PREP-SELECT-PREP^dagger construction absorbs complex coefficient phases into
 the unitaries that SELECT applies, so the PREP register only encodes
@@ -61,7 +61,7 @@ def _admit_lcu(data, *, max_bytes, max_work, dense=False):
     """Raise before the known LCU arrays or work exceed ``max_bytes`` or ``max_work``.
 
     With N supplied terms, P padded addresses (a qubits) and system
-    dimension D, the coefficient and PREP stage is charged an untuned 128
+    dimension D, the coefficient and PREP stage is counted at an untuned 128
     bytes per address and ``16 P (a + 1)`` work for the a-level preparation
     tree. Identity padding adds PREP entries but no matrices.
 
@@ -230,7 +230,7 @@ class LCUCircuit:
 
 @dataclass(frozen=True, kw_only=True)
 class _LCUPreparationArtifact:
-    """One PREP build shared by the shipped circuit and its error metadata."""
+    """One PREP circuit, shared by the returned circuit and its error metadata."""
 
     circuit: QuantumCircuit
     metadata: Mapping[str, Any]
@@ -419,12 +419,14 @@ def _build_lcu_preparation_artifact(
     docs/ENGINEERING_CONSTANTS.md. The MPS path passes ``max_work`` to the builder
     as ``max_svd_work``, the limit of its TT-SVD and its layered construction.
 
-    The direct path uses the same magnitude/phase tree as ``prepare_qiskit``
-    but is not a declared PREP block, so ``max_direct_amplitudes`` does not
-    apply. ``_admit_lcu`` admits it instead: ``16 P (a + 1)`` work against
-    ``max_work`` and 128 bytes per address for P = 2**a addresses. A
-    ``max_work`` of 10**8 admits up to 2**18 addresses, and the default of
-    10**9, which QLS shares, up to 2**21.
+    The direct path uses the same magnitude and phase tree as
+    ``prepare_qiskit`` but is not a separate state-preparation block of a
+    Program, so the execution limit ``ExecutionLimits.max_direct_amplitudes``
+    does not apply. ``_admit_lcu``
+    checks it instead, counting ``16 P (a + 1)`` work against ``max_work``
+    and 128 bytes per address for P = 2**a addresses. A ``max_work`` of
+    10**8 allows up to 2**18 addresses, and the default of 10**9, which QLS
+    shares, up to 2**21.
     """
 
     _admit_lcu(data, max_bytes=max_bytes, max_work=max_work)
@@ -524,7 +526,7 @@ def build_lcu_prepare(
             layers.
         max_bytes (int): Default 10 GB (decimal, `10_000_000_000` bytes).
             Limit on the known coefficient and PREP arrays. It does not
-            bound SDK memory.
+            bound memory used inside external libraries.
         max_work (int): Default `1_000_000_000`. Limit on the PREP work and
             the TT-SVD of MPS PREP.
 
@@ -550,9 +552,9 @@ def build_lcu_select(data: LCUData, *, max_bytes: int = DEFAULT_MAX_BYTES,
                      max_work: int = DEFAULT_MAX_LCU_WORK) -> QuantumCircuit:
     """Build SELECT, which applies the dense unitary of branch `j` when the control register holds `j`.
 
-    This entry serves small dense validation tables of unrelated
-    multi-qubit unitaries. Pauli and product-formula callers use their
-    gate-level multiplexor compilers and do not go through this dense
+    This function serves small dense validation tables of unrelated
+    multi-qubit unitaries. The Pauli and product-formula constructions of
+    NWQLib use their own gate-level multiplexors instead of this dense
     construction.
 
     The whole controlled matrix of each branch, with its address as the

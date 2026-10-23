@@ -1,4 +1,4 @@
-"""Import unchanged QASM writer output after checking its construction's work limits."""
+"""Import an unchanged file of the OpenQASM 3 writer into Qiskit after checking the limits derived from its construction."""
 
 from dataclasses import dataclass
 import os

@@ -1,29 +1,31 @@
 """QPE Methods: input checks, the controlled-evolution Program and estimate reconstruction.
 
 Every estimator observes the signal z_p = <psi|U^p|psi> through one
-ancilla, with U = exp(-i*tau*H) for a Hamiltonian H or the polar base of the
-supplied unitary. An exact static Plan reads Re z_p and Im z_p as the ancilla
-X and Y expectations at the power positions of one controlled trajectory. A
-sampled Hadamard test turns the measured mean <Z> into Re(exp(i*s)*z_p) with
-its ancilla phase s. Reading order for one ``solve`` call:
+ancilla, with U = exp(-i*tau*H) for a Hamiltonian H or the polar factor of
+the supplied unitary. An exact static Plan reads Re z_p and Im z_p as the
+ancilla X and Y expectations at the power positions of one controlled
+trajectory. A sampled Hadamard test turns the measured mean <Z> into
+Re(exp(i*s)*z_p) with its ancilla phase s. Reading order for one ``solve``
+call:
 
 1. ``_QPEMethod.plan`` checks the input (``_inputs``), chooses tau
    (``_safe_time`` or the Pauli l1 bound), separates and prunes Pauli terms
-   (``_split_pauli_terms``), draws the acquisition schedule
-   (numerical.planned_power_schedule), selects the controlled powers once
-   per Plan (powers.select_powers) and builds either the quantum Program
-   (``_quantum_program``) or the classical host kernel
+   (``_split_pauli_terms``), draws the query schedule
+   (numerical.planned_power_schedule), chooses the construction of each
+   controlled power once per Plan (powers.select_powers) and builds either
+   the quantum Program (``_quantum_program``) or the classical routine
    (``_host_construction``).
 2. The shared Run executes the Program. RWPE instead runs its one-bit
    feedback loop in controller.py.
 3. ``_samples`` reduces saved observations to one ancilla mean per query,
-   and ``_analysis`` applies the estimator kernel in numerical.py and
-   derives the phase in turns and the output-frame interval from its value
-   (records.public_estimate).
+   and ``_analysis`` applies the estimator routine in numerical.py and
+   derives from its value the phase in turns and the interval in the units
+   of the requested output (records.public_estimate).
 
-Size laws passed to ``_QPEMethod._admit`` are counted before the work they
-describe. They are allowances in scalar-operation and byte units, not
-measured CPU time or memory (docs/CODE_TOUR.md, "Byte and work budgets").
+The size formulas passed to ``_QPEMethod._admit`` are checked against the
+limits before the work they describe. They are allowances in
+scalar-operation and byte units, not measured CPU time or memory
+(docs/CODE_TOUR.md, "Byte and work budgets").
 """
 
 from nwqlib._limits import DEFAULT_MAX_BYTES
@@ -129,16 +131,16 @@ ERROR_SOURCES = (
 
 @dataclass(frozen=True)
 class _Input:
-    """Native inputs bound to a Plan for execution, archives and verification.
+    """Checked operator and state inputs attached to a Plan for execution, saving and verification.
 
     Attributes:
-        target: Admitted operator on the power-of-two register, after the
+        target: Checked operator on the power-of-two register, after the
             padding of ``_QPEMethod._inputs``.
-        reference: Admitted initial state on the same register.
+        reference: Checked initial state on the same register.
         tau: Time step of U = exp(-i*tau*H), or None for unitary input.
-        base: For unitary input, the admitted polar factor V = polar(A) of
-            the target, the base of every power and spectral consumer. None
-            for Hamiltonian input.
+        base: For unitary input, the checked polar factor V = polar(A) of
+            the target, the base of every power and of every spectral
+            computation. None for Hamiltonian input.
     """
 
     target: OperatorInput
@@ -155,15 +157,16 @@ class _Input:
 def _new_context():
     """Return an empty run-local spectral cache.
 
-    Keys: ``target`` (operator identity and decomposition kind),
+    Keys: ``target`` (operator reference and decomposition kind),
     ``eigensystem`` (read-only eigenvalues and eigenvectors),
-    ``preparation`` (the preparation record the reference belongs to),
+    ``preparation`` (the state-preparation specification of the reference),
     ``reference`` ((vector, basis index) from _reference_data),
     ``weights`` (numerical.spectral_weights) and ``squares`` (the base's
-    identity and its cached binary squares, powers.cached_unitary_power;
-    None until the first unitary power). The host kernel and dense powers
-    fill it lazily and share it within one Run. Verification starts from a
-    copy of the context saved with the Result, which keeps no squares.
+    input reference and its cached binary squares from
+    powers.cached_unitary_power, or None until the first unitary power). The
+    classical routine and the dense powers fill it on first use and share it
+    within one Run. Verification starts from a copy of the context saved
+    with the Result, which keeps no squares.
     """
     return {
         "target": None,
@@ -194,10 +197,11 @@ def _check_context(context, target, kind, preparation=None):
 def _eigensystem(target, matrix, *, kind, context):
     """Return the context's eigensystem of the target, computing it once per context.
 
-    Within one context, the host signal, the dense Hamiltonian powers and
-    explicit verification share this one decomposition. The arrays are made
-    read-only so that sharing cannot let one consumer alter another's
-    spectrum. Returns the eigensystem and whether this call computed it.
+    Within one context, the classical signal, the dense Hamiltonian powers
+    and explicit verification share this one decomposition. The arrays are
+    made read-only so that no computation that shares them can alter the
+    spectrum the others use. Returns the eigensystem and whether this call
+    computed it.
     """
     _check_context(context, target, kind)
     created = context["eigensystem"] is None
@@ -210,11 +214,11 @@ def _eigensystem(target, matrix, *, kind, context):
 
 
 def _scalar_reference_available(state):
-    """Return whether ``state`` is a nonzero one-dimensional vector with stored entries.
+    """Return whether ``state`` is a nonzero one-dimensional vector with explicit entries.
 
     A dimension-one problem has a scalar target and no system register, so
     the Hadamard test needs no preparation circuit and the reference
-    direction is read directly from the admitted vector.
+    direction is read directly from the checked vector.
     """
     return (
         isinstance(state, StateInput)
@@ -261,8 +265,8 @@ def _spectrum(data, context):
 
     The eigendecomposition and the projection of the reference each run at
     most once per context. ``setup`` and ``projected`` report whether this
-    call performed them, and the host kernel records both counts so that a
-    report distinguishes reuse from new work.
+    call performed them, and the classical routine records both counts so
+    that a report distinguishes reuse from new work.
     """
     kind = "unitary" if data.tau is None else "hamiltonian"
     preparation = data.reference.preparation
@@ -294,8 +298,8 @@ def _safe_time(matrix, supplied, *, phase_radius=pi):
     default registered in docs/ENGINEERING_CONSTANTS.md (QPE automatic time),
     not a paper constant. A supplied time is returned unchanged, and R is
     still reported for the aliasing check. A zero matrix returns tau = 1 and
-    R = 0. R is None when it overflows binary64. This reads the stored dense
-    input and performs no eigensolve.
+    R = 0. R is None when it overflows binary64. This reads the dense input
+    matrix and performs no eigensolve.
     """
     # Scaled row-sum calculation avoids complex scaling underflow and
     # overflowing an otherwise representable conservative time.
@@ -319,14 +323,14 @@ def _safe_time(matrix, supplied, *, phase_radius=pi):
 
 
 def _analysis_size(options, count, *, power_span, complex_points):
-    """Return (work, bytes) declared for one estimator analysis, or for RWPE its controller run.
+    """Return (work, bytes) declared for one estimator analysis, or for RWPE its iteration loop.
 
-    ``count`` is the number of scalar samples (acquisition settings) and
+    ``count`` is the number of scalar samples (query settings) and
     ``complex_points`` the number N of distinct complex points after the two
-    quadratures of each power are combined. Planning admits this size before
-    the schedule is drawn, and reanalysis admits it again before a changed
-    grid is evaluated, so max_work and max_bytes bound the analysis before it
-    runs. The values are operation-size units, not measured CPU time
+    quadratures of each power are combined. Planning checks this size against
+    the limits before the schedule is drawn, and reanalysis checks it again
+    before a changed grid is evaluated, so max_work and max_bytes bound the
+    analysis before it runs. The values are operation-size units, not measured CPU time
     (docs/ENGINEERING_CONSTANTS.md, QCELS finite complex search).
     """
     if options.estimator == "qcels":
@@ -398,7 +402,7 @@ def trajectory_labels(width):
 
 
 def _quantum_program(data, queries, selection, shots, route):
-    """Build the quantum Program of the selected route from its selected power constructions.
+    """Build the quantum Program of the given route from the constructions chosen for its powers.
 
     ``route`` is ``trajectory``, ``sampled`` or ``rwpe``.
 
@@ -413,11 +417,12 @@ def _quantum_program(data, queries, selection, shots, route):
     labels are ``"I"*n+"X"`` and ``"I"*n+"Y"`` (``trajectory_labels``), read
     at one ``pauli_expectation`` point per distinct power. A final phase s
     and H read Re(exp(i*s)*z_p), so phases 0 and -pi/2 give
-    exactly these quadratures. Those phase/H tails are unnecessary with X/Y
-    saves. Leaving them in the continuing circuit without undoing them would
-    change subsequent signals. Nothing follows the last point. Power 0 is
-    observed after the preparation and H as an actual acquisition. The
-    base-oracle cost is P_max controlled applications, compared with
+    exactly these quadratures. The final phase and H are unnecessary when the
+    X and Y expectations are saved directly. Leaving them in the continuing
+    circuit without undoing them would change subsequent signals. Nothing
+    follows the last point. Power 0 is a measured point after the preparation
+    and H. The cost in applications of the base unitary is P_max controlled
+    applications, compared with
     sum_i p_i for separately prepared powers with combined X/Y readout, or
     2*sum_i p_i for two quadrature circuits. Preparation occurs once and
     there are 2K scalar outputs. A dense gap is one controlled gap-power
@@ -429,8 +434,8 @@ def _quantum_program(data, queries, selection, shots, route):
     gap does not double count earlier phase, as adding -c_I*t_i at every
     position would. Gap node ids are ``gap_<p>``.
 
-    Sampled static Hadamard tests. Positive-shot X and Y acquisitions still
-    require separate preparations. Each query's body is prepare, H,
+    Sampled static Hadamard tests. With positive shots, the X and Y
+    measurements require separate preparations. Each query's body is prepare, H,
     ``selected_<p>``, its quadrature RZ(s), H and the ancilla measurement
     (Ding and Lin, arXiv:2211.11973v2, Fig. 1, p. 3): with ancilla phase s
     the ancilla mean is <Z> = Re(exp(i*s) <psi|U^p|psi>), so s = 0 and
@@ -441,12 +446,12 @@ def _quantum_program(data, queries, selection, shots, route):
     applies the power's own independently selected step repeated ``steps``
     times with the control phase P(-p*tau*c_I) for a product formula, and
     the dense power block of p for a dense power. A counts batch requests
-    ``shots * query.multiplicity`` repetitions, the only place where the
-    multiplicity of pooled SPE and RFE draws enters the requested
-    population.
+    ``shots * query.multiplicity`` repetitions. This is the only place where
+    the multiplicity of pooled SPE and RFE draws enters the requested number
+    of shots.
 
     RWPE. Each query is one Hadamard test at its continuous time with a
-    symbolic ``feedback`` phase that its controller binds, its own
+    symbolic ``feedback`` phase that the RWPE loop of controller.py sets, its own
     independently selected step repeated ``steps`` times and the control
     phase P(-p*tau*c_I), because controlled(exp(i*a) V) equals P(a) on the
     control followed by controlled V.
@@ -648,7 +653,7 @@ def _quantum_program(data, queries, selection, shots, route):
 
 
 def _bind_host(plan, data, declaration):
-    """Return the bound host kernel that evaluates the ideal Hadamard means classically.
+    """Return the classical routine, bound to this Plan, that evaluates the ideal Hadamard means.
 
     For each query (power p, ancilla phase s) the kernel returns
     Re(exp(i*s)*z_p) with z_p = sum_j w_j*exp(-i*E_j*tau*p), or
@@ -720,22 +725,25 @@ def _bind_host(plan, data, declaration):
 
 
 def _samples(plan, observations, trace, *, receipts=()):
-    """Return one QPESample (ancilla mean with its power and phase) per acquired query value.
+    """Return one QPESample (ancilla mean with its power and phase) per obtained query value.
 
-    Every observation chunk is first joined to one completed event, its
-    selected Experiment and readout, and, for counts, the receipt of its
-    selected construction and an independent seed population. A trajectory
-    point chunk holds the one-point readout of its declared point, and its
-    attempt's completed event names the ``ObservationView`` identity of the
-    ordered point collection. When every declared point is present that
-    identity is checked, and a missing point leaves its queries without
-    samples, so analysis reports them missing instead of replaying any
-    prefix. Each Experiment and binding is resolved once per call, however
-    many point chunks it produced. _host_samples then reduces a classical
-    host-kernel chunk, _trajectory_samples a trajectory point and
-    _native_sample a one-bit count readout. Analysis, the RWPE controller and
-    saved-data validation all call this one reduction, so a loaded Result is
-    checked against the same samples its producer used.
+    Every observation chunk is first matched to one completed event, its
+    Experiment and readout. A counts chunk is also matched to the preparation
+    record (receipt) of its construction and checked for unknown sampling
+    semantics, reused data and repeated fixed-seed streams. Statistical
+    independence remains an assumption of the sampling model. A trajectory
+    point chunk holds the measurement at its declared point, and the
+    completed event of its attempt names the content hash of the
+    ``ObservationView`` of the ordered points. When every
+    declared point is present that hash is checked, and a missing point
+    leaves its queries without samples, so analysis reports them missing
+    instead of rerunning part of the trajectory. Each Experiment and binding
+    is resolved once per call, however many point chunks it produced.
+    _host_samples then reduces a chunk that the classical routine returned,
+    _trajectory_samples a trajectory point and _native_sample a one-bit count
+    measurement. Analysis, the RWPE iteration loop and saved-data validation
+    all call this one reduction, so a loaded Result is checked against the
+    same samples from which it was computed.
     """
     from nwqlib._counts import CountsSources
     from nwqlib.execution import ObservationView
@@ -807,14 +815,15 @@ def _samples(plan, observations, trace, *, receipts=()):
 
 
 def _host_samples(plan, chunk, event, realization):
-    """Return the samples of one classical host-kernel chunk.
+    """Return the samples of one chunk that the classical routine returned.
 
-    The chunk must come from the Plan's single host kernel with its declared
-    scalar frames, application arguments and work. A static batch holds one
-    scalar per query, and an RWPE chunk holds its one query. Each scalar is
-    the ideal ancilla mean Re(exp(i*s)*z_p) of _bind_host. bounded_mean
-    stores a value that lies within NUMERICAL_RELATION_RTOL outside [-1, 1]
-    in raw_mean and uses the nearer endpoint as mean. A missing scalar
+    The chunk must come from the Plan's single classical routine with its
+    declared scalar frames, application arguments and work. A static batch
+    holds one scalar per query, and an RWPE chunk holds its one query. Each
+    scalar is the ideal ancilla mean Re(exp(i*s)*z_p) of _bind_host.
+    bounded_mean records in raw_mean a value that lies within
+    NUMERICAL_RELATION_RTOL outside [-1, 1] and uses the nearer endpoint as
+    mean. A missing scalar
     (value None) produces no sample.
     """
     kernel = realization.selected_construction(plan).kernels[0]
@@ -879,7 +888,7 @@ def _host_samples(plan, chunk, event, realization):
 
 
 def _expected_layout(plan):
-    """Return the native layout of a QPE readout: ancilla on qubit 0, system on qubits 1..n."""
+    """Return the qubit layout of a QPE measurement: ancilla on qubit 0, system on qubits 1..n."""
     width = plan.reconstruction.preparation.basis.dimension.bit_length() - 1
     return (("ancilla", (0,)),) + ((("system", tuple(range(1, width + 1))),) if width else ())
 
@@ -891,8 +900,8 @@ def _trajectory_samples(plan, chunk, event, receipt_map):
     whose expectations at power p are Re z_p and Im z_p. Each query of the
     point keeps its logical quadrature (0 for X, -pi/2 for Y) and names the
     point chunk as its one contribution, so the two quadratures of one power
-    share one acquisition. Each saved expectation is admitted by
-    ``bounded_mean`` within the receipt's ``probability_window``: one native
+    share one measurement. ``bounded_mean`` accepts each saved expectation
+    within the ``probability_window`` of the preparation record. One native
     operation count G for the whole trajectory
     (``PreparedArtifact.probability_window``) gives a conservative window
     for every point, and the window is not multiplied by the number of
@@ -970,12 +979,12 @@ def _native_sample(plan, chunk, event, observation):
 
 
 def _aggregate(samples):
-    """Return (mean, shots) of the samples acquired for one query.
+    """Return (mean, shots) of the samples obtained for one query.
 
     Count samples are pooled: mean = (sum zeros - sum ones)/(total returned
     shots), with that total as the second value. Exact samples, which carry
     no shot count, are averaged and return shots None. A query cannot mix the
-    two populations.
+    two kinds of data.
     """
     sampled = tuple(sample.shots is not None for sample in samples)
     if any(sampled) and not all(sampled):
@@ -991,14 +1000,14 @@ def _mean_window(plan, samples, receipts):
 
     QCELS and RFE use it to decide which powers carry a signal
     (numerical._signal_vanishes). Count samples take the exact-zero test, so
-    any sample with shots gives None. Classical execution evaluates host
-    scalars, whose means ``bounded_mean`` admits within
-    NUMERICAL_RELATION_RTOL. Exact trajectory expectations are admitted
-    within their receipt's ``probability_window`` (_trajectory_samples): one
-    native operation count G for the whole trajectory
-    (``PreparedArtifact.probability_window``) gives a conservative window
-    for every point, so the window is the largest over the Run's receipts, or
-    NUMERICAL_RELATION_RTOL without a receipt.
+    any sample with shots gives None. Classical execution evaluates its
+    scalars in the classical routine, whose means ``bounded_mean`` accepts
+    within NUMERICAL_RELATION_RTOL. Exact trajectory expectations are
+    accepted within the ``probability_window`` of their preparation record
+    (_trajectory_samples). One native operation count G for the whole
+    trajectory (``PreparedArtifact.probability_window``) gives a conservative
+    window for every point, so the window is the largest over the Run's
+    preparation records, or NUMERICAL_RELATION_RTOL without a record.
     """
     if any(sample.shots is not None for sample in samples):
         return None
@@ -1019,10 +1028,10 @@ def _static_estimate(plan, samples, options, *, mean_window=None):
     roundoff. When any planned query has no sample, no estimator runs and the
     missing names are returned.
 
-    Each count-mode SPE or RFE query contributes its mean over the shots
-    actually returned, weighted by its original random-power draw
-    multiplicity (``received_fourier_exposure``). The third returned value
-    holds the exposure facts of those count queries, None otherwise.
+    Each sampled SPE or RFE query contributes its mean over the shots
+    returned, weighted by its draw multiplicity, the number of times its
+    power was drawn (``received_fourier_exposure``). The third returned value
+    holds the exposure facts of those sampled queries, None otherwise.
     """
     rec = plan.reconstruction
     powers = tuple(power.power for power in rec.powers)
@@ -1073,7 +1082,7 @@ def _exposure_fields(exposure):
     """Return the QPEAnalysis exposure fields of ``received_fourier_exposure``'s facts.
 
     The exact effective exposure keeps its numerator and denominator, and
-    the exact RFE coordinate proxy is published upward in binary64.
+    the exact RFE coordinate proxy is rounded upward to binary64.
     """
     from nwqlib.subroutines.trotterization.error_budget import _finite_upper
 
@@ -1092,14 +1101,14 @@ def _exposure_fields(exposure):
 
 
 def received_fourier_exposure(pairs, shots):
-    """Return the received-population facts of count-mode SPE or RFE queries.
+    """Return the facts about the shots received by sampled SPE or RFE queries.
 
     ``pairs`` contains (real_query, imag_query, real_received, imag_received)
     per drawn power. Let M be the number of paired random-power draws and m
     the multiplicity of a distinct drawn power, with sum m = M. A query
     requests N = s*m shots and returns n with 1 <= n <= N, and its mean is
     (Z - O)/n. Conditioned on the drawn schedule and the received counts,
-    and assuming every counted observation is an actual outcome of that
+    and assuming every counted observation is a genuine outcome of that
     query with the same conditional mean and was not selected by its
     outcome or an outcome-dependent stopping rule, linearity gives
     E[m*mean | schedule, counts] = m*mu for every positive integer n,
@@ -1113,15 +1122,14 @@ def received_fourier_exposure(pairs, shots):
     min_q n_q/m_q, not a fractional physical shot count. These are
     statements about the finite CDF or Fourier arrays, not about the
     nonlinear crossing or peak, and exclude evolution bias and
-    floating-point evaluation error. Source: NWQLib's received-population
-    analysis of the pooled draws, with
-    the uniform random draws of Kshirsagar, Katabarwa and Johnson,
-    arXiv:2209.11322v3, Eqs. (5)-(7), and the sampled filter of Wan, Berta
-    and Campbell, arXiv:2110.12071v2.
+    floating-point evaluation error. Source: NWQLib's analysis of the shots
+    received for the pooled draws, with the uniform random draws of
+    Kshirsagar, Katabarwa and Johnson, arXiv:2209.11322v3, Eqs. (5)-(7), and
+    the sampled filter of Wan, Berta and Campbell, arXiv:2110.12071v2.
 
-    Refuses an empty draw schedule, quadratures that do not represent the
-    same draws and a received count outside 1..N (no shots, or an over-return
-    beyond the admitted request).
+    Raises ValueError for an empty draw schedule, for quadratures that do not
+    represent the same draws and for a received count outside 1..N (no
+    shots, or more shots than requested).
     """
     from fractions import Fraction
 
@@ -1155,7 +1163,7 @@ def received_fourier_exposure(pairs, shots):
 
 
 def _schedule_size(config, tau):
-    """Return (acquisition count, maximum power) and admit the schedule size.
+    """Return (setting count, maximum power) and check the schedule size.
 
     ``count`` is the number of logical quadrature settings before repeated
     SPE and RFE draws are grouped, two per power for the static estimators and
@@ -1165,10 +1173,10 @@ def _schedule_size(config, tau):
     K-1 for RFE and the last relative time 1/sigma for RWPE. Planning
     calls this before the method RNG draws the schedule, so an oversized
     schedule or a power above max_power is rejected before any draw or
-    construction. The admitted size is 8 work units and 64 bytes per unit of
-    ``frontier``, which counts the schedule entries plus 2*fourier_degree+1
-    for SPE (the filter's maximum frequency) or K for RFE (its number of
-    frequencies).
+    construction. The size checked against the limits is 8 work units and
+    64 bytes per unit of ``frontier``, which counts the schedule entries
+    plus 2*fourier_degree+1 for SPE (the filter's maximum frequency) or K for
+    RFE (its number of frequencies).
     """
     if config.estimator == "qcels":
         positive, maximum = numerical.qcels_schedule_size(config, tau)
@@ -1193,12 +1201,14 @@ def _schedule_size(config, tau):
 
 
 def _host_declaration(data, labels, *, work, payload, pointwise, query_count):
-    """Declare the classical kernel that evaluates the nominal signal.
+    """Declare the classical routine that evaluates the nominal signal.
 
-    The kernel computes the estimator signal from one dense eigendecomposition
-    and the prepared spectral weights. It is a nominal model, not quantum
-    execution or an independent reference. ``work`` and ``payload`` are the
-    size laws the caller admitted. LAPACK internals and SDK workspace stay unknown.
+    The routine computes the estimator signal from one dense
+    eigendecomposition and the prepared spectral weights. It is a nominal
+    model, not quantum execution or an independent reference. ``work`` and
+    ``payload`` are the size formulas the caller has checked against the
+    limits. The work inside LAPACK and the workspace of the numerical
+    libraries remain unknown.
     """
     law = ResourceLaw(
         metric="classical_work",
@@ -1226,9 +1236,9 @@ def _analysis_configuration(method, settings):
 
     Only QCELS and SPE accept ``grid_size``, which changes the analysis grid
     over the same observations. RFE's K fixes both its power distribution and
-    its frequency grid, and every RWPE setting fixes its controller, so both
-    accept no setting. A setting that would need new acquisitions raises
-    ValueError.
+    its frequency grid, and every RWPE setting fixes its iteration loop, so
+    neither accepts a setting. A setting that would need new observations
+    raises ValueError.
     """
     allowed = set() if method.estimator in {"rfe", "rwpe"} else {"grid_size"}
     if set(settings) - allowed:
@@ -1248,17 +1258,18 @@ def _analysis(
     controller_work=0,
     stop_reason=None,
 ):
-    """Return the QPEAnalysis Result for existing samples, without acquisition.
+    """Return the QPEAnalysis Result for existing samples, without new observations.
 
     RWPE reports the saved Gaussian moments through numerical.rwpe_estimate
     and is complete once all planned steps are processed. The static
     estimators run _static_estimate and are complete when no query is
-    missing and the kernel identified an estimate. records.public_estimate
-    derives the phase in turns and the output-frame interval from the kernel
-    value, and identification_note prefixes any unverified branch or filter
-    premise to the interval text. ``settings`` holds reanalysis choices
-    accepted by _analysis_configuration. ``receipts`` are the Run's
-    preparation receipts, whose windows ``_mean_window`` reads.
+    missing and the estimator routine identified an estimate.
+    records.public_estimate derives from the routine's value the phase in
+    turns and the interval in the units of the requested output, and
+    identification_note prefixes to the interval text any unverified branch
+    or filter assumption. ``settings`` holds reanalysis choices accepted by
+    _analysis_configuration. ``receipts`` are the Run's preparation records,
+    whose windows ``_mean_window`` reads.
     """
     settings = settings or {}
     config = _analysis_configuration(plan.method, settings)
@@ -1340,7 +1351,8 @@ def _split_pauli_terms(raw, rtol):
     - pruned_mass: an upward bound d_up on d = sum |c_j| over nonidentity
       terms with |c_j| <= rtol*max_k |c_k|, the maximum including the
       identity (``error_budget.upper_dropped_mass``). powers.select_powers
-      charges abs(t)*d_up at the exact target time of each power. For H',
+      counts abs(t)*d_up against the error budget at the exact target time
+      of each power. For H',
       ||exp(-i*t*H) - exp(-i*t*H')|| <= abs(t)*||H - H'|| <= abs(t)*d, the second step
       by the triangle inequality because every Pauli string has norm one.
       The emitted-parameter rechecks require the exact mass or an outward upper
@@ -1373,12 +1385,13 @@ def _split_pauli_terms(raw, rtol):
 def _host_construction(method, data, d, queries, powers):
     """Return (construction, experiments, declaration) for classical execution.
 
-    The Program has one ClassicalStage that calls the host kernel of
+    The Program has one ClassicalStage that calls the classical routine of
     _bind_host. Static estimators evaluate every query in one ``overlaps``
     experiment with scalars ``z_0``, ``z_1``, and so on. RWPE has one
     experiment per query with the single scalar ``z`` and a symbolic
-    ``feedback`` parameter. The declaration carries the admitted size law
-    of the kernel as its invocation work and workspace bytes.
+    ``feedback`` parameter. The declaration carries the routine's size
+    formula, already checked against the limits, as its invocation work and
+    workspace bytes.
     """
     # Size law of the host kernel for dimension D:
     # - 8*D**3 work: the dense eigendecomposition (numerical.nominal_eigensystem).
@@ -1436,10 +1449,10 @@ def _host_construction(method, data, d, queries, powers):
 def _unknown_error_model(problem, output, construction):
     """Return the ErrorModel that records every QPE error source as unknown.
 
-    The estimator kernels give at most a local model interval. None of them
-    composes the ERROR_SOURCES contributions into a bound in the requested
-    output frame, so each one is listed with availability "unknown" instead
-    of being omitted.
+    The estimator routines give at most a local model interval. None of them
+    composes the ERROR_SOURCES contributions into a bound in the quantity
+    and unit of the requested output, so each one is listed with
+    availability "unknown" instead of being omitted.
     """
     frame = output.frame(problem)
     return ErrorModel(
@@ -1501,16 +1514,23 @@ class _QPEMethod(Method):
             `"trotter_error_budgeted"`, a second-order product formula, which
             needs a Hamiltonian.
         controlled_power_error_budget: Default `1e-3`, positive. Operator-norm
-            allowance for each power, covering Pauli pruning plus
-            product-formula error. It does not bound the estimator error.
+            allowance for each power on the `"trotter_error_budgeted"` route,
+            covering Pauli pruning, product-formula error, represented-time
+            displacement, rotation-angle formation and the identity-phase
+            discrepancy. It does not bound the estimator error or certify
+            the numerical error of the `"dense_exact"` route.
         pauli_pruning_rtol: Default `1e-12`, nonnegative. Non-identity Pauli
             terms with `abs(c) <= pauli_pruning_rtol*max abs(c)` are dropped,
             and their L1 mass is counted against each power's error
             allowance.
         max_bytes: Default 10 GB (decimal, `10_000_000_000` bytes). Limit on
-            the known bytes of input and analysis arrays.
-        max_work: Default `1_000_000_000`. Limit on the counted work of the
-            likelihood, the grid and the evolution choice.
+            the bytes of the input and analysis arrays whose sizes are known
+            in advance.
+        max_work: Default `1_000_000_000`. Limit on the work units counted
+            for the likelihood, the grid and the choice of the controlled
+            evolutions. A work unit is one scalar operation in a count
+            derived from the problem sizes by formula and checked before the
+            computation runs, not a measured time.
         max_power: Default `100_000`. Largest absolute evolution time in
             units of tau, including the non-integer times of RWPE.
         max_trotter_steps: Default `1_000_000`. Largest number of
@@ -1534,8 +1554,8 @@ class _QPEMethod(Method):
     def _admit(self, work, payload_bytes):
         """Raise ValueError if work > max_work or bytes > max_bytes, naming the Method class, the exceeded limits and both sizes.
 
-        Callers pass the size law of the next step before running it, so a
-        refused step never starts.
+        Callers pass the size formula of the next step before running it, so
+        a rejected step never starts.
         """
         if work > self.max_work or payload_bytes > self.max_bytes:
             name = type(self).__name__
@@ -1550,7 +1570,7 @@ class _QPEMethod(Method):
                 + " and ".join(f"{name}.{field} to at least {need}" for field, need in exceeded) + ".")
 
     def _inputs(self, problem, output):
-        """Admit Hamiltonian/unitary inputs and pad only explicit finite dense coordinates.
+        """Check Hamiltonian or unitary inputs and pad only explicit finite dense matrices.
 
         A dense input of dimension d that is not a power of two is embedded in
         the next power of two. The added block is c*I with c = Tr(H)/d for a
@@ -1633,7 +1653,7 @@ class _QPEMethod(Method):
            power, and one dense block per trajectory gap or sampled power.
         7. Build the circuit description: one trajectory for exact static
            estimators, one Hadamard test per sampled or RWPE query, or the
-           classical kernel, with the record that analysis reads and the
+           classical routine, with the record that analysis reads and the
            error model.
         """
         if self.estimator == "rwpe" and isinstance(problem, SpectralEstimation) and problem.unitary is not None:
@@ -1877,12 +1897,12 @@ class _QPEMethod(Method):
             raise KeyError("feedback")
 
     def before_submit(self, plan, prepared, *, run):
-        """Reject known unusable likelihood populations before new submission."""
+        """Before submission, reject count data known to be unusable as independent likelihoods."""
         if any(handle.record.observation.kind == "counts" for handle in prepared):
             run.admit_count_preparations(prepared)
 
     def prepare_all_refusal(self):
-        """RWPE refuses ``settings="all"``, because each feedback angle depends on the outcomes before it."""
+        """RWPE rejects ``settings="all"``, because each feedback angle depends on the outcomes before it."""
         if self.estimator == "rwpe":
             return (
                 "RWPE cannot prepare every setting in advance, because the feedback angle of each "
@@ -1897,30 +1917,30 @@ class _QPEMethod(Method):
 
         RWPE's query comes from ``controller.prepare_rwpe``. For RWPE,
         ``settings`` is always ``"first"``, because ``prepare_all_refusal``
-        refuses ``"all"`` before a Run exists, so ``prepare_rwpe`` does not
+        rejects ``"all"`` before a Run exists, so ``prepare_rwpe`` does not
         take it.
 
-        Quantum RWPE plans ``max_steps`` circuit preparations, acquisitions
+        Quantum RWPE plans ``max_steps`` circuit preparations, measurements
         and one-shot observations. It checks all three totals before preparing
-        the first feedback query. A caller cancellation can end the run
+        the first feedback query. Cancellation by the caller can end the Run
         earlier. The feedback angle remains dependent on preceding outcomes,
         so only the next circuit is prepared at a time. ``controller.run_rwpe``
         processes one datum at each of ``max_steps`` scheduled steps, and
         quantum preparation enforces one shot per step, so without
         cancellation or execution failure::
 
-            preparations = acquisitions = shots = max_steps
+            preparations = measurements = shots = max_steps
 
         The Gaussian width update introduces no early convergence stop, so
-        ``max_steps`` is the exact completed-work total of the normal route
-        and a sufficient envelope when the caller cancels. The check is
-        ``Run.check_capacity``, not a reservation, so the per-step charges are
-        unchanged and nothing is counted twice. It runs on a fresh Run only: a
-        restored Run already holds exposure and may have a prepared or
-        completed pending step, and its existing per-step checks protect
-        resumed and exceptional work. The classical route uses host
-        invocations and a local Bernoulli draw and is not charged as quantum
-        shots.
+        ``max_steps`` is the exact total of completed work on the normal route
+        and a sufficient upper bound when the caller cancels. The check is
+        ``Run.check_capacity``, which sets nothing aside, so the per-step
+        counts against the Run limits are unchanged and nothing is counted
+        twice. It runs on a fresh Run only. A restored Run already has
+        submitted work and may have a prepared or completed pending step, and
+        its existing per-step checks protect resumed and exceptional work. The
+        classical route calls the classical routine and draws the Bernoulli
+        datum locally, and neither is counted as a quantum shot.
         """
         if self.estimator == "rwpe":
             from .controller import prepare_rwpe
@@ -1982,7 +2002,7 @@ class _QPEMethod(Method):
 
     @staticmethod
     def snapshot_result_context(context):
-        """Keep already-produced spectral arrays by immutable reference."""
+        """Keep the spectral arrays already computed, as read-only references."""
         from types import MappingProxyType
 
         if context is None:
@@ -2184,16 +2204,18 @@ class RFE(_QPEMethod):
     `Eigenproblem` needs `initial_state`. The other arguments are optional,
     and the [shared settings][nwqlib.algorithms.qpe.method._QPEMethod] apply
     too. The result is a
-    [`QPEAnalysis`][nwqlib.algorithms.qpe.records.QPEAnalysis] whose phase
-    is `2*pi*j/K` for the frequency j of the largest of the K sampled Fourier
-    coefficients, on the principal branch, and whose energy is `-phase/tau`.
+    [`QPEAnalysis`][nwqlib.algorithms.qpe.records.QPEAnalysis] whose `phase`
+    is `j/K` turns for the index j of the largest-magnitude sampled Fourier
+    coefficient among the K. For a Hamiltonian its energy is `-phi/tau`, where `phi` is
+    `2*pi*j/K` reduced to the principal branch `[-pi, pi)`.
 
     In randomized Fourier estimation, each of M independent draws picks a
     uniform integer power in `[0, K)` and measures the real and imaginary
     Hadamard tests of Kshirsagar, Katabarwa and Johnson, arXiv:2209.11322v3
     (Eqs. (1)-(6), p. 4).
     Algorithm 1 and Eq. (7), p. 5, define the sampled Fourier coefficients.
-    The default exact readout reads the same quadratures as the ancilla X
+    The default exact readout computes expectations without shot sampling,
+    subject to numerical rounding. It reads the same quadratures as the ancilla X
     and Y expectations at each power of one controlled trajectory, and
     sampled readout keeps the paired tests. Repeated draws of one power
     share one setting per quadrature. With counts, that setting requests
@@ -2211,7 +2233,7 @@ class RFE(_QPEMethod):
 
     Examples:
         `H = diag(-0.5, 0.5)` has eigenvalue -0.5 for the eigenvector `|0>`.
-        RFE returns a phase on the grid `2*pi*j/49`:
+        RFE returns `result.phase` equal to `j/49` turns for an integer j:
 
         >>> from nwqlib import Eigenproblem, solve
         >>> from nwqlib.algorithms import RFE
@@ -2245,7 +2267,7 @@ class RWPE(_QPEMethod):
     because the method needs continuous evolution times, which the integer
     powers of a bare unitary do not supply. It uses exactly one shot per
     step. Because each feedback angle depends on the outcomes before it,
-    `prepare(plan, settings="all")` is refused, and `prepare(plan)` prepares
+    `prepare(plan, settings="all")` is rejected, and `prepare(plan)` prepares
     the next query.
 
     The random-walk phase estimation update is the basic walk of Granade and

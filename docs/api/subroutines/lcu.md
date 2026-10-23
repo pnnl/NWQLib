@@ -67,7 +67,7 @@ print(np.round(alpha * block.real, 12))
 
 - A supplied zero-weight unitary that is not the identity stays a real SELECT branch and goes through the normal unitarity check.
 - Every function takes `max_bytes` (default 10,000,000,000) and `max_work` (default 1,000,000,000). Before any matrix conversion or synthesis they check the coefficient and PREP tables, the supplied matrices and, for a dense SELECT with a control register, the exact synthesis of each controlled branch, for `N` terms, `P` addresses and system dimension `D`. A branch is synthesized from its `PD`-square controlled matrix. Work counts scalar operations, not time. With `M = PD` and `m = log2(M)`, each branch counts `11 M³ + (m² + 5m + 256) M²` work units, `256 M² + 65536` bytes of working arrays, which one branch at a time uses, and `176 M² + 16384` bytes for the circuit it keeps.
-- The default `max_work` is a guard against runaway planning work, and a dense SELECT above it needs an explicitly raised `max_work`. The `DEFAULT_MAX_LCU_WORK` row of [Engineering constants](../../ENGINEERING_CONSTANTS.md#budgets-and-mechanical-bounds) gives the derivation and the measured times and memory behind these terms.
+- The default `max_work` stops unintentionally large planning work, and a dense SELECT above it needs an explicitly raised `max_work`. The `DEFAULT_MAX_LCU_WORK` row of [Engineering constants](../../ENGINEERING_CONSTANTS.md#budgets-and-mechanical-bounds) gives the derivation and the measured times and memory behind these terms.
 - Pass the limits to each stage you call. `build_lcu_circuit` forwards the same values to its stages. The workspace of the tensor library used by layered MPS PREP is not counted.
 
 ## Source map

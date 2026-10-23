@@ -1,4 +1,4 @@
-"""Selected LCHS reconstruction and original-coordinate scientific results."""
+"""LCHS reconstruction records and the results in the original coordinates."""
 
 from typing import Literal
 
@@ -27,10 +27,10 @@ DESCRIPTOR = AlgorithmDescriptor(method="lchs", version="3",
 
 
 class LCHSReconstruction(Record):
-    """Actual recovery and coordinate mapping, never a second scientific input.
+    """Recovery scale and coordinate mapping of an LCHS Plan, never a second scientific input.
 
     Attributes:
-        elapsed_time: Selected final time minus initial time.
+        elapsed_time: Final time minus initial time.
         dimension: Original physical coordinate dimension.
         encoded_dimension: Dimension including any coherent dummy coordinates.
         mode: "quadrature" (finite LCHS sum), "unitary" (a quantum Plan
@@ -40,20 +40,20 @@ class LCHSReconstruction(Record):
             zero).
         has_source: Whether the original problem includes a constant source.
         initial_scale: Original initial-vector norm in binary physical-scale form.
-        source_scale: Original source-vector scale, when a source is selected.
+        source_scale: Original source-vector scale, when the problem has a source.
         recovery: Physical scale that multiplies the success-projected
             amplitudes. For LCHS evolution it composes the coefficient 1-norm,
             any QSP amplitude factor, without a constant source the
             initial-state norm, and the power of two 2**e that the
             coefficients omit when the PSD recovery exp(shift*T) exceeds
             binary64. A no-evolution readout uses the initial-state
-            norm alone. None for classical host Plans and for no-evolution
-            Plans answered from the ingested input. A unit-normalized output
+            norm alone. None for classical Plans and for no-evolution
+            Plans answered directly from the input. A unit-normalized output
             does not depend on it.
-        success_bits: Actual success-projector qubit indices.
+        success_bits: Qubit indices of the success projector.
         system_bits: Ordered encoded coordinate qubits.
-        terms: Selected observable Pauli labels and coefficients.
-        settings: Actual acquisitions: the one exact ``projected_moments``
+        terms: Pauli labels and coefficients of the observable.
+        settings: Readout settings run: the one exact ``projected_moments``
             reduction, the amplitude or Samples readout, or one counts
             setting per qubit-wise commuting group (its label is the group's
             accumulated basis), the physical-mass counts setting of a
@@ -61,13 +61,14 @@ class LCHSReconstruction(Record):
             unrotated ``physical_mass`` setting.
         groups: Member labels of each group setting, in first-fit order,
             aligned with the settings named ``group_<g>``.
-        grouping_comparisons: Evaluated candidate-mask comparisons of sampled QWC
-            grouping, charged to max_readout_work.
-        select_work: Sum of SELECT construction work recorded at planning, including
-            its separately admitted decomposition, selection and classification
-            charges under the construction-stage max_select_work limits.
+        grouping_comparisons: Comparisons evaluated by the qubit-wise commuting
+            (QWC) grouping of sampled terms, counted against max_readout_work.
+        select_work: Sum of the SELECT construction work counted at planning,
+            including the decomposition, selection and classification work that
+            is checked separately against the max_select_work limit of each
+            construction stage.
         coefficient_l1_norm: One-norm ``sum_j |c_j|`` of the coefficient table
-            this Plan selects. Without a constant source, and in every
+            of this Plan. Without a constant source, and in every
             classical Plan, the table holds the kernel quadrature
             coefficients of one operator application, so the value is
             dimensionless. A quantum Plan with a constant source prepares the
@@ -75,14 +76,15 @@ class LCHSReconstruction(Record):
             initial-state norm or a Duhamel weight times the source norm,
             and the PSD growth of their application, so the value is in the
             solution's unit. When the PSD recovery exp(shift*T) exceeds
-            binary64 this is the one-norm of the stored coefficients, which
+            binary64 this is the one-norm of the saved coefficients, which
             omit its power of two 2**e.
         physical_branches: Nonpadding entries of that table, the k nodes of
             one application, or for a quantum constant-source Plan the k
             nodes of the initial application and of every Duhamel node.
-        padded_branches: Power-of-two address-space size of that table,
-            including padding. A classical Plan runs no SELECT, and the value
-            is the address size its kernel table would need.
+        padded_branches: Number of address slots of that table, a power of
+            two that includes the padding slots. A classical Plan runs no
+            SELECT, and the value is the number of address slots its kernel
+            table would need.
         selected_backend: Hamiltonian-evolution implementation chosen once.
         selected_select: Concrete SELECT implementation or identity route.
         psd_premise: "numerical" (the scale-aware eigenvalue check of
@@ -103,13 +105,13 @@ class LCHSReconstruction(Record):
             ``exp(psd_shift * t)`` of each operator application, summed over
             the applications. It is not total error.
         quadrature_bound: Available k-quadrature component bound, in the same
-            unit-input operator frame. The fact ``k_quadrature``, published
+            unit-input operator norm. The fact ``k_quadrature``, reported
             the same way, is its physical L2 bound, weighted and summed as
             above. Not total error.
-        source_nodes: Selected Duhamel time nodes.
+        source_nodes: Duhamel time nodes.
         source_weights: Matching Duhamel time-quadrature weights.
-        step_counts: Selected product-formula repetitions where applicable.
-        classical_work: Existing classical work counters/proxies, not CPU timing.
+        step_counts: Product-formula step counts, where applicable.
+        classical_work: Counts of classical work, not CPU timing.
     """
 
     schema_version: Literal[4] = 4
@@ -163,14 +165,13 @@ class LCHSReconstruction(Record):
 class LCHSSamples(Record):
     """Sampled output of an LCHS run: the observed original coordinates and their counts, as two int64 arrays.
 
-    `LCHSAnalysis.samples` holds it for a `Samples` output. Analysis adopts
-    the fresh, C-contiguous int64 arrays that the sample reduction returns,
-    without copying them. For m stored indices, the adopted arrays occupy
-    16m data bytes and the local validation phase peaks at 17m data bytes
-    while one Boolean comparison mask is live. These array-data terms
-    exclude caller-held input data, earlier reduction workspace and Python
-    object overhead. Building the record does not check these bytes against
-    a memory limit.
+    `LCHSAnalysis.samples` holds it for a `Samples` output. Analysis uses
+    the new C-contiguous int64 arrays that the sample reduction returns,
+    without copying them. For m indices, these arrays occupy 16m bytes of
+    data, and checking them takes at most 17m bytes of data while one
+    Boolean comparison mask exists. These counts exclude input data held by
+    the caller, earlier reduction workspace and Python object overhead.
+    Building the record does not check these bytes against a memory limit.
 
     Attributes:
         indices: Distinct original-coordinate indices below the original
@@ -212,19 +213,20 @@ class LCHSProjectedMoments(Record):
             full saved state, including all ``populations[0]`` amplitudes.
         success_mass: Success-only mass ``p_alg``, computed as the sum of squared
             magnitudes of the ``populations[1]`` amplitudes whose success
-            selectors match. This selection can include branches that fail the
-            additional conditions and coordinates added by padding.
+            qubits take their success values. This selection can include
+            branches that fail the additional conditions and coordinates added
+            by padding.
         physical_mass: Physical-slice mass p over the ``populations[2]``
             success-and-physical coordinates.
-        numerator: Projected moment ``q = v^dagger O v`` of the stored Pauli
-            observable on the physical slice v, not a full selected-block
-            moment. Zero for a NormSquared output.
+        numerator: Projected moment ``q = v^dagger O v`` of the saved Pauli
+            observable on the physical slice v, not a moment of the whole
+            success-projected block. Zero for a NormSquared output.
         numerator_radius: Upper bound, rounded upward, on the absolute rounding
-            error in ``numerator`` from its classical evaluation using the stored
+            error in ``numerator`` from its classical evaluation using the saved
             observable and the computed physical slice. It assumes binary64
             round-to-nearest arithmetic with gradual underflow and finite
             intermediate results. Errors in the prepared state and in converting
-            the original observable to the stored one are separate.
+            the original observable to the saved one are separate.
         lost_state_components: Number of initially nonzero real or imaginary
             parts of physical-slice amplitudes that round to zero when rescaled
             by a power of two for the moment calculation. Real and imaginary
@@ -262,15 +264,17 @@ class LCHSGroupMoments(Record):
             a mass setting.
         basis: Accumulated measurement basis, qubit zero rightmost.
         population: ``success_conditional`` (weighted values over the
-            success-selected shots), ``unconditional`` (success indicator
+            shots postselected on success), ``unconditional`` (success indicator
             times weighted values over all returned shots, the identity term
             assigned to the first group) or ``physical_prefix`` (the
             unrotated mass setting).
         returned_shots: Shots returned for the setting.
-        selected_shots: Returned shots whose success selectors match (and,
-            for the mass setting, whose coordinate is physical).
-        mean: Weighted outcome mean, or the selected fraction of the mass
-            setting. None without a population.
+        selected_shots: Returned shots whose success qubits take their success
+            values (and, for the mass setting, whose coordinate is physical).
+        mean: Weighted outcome mean, or the postselected fraction of the mass
+            setting. None when there are no shots to average, that is, no
+            postselected shots for ``success_conditional`` and no returned
+            shots otherwise.
         second_moment: Weighted second moment, for a group.
         variance: Unbiased variance of the mean, for a group of at least two shots.
         contribution_id: Content hash of the `ObservationChunk` that holds
@@ -328,14 +332,14 @@ class LCHSAnalysis(Result):
             for a `QuadraticForm`.
         numerator_frame: Normalization of `numerator`, `"unit"` for the
             normalized ratio or `"physical"` for the quadratic form.
-        artifact: Description of the stored solution or state array.
+        artifact: Description of the saved solution or state array.
             Printing the result does not load the array, and `solution` and
             `state_vector` read it.
         applications: Numerical operator applications of the run, each with
             its error-component facts.
         submitted_shots: Shots requested for a sampled output, if
             applicable.
-        returned_shots: Shots returned, before selection of the physical
+        returned_shots: Shots returned, before postselection on the physical
             coordinates.
         selected_shots: Returned shots kept for the physical output. For
             `Samples`, the sum of the sample counts.
@@ -347,7 +351,7 @@ class LCHSAnalysis(Result):
             (`shots=None`): the complete, success and physical-slice masses
             and the projected moment, as mantissa-exponent pairs.
         groups: Weighted moments of each sampled measurement setting, with
-            its Pauli labels, basis and returned and selected shots.
+            its Pauli labels, basis, returned shots and postselected shots.
     """
 
     value: Real | None = None
@@ -372,7 +376,7 @@ class LCHSAnalysis(Result):
         return self
 
     def _summary_lines(self):
-        """Describe the Result from stored records only, without loading arrays.
+        """Describe the Result from saved records only, without loading arrays.
 
         Every error-related line states its scope. The construction tolerance
         and the kernel bounds are labeled as not total physical-output error,

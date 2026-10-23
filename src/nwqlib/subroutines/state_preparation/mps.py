@@ -7,7 +7,7 @@ doi:10.1137/090752286, with the per-value truncation rule stated in
 ``analyze_mps_state_compression`` rest on the orthogonality step in the
 proof of Theorem 2.2 (p. 2299). The work and byte limits are checked for
 the whole sweep before the first SVD. The
-[layered MPS construction law](../../ENGINEERING_CONSTANTS.md#layered-mps-construction-law)
+[layered MPS construction formula](../../ENGINEERING_CONSTANTS.md#layered-mps-construction-law)
 bounds the work and bytes of the layered circuit that ``mps_circuit``
 builds from these cores.
 """
@@ -34,10 +34,10 @@ DEFAULT_MAX_SVD_WORK = 100_000_000
 
 
 def _input(vector, max_bytes):
-    """Admit a one-dimensional vector and return ``(normalized_state, input_norm)``.
+    """Check a one-dimensional vector against the byte limit and return ``(normalized_state, input_norm)``.
 
-    Admission reserves 48 bytes per entry beyond the stored input, three
-    complex128 state-sized arrays for the conversion and normalization.
+    The byte check counts 48 bytes per entry beyond the stored input, for
+    three complex128 state-sized arrays of the conversion and normalization.
     """
     array = _array_input(vector, ndim=1, max_bytes=max_bytes, extra_bytes_per_item=48)
     return normalize_state_vector(array)
@@ -169,13 +169,13 @@ class MPSCompressionAnalysis:
         reference_id: Content hash of the supplied comparison reference after normalization, or None without one.
         reference_matches_input: Whether that hash matches the compressed input, or None without a reference.
         reference_norm: Norm of the supplied reference before normalization, or None without one.
-        measured_raw_l2: Explicitly measured raw-tensor distance to the normalized reference, or None if not computed.
-        measured_normalized_fidelity: Measured normalized fidelity to the supplied reference, clipped to [0, 1], or None if unavailable.
+        measured_raw_l2: Raw-tensor distance to the normalized reference, computed from the contracted cores, or None if not computed.
+        measured_normalized_fidelity: Normalized fidelity to the supplied reference, computed from the contracted cores and clipped to [0, 1], or None if unavailable.
         raw_measured_fidelity: Computed ``|<t,r>|**2 / (<t,t> <r,r>)`` for the normalized reference t
-            and the raw tensor r before clipping to [0, 1], or None if unmeasured.
+            and the raw tensor r before clipping to [0, 1], or None if not computed.
         fidelity_roundoff_window: Bound on how far rounding can push that value above one, from
             NWQLib's rounding analysis of this evaluation (see the
-            [constants registry](../../ENGINEERING_CONSTANTS.md)). None if unmeasured. It is never
+            [constants registry](../../ENGINEERING_CONSTANTS.md)). None if not computed. It is never
             an approximation allowance.
         method: Name of the analysis, `"mps_ttsvd_analysis"`.
     """
@@ -335,7 +335,7 @@ def analyze_mps_state_compression(decomposition, *, reference=None,
             products of the contraction.
 
     Returns:
-        analysis (MPSCompressionAnalysis): The estimates, and the measured
+        analysis (MPSCompressionAnalysis): The estimates, and the computed
             comparison when a reference was given.
     """
     d = decomposition.discarded_weight
@@ -382,7 +382,7 @@ def analyze_mps_state_compression(decomposition, *, reference=None,
 def layered_construction_size(bond_dimensions, num_layers) -> tuple[int, int]:
     """Return upper bounds `(work, bytes)` of building the layered circuit from MPS cores.
 
-    The law follows the scikit_tt calls of
+    The formula follows the scikit_tt calls of
     [`mps_to_circuit`][nwqlib.subroutines.state_preparation.mps_circuit.mps_to_circuit],
     and of the conversion of the cores to a scikit_tt tensor train, for
     cores with these bond dimensions, with an upper bound on each TT rank in
@@ -402,7 +402,7 @@ def layered_construction_size(bond_dimensions, num_layers) -> tuple[int, int]:
 
     Work, in the units of the TT-SVD work limit of `decompose_state_to_mps`:
 
-    - An SVD of an m x c core matrix, ``m c min(m, c)``, charged twice
+    - An SVD of an m x c core matrix, ``m c min(m, c)``, counted twice
       because scikit_tt repeats a failed ``gesdd`` with ``gesvd``.
     - A left-sweep step with ``k = min(m, c)``: ``diag(s) @ vh``, ``k k c``,
       and its ``tensordot`` into the next core of right rank r, ``2 k c r``.
@@ -436,7 +436,7 @@ def layered_construction_size(bond_dimensions, num_layers) -> tuple[int, int]:
     the gate MPOs, the Python objects of the TTs and the headers of their
     core arrays. Under tracemalloc these exceeded the array bytes by up to
     31 kB for ten sites (SciPy 1.18.1). Qiskit circuit objects
-    are outside the law, and the two-qubit syntheses have their own
+    are outside the formula, and the two-qubit syntheses have their own
     limit check. Cores whose bond dimensions are all one form a product state,
     which the builder prepares site by site without scikit_tt, 64 units per
     site.
@@ -522,7 +522,7 @@ def admit_layered_construction(bond_dimensions, num_layers, *, max_svd_work, max
 
 
 def _reconstruct_cores(cores, *, max_bytes=DEFAULT_INPUT_BYTES, max_products=1_000_000_000):
-    """Contract adjacent TT ranks after admitting known arrays and scalar products."""
+    """Contract adjacent TT ranks after checking the known arrays and scalar products against their limits."""
     core_bytes = sum(core.nbytes for core in cores)
     tensor = cores[0][:, :, 0, :]
     products = 0

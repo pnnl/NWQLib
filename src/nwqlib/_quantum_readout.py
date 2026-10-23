@@ -1,4 +1,4 @@
-"""Reduce actual selected quantum populations, without acquisition or replay.
+"""Reduce measured counts and saved states to masses and Pauli moments, without running or repeating any circuit.
 
 An, Childs & Lin, arXiv:2312.03916v2, Appendix A.3 Lemma 24 Eq. (178), p. 36,
 https://arxiv.org/html/2312.03916v2#A3, defines the encoded LCU amplitudes.
@@ -8,15 +8,17 @@ recovery from that convention. Statistical intervals require separate evidence.
 An outcome index of ObservationChunk.histogram has observed position p at
 bit p, so the bit at observed position p is (index >> p) & 1.
 
-The exact scalar route registers the acquisition-time reduction
-``projected_moments`` when this module is imported, and
+The exact scalar path registers ``projected_moments``, a reduction applied
+during data collection, when this module is imported, and
 ``core.planning.BUILTIN_REDUCER_MODULES`` lists this module so that the name
 resolves in a process that has not imported it. One saved state yields the
-complete native norm, the success-only mass, the physical-slice mass and the
-projected Pauli moment as scaled (mantissa, exponent) pairs, validated
-against the producing receipt's qualified state error or probability-window
-convention before publication (``reduce_scaled``, ``validate_saved_masses``).
-The sampled route groups qubit-wise commuting labels (``qwc_groups``) and
+complete mass (the squared norm of the whole simulated state), the
+success-only mass, the physical-slice mass and the projected Pauli moment as
+scaled (mantissa, exponent) pairs, validated against the qualified state error
+or probability-window convention of the preparation record that produced the
+state, before they are saved
+(``reduce_scaled``, ``validate_saved_masses``).
+The sampled path groups qubit-wise commuting labels (``qwc_groups``) and
 reduces each group's counts to weighted moments (``weighted_group_moments``).
 A sampled physical mass reduces one counts setting (``reduce_setting``).
 Sampled original-coordinate outcomes reduce to sorted index and count arrays
@@ -57,7 +59,7 @@ class ReadoutSetting(Record):
 
 
 def validate_readout_layout(chunk, *, observed, classical):
-    """Match physical observation order and actual classical storage positions.
+    """Match the physical observation order with the positions of the classical bits that hold the outcomes.
 
     A trajectory point chunk is checked against its point's one-point readout
     (``ObservationChunk.observation``).
@@ -276,20 +278,21 @@ def selected_tiles(native, fixed=(), *, tile=1024):
 
 
 def scaled_mass_tiles(make_tiles, count):
-    """Return the scaled squared norm of one population and its scaling exponent.
+    """Return the scaled squared norm of one selected set of amplitudes and its scaling exponent.
 
     For M complex amplitudes with m = 2M real components x_i, the largest
-    magnitude a sets e = frexp(a).exponent. The components are scaled
-    exactly by 2**-e, squared and summed by tiled NumPy reductions, and
-    ``frexp`` of the total gains 2e in its exponent. Under IEEE binary64
+    magnitude a sets e = frexp(a).exponent. The components are scaled by
+    2**-e, squared and summed by tiled NumPy reductions, and ``frexp`` of the
+    total gains 2e in its exponent. The scaling is exact unless a component
+    underflows, a case that U_M below covers. Under IEEE binary64
     round to nearest with gradual underflow, finite complex128 components
-    and the same population on both passes, the computed mass obeys
+    and the same selected amplitudes on both passes, the computed mass obeys
     ``|M_hat - M| <= a_M M + U_M`` with ``a_M = gamma(m+1)`` and
     ``U_M = 2**(2e) 4 m eta / (1 - (m+1) u)``, eta = 2**-1074. The largest
     scaled square is at least 1/4, so a positive mass stays positive even
-    below the ordinary binary64 range, and a zero output means an exactly
-    zero population. The scale is fixed on the first pass, so the
-    population is selected twice.
+    below the ordinary binary64 range, and a zero output means that every
+    selected amplitude is exactly zero. The scale is fixed on the first pass,
+    so the amplitudes are selected twice.
     """
     if type(count) is not int or count < 0:
         raise ValueError("invalid population count")
@@ -319,13 +322,13 @@ def scaled_mass_tiles(make_tiles, count):
 
 
 def saved_mass_allowance(pair, count):
-    """Relative and absolute host allowance of a saved mass, from the saved pair alone.
+    """Relative and absolute allowance for the classical roundoff of a saved mass, from the saved pair alone.
 
-    Since ``2**(2e) <= 4 M_hat`` for this kernel, the saved absolute
+    Since ``2**(2e) <= 4 M_hat`` for this routine, the saved absolute
     allowance ``U_M = 16 m eta M_hat / (1 - (m+1) u)`` with m = 2*count
-    bounds the scan's underflow without the acquisition's scaling
-    exponent. The relative allowance is ``gamma(m+1)``. A zero output of
-    this kernel has zero host error. Arithmetic is exact rational on a
+    bounds the scan's underflow without the scaling exponent used when the
+    state was reduced. The relative allowance is ``gamma(m+1)``. A zero
+    output of this routine has zero classical roundoff error. Arithmetic is exact rational on a
     bounded number of scalars.
     """
     value = pair_value(pair)
@@ -345,31 +348,34 @@ def saved_mass_allowance(pair, count):
 
 def validate_saved_masses(complete, success, physical, counts, *,
                           delta=None, window=None):
-    """Check the complete native norm and the nested masses of one computed state.
+    """Check the complete mass and the nested masses of one computed state.
 
-    Success and physical masses are subpopulations and need not be one.
-    With a justified native-state bound delta, the complete norm obeys
+    Success and physical masses are masses of subsets of the amplitudes and
+    need not be one. With a justified bound delta on the error of the
+    simulator state, the complete mass F_hat obeys
     ``|F_hat - 1| <= 2 delta + delta**2 + a_F (1+delta)**2 + U_F``. Without
-    it, the producing receipt's probability window omega supplies an
+    it, the probability window omega of the preparation record that produced
+    the state supplies an
     input-validation convention, ``T_F = omega + a_F (1 + omega) + U_F`` with
-    ``|F_hat - 1| <= T_F``, and the accepted norm bounds the computed state's
+    ``|F_hat - 1| <= T_F``, and the accepted complete mass bounds the computed state's
     squared norm by ``R**2 <= (F_hat + U_F)/(1 - a_F)``. The subset relations
-    on the same computed state need only host errors:
+    on the same computed state need only the classical roundoff errors:
     ``A_hat - F_hat <= (a_A + a_F) R**2 + U_A + U_F`` and
     ``P_hat - A_hat <= (a_P + a_A) R**2 + U_P + U_A``. Each projected mass is
     also bounded by ``(1 + a) R**2 + U``. The window convention is a
     validation policy, not a certificate of closeness to the ideal circuit.
-    Returns the norm upper bound R**2 and the complete-norm window.
+    Returns the upper bound R**2 on the squared norm and the window of the complete mass.
 
-    Projected acquisition and QLS/LCHS reanalysis pass the same pair of the
-    producing receipt's saved-state budgets: delta is
-    ``PreparedArtifact.saved_state_error``, which adds the host phase
-    product's charge to the native estimate, and omega is
-    ``saved_state_probability_window``, omega_saved. When native exclusions
-    make delta unavailable, ``T_F = omega_saved + a_F(1 + omega_saved) + U_F``
-    and ``R**2 <= (F_hat + U_F)/(1 - a_F)``. Subset checks continue adding
-    only their host mass-evaluation errors against this accepted norm. They
-    do not add native error a second time.
+    The projected reduction during data collection and QLS/LCHS reanalysis
+    pass the same pair of saved-state budgets of the preparation record that
+    produced the state. delta is ``PreparedArtifact.saved_state_error``, which
+    adds the roundoff of the classical phase multiplication to the simulator's
+    estimate, and omega is ``saved_state_probability_window``, omega_saved.
+    When exclusions of the preparation record make delta unavailable,
+    ``T_F = omega_saved + a_F(1 + omega_saved) + U_F`` and
+    ``R**2 <= (F_hat + U_F)/(1 - a_F)``. Subset checks continue adding only the
+    classical roundoff of their mass evaluation against this bound R**2.
+    They do not add the simulator's error a second time.
     """
     F, A, P = map(pair_value, (complete, success, physical))
     nF, nA, nP = counts
@@ -391,7 +397,7 @@ def validate_saved_masses(complete, success, physical, counts, *,
         total_window = omega + aF * (1 + omega) + uF
         norm_upper = (F + uF) / (1 - aF)
     if abs(F - 1) > total_window:
-        raise ValueError("complete native norm is outside the producing window")
+        raise ValueError("complete native mass is outside the producing window")
     if (A - F > (aA + aF) * norm_upper + uA + uF
             or P - A > (aP + aA) * norm_upper + uP + uA
             or A > (1 + aA) * norm_upper + uA
@@ -429,7 +435,7 @@ def ordered_action_constants(n, terms):
     relative factor ``(1+gamma(h-1))*(1+mu)*(1+gamma(G-1))-1`` is therefore
     bounded by e_A. Its underflow allowance is
     ``4*(L+G)*eta*s(N)/(1-(L+G+4)*u)`` and is bounded by U_A because
-    G <= L. The same ordered envelope covers either successful action
+    G <= L. The same ordered bound covers either successful action
     path.
     """
     if not terms:
@@ -442,10 +448,10 @@ def ordered_action_constants(n, terms):
 
 
 def scaled_projected_moment(selected, table, physical, state_exponent):
-    """Scaled numerator ``q = v^dagger O v`` on the physical slice and its host radius.
+    """Scaled numerator ``q = v^dagger O v`` on the physical slice and its classical roundoff radius.
 
     The slice is framed by the physical mass pass's exponent e,
-    ``r = RN(2**-e v)`` zero padded to N entries. The coalesced identity
+    ``r = RN(2**-e v)`` zero padded to N entries. The summed identity
     coefficient c_I contributes ``c_I P_hat`` with the saved physical mass.
     The other coefficients are framed by ``k = frexp(max |c_j|).exponent``,
     ``beta_j = RN(2**-k c_j)``, keeping every row. With
@@ -458,19 +464,19 @@ def scaled_projected_moment(selected, table, physical, state_exponent):
     ``E_contract = [e_A + g(1 + e_A)] C r_+**2 + (1 + g) r_+ U_A + U_dot``
     with ``g = sqrt(2) gamma(2N)`` and ``U_dot = 8 N eta / (1 - (2N+4) u)``.
     The published numerator ``Q_0 = c_I P_hat + 2**(2e+k) Re(r^dagger B r)``
-    has host radius
+    has roundoff radius
     ``E_q = |c_I| E_P + 2**(2e+k)(E_frame + E_contract) + E_pair`` against the
     stored Pauli observable on the computed physical slice, E_pair being the
-    exact change of the final pair rounding. It is published upward. Framed
+    exact change of the final pair rounding. It is rounded upward. Framed
     inputs have magnitude below one, so for N, L < 2**51 the action and dot
-    intermediates cannot overflow binary64. A nonfinite result is a violated
-    premise. A signed contraction can round to zero with a nonzero radius,
+    intermediates cannot overflow binary64. A nonfinite result means that an
+    assumption is violated. A signed contraction can round to zero with a nonzero radius,
     which is not evidence that the exact numerator is zero. Lost framed
     state components and coefficients are counted as diagnostics. The radius
     does not depend on them. Against an original dense observable add its
     conversion discrepancy times the physical mass. Against an ideal state
-    add the native-state term. No native floating-point certificate is
-    asserted.
+    add the simulator-state term. No certificate of the simulator's
+    floating-point arithmetic is asserted.
     """
     from nwqlib.operators._pauli import PauliTerms, apply_terms
 
@@ -544,14 +550,15 @@ def scaled_projected_moment(selected, table, physical, state_exponent):
 
 def reduce_scaled(native, *, coordinates, success, conditions, dimension, table,
                   delta=None, window=None, tile=1024, has_moment=True):
-    """Reduce one saved native state to its scaled masses and projected moment.
+    """Reduce one saved simulator state to its scaled masses and projected moment.
 
-    The reducer scans success mass and the complete native norm in bounded
-    tiles, then evaluates the observable on the success-and-physical slice.
-    Admission includes the saved state, slice-index workspace, observable
-    representations, coefficient framing and grouping metadata. Work counts
-    the selected mass and gather branches and the grouped action on scaled
-    inputs. The byte reserve includes the shared action's scratch envelope.
+    The reducer scans success mass and the complete mass in bounded tiles,
+    then evaluates the observable on the success-and-physical slice. The
+    check against the limits includes the saved state, slice-index workspace,
+    observable representations, coefficient framing and grouping metadata.
+    Work counts the selected mass and gather branches and the grouped action
+    on scaled inputs. The bytes set aside include the upper bound on the
+    shared action's scratch space.
     Scaled scalar statistics carry the recovery information needed for reanalysis.
 
     Exact scalar readout evaluates the stored Pauli observable on the
@@ -562,14 +569,14 @@ def reduce_scaled(native, *, coordinates, success, conditions, dimension, table,
     dense observable. Projected and full-block Pauli sums coincide for an
     exact zero-extension representation, while rounded coefficients can
     change the cancellation of dummy-coordinate contributions. Recovery and
-    numerical reduction errors follow their separate owners.
+    numerical reduction errors are bounded by their own routines.
 
     The coordinates and the valued selector bits (success, then conditions)
-    must partition the native wires, qubit zero least significant. The
-    complete native norm, the success-only mass and the physical-slice mass
-    are validated by ``validate_saved_masses`` before any statistic is
-    returned. Identical success and physical populations (no conditions,
-    unpadded coordinates) share one mass pair.
+    must partition the wires of the saved state, qubit zero least significant.
+    The complete mass, the success-only mass and the physical-slice mass are
+    validated by ``validate_saved_masses`` before any statistic is returned.
+    Identical success and physical subsets (no conditions, unpadded
+    coordinates) share one mass pair.
     """
     from nwqlib.amplitudes import _slice
 
@@ -613,12 +620,13 @@ def reduce_scaled(native, *, coordinates, success, conditions, dimension, table,
 
 
 def recover_scaled_pair(pair, recovery, *, upward=False):
-    """Multiply a saved native pair by recovery**2 without forming recovery**2.
+    """Multiply a saved pair by recovery**2 without forming recovery**2.
 
     For ``recovery = m_G * 2**e_G`` the pair's mantissa is multiplied by
     ``m_G**2`` exactly, normalized, and ``2 e_G`` is added to its exponent.
     Recovered exponents are arbitrary Python integers. A claim about the
-    physical value also needs the recovery owner's own error.
+    physical value also needs the error of the computation of the recovery
+    factor itself.
     """
     m, e = pair
     if recovery is None:
@@ -636,23 +644,24 @@ def readout_requirements(F, n, d, L, payload, *, tile=1024, has_moment=True,
     """Return bytes and input-visit work for a scaled projected reduction.
 
     F=2**w, N=2**n, d<=N and L describe the saved state, coordinate
-    population, physical prefix and kept packed rows. payload includes
-    the original packed table and all live observable representations.
-    success_count is the success-only population A. None reserves A=F
-    plus a selector scan. A=F denotes an empty success selector.
+    space, physical prefix and kept packed rows. payload counts the
+    original packed table and all observable representations held in
+    memory. success_count is the size A of the success-only subset. None
+    counts A=F plus a selector scan. A=F denotes an empty success selector.
     same_mass means no conditions and d=N. contiguous means _slice
-    returns its strided view. Omitted layout facts reserve their costly
-    branches. binding_work funds JSON decoding and label packing.
+    returns its strided view. Omitted layout facts count their costly
+    branches. binding_work counts the work of JSON decoding and label
+    packing.
 
     A mass pass costs at most 16 visits per complex entry. A nonempty
     success selector adds 8F visits. A gather adds (4n+4)d visits.
     A moment adds 16d+24N+32L and the grouped Pauli-action work. The
     scaled inputs have components below one and N,L<2**51, so the
     grouped action cannot overflow and its ordered retry is unreachable.
-    The shared action byte envelope still reserves retry scratch.
+    The shared action's byte bound still includes the retry's scratch space.
 
     With I_p=1 when physical mass is separately scanned, I_g=1 when
-    ``_slice`` gathers and g=min(L,N), the work law is
+    ``_slice`` gathers and g=min(L,N), the work formula is
     ``W_mass=16F+1[success nonempty](8F+16A)+16d I_p``,
     ``W_gather=(4n+4)d I_g``,
     ``W_moment=16d+24N+32L+(4L+g)+N(L+g+1)`` and
@@ -662,13 +671,13 @@ def readout_requirements(F, n, d, L, payload, *, tile=1024, has_moment=True,
     (B_A, W_A) from ``pauli_action_requirements``, an active moment
     reserves ``16F+P+65536+max{96L, 64t, 16N+48d I_g+B_A+32N+3P+48L+64s}``
     bytes and a mass-only output ``16F+P+65536+max{64t, 48d I_g+64s}``.
-    This work law is an upper bound on input visits. It still
+    This work formula is an upper bound on input visits. It still
     overcounts early zero or identity exits, uses g as a bound on flip
-    groups and keeps conservative framing reserves.
+    groups and keeps conservative framing allowances.
 
-    Bytes keep the conservative 3*payload scaled-storage reserve and
-    65536 fixed bookkeeping allowance. They cover known buffers and
-    the qualified CPython objects priced by projected_requirements,
+    Bytes keep the conservative 3*payload allowance for scaled storage and
+    the 65536-byte fixed bookkeeping allowance. They cover known buffers and
+    the qualified CPython objects counted by projected_requirements,
     not simulator storage, allocator arenas or process RSS.
     """
     from nwqlib.operators._pauli import pauli_action_requirements
@@ -744,7 +753,7 @@ PROJECTED_MASS_EXCLUSIONS = ("amplitude-derived masses",)
 
 
 def projected_parameters(*, coordinates, success, conditions=(), dimension, terms, moment=True):
-    """Canonical reducer parameters binding the selected reduction's populations and observable.
+    """Canonical reducer parameters that fix the reduction's subsets and observable.
 
     ``coordinates`` are the ordered coordinate qubits (qubit zero least
     significant), ``success`` and ``conditions`` the valued selector bits,
@@ -795,19 +804,19 @@ def _pauli_table(terms, num_qubits):
 
 
 def projected_populations(parameters, width):
-    """Declared population sizes (complete F, success-only, physical d) of one reduction."""
+    """Declared subset sizes (complete F, success-only, physical d) of one reduction."""
     coordinates, success, _, dimension, _, _ = _projected_fields(parameters)
     return 1 << width, (1 << width) >> len(success), dimension
 
 
 def projected_requirements(parameters, width):
-    """Price separate packing and numerical phases after callback payload release.
+    """Count the bytes and work of the packing and numerical phases, after the callback releases its parameters.
 
     Requires _projected_execute to delete parameters and terms after its
     packed table is built and before reduce_scaled. The parameter string
-    remains owned by the point. Parsed rows overlap packing but not the
+    remains held by the point. Parsed rows overlap packing but not the
     numerical phase. A qualified 64-bit CPython object allowance supplements
-    the shared action owner's logical group metadata.
+    the logical group metadata that the shared action routine counts.
 
     M counts every serialized row, including zero coefficients. L counts
     nonzero packed rows. H is the sum of the parsed outer-list size, the
@@ -818,7 +827,7 @@ def projected_requirements(parameters, width):
     below 51. Integer coefficients use their magnitude-bit count plus two
     in place of 32. Two JSON decodes, two label validations and one packing
     pass are included in ``W_bind=2J+2(n+4)M+(n+8)L+8w+64``. The work unit
-    is a character or kernel-input visit, not a CPU-instruction or
+    is a character or routine-input visit, not a CPU-instruction or
     elapsed-time estimate.
 
     With T=32L, S=64+J and H_action=64L+192g+1024 for the extra action
@@ -827,9 +836,9 @@ def projected_requirements(parameters, width):
     bytes. A mass-only output sets T=0 and omits packing and the numerical
     action, leaving ``16F+S+65536+max(H, 64t, 48d I_g+64s)``. Work is that of
     ``readout_requirements`` with payload T+H+64+J. The direct production
-    registry path, this callback and the checked interpreter are premises of
-    the release. A wrapper that keeps another reference to the mapping needs
-    the larger envelope P=32L+H+64+J throughout.
+    registry path, this callback and the checked interpreter are assumptions
+    of this release. A wrapper that keeps another reference to the mapping
+    needs the larger bound P=32L+H+64+J throughout.
     """
     from nwqlib.operators._pauli import pauli_action_requirements
 
@@ -878,22 +887,23 @@ def _projected_work(parameters, width):
 
 
 def _projected_execute(state, parameters, bindings, *, context):
-    """Reduce the saved state using the producing receipt's qualified mass window.
+    """Reduce the saved state using the qualified mass window of the preparation record that produced it.
 
     The registry declares amplitude-derived masses resolved because
-    scaled_mass_tiles and saved_mass_allowance bound the populations this
-    kernel squares and sums. The context carries the receipt's saved-state
-    budget after that resolution. The reducer stays registered phase
-    sensitive because its lost-component diagnostic can change under a phase
-    rotation, so its context has no ``state_error``. Its masses and
-    quadratic-form target are invariant, and their finite host errors are
-    priced separately, so the mass checks use
-    ``context.modulo_phase_state_error``, which includes the host phase
-    product's charge. When native exclusions make that budget unavailable,
-    they use the propagated window ``context.probability_window``, and the
-    receipt's exclusions stay visible. This validates the saved masses under
-    the stated window convention, without claiming phase-defined or general
-    native accuracy.
+    scaled_mass_tiles and saved_mass_allowance bound the sums of squares that
+    this routine forms. The context carries the preparation record's
+    saved-state budget after that resolution. The reducer stays registered
+    phase sensitive because its lost-component diagnostic can change under a
+    phase rotation, so its context has no ``state_error``. Its masses and
+    quadratic-form target are invariant, and their finite classical roundoff
+    errors are bounded separately, so the mass checks use
+    ``context.modulo_phase_state_error``, which includes the roundoff of the
+    classical phase multiplication. When exclusions of the preparation record
+    make that budget unavailable, they use the propagated window
+    ``context.probability_window``, and the record's exclusions stay visible.
+    This validates the saved masses under the stated window convention,
+    without claiming phase-defined accuracy or general accuracy of the
+    simulator.
     """
     import numpy as np
 
@@ -920,10 +930,10 @@ def projected_statistics(chunk, parameters, width, *, delta=None, window):
 
     Reads the chunk's three components by their registered order, checks
     each pair, and applies ``validate_saved_masses``.
-    The populations come from the bound declaration. Mass validation uses the
-    producing receipt's qualified delta when supplied and its probability
-    window otherwise. Returns dict(name -> pair) for PROJECTED_SCALARS plus
-    the two loss counts.
+    The subset sizes come from the declaration bound to the point. Mass
+    validation uses the qualified delta of the preparation record that
+    produced the state when supplied, and its probability window otherwise.
+    Returns dict(name -> pair) for PROJECTED_SCALARS plus the two loss counts.
     """
     values = {item.component: item for item in chunk.values if getattr(item, "kind", None) == "reduced"}
     if set(values) != {0, 1, 2} or len(chunk.values) != 3:
@@ -985,8 +995,8 @@ def qwc_groups(terms, num_qubits, *, max_comparisons, max_bytes, limit_name="max
 
     Returns ``(groups, bases, comparison_count)``: each group's member labels
     in first-fit order, its accumulated basis (qubit zero rightmost) and the
-    actual evaluated comparison count. ``limit_name`` is forwarded to
-    ``PauliTerms.group``, which admits each candidate tile against
+    number of comparisons evaluated. ``limit_name`` is forwarded to
+    ``PauliTerms.group``, which checks each tile of label comparisons against
     ``comparisons + charge <= max_comparisons`` and names the caller's limit
     on refusal. With no grouped label no comparison is needed, so only the cap
     is validated and zero comparisons are returned.
@@ -1018,7 +1028,7 @@ def weighted_group_moments(bits, counts, selected, masks, coefficients):
     Reduce all Pauli parities in one qubit-wise-commuting group from the same
     returned counts. The group's basis rotates each active coordinate once.
     A label's support mask selects its parity, and valued success selectors
-    define its population. Weighted group variances include within-shot
+    define the shots it counts. Weighted group variances include within-shot
     covariance. A physical-prefix mass is measured in an unrotated
     coordinate setting. Counts from a rotated basis do not identify
     dummy-coordinate membership.
@@ -1029,7 +1039,7 @@ def weighted_group_moments(bits, counts, selected, masks, coefficients):
     The variance of the summed estimator is
     ``sum_g (sum_{j,k in g} c_j c_k Cov(X_j, X_k))/n_g``. Floating-point
     second moments are diagnostics and can be slightly inconsistent by
-    rounding. The population is summed with Python integers.
+    rounding. The shot counts are summed with Python integers.
     """
     import numpy as np
 
@@ -1050,7 +1060,7 @@ def weighted_group_moments(bits, counts, selected, masks, coefficients):
 
 
 def reduce_sample_arrays(chunk, *, observed, coordinates, success, conditions=(), dimension):
-    """Original-coordinate sample indices and counts as sorted int64 arrays, plus shot populations.
+    """Original-coordinate sample indices and counts as sorted int64 arrays, plus shot counts.
 
     Returns ``(indices, counts, algorithm, physical)``: the distinct
     original-coordinate indices below ``dimension`` of outcomes whose

@@ -1,4 +1,4 @@
-"""Portable selected block records, bound to the shared Program graph."""
+"""Saved records of the selected definition of each circuit block, tied to the Program that calls the blocks."""
 
 from typing import Annotated, Literal
 
@@ -13,7 +13,7 @@ from nwqlib.resources.records import ResourceLaw, Workspace
 
 
 class Primitive(Record):
-    """One exact gate in a block's recipe. A global phase has no target qubits and becomes observable under control.
+    """One exact gate in a block's gate decomposition. A global phase has no target qubits and becomes observable under control.
 
     [`SelectedDefinition.decomposition`][nwqlib.blocks.records.SelectedDefinition]
     lists these in order. Build it with keyword arguments, for example
@@ -130,19 +130,23 @@ class BlockSemantics(Record):
 
 
 class SelectedDefinition(Record):
-    """The portable half of a selected block: its interface, promised action, chosen recipe and cost rules.
+    """The saved part of a selected block: its interface, promised action, chosen recipe and declared costs.
 
     Read it as `block.record` of a [`SelectedBlock`][nwqlib.blocks.selection.SelectedBlock],
     or from `SelectedConstruction.selections`. The `select_*` functions build it.
     It holds everything resource estimates, saved archives and reports need, and
-    its content hash covers every field. The executable half is the
-    `SelectedBlock` that binds trusted code to this exact record. Two recipes for
+    its content hash covers every field. The executable part is the
+    `SelectedBlock` that binds trusted code to this exact record. The recipe is
+    the chosen way of building the block's circuit. Two recipes for
     the same full operator, such as X and HZH, are different selections with
-    different content hashes and gate counts. `decomposition` gives the ordered
-    exact gate recipe when one exists. Otherwise `cost_law` names the cost rule
-    of the circuit construction. An unknown cost stays unresolved and never
-    becomes zero. `construction_work` counts the documented size rule, not CPU
-    time or memory. The fields below are read-only.
+    different content hashes and gate counts. `decomposition` lists the recipe's
+    exact gates in order when such a list exists. `cost_law` names the
+    registered cost function of the construction when one applies, such as a
+    CX bound of the construction or the count of its ordered gate list, and
+    `resource_laws` holds its cost rules (`ResourceLaw`). An unknown cost stays
+    unresolved and never becomes zero. `construction_work` counts the
+    documented size formula, not CPU time or memory. The fields below are
+    read-only.
 
     Attributes:
         signature: Declared interface, equal to the Program's signature of the
@@ -154,23 +158,25 @@ class SelectedDefinition(Record):
         implementation: Versioned Source of the implementation.
         choice: Recipe label within the implementation. A supplied circuit gets a
             fresh unique label.
-        decomposition: Exact ordered [`Primitive`][nwqlib.blocks.records.Primitive]
-            recipe, or `None` when a cost rule describes the cost.
-        cost_law: Source of the size or CX rule, or `None` when there is none.
-        cost_parameters: Exact arguments of that rule for this selection.
-        cost_context: Scope and limits of the rule, carried into resource
+        decomposition: The exact gates of the recipe in order, as
+            [`Primitive`][nwqlib.blocks.records.Primitive] records, or `None`
+            when the recipe has no exact gate list.
+        cost_law: Source of the registered cost function, a CX bound or the
+            count of an ordered gate list, or `None` when there is none.
+        cost_parameters: Exact arguments of that function for this selection.
+        cost_context: Scope and limits of that function, carried into resource
             quantities.
         construction_work: Work units of building the block's circuit definition by its
-            size rule, or `None` when unknown.
+            size formula, or `None` when unknown.
         controlled: Whether this selection adds one coherent control to its base.
         adjoint: Whether this selection is the adjoint of its base.
         base_selection_id: Content hash of the base selection of a control or
             adjoint.
         coefficient_selection_id: Content hash of the SELECT whose coefficients
             this PREP prepares.
-        blocker: Why the selection cannot run, for a block with a cost rule only
-            or an unsupported block.
-        resource_laws: Per-call resource rules.
+        blocker: Why the selection cannot run, for a block that only declares
+            its costs or an unsupported block.
+        resource_laws: Per-call cost rules (`ResourceLaw`).
         workspace: Workspace bytes per call, by location. An empty tuple means
             unknown, not zero.
     """
@@ -235,12 +241,12 @@ class PauliEncoding(Record):
 
 
 class SelectedKernel(Record):
-    """Declaration of a classical computation that a Program runs on this computer: its inputs, outputs, work and dependencies.
+    """Declaration of a classical routine that a Program runs on this computer: its inputs, outputs, work and dependencies.
 
     `SelectedConstruction.kernels` holds the declarations, and a
     `ClassicalStage` with `boundary="host"` names one to run it. The
     declaration is saved with the Plan. The callable that reads the input
-    data is not saved: the Method attaches it to the Plan as a
+    data is not saved. The Method attaches it to the Plan as a
     ``BoundKernel`` with `Plan._bind`.
     ``construction_work`` and ``invocation_work`` are declared size units
     counted against the Run, not CPU-instruction counts. The ``resource_laws``
@@ -250,25 +256,25 @@ class SelectedKernel(Record):
     known bytes and unknown components separately.
 
     Attributes:
-        name: Name of the computation, referenced by the Program's
+        name: Name of the routine, referenced by the Program's
             `ClassicalStage` with `boundary="host"`.
         implementation: Versioned `Source` of the classical algorithm.
-        inputs: References (`InputRef`) to the inputs the computation reads.
+        inputs: References (`InputRef`) to the inputs the routine reads.
         scalars: Ordered labels of the scalar statistics it returns.
         scalar_frames: Frame of each scalar, ``physical`` for physical units, ``unit`` for a normalized direction, or ``encoded_branch`` for a branch mass or norm in the encoded frame that the Method declares.
         outputs: Declared named arrays it may return.
-        resource_laws: Fixed ``classical_work`` formulas (`ResourceLaw`) of
-            the computation, without parameter bindings, control or adjoint.
+        resource_laws: Fixed ``classical_work`` cost rules (`ResourceLaw`) of
+            the routine, without parameter bindings, control or adjoint.
         workspace: Per-invocation memory declarations (`Workspace`). An
             entry with unknown bytes keeps that component unknown.
         construction_work: Size units counted against the Run when the
-            computation is bound at preparation.
+            routine is bound at preparation.
         invocation_work: Size units counted against the Run for each
             invocation.
-        dependencies: Distribution names, such as ``numpy``, whose installed
-            versions each preparation of the computation records.
+        dependencies: Python package names, such as ``numpy``, whose installed
+            versions each preparation of the routine records.
         application_bytes: Upper bound, using the Run's JSON byte accounting, on
-            the stored size of the sequence of ``KernelApplication`` records
+            the saved size of the sequence of ``KernelApplication`` records
             returned by each invocation when the Method fixes them at selection.
             The Run sets aside this many bytes along with the declared outputs.
             At completion, the smaller of this value and the returned sequence's
@@ -322,8 +328,8 @@ class SelectedConstruction(Record):
     exact record when the circuit is built, never from saved code.
     The checks require exactly one selected definition per Program signature,
     with an identical signature, so every block call resolves to one selection,
-    and every stage that names a kernel is a `"host"` stage that names its
-    exact selected kernel. A Pauli encoding with
+    and every stage that names a classical routine is a `"host"` stage that
+    names its exact `SelectedKernel` declaration. A Pauli encoding with
     a label register must be the ordered PREP, SELECT, PREP-adjoint Sequence on
     that register, where the PREP was selected from this SELECT's coefficients
     and the adjoint is of that same PREP. A single-term encoding has no label
@@ -338,8 +344,9 @@ class SelectedConstruction(Record):
             Program signature.
         encodings: Default `()`. [`PauliEncoding`][nwqlib.blocks.records.PauliEncoding]
             subgraphs, checked as PREP, SELECT and PREP-adjoint.
-        kernels: Default `()`. Classical kernel declarations, each named by
-            at least one `ClassicalStage` with `boundary="host"`.
+        kernels: Default `()`. Declarations of classical routines
+            ([`SelectedKernel`][nwqlib.blocks.records.SelectedKernel]), each
+            named by at least one `ClassicalStage` with `boundary="host"`.
         schema_version: Fixed `2`. Version of the saved record format.
 
     Raises:

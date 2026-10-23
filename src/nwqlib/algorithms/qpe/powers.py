@@ -3,13 +3,13 @@
 select_powers chooses, once per Plan, how controlled powers of U are
 built: exact dense powers of one base (the polar factor of a supplied
 unitary, or the spectral exponential of a Hamiltonian), or repetitions of
-controlled second-order Suzuki steps selected from the commutator bound of
-Childs et al. doi:10.1103/PhysRevX.11.011020
+controlled second-order Suzuki steps whose counts are chosen from the
+commutator bound of Childs et al. doi:10.1103/PhysRevX.11.011020
 (subroutines/trotterization/error_budget.py). An exact static trajectory
 repeats one shared step on a common integer grid and applies gap blocks
-between its power positions. Sampled static settings and RWPE select a
+between its power positions. Sampled static settings and RWPE choose a
 step count for each power independently. The ``construct_*``
-functions build the Qiskit circuits only when a native circuit is requested.
+functions build the Qiskit circuits only when a Qiskit circuit is requested.
 For product-formula powers the Hamiltonian identity coefficient is split off
 and acts as a separate phase gate on the control (method._quantum_program).
 A dense power contains it in its matrix.
@@ -107,23 +107,25 @@ def _make(
     ``kind`` is ``suzuki_step`` or ``dense_power`` (ports ``control`` and,
     when ``width > 1``, ``system``) or ``hadamard`` or ``phase`` (one
     ``register`` port). ``payload`` is the data the constructor needs,
-    ``work`` the admitted construction size and ``epsilon`` the per-block
-    operator-norm error bound, when one exists, with ``evidence`` stating
-    why. ``operations`` gives the exact number of stored instructions per
-    block and ``cx`` its exact CX count in the qualified lowering
+    ``work`` the construction size checked against the limits and
+    ``epsilon`` the per-block operator-norm error bound, when one exists,
+    with ``evidence`` stating why. ``operations`` gives the exact number of
+    instructions per block in the circuit description and ``cx`` its exact
+    CX count in the qualified decomposition into CX and one-qubit gates
     (``suzuki_step_cx`` for a step, zero for a one-qubit phase). Each is
-    recorded as a resource law only for blocks without a primitive
-    ``decomposition``.
+    recorded as a cost rule (``ResourceLaw``) only for blocks without a
+    primitive ``decomposition``.
 
-    The fold applies a law only when its fixed bindings equal the call's
-    cost parameters (``resources/fold.py``, ``_Fold.leaf``), so both laws
-    bind exactly the ``cost_parameters`` of their block, for example the
-    ``power``, ``steps`` and ``step_time`` of one Suzuki step. The formal
-    ``parameters`` (the ``angle`` of a phase leaf) stay unbound and the laws
-    cover their whole admitted domain, since one P or RZ instruction with no
-    CX is stored whatever the angle. The laws keep ``controlled=False``,
-    because a Suzuki step already contains its QPE control and the flag
-    describes an additional control transformation of the selection.
+    The resource total applies a cost rule only when its fixed bindings
+    equal the call's cost parameters (``resources/fold.py``, ``_Fold.leaf``),
+    so both cost rules bind exactly the ``cost_parameters`` of their block,
+    for example the ``power``, ``steps`` and ``step_time`` of one Suzuki
+    step. The formal ``parameters`` (the ``angle`` of a phase leaf) stay
+    unbound and the cost rules cover every allowed angle, since one P or RZ
+    instruction with no CX is recorded whatever the angle. The cost rules keep
+    ``controlled=False``, because a Suzuki step already contains its QPE
+    control and the flag describes an additional control added to the
+    chosen block.
     """
     implementation = source(kind)
     costs = tuple(Binding(parameter=key, value=value) for key, value in cost_parameters)
@@ -259,24 +261,25 @@ def select_auxiliary(*, basis, reference):
 
 
 def _census_envelope(count, width, config, variant, pairs, nested, triples):
-    """Return (work, bytes, block) of one second-order QPE census envelope.
+    """Return (work, bytes, block), an upper bound on one second-order QPE commutator count.
 
-    Work is ``2*p*q + G + V`` (``error_budget.census_work``): p*q label reads
-    for the packed masks and p*q for the support sum of ``suzuki_step_cx``,
-    plus the structure and contraction charges of one selected term table.
+    Work is ``2*p*q + G + V`` (``error_budget.census_work``), which counts
+    p*q label reads for the packed masks and p*q for the support sum of
+    ``suzuki_step_cx``, plus the structure and contraction costs of one term
+    table.
     With w = ceil(q/64), P = p(p-1)/2, E the pair count and b the block,
     relaxed_prefix has G = wP and V = 2p+4E: the suffix and outward
     degree passes cost 2p, endpoint-weight additions 2E and the two
     contribution reductions 2E, with fixed arithmetic bundled per visit.
     It builds no nested/triple structure. Its contraction scratch is
-    72p+96b+96 ceil(E/b)+65536 bytes, within census_bytes' complete envelope.
-    The census does not repeat over powers. Bytes are
-    ``error_budget.census_bytes`` at the largest checked block that fits
-    ``max_bytes`` (``choose_census_block``). ``_admit`` is a per-step
-    gate, and ``max_bytes`` does not promise a total simultaneous cap, so
-    B_held = 0 here although the QPE term records remain live. When no
+    72p+96b+96 ceil(E/b)+65536 bytes, within the complete bound of
+    census_bytes. The commutator count is not repeated for each power. Bytes
+    are ``error_budget.census_bytes`` at the largest checked block that fits
+    ``max_bytes`` (``choose_census_block``). ``_admit`` checks one step at a
+    time, and ``max_bytes`` does not limit the total memory held at once, so
+    B_held = 0 here although the QPE term records remain in memory. When no
     checked block fits, ``block`` is None and the bytes are those of
-    block 1, a checked candidate above ``max_bytes``.
+    block 1, a checked block size above ``max_bytes``.
     """
     work = 2 * count * width + census_work(
         count, width, order=2, variant=variant, pairs=pairs, nested=nested, triples=triples
@@ -289,31 +292,34 @@ def _census_envelope(count, width, config, variant, pairs, nested, triples):
 
 
 def _census(labels, coefficients, width, config, *, reservation):
-    """Admit one census together with reserved common-step work and bytes.
+    """Check one commutator count and the common-step work and bytes set aside against the limits.
 
-    reservation is (R, B), computed by _common_recheck_law with W=None
-    from the input shapes before any masks or pair structure exist.
-    Every census candidate C requires C.work+R <= max_work and separately
-    C.bytes <= max_bytes and B <= max_bytes. The census arrays are released
-    before the exact stage, so their byte envelopes are not added.
+    ``reservation`` is the pair (R, B) set aside, computed by
+    _common_recheck_law with W=None from the input shapes before any masks
+    or pair structure exist. Every commutator-count variant C considered
+    requires C.work+R <= max_work and separately C.bytes <= max_bytes and
+    B <= max_bytes. The commutator-count arrays are released before the
+    exact stage, so their byte bounds are not added.
 
     E, N, F, P and J are the symbols of ``error_budget.census_work`` and
-    ``error_budget.census_sizes``. The initial admission uses E=P, N=F=J for
-    the full variant and E=P for the relaxation. After pairs, price the
-    actual E,N with F=N. Prefer the full expression when the combined
-    charge fits, otherwise select the admitted relaxation. These are
-    successive bounds on one census, not two charges. The fixed R covers
-    either coefficient representation and every checked contraction block.
-    No later common-step work gate can refuse an admitted candidate.
-    Step-count and error checks remain.
+    ``error_budget.census_sizes``. The initial check uses E=P, N=F=J for
+    the full variant and E=P for the relaxation. After the pairs are known,
+    the check uses the computed E and N with F=N. The full expression is
+    preferred when the combined count fits, and otherwise the relaxation
+    that passes the check is used. These are successive bounds on one
+    commutator count, not two separate counts against the limit. The fixed R
+    covers either coefficient representation and every checked contraction
+    block. No later check of the common-step work can reject a variant that
+    passed this check. Step-count and error checks remain.
 
     The relaxation contracts U_ij = min(S_i,D_i+D_j-|c_i|), where S_i is
     the ordered suffix mass and D_v the anticommuting-neighbor mass for
-    this term table. It gathers degree weights only within the admitted
-    block and retains no nested or triple table.
+    this term table. It gathers degree weights only within the checked
+    block and keeps no nested or triple table.
 
     Returns:
-        (evaluation, block, work), with work counting the census only.
+        (evaluation, block, work), with work counting the commutator count
+        only.
     """
     count = len(labels)
     reserved_work, reserved_bytes = reservation
@@ -355,7 +361,7 @@ def _census(labels, coefficients, width, config, *, reservation):
 
 
 def _float_shape(value):
-    """Return (denominator exponent, strict magnitude exponent) for a native finite float."""
+    """Return (denominator exponent, strict magnitude exponent) for a finite built-in float."""
     if type(value) is not float or not isfinite(value):
         raise TypeError("common-step admission requires native finite binary64 inputs")
     numerator, denominator = value.as_integer_ratio()
@@ -363,7 +369,7 @@ def _float_shape(value):
 
 
 def _rational_bits(value):
-    """Return the larger numerator or denominator bit length of a native int, float or Fraction."""
+    """Return the larger numerator or denominator bit length of a Python int, float or Fraction."""
     if type(value) is int:
         return max(1, abs(value).bit_length())
     if type(value) is Fraction:
@@ -375,7 +381,7 @@ def _rational_bits(value):
 
 
 def _census_coefficient_bits(count, lower_exponent, scale_exponent):
-    """Bound the numerator/denominator width of either second-order census W.
+    """Bound the numerator/denominator width of W for either second-order commutator count.
 
     The nonzero input magnitudes obey 2**(lower_exponent-1) <= |c| <
     2**scale_exponent. Normalization uses e=scale_exponent. Each positive
@@ -388,13 +394,13 @@ def _census_coefficient_bits(count, lower_exponent, scale_exponent):
     for the pair term are <= 4, the relaxed cap is <= its suffix <= 4L, and its cubic
     contributions <= 16L. The block and outer sums therefore give each
     final reduction <= 256L(P+1), P=L(L-1)/2. Their strict magnitude
-    exponent is U=8+bit_length(L)+bit_length(P+1). For larger populations
-    use the finite-binary64 exponent U=1024. Nonfinite reductions already
-    fail coefficient formation. W=(2*A12+A24)*2**(3e)/(6*2**s), so its
-    reduced component widths do not exceed the returned integer.
-    The intermediate neighbor-degree vector is bounded by the same
-    nonnegative population envelope; the cap never exceeds the matched
-    stored suffix, so it needs no larger coefficient-width reservation.
+    exponent is U=8+bit_length(L)+bit_length(P+1). For larger counts use
+    the finite-binary64 exponent U=1024. Nonfinite reductions already fail
+    coefficient formation. W=(2*A12+A24)*2**(3e)/(6*2**s), so its reduced
+    component widths do not exceed the returned integer. The same
+    nonnegative upper bound covers the intermediate neighbor-degree vector.
+    The cap never exceeds the matched suffix, so it needs no wider
+    coefficient allowance.
     """
     if count < 2 or lower_exponent is None:
         return 1
@@ -411,21 +417,26 @@ def _common_recheck_law(W, loss, powers, coefficients, identity, tau, allowances
                        max_steps):
     """Return (work, logical peak bytes, visits, integer bits) for one QPE common-step attempt.
 
-    Inputs are the native float values already held by the QPE caller, native
-    nonnegative distinct integer powers, and native rational W and loss.
-    W=None reserves the stage before the census, using the component-width
-    envelope of _census_coefficient_bits for either variant and every block.
-    The coefficient exponent extrema reuse this function's shape scan. The
-    denominator and magnitude envelopes cover the actual input exponents and
-    all finite emitted values after the max_steps check. Candidate-count widths
-    separately cover a candidate refused by that check. With D=2**s all ordinary
-    dyadics are a/D with abs(a)<2**a_bits. The integer envelope follows rational
-    selection, the five subtotal parts, residual scaling and publication.
+    Inputs are the built-in float values already held by the QPE caller,
+    distinct nonnegative built-in integer powers, and rational W and loss,
+    each a built-in int, float or Fraction. W=None sets aside the cost of
+    this stage before the
+    commutator count, using the component-width bound of
+    _census_coefficient_bits for either variant and every block. The
+    coefficient exponent extrema reuse this function's shape scan. The
+    denominator and magnitude bounds cover the input exponents and all
+    finite emitted values after the max_steps check. The widths of the trial
+    step counts separately cover a trial count rejected by that check. With
+    D=2**s all ordinary dyadics are a/D with abs(a)<2**a_bits. The
+    integer-width bound follows the rational choice of the step count, the
+    five subtotal parts, residual scaling and the final upward rounding to
+    binary64.
 
-    Premises. Binary64 round-to-nearest with gradual underflow. Coefficients,
-    identity, tau and allowances are finite native floats, powers are
-    distinct native nonnegative integers, W and loss are native ints, floats
-    or Fractions, and the allowance dictionary has precisely the power keys.
+    Assumptions. Binary64 round-to-nearest with gradual underflow.
+    Coefficients, identity, tau and allowances are finite built-in floats,
+    powers are distinct nonnegative built-in integers, W and loss are
+    built-in ints, floats or Fractions, and the allowance dictionary has
+    precisely the power keys.
     This is not a bound for arbitrary conversion callbacks or a public
     ``common_steps`` call with arbitrary rational times.
 
@@ -438,7 +449,7 @@ def _common_recheck_law(W, loss, powers, coefficients, identity, tau, allowances
     u_x = frexp(abs(x))[1], so abs(x) < 2**u_x. Zero has both shapes zero.
     s_in, u_in bound all ordinary inputs (u_in >= 1), s_c, u_c the
     coefficients (u_c >= 0), with separate shapes for tau and the identity.
-    An accepted candidate has r_max = (p_max/g)m <= M, hence h = g*tau/m >=
+    An accepted trial count has r_max = (p_max/g)m <= M, hence h = g*tau/m >=
     tau/M, and a positive nearest-rounded h_hat is at least h/2, so
     s_h = min(1074, max(0, 54 - u_tau + R_M)) is a sufficient denominator
     exponent for the emitted step. A correctly rounded finite product of
@@ -450,38 +461,39 @@ def _common_recheck_law(W, loss, powers, coefficients, identity, tau, allowances
     u = max(u_in, min(1024, P+u_tau+1), min(1024, P+u_tau+u_c+2),
     min(1024, P+u_tau+u_I+3)), every ordinary input and every finite emitted
     value is a/D with D = 2**s and abs(a) < 2**a_bits, a_bits = max(1, s+u).
-    s >= 1, so 2D**2 divides D**3. A candidate refused before emission uses
-    only the inputs, which fit the same envelope: the candidate square fits
+    s >= 1, so 2D**2 divides D**3. A trial count rejected before emission
+    uses only the inputs, which fit the same bound. The trial square fits
     Q = w+d+3P+3a_bits+2, and the floor, integer square root, increment and
     multiplication by p/g give R = max(P+ceil(Q/2)+2, R_M), which covers a
-    count refused by the step limit. The five subtotal parts share a
+    count rejected by the step limit. The five subtotal parts share a
     denominator dividing B_w*B_d*D**3 and their sum fits
     T = w+d+3a_bits+P+R+ell+k+5. Rescaling the residual to r_max adds at
     most R+2. Hence H = w+d+3P+4a_bits+2R+2ell+2k+32 and
-    b = max(2H+2, H+1076): the first term covers unreduced cross-products,
-    the second comparisons with a general binary64 boundary during
-    conversion and publication.
+    b = max(2H+2, H+1076). The first term covers unreduced cross-products,
+    and the second covers comparisons with a general binary64 boundary
+    during conversion and the final rounding.
 
     Visits. With the shared reductions of ``error_budget._common_reductions``
-    and one exact running phase prefix, V = 32L+320K+128+32K**2+4Kk: 32L for
-    coefficient validation, shape inspection, half-angle construction,
-    finiteness checks and the single exact mass/angle reduction; 320K+128
-    for input and allowance checks, ideal selection, one phase conversion
-    and exact prefix addition per power, the five scalar parts and their
-    sum, residuals, publication and grid validation; 4Kk for the two sorts;
-    32K**2 for integer-key hash-collision comparisons. The arithmetic
-    reductions are O(L+K). The admission stays O(L+K**2) because it prices
-    hostile collisions.
+    and one exact running phase prefix, V = 32L+320K+128+32K**2+4Kk. Here
+    32L covers coefficient validation, shape inspection, half-angle
+    construction, finiteness checks and the single exact mass/angle
+    reduction. 320K+128 covers input and allowance checks, the ideal choice
+    of the step count, one phase conversion and exact prefix addition per
+    power, the five scalar parts and their sum, residuals, the final
+    rounding and grid validation. 4Kk covers the two sorts, and 32K**2 the
+    integer-key hash-collision comparisons. The arithmetic reductions are
+    O(L+K). The work check stays O(L+K**2) because it counts worst-case
+    hash collisions.
 
     Work is V*c*c*(1+ceil(log2(c))), c=ceil(bits/1075), a logical proxy rather
     than a timing guarantee. Bytes use the convention
-    I(b) = 32+4*ceil(b/30) and B = 65536+192L+2048K+(2L+13K+64)*I(b): 2L
-    integer slots for the coefficient Fractions while the shared reductions
+    I(b) = 32+4*ceil(b/30) and B = 65536+192L+2048K+(2L+13K+64)*I(b), with
+    2L integers for the coefficient Fractions while the shared reductions
     are formed, 13K for six Fractions per completed prefix and its count, and
-    a 64-slot frontier. The byte envelope has the qualified 64-bit CPython
-    object allowance and excludes opaque allocator/bigint implementation
-    scratch and process RSS. Source: NWQLib's derivation for the common-step
-    selector, not a paper theorem.
+    a working set of 64 integers. The byte bound uses the object sizes of
+    the qualified 64-bit CPython and excludes allocator and big-integer
+    scratch memory and the resident memory of the process. Source: NWQLib's
+    derivation for the common-step selection, not a paper theorem.
     """
     if type(max_steps) is not int or max_steps < 1:
         raise ValueError("max_steps must be a positive native integer")
@@ -532,14 +544,15 @@ def _common_recheck_law(W, loss, powers, coefficients, identity, tau, allowances
 
 
 def _admit_common_recheck(W, loss, powers, coefficients, identity, tau, allowances, config):
-    """Admit one common-step attempt of an empty kept generator.
+    """Check one common-step attempt with no kept Pauli term against the limits.
 
     select_powers calls it only when no Pauli term is kept, so there is no
-    census and no census reservation (``_census``). The input-exponent
-    width envelope covers candidate selection and the shared exact
-    reductions before the selector runs. max_trotter_steps separately
-    refuses an oversized candidate. Bytes describe the exact stage's
-    logical live objects.
+    commutator count and nothing is set aside for one (``_census``). The
+    width bound from the input exponents covers the choice of the trial count
+    and the shared exact reductions before the selection runs.
+    max_trotter_steps separately rejects an oversized trial count. Bytes
+    bound the logical size of the objects held in memory during the exact
+    stage.
     """
     work, peak, visits, bits = _common_recheck_law(
         W, loss, powers, coefficients, identity, tau, allowances,
@@ -570,27 +583,27 @@ def independent_recheck_work(W, loss, powers, coefficients, identity, tau,
                              allowance, max_steps):
     """Return (work, visits, integer bits) of the exact recheck in _independent_powers.
 
-    K is the number of powers actually passed to this invocation, including
+    K is the number of powers passed to this invocation, including
     zero. L is the number of kept nonidentity terms. _independent_powers forms
     half angles and performs the exact angle reduction even for power zero,
     so that entry must not be omitted from KL. Repeated shots and the two
-    interference quadratures do not multiply K when they share one selected
-    power. RWPE planning passes all of its max(1, max_steps) relative times
-    in one call.
+    interference quadratures do not multiply K when they share one power.
+    RWPE planning passes all of its max(1, max_steps) relative times in one
+    call.
 
-    Premises: native finite binary64 coefficients, tau>0, finite identity
-    and allowance, native integer or finite binary64 powers, an admitted
-    rational census coefficient W, and the represented pruning mass. All
-    powers have already passed the schedule's range checks. A selected
-    count r is checked against M=max_trotter_steps before its angles are
-    emitted. A candidate refused by that check still performs exact
-    inversion and must be priced. Arbitrary conversion callbacks and
-    arbitrary rational public powers are outside this law.
+    Assumptions: built-in finite binary64 coefficients, tau>0, finite
+    identity and allowance, built-in integer or finite binary64 powers, a
+    checked rational commutator-count coefficient W, and the represented
+    pruning mass. All powers have already passed the schedule's range
+    checks. A chosen count r is checked against M=max_trotter_steps before
+    its angles are emitted. A trial count rejected by that check still
+    performs exact inversion and must be counted. Arbitrary conversion
+    callbacks and arbitrary rational public powers are outside this formula.
 
     Work units. Each power forms and checks L half angles and evaluates the
     exact reduction A_p = 2 sum_j |val(a_pj)-val(h_p)c_j/2|, then the five
     emitted-error parts, their comparison with the allowance and the
-    upward-rounded publications. The candidate inversion performs a fixed
+    upward-rounded results. The inversion for the trial count performs a fixed
     number of rational operations and one integer square root per active
     power. These are O(KL+K+L) logical arithmetic visits. With the
     integer-width weighting of _common_recheck_law,
@@ -599,20 +612,20 @@ def independent_recheck_work(W, loss, powers, coefficients, identity, tau,
     engineering arithmetic proxy, not a CPU-time or exact bigint-instruction
     bound. The sufficient visit inventory is
     V_T=32L(K+1) (coefficients once plus each power's coefficient pass),
-    V_S=320K+128 (per-power scalar path) and V_I=128K_a (candidate
-    inversion, including a candidate later refused by M), where K_a counts
+    V_S=320K+128 (per-power scalar path) and V_I=128K_a (inversion for the
+    trial count, including one later rejected by M), where K_a counts
     nonzero powers if L>0 and is zero for an empty kept generator.
 
     Widths. p, tau, the identity coefficient, the allowance, coefficients,
     displayed time and the finite emitted h, half angles and phase are
-    n/D with D=2^s, s>=1, |n|<2^a, a=s+u, derived from the native float
+    n/D with D=2^s, s>=1, |n|<2^a, a=s+u, derived from the built-in float
     shapes. For positive displayed time with frexp(time)[1]=u_t, a nonzero
     emitted h=RN(time/r) with r<=M has denominator exponent at most
     s_h = min(1074, max(0, 54-min_positive(u_t)+bit_length(M))). Half
     angles at most min(1074, s_h+s_c+1) and phases at most
     min(1074, s_p+s_tau+s_I). With ell=bit_length(max(1,L)),
     r_M=bit_length(M), d the pruning mass width and w the larger of W's
-    width and the _census_coefficient_bits envelope of these coefficients:
+    width and the _census_coefficient_bits bound of these coefficients:
     H_T = 3a+ell+4, b_T = 2H_T+2,
     H_S = w+d+3a+ell+r_M+8, b_S = max(2H_S+2, H_S+1076, 2152),
     Q = w+3a+1075+4, R = ceil(Q/2)+2,
@@ -623,18 +636,18 @@ def independent_recheck_work(W, loss, powers, coefficients, identity, tau,
     two). Doubling covers unreduced cross-products. The five emitted parts
     share a denominator dividing den(W)*den(loss)*D^3, the count adds at
     most r_M bits, the coefficient sum ell and the five-part sum fewer than
-    three. H_S+1076 covers comparison/publication against a finite binary64
+    three. H_S+1076 covers comparison and final rounding against a finite binary64
     boundary and the 2,152-bit floor scalar operations on two binary64
     values. The selector divides W*time^3 by a positive binary64 remaining
-    allowance, whose numerator and denominator fit Q. The square-root
-    candidate has at most R bits even above M. Publishing W*time^3/r^2
-    needs H_I. The law covers the work before both scientific refusals and
-    the step-count refusal. It is not a wall-clock guarantee, a Plan-wide
-    work total or a heap/RSS envelope.
+    allowance, whose numerator and denominator fit Q. The square-root trial
+    count has at most R bits even above M. Rounding W*time^3/r^2 upward to
+    binary64 needs H_I. The formula covers the work before both scientific
+    rejections and the step-count rejection. It is not a wall-clock
+    guarantee, a Plan-wide work total or a bound on heap or resident memory.
 
-    Source: NWQLib's derivation of the independent exact recheck
-    admission. The widths reuse the coefficient-width premise of
-    _census_coefficient_bits and the chunk convention of
+    Source: NWQLib's derivation of the work check for the independent exact
+    recheck. The widths reuse the coefficient-width assumption of
+    _census_coefficient_bits and the 1075-bit chunk convention of
     _common_recheck_law.
     """
     K, L = len(powers), len(coefficients)
@@ -698,25 +711,26 @@ def independent_recheck_work(W, loss, powers, coefficients, identity, tau,
 
 
 def polar_base(matrix, config):
-    """Return V = polar(A) = U @ Vh from one NumPy SVD of the admitted near-unitary A.
+    """Return V = polar(A) = U @ Vh from one NumPy SVD of the checked near-unitary A.
 
-    Dense unitary selection forms one polar base and constructs controlled
-    gap powers of that base. For a nonsingular admitted A the ideal target
+    For dense unitary input, planning forms one polar factor and constructs
+    controlled gap powers of it. For a nonsingular checked A the ideal target
     is V = polar(A), a unitary. If eta_A = ||A^dagger A - I|| < 1, singular
     values give ||A - V||_2 = max_j |sigma_j(A) - 1|
     <= eta_A/[1 + sqrt(1 - eta_A)], from |sigma-1| = |sigma**2-1|/(sigma+1).
-    The entrywise admission implies eta_A <= D*entry_tolerance. Numerical
-    polar computation contributes its own error relative to V.
+    The entrywise unitarity check implies eta_A <= D*entry_tolerance.
+    Numerical polar computation contributes its own error relative to V.
 
-    Admission. The polar stage charges 9*D**3 + 8*D**2 work units and
-    192*D**2 + 160*D known-buffer bytes for complex128 input under the
+    Limit check. The polar stage counts 9*D**3 + 8*D**2 work units and
+    192*D**2 + 160*D bytes of known buffers for complex128 input under the
     NumPy 2.5.2 wrapper inventory. The byte allowance includes the caller's
     matrix, singular-vector frames, singular values, RWORK and IWORK,
     using eight bytes per LAPACK integer, plus one conservative D-square
     matrix allowance. NumPy's separately allocated, implementation-dependent
-    complex WORK array is outside this charge. Thus max_bytes is a
-    known-buffer admission and does not bound the complete SVD allocation
-    or process RSS. The selected factor occupies 16*D**2 persistent bytes.
+    complex WORK array is outside this count. Thus max_bytes checks only the
+    known buffers and does not bound the complete SVD allocation or the
+    resident memory of the process. The polar factor keeps 16*D**2 bytes in
+    memory.
     This runs once per Plan for unitary dense input. Hamiltonian input keeps
     its Hermitian spectral route.
     """
@@ -750,18 +764,18 @@ def gap_powers(powers):
 
 @dataclass(frozen=True)
 class PowerSelection:
-    """The selected constructions of one Plan's powers.
+    """The constructions chosen for one Plan's powers.
 
     Attributes:
         powers: One QPEPower per distinct power, sorted.
-        blocks: Every selected power block, each once.
-        evaluation: The one Pauli census evaluation, or None.
-        census_block: Contraction block actually passed to that census.
+        blocks: Every power block, each once.
+        evaluation: The one evaluation of the Pauli commutator count, or None.
+        census_block: Contraction block passed to that commutator count.
         common: The shared step record of exact-trajectory product-formula powers.
         step: The shared controlled step block, or None.
         increments: Certified binary64 identity phases. The exact
-            trajectory stores the increment before each power position,
-            and sampled and RWPE Plans store the whole phase for each
+            trajectory records the increment before each power position,
+            and sampled and RWPE Plans record the whole phase for each
             independent power.
         dense: Dense power blocks by their nonnegative exponent.
     """
@@ -778,63 +792,65 @@ class PowerSelection:
 
 def select_powers(*, target, base, tau, labels, coefficients, identity, pruned_mass, powers,
                   backend, config, route):
-    """Census the kept terms once and select every construction of the Plan's powers once.
+    """Count the commutators of the kept terms once and choose every power construction once.
 
     ``route`` is ``trajectory`` (the exact static quantum trajectory),
     ``sampled`` (separate static Hadamard tests with counts), ``rwpe`` or
     ``classical``.
 
-    Product formula, trajectory, sampled and RWPE routes. One Pauli commutator census gives an
-    upper bound W_up on the second-order coefficient of Childs, Su, Tran,
-    Wiebe and Zhu, Phys. Rev. X 11, 011020 (2021),
+    Product formula, trajectory, sampled and RWPE routes. One count of Pauli
+    commutators gives an upper bound W_up on the second-order coefficient of
+    Childs, Su, Tran, Wiebe and Zhu, Phys. Rev. X 11, 011020 (2021),
     doi:10.1103/PhysRevX.11.011020, Prop. 10, Eq. (121) (arXiv:1912.08854v3
     Prop. 16, Eq. (152)), from the Pauli-triangle expansion in
-    trotterization.error_budget. The census uses the full Pauli-triangle
-    expression when its work plus any reserved common-step work and its
-    storage fit, and otherwise the second-order degree-capped suffix relaxation
-    (``_census``).
+    trotterization.error_budget. The count uses the full Pauli-triangle
+    expression when its work plus any common-step work set aside and its
+    storage fit, and otherwise the second-order degree-capped suffix
+    relaxation (``_census``).
 
     Product formula, exact static trajectory. The exact static trajectory
     uses one propagated state and keeps the common grid. Only this route
-    reserves common-step work. The reservation bounds the census
-    coefficient width from the input exponents before any pair work. After
-    this combined admission,
-    ``error_budget.select_common_step`` selects one ordered second-order
+    sets aside common-step work. The amount set aside bounds the width of the
+    commutator-count coefficient from the input exponents before any pair
+    work. After this combined limit check,
+    ``error_budget.select_common_step`` chooses one ordered second-order
     step for the nonnegative integer power positions. The ideal rational
-    grid uses ``t_p=p*val(tau)`` and integer prefix counts. Persist the
-    emitted binary64 step and the cumulative count at every point. Admit
-    each prefix using its pruning bound, ``W*r_p*abs(val(h_hat))**3``,
+    grid uses ``t_p=p*val(tau)`` and integer prefix counts. The emitted
+    binary64 step and the cumulative count at every point are saved. Each
+    prefix is accepted using its pruning bound, ``W*r_p*abs(val(h_hat))**3``,
     kept-generator time-displacement bound and applicable identity-phase and
     rotation-angle formation bounds. The counts are sufficient for the
     shared trajectory and need not minimize each prefix independently. Every
     power's allowance is ``controlled_power_error_budget``. A failed
-    subtotal refuses planning, naming the power, the allowance and the
-    contributions. No retry is made. Target increments are
+    subtotal stops planning with an error that names the power, the
+    allowance and the contributions. No retry is made. Target increments are
     ``(p_k-p_(k-1))*val(tau)``.
 
     Product formula, sampled static settings and RWPE. A sampled setting
     starts from its own preparation and runs its own Hadamard circuit. It
     does not share the propagated state at earlier powers. Therefore it can
     use an independent Suzuki step count, and so does each continuous RWPE
-    power. Each power has exact signed target t=val(p)*val(tau). Its
-    candidate count is independently selected at the displayed positive
-    time, then its emitted parameters are checked against the complete
+    power. Each power has exact signed target t=val(p)*val(tau). Its trial
+    step count is chosen independently at the displayed positive time, then
+    its emitted parameters are checked against the complete
     subtotal in _independent_powers. The step block carries its intrinsic
     formula-plus-angle bound at the represented step time. Pruning, time
     displacement and identity phase enter only the complete power bound.
-    These routes reserve no common-step work and record no common step.
-    Their exact recheck is admitted separately at its entry.
+    These routes set aside no common-step work and record no common step.
+    Their exact recheck is checked against the limits separately when it
+    starts.
 
     Dense powers. A Hamiltonian power is the exact spectral power. For a
-    dense unitary input A, the selected base is its unitary polar factor V
-    (``base``, ``polar_base``). Every nominal power and trajectory gap uses
+    dense unitary input A, the base is its unitary polar factor V
+    (``base``, ``polar_base``). Every requested power and trajectory gap uses
     this same base. A gap of k powers is constructed by repeated squaring of
-    V and realized as a controlled dense block. The represented target is
-    V^p at power p. Polar selection, floating-point power formation and
-    controlled synthesis contribute numerical error. Each gap is admitted
-    for its actual matrix work, synthesis and live cache storage. The
-    trajectory constructs one block per distinct positive gap and a sampled
-    or RWPE Plan one block per distinct nonzero power.
+    V and built as a controlled dense block. The target operator at
+    power p is V^p. The polar decomposition, the floating-point matrix
+    powers and the synthesis of the controlled gates contribute numerical
+    error. Each gap's limit check covers its matrix work, its synthesis and
+    the cached matrices held in memory. The trajectory constructs one block
+    per distinct positive gap and a sampled or RWPE Plan one block per
+    distinct nonzero power.
 
     Returns:
         PowerSelection.
@@ -950,14 +966,14 @@ def _display_time(power, tau):
 
 def _independent_powers(target, tau, terms, identity, pruned_mass, powers, config,
                         evaluation, census_block):
-    """Select and certify independent QPE powers against t=val(p)*val(tau).
+    """Choose and certify the step counts of independent QPE powers against t=val(p)*val(tau).
 
     The powers are the integer powers of sampled QCELS, SPE and RFE
-    settings or the continuous powers of RWPE. Each is selected on its own,
+    settings or the continuous powers of RWPE. Each is chosen on its own,
     because its circuit starts from its own preparation and does not share
     a propagated state with other powers.
 
-    Select one candidate count at the displayed positive time using the
+    Choose one trial count at the displayed positive time using the
     outward pruning subtotal. With t_p=p*val(tau), d_up the dropped
     coefficient mass and epsilon_p=controlled_power_error_budget, the ideal
     remaining allowance is epsilon_p-|t_p|*d_up. At order two the formula
@@ -970,23 +986,23 @@ def _independent_powers(target, tau, terms, identity, pruned_mass, powers, confi
     A=2*sum|val(a_j)-val(h)*c_j/2|, its intrinsic error is W*|val(h)|**3+A.
     The complete power subtotal is
     B_p = |t|*d_up + r*(W*|val(h)|**3+A) + M*|r*val(h)-t| + |val(phi)+t*c_I|,
-    with every quantity an exact rational of the stored binary64
-    parameters. B_p <= epsilon_p is required and its upward rounding is
-    published. phi=-p*tau*c_I is emitted separately on the control and is
-    stored for the Program to use. A failed complete subtotal refuses
-    without retry. The initial smallest-r claim concerns only the ideal
+    with every quantity an exact rational of the binary64 parameters.
+    B_p <= epsilon_p is required and its upward rounding is recorded.
+    phi=-p*tau*c_I is emitted separately on the control and is recorded for
+    the Program to use. A failed complete subtotal stops planning without
+    retry. The initial smallest-r claim concerns only the ideal
     formula bound at the displayed time, not the complete emitted-parameter
     subtotal. Source: the independent minimum-count rule of Childs et al.
     doi:10.1103/PhysRevX.11.011020, Sec. V B, with the second-order
     coefficient of Prop. 10, Eq. (121). docs/algorithms/qpe.md states the
-    per-power selection.
+    per-power choice.
 
-    Before forming the coefficient Fractions, the recheck is admitted
-    against max_work as a next-stage check (``_QPEMethod._admit``'s
-    contract, not a cumulative ledger): independent_recheck_work prices
-    its K powers, including zero, and L kept terms by a linear metadata
-    scan without any KL Fraction reduction or commutation scan. The
-    admission changes no step-selection, emitted-parameter or
+    Before the coefficient Fractions are formed, the work of the recheck is
+    checked against max_work as the check of the next stage (the rule of
+    ``_QPEMethod._admit``, not a cumulative total). independent_recheck_work
+    counts the work of its K powers, including zero, and L kept terms by a
+    linear metadata scan without any KL Fraction reduction or commutation
+    scan. This check changes no step-selection, emitted-parameter or
     error-comparison formula.
     """
     coefficients = tuple(value for _, value in terms)
@@ -1127,27 +1143,27 @@ def _step_block(target, terms, step_time, evaluation, config, *, angle_per_step)
 
 
 def _dense_block(target, reference, matrix, tau, exponent, config, *, squares):
-    """Return the controlled dense block of one nonnegative exponent k of the selected base.
+    """Return the controlled dense block of one nonnegative exponent k of the base.
 
     Work counts D**3 units per product of two D-square matrices, the unit of
-    _linalg_laws. For a unitary the per-exponent envelope is
+    _linalg_laws. For a unitary the per-exponent upper bound is
     W_k = [bitlength(k) + popcount(k) - 2]*D**3 + 8*D**2 + W_synthesis. It
     remains valid with shared squares, since a cache miss cannot require
     more squares than an independent construction. For a Hamiltonian,
     V*exp(-i*E*tau*k)*V^dagger is one product, and the eigendecomposition it
     reads is computed by whichever block is constructed first, so every
-    block is charged _linalg_laws.hermitian_eigensystem_work as well.
+    block counts _linalg_laws.hermitian_eigensystem_work as well.
     Bytes: for a Hamiltonian an allowance of six D x D complex128 arrays
     (96*D**2). For a unitary the 96*D**2 allowance does not cover the
     persistent square cache, and the sufficient replacement is
     (96+16J)*D**2 + B_synthesis,working + B_synthesis,kept + H_cache with
     H_cache = 256(J+1) + H0, H0 = 65536, and J the largest square index of
-    any exponent the Plan constructs, admitted before the cache is
-    populated (``construct_dense_power``). The synthesis of the controlled
-    matrix on width + 1 qubits adds the work, working bytes and kept circuit
-    of _dense_synthesis.controlled_synthesis_size. Each block is admitted on
-    its own. Turning the reported total into a Plan-wide rejection gate is
-    a separate policy (docs/algorithms/qpe.md).
+    any exponent the Plan constructs, checked against the limits before the
+    cache is filled (``construct_dense_power``). The synthesis of the
+    controlled matrix on width + 1 qubits adds the work, working bytes and
+    kept circuit of _dense_synthesis.controlled_synthesis_size. Each block is
+    checked on its own. Comparing the reported Plan total with a limit would
+    be a separate policy (docs/algorithms/qpe.md).
     """
     dimension = target.manifest.basis.dimension
     width = dimension.bit_length() - 1
@@ -1182,7 +1198,7 @@ def _dense_block(target, reference, matrix, tau, exponent, config, *, squares):
 
 
 def bind_power(*, target, terms, power, steps, step_time, step_error, config, step_cx):
-    """Return one independently selected sampled or RWPE power's controlled step at its step_time.
+    """Return the controlled step of one independently chosen sampled or RWPE power.
 
     step_time is the checked signed binary64 step time of that power.
 
@@ -1243,7 +1259,7 @@ def construct_phase(block, arguments, method_context):
 
 
 def rotation_schedule(terms, step_time):
-    """Ordered second-order rotations consumed directly by native construction.
+    """Ordered second-order rotations that the Qiskit circuit construction applies directly.
 
     One step of the second-order Suzuki formula S2(dt) applies every term for
     dt/2 in the given order and then again in reverse order. Term 1 acts
@@ -1261,7 +1277,7 @@ def rotation_schedule(terms, step_time):
 
 
 def suzuki_step_cx(terms):
-    """Count CX gates in one selected QPE controlled Suzuki step.
+    """Count CX gates in one controlled Suzuki step of QPE.
 
     Let w_j be the number of nonidentity symbols in nonidentity Pauli term
     j, and W_support = sum_j w_j over the terms after splitting and pruning.
@@ -1281,7 +1297,7 @@ def suzuki_step_cx(terms):
     construct_suzuki_step uses qiskit_compat.controlled on a one-term
     PauliEvolutionGate. Qiskit 2.6.0 controls its central rotation through
     the projector representation (``PauliEvolutionGate.control`` in
-    qiskit/circuit/library/pauli_evolution.py, lowered by
+    qiskit/circuit/library/pauli_evolution.py, decomposed by
     crates/synthesis/src/pauli_evolution.rs), leaving the parity and basis
     networks uncontrolled. The corresponding uncontrolled leaf costs
     2*(w_j - 1), and the uncontrolled schedule 4*(W_support - L).
@@ -1295,11 +1311,11 @@ def suzuki_step_cx(terms):
     one-qubit feedback RZ and Hadamard gates.
 
     select_powers computes W_support once in O(L*q) label reads and uses
-    constant scalar work to instantiate each power's law. The value is per
-    step. Repeat supplies the steps multiplier, and the workload supplies
-    repetitions. The law binds the exact selected power, steps and
-    step_time cost parameters (``_make``). The law does not apply to the
-    separately selected dense-power synthesis.
+    constant scalar work to instantiate each power's CX cost rule. The value
+    is per step. Repeat supplies the steps multiplier, and the workload
+    supplies repetitions. The cost rule binds the exact power, steps and
+    step_time cost parameters (``_make``). It does not apply to the
+    separately chosen dense-power synthesis.
     """
     return 4 * sum(len(label) - label.count("I") for label, _ in terms)
 
@@ -1335,12 +1351,12 @@ def construct_suzuki_step(block, arguments, method_context):
 def cached_unitary_power(matrix, power, squares):
     """Return matrix**power from the binary squares in ``squares``, appending missing squares.
 
-    Reuse binary squares of the same admitted unitary within the Plan
+    Reuse binary squares of the same checked unitary within the Plan
     context, preserving NumPy's multiplication order including its
-    power-three case. Admission includes every cached square that can remain
-    live during native construction.
+    power-three case. The limit check counts every cached square that can
+    remain in memory while the Qiskit circuit is built.
 
-    The cache holds Z_0 = U (aliasing the owned matrix) and
+    The cache holds Z_0 = U (the block's own matrix, not a copy) and
     Z_j = Z_(j-1) @ Z_(j-1). For n = abs(power) > 0 with j = bit_length(n)-1
     and j_old the highest square cached before the call, it needs
     [max(0, j-j_old) + popcount(n) - 1]*D**3 of matrix work, and across calls
@@ -1370,19 +1386,19 @@ def cached_unitary_power(matrix, power, squares):
 
 
 def construct_dense_power(block, arguments, method_context):
-    """Build the controlled dense power of one exponent of the selected base.
+    """Build the controlled dense power of one exponent of the base.
 
-    Construct a controlled gap power of the Plan's selected polar base. For
-    a computed gap matrix B with operator-norm unitarity defect eta below
+    Construct a controlled gap power of the Plan's polar base. For a
+    computed gap matrix B with operator-norm unitarity defect eta below
     one, its polar factor differs from B by at most eta/(1+sqrt(1-eta)).
-    Error against the selected ideal power additionally includes B's
-    formation error and circuit-synthesis error.
+    Error against the ideal power additionally includes B's formation
+    error and circuit-synthesis error.
 
     For a Hamiltonian, U^p = V diag(exp(-i*E*tau*p)) V^dagger from the
-    eigensystem kept in the method context, so every power and the host
-    signal reuse one eigendecomposition. For unitary input the payload
-    matrix is the selected polar base, and its power comes from the binary
-    squares kept in the method context under the base's identity
+    eigensystem kept in the method context, so every power and the
+    classical signal reuse one eigendecomposition. For unitary input the
+    payload matrix is the polar base, and its power comes from the binary
+    squares kept in the method context under the base's input reference
     (``cached_unitary_power``). The squares are a recomputable construction
     cache and are not saved with a Result. ``qiskit_compat.controlled``
     synthesizes the unitary polar factor of the controlled matrix to

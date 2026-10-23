@@ -3,13 +3,13 @@
 The layer (``constrained.py``) solves a ``ConstrainedOptimization`` by a
 sequence of box problems, each one a new QHD Plan. These records hold its
 options, the constraint preprocessing, each round and the whole run. They are
-typed, immutable and carry content identities. Their validators check
+typed, immutable and carry content hashes. Their validators check
 mathematical domains and the links between records. The rules that produce
-the values live in ``constrained.py``.
+the values are in ``constrained.py``.
 
 Sources named here and in ``constrained.py``: Wu et al. arXiv:2605.12066v1,
 Eqs. (6)-(8), Rockafellar doi:10.1007/BF01580138 (the PHR inequality term), and
-Birgin and Martinez, *Practical Augmented Lagrangian Methods for Constrained
+Birgin and Martínez, *Practical Augmented Lagrangian Methods for Constrained
 Optimization*, SIAM 2014, doi:10.1137/1.9781611973365 (Algorithm 4.1,
 Eqs. (4.7)-(4.9), the effective objective of Eq. (10.3), Algencan's stopping
 test, Eqs. (10.6)-(10.8), and the assumptions of the book's convergence
@@ -87,7 +87,7 @@ _REFINEMENT_ONLY = ("flat_objective", "unresolved_objective", "width_floor")
 
 
 class MultiplierBounds(Record):
-    """Safeguard box for the multipliers, Algorithm 4.1 Step 4 of Birgin and Martinez, doi:10.1137/1.9781611973365.
+    """Safeguard box for the multipliers, Algorithm 4.1 Step 4 of Birgin and Martínez, doi:10.1137/1.9781611973365.
 
     Build it with keyword arguments, for example
     `MultiplierBounds(equality_lower=-10.0, equality_upper=10.0, inequality_upper=10.0)`,
@@ -150,7 +150,7 @@ class AugmentedLagrangian(Record):
             that increases rho.
         reduction_ratio: Default `0.25`, from the prototype code of the authors of Wu et
             al., arXiv:2605.12066v1, strictly between 0 and 1. The tau of the penalty
-            test, Birgin and Martinez Eq. (4.9). The book only requires 0 < tau < 1.
+            test, Birgin and Martínez Eq. (4.9). The book only requires 0 < tau < 1.
         max_penalty: Default `1e9`, from Wu et al., Sec. VI.B. Upper bound of rho, at
             least `initial_penalty`.
         max_iterations: Default `15`, from Wu et al., Sec. VI.B. Largest positive number
@@ -178,7 +178,7 @@ class AugmentedLagrangian(Record):
         equality_multipliers: Default `None`, which starts every equality multiplier at
             0. Initial normalized lambda for every equality. Algorithm 4.1 starts the
             multipliers inside `multiplier_bounds`, so `solve_augmented_lagrangian`
-            refuses None for a problem with equalities when the bounds' equality
+            rejects None for a problem with equalities when the bounds' equality
             interval excludes zero.
         inequality_multipliers: Default `None`, which starts every inequality multiplier
             at 0. Initial normalized mu >= 0 for every inequality.
@@ -206,10 +206,11 @@ class AugmentedLagrangian(Record):
             diagnostic r_stat. It differentiates f, h and g symbolically and does not
             affect stopping.
         inequality_form: Default `"phr"`. How each round represents its kept
-            inequalities in the inner problem
+            inequalities, those that `absorb_bounds` did not turn into box bounds, in
+            the inner problem
             ([Proposition 54](../../mathematics.md#r54)): `"phr"`, the PHR term,
             `"slack"`, a slack variable per inequality with a positive cap, or `"auto"`,
-            chosen by planned cost on the quantum route. The outer update and the
+            chosen by planned cost under quantum execution. The outer update and the
             stopping tests are those of the PHR term in every case. The Inequality forms
             note below gives the rules.
 
@@ -224,7 +225,7 @@ class AugmentedLagrangian(Record):
         search-model level solves its positive normalization. The point rules act in the
         inner coordinates. Refinement compares recorded relative values of the inner
         objective across levels and takes the earlier level on a tie. The outer point is
-        the projection onto the original variables, and effective_value is the PHR value
+        the projection onto the original variables, and `effective_value` is the PHR value
         L_k evaluated at that projection when a representation is present. With box
         refinement (`solve_augmented_lagrangian(refinement=...)`) the rule reads every
         level, so it must equal `BoxRefinement.point_rule`, which applies it, and a run
@@ -244,22 +245,24 @@ class AugmentedLagrangian(Record):
 
         `"auto"` keeps PHR without branch tests for classical execution or a user
         GaussianState. Otherwise it applies the eligible branch tests and considers
-        slack conversions in constraint order. It accepts a trial that planning accepted
-        when planned classical work and CX count are both no larger and at least one is
-        smaller, or when the current planning is refused and the trial is accepted with
-        a CX count. A missing CX count prevents the comparison. The comparison study's
-        quantum quality evidence for `"auto"` covers only the QHD guide's `n = 3`,
-        `K = 4` cases with one affine inequality, `KineticGroundState`, joint-mode
-        readout, no refinement and exact noiseless readout under the study's fixed
-        schedule and outer settings. Classical execution uses a restricted state that
-        grows by a factor K per slack.
+        slack conversions in constraint order. It keeps a trial whose planning passes the
+        limit checks when planned classical work and CX count are both no larger and at
+        least one is smaller, or when the current planning was rejected and the trial has
+        a CX count. A missing CX count prevents the comparison. Evidence on the solution
+        quality of `"auto"` under quantum execution covers only the `n = 3`, `K = 4`
+        cases of the comparison of the three forms in the
+        [QHD guide](../../algorithms/qhd.md#slack-variables-for-inequality-constraints),
+        with one affine inequality, `KineticGroundState`, joint-mode readout, no
+        refinement and exact noiseless readout under that comparison's fixed schedule and
+        outer settings. Classical execution uses a restricted state that grows by a
+        factor K per slack.
 
         The outer update, the stopping tests and the stationarity diagnostic stay those
         of the PHR term at the round's point in the original coordinates.
 
     Raises:
         ValueError: If `max_penalty` is below `initial_penalty`, or the initial
-            multipliers lie outside `multiplier_bounds`, where Birgin-Martinez Algorithm
+            multipliers lie outside `multiplier_bounds`, where Birgin-Martínez Algorithm
             4.1 starts them.
     """
 
@@ -481,14 +484,14 @@ class FormTrial(Record):
     Attributes:
         inequality: Problem position of the inequality the trial converts.
         current_work: Planned classical work of the current representation, or None when
-            its planning was refused.
-        current_cx: Its CX count per circuit, or None when its planning was refused or
+            its planning was rejected.
+        current_cx: Its CX count per circuit, or None when its planning was rejected or
             the construction has no CX count.
-        trial_work: Planned classical work of the trial, or None when refused.
+        trial_work: Planned classical work of the trial, or None when rejected.
         trial_cx: CX count of the trial, or None as for `current_cx`.
         accepted: Whether the round keeps the trial. It does when both counts are no
-            larger and one is strictly smaller, or when the current planning was refused
-            and the trial was accepted with a CX count. A missing CX count keeps the
+            larger and one is strictly smaller, or when the current planning was rejected
+            and the trial's planning passed with a CX count. A missing CX count keeps the
             current representation.
         reason: Why the trial was accepted or kept out.
     """
@@ -532,10 +535,10 @@ class InnerRepresentation(Record):
             per `slack` form, in the same order.
         variables: Names of the inner problem's variables, the problem's variables
             followed by the slack variables.
-        grid: The slack grid's convention, from the Method's `boundary` and
+        grid: The slack grid's convention, from the QHD configuration's `boundary` and
             `include_boundary_points`: `dirichlet_interior`, `dirichlet_endpoints` or
             `periodic`.
-        grid_points: Points of each slack grid, the Method's `num_grid_points`.
+        grid_points: Points of each slack grid, the QHD configuration's `num_grid_points`.
         cap_scope: `grid`. The caps and branch tests hold on the grid of the
             preprocessed box, not on the continuous box or on the nested grids of later
             refinement levels.
@@ -546,12 +549,13 @@ class InnerRepresentation(Record):
             for the other policies.
         selection: Why the policy chose these forms.
         table_evaluations: Objective-table grid tuples that QHD planning evaluated for
-            the candidates of automatic selection, each planned candidate once, the
+            the representations that automatic selection planned, each once, the
             current representation and every trial, whether kept or discarded. Zero for
             the other policies and when selection planned nothing. The round adds the
-            candidates that its Plans do not reuse to `ALResources.table_evaluations`.
-            None when a candidate's planning raised after its tables were accepted, so
-            that its partial evaluations are unknown.
+            representations that its Plans do not reuse to
+            `ALResources.table_evaluations`. None when the planning of a representation
+            raised after its tables passed the limit check, so that its partial
+            evaluations are unknown.
         table_evaluations_unavailable: Why `table_evaluations` is None, or None.
         inner_objective: Content hash of the inner objective, the SHA-256 of its
             `srepr`, the inner variables' `srepr` and the inner box, which the inner
@@ -600,8 +604,9 @@ class ALResources(Record):
     by zero. A total sums each count over the rounds, except `width` and
     `restricted_dimension`, which take the largest round, and is unknown when any
     round's count is unknown. Measurement counts are what the inner Runs set aside,
-    including failed and uncertain attempts, as `ExecutionTrace` counts them. A round
-    with box refinement counts every level of its refinement, completed or stopping
+    including failed attempts and uncertain ones, whose outcome cannot be established,
+    as `ExecutionTrace` counts them. A round with box refinement counts every level of
+    its refinement, completed or stopping
     (`BoxRefinementResult.resources`), and a count is unknown when the refinement's is.
 
     The counts are the work of the algorithm, each counted once as in an uninterrupted
@@ -624,8 +629,9 @@ class ALResources(Record):
             0 and when the value is unknown.
         arbitrary_rotations: Arbitrary rotations of the same circuits, counted as `cx`
             is, an upper bound for the binary encoding. For quantum execution it equals
-            the body total `arbitrary_rotations` of
-            [`run_resources`][nwqlib.algorithms.qhd.resources.run_resources].
+            `arbitrary_rotations` of
+            [`run_resources`][nwqlib.algorithms.qhd.resources.run_resources], the body
+            total that counts each compiled circuit once, not multiplied by shots.
         circuit_preparations: Circuit preparations.
         circuit_attempts: Circuit attempts of every status.
         completed_circuit_attempts: Those of them that completed with an observation.
@@ -634,9 +640,9 @@ class ALResources(Record):
         completed_shots: Raw shots of the completed attempts.
         data_bytes: Recorded Run data bytes.
         table_evaluations: Objective-table grid tuples evaluated by QHD planning,
-            including discarded automatic-selection candidates and, with refinement,
-            every level's planning. The Circuit counts note below gives what each round
-            adds and when the count is unavailable.
+            including the representations that automatic selection planned and
+            discarded and, with refinement, every level's planning. The Circuit counts
+            note below gives what each round adds and when the count is unavailable.
         evolution_work: Work that the inner Run counted for classical evolution before
             running it, in QHD's work units.
         construction_work: Construction work that the inner Run counted, for a quantum
@@ -649,7 +655,7 @@ class ALResources(Record):
             original-expression numerical scans of the grid check before the first
             round.
         layer_work: Their work, one unit per expression-tree node and per coordinate of
-            each evaluation, and in a run's total the nominal term charge of the grid
+            each evaluation, and in a run's total the nominal term count of the grid
             check's expansions (`objective.expansion_term_charge`). Its term-count
             guarantee applies to numeric constants, symbols, sums, products and
             nonnegative integer powers, with general SymPy rewriting outside it.
@@ -671,11 +677,12 @@ class ALResources(Record):
         `arbitrary_rotations` equals the body total of `run_resources`, which also
         multiplies each circuit by its shots and adds T estimates.
 
-        `table_evaluations` includes automatic-selection candidates that were discarded.
-        An unrefined round counts its reused Plan once. A refined round also counts
-        every level's planning and each search-model level's unscaled table stage. The
-        count is unavailable when a failed planning attempt's partial evaluations are
-        unknown. The candidates' count is `InnerRepresentation.table_evaluations`, and
+        `table_evaluations` includes the representations that automatic selection planned
+        and discarded. An unrefined round counts its reused Plan once. A refined round
+        also counts every level's planning and each search-model level's unscaled table
+        stage. The count is unavailable when a failed planning attempt's partial
+        evaluations are unknown. The count of the selection is
+        `InnerRepresentation.table_evaluations`, and
         the level counts are `RefinementResources` `table_evaluations` plus
         `support_evaluations`.
     """
@@ -727,7 +734,7 @@ class ALEvaluation(Record):
     an inequality representation. The Point rules note of
     [`AugmentedLagrangian`][nwqlib.algorithms.qhd.constrained_records.AugmentedLagrangian]
     describes the rules. The outer point is the projection onto the original variables,
-    and effective_value is the PHR value L_k evaluated at that projection when a
+    and `effective_value` is the PHR value L_k evaluated at that projection when a
     representation is present.
 
     With box refinement the point is that of the level with the least recorded relative
@@ -761,7 +768,8 @@ class ALEvaluation(Record):
             `valid_mean`. With slack variables it is the probability of the joint point.
         tie_deficit: For a most probable grid point (`most_probable`, and `mode_or_mean`
             when it takes the grid point), the computed maximum probability minus the
-            chosen point's probability, positive when a point within the tie window was
+            chosen point's probability, positive when a point within the tie window, the
+            bound on the numerical error of a computed difference of two probabilities, was
             preferred by the lexicographic rule. None otherwise. With slack variables it
             is that of the joint point.
         tie_window: The inner readout's tie window for such a point, or None when there
@@ -780,7 +788,7 @@ class ALEvaluation(Record):
             (`RefinementLevel.objective`). With a representation it is the PHR objective
             L_k evaluated at `point` from f, h and g, also at a grid point.
         effective_value_source: `table` when read from the inner Plan's support tables,
-            or with refinement when the level read L_k at its grid point from its stored
+            or with refinement when the level read L_k at its grid point from its
             tables. `evaluated` when L_k was evaluated at an off-grid mean, from f, h
             and g by the layer or, with refinement, by the level, and in every round
             with a representation.
@@ -1069,10 +1077,10 @@ class AugmentedLagrangianRecord(Record):
       (`termination="feasibility"`).
     - `iteration_limit`: `max_iterations` rounds ran without stopping.
     - `no_valid_point`: the last inner result had no valid grid point.
-    - `budget_exhausted`: the remaining cumulative `limits` could not fund another
+    - `budget_exhausted`: the remaining cumulative `limits` could not cover another
       round, possibly after zero rounds.
     - `inner_failed`: the inner planning, preparation or execution of the last round
-      raised, for example because QHD planning refused a larger penalty or a Run refused
+      raised, for example because QHD planning rejected a larger penalty or a Run rejected
       the remaining limits. Before anything has completed, in the first round without
       refinement or the first level of the first round with refinement,
       `solve_augmented_lagrangian` raises the original exception instead. The status
@@ -1103,7 +1111,7 @@ class AugmentedLagrangianRecord(Record):
         options: The layer's options.
         refinement: The box-refinement options of every round, or None when each round
             is one QHD solve. With refinement, `options.inner_point` equals
-            `refinement.point_rule`, the readout of every level.
+            `refinement.point_rule`, the rule that reads every level's point.
         execution: `quantum` or `classical`, for every round.
         shots: Shots per round, or None for exact readout.
         entropy: Entropy of the run's root `SeedSequence`.
@@ -1139,20 +1147,21 @@ class AugmentedLagrangianRecord(Record):
     Work and byte bounds:
         `admitted_work_bound` is fixed before the first round and bounds the nominal QHD
         work categories and the layer's own counted work. The symbolic category uses a
-        term charge that bounds formal term count for numeric constants, symbols, sums,
-        products and nonnegative integer powers. It does not bound general SymPy rewriting,
-        coefficient storage or symbolic temporaries. Write M for
+        nominal term count that bounds the formal number of terms for numeric constants,
+        symbols, sums, products and nonnegative integer powers. It does not bound general
+        SymPy rewriting, coefficient storage or symbolic temporaries. Write M for
         `options.max_iterations`, L for `refinement.max_levels`, and `a = 6` for
         search-model or `a = 4` for physical refinement. The bound is
         `(a * M * L + t * M + 1) * qhd.max_work`. Without refinement, L = 1 and a = 4.
-        An ordinary Plan has at most four category bounds: the nominal symbolic term charge, the
+        An ordinary Plan has at most four category bounds: the nominal symbolic term count, the
         running total (the initial state's evaluation and the table, compiled-block
-        and schedule-integral work), the optional kept state, and the classical evolution
-        or circuit construction. Planning checks the first part of the running total,
+        and schedule-integral work), the optional kept state (the final state that
+        `keep_state=True` saves), and the classical evolution or circuit construction.
+        Planning checks the first part of the running total,
         the initial state, alone before evaluating it. A search-model level adds the
         symbolic and running-total bounds of its unscaled table stage. Intermediate checks of one
         category are not counted separately. The trials of automatic inequality
-        selection on the quantum route add `t = 6 (m + 1) - 4` bounds per round without
+        selection under quantum execution add `t = 6 (m + 1) - 4` bounds per round without
         refinement and `t = 6 (m + 1)` with it, for m kept inequalities, and t = 0
         otherwise. The layer counts the work of its support-table check of f, h and g,
         which also gives the inequality ranges, and of its evaluations once for the
@@ -1385,7 +1394,7 @@ class ConstrainedGridMinimum(Record):
     """Evaluated finite-grid reference of `constrained_grid_minimum`.
 
     [`constrained_grid_minimum`][nwqlib.algorithms.qhd.constrained.constrained_grid_minimum]
-    returns it. The fields below are read-only. The answer is `gap`, the run's stored
+    returns it. The fields below are read-only. The answer is `gap`, the run's recorded
     best objective minus the least evaluated feasible objective `objective`, in original
     units. Computed feasibility uses the run's scales and `feasibility_tolerance` on the
     normalized residuals. The reference covers the preprocessed box's grid. It bounds
@@ -1403,13 +1412,13 @@ class ConstrainedGridMinimum(Record):
             lexicographically smallest index, or None when no grid point passes.
         point: That point in the original coordinates, or None.
         objective: Its evaluated f in original units, including the constant, or None.
-        best_objective: Stored evaluated f at the run's reported best point, or None
+        best_objective: Recorded evaluated f at the run's reported best point, or None
             when the run chose no point.
         best_feasible: Whether that best point passes the same computed tolerance test,
             or None. This does not state objective optimality.
         gap: `best_objective - objective` in original units, or None when either is
-            None. It compares a stored value with a fresh grid minimum and can be
-            negative, including when the point is infeasible or is an off-grid mean
+            None. It compares a recorded value with a freshly evaluated grid minimum and
+            can be negative, including when the point is infeasible or is an off-grid mean
             chosen by `mode_or_mean`. The Gap note below bounds the exact gap.
         feasibility_tolerance: The tolerance used.
         work: Work checked against `max_work` before the first evaluation.
@@ -1417,7 +1426,7 @@ class ConstrainedGridMinimum(Record):
     Gap:
         Let G be the nonempty grid subset passing this check's computed feasibility
         test, and let the reported point a lie in G. Suppose a finite E >= 0 bounds the
-        absolute error of the stored objective at a and every fresh objective on G,
+        absolute error of the recorded objective at a and every fresh objective on G,
         relative to exact values at the same coordinates. For finite reported gap r and
         u = 2**-53, the exact gap `F(a) - min_G F` is at most `r/(1-u) + 2*E` if r >= 0,
         and `r/(1+u) + 2*E` if r < 0. These are real-arithmetic inequalities under

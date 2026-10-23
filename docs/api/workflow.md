@@ -33,7 +33,7 @@ print(round(result.eigenvalue, 10))  # 1.0
 | State the question | [Problems and outputs](#scientific-inputs-and-output-quantities), [`Accuracy`](#nwqlib.problems.records.Accuracy) |
 | Read the answer, check it and save it | [`Result`](#nwqlib.core.analysis.Result) and its answer table |
 | Plan, compare or estimate before running | [`plan`](#nwqlib.scientist.plan), [`compare`](#nwqlib.scientist.compare), [`estimate`](#nwqlib.scientist.estimate) |
-| Rank candidate Plans | [`scan`](#nwqlib.search.scan) |
+| Rank Plans by shots, width or predicted time | [`scan`](#nwqlib.search.scan) |
 | Run step by step, with limits | [`prepare`](#nwqlib.scientist.prepare), [`submit`](#nwqlib.scientist.submit), [`Run`](#nwqlib._prepared_execution.Run), [`ExecutionLimits`](#nwqlib.execution.ExecutionLimits) |
 | Reopen a saved Result or Run | [`load_result`](#nwqlib.scientist.load_result), [`load_run`](#nwqlib.scientist.load_run) |
 

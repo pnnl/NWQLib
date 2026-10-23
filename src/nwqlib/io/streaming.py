@@ -1,4 +1,4 @@
-"""SDK-free, bounded OpenQASM 3.0 emission of selected primitive recipes."""
+"""OpenQASM 3.0 text written from exact primitive gate recipes, within limits and without a quantum SDK."""
 
 from dataclasses import dataclass
 import os
@@ -138,9 +138,10 @@ class QasmWriteError(RuntimeError):
 
 
 def _metadata(value, budget):
-    """Bound a conservative JSON envelope of ``value`` before any text is produced.
+    """Bound a conservative JSON size of ``value`` before any text is produced.
 
-    Each kept slot costs one walk step and 8 bytes of punctuation. Strings cost
+    Each value that ``walk_kept`` visits costs one walk step and 8 bytes of
+    punctuation. Strings cost
     six bytes per character (worst-case JSON escaping), integers their bit length
     plus one (a decimal digit count never exceeds the bit length) and floats 32
     bytes. Both limits are checked during the walk, so an oversized graph stops
@@ -149,7 +150,7 @@ def _metadata(value, budget):
     slots = payload = 0
 
     def reserve(amount):
-        """Charge ``amount`` kept slots, one walk step and 8 bytes each, before walk_kept visits them."""
+        """Count ``amount`` values, one walk step and 8 bytes each, before walk_kept visits them."""
         nonlocal slots, payload
         slots += amount
         payload += 8 * amount  # punctuation and scalar overhead, no RSS claim
@@ -170,25 +171,25 @@ def _metadata(value, budget):
 
 
 class _Prepared:
-    """One admitted construction, counted completely before the first byte is written.
+    """One checked construction, counted completely before the first byte is written.
 
-    Writing has two passes over the same kept graph. The counting pass here checks
+    Writing makes two passes over the same graph. The counting pass here checks
     the supported subset (one root batch setting without axes, bit registers,
     Repeat, CoherentRegion, Sequence, computational Measure and Reset,
     Allocate/Release without reallocation, and the five registered primitive
     recipes without parameters, ``preparation.native``, ``preparation.hzh``,
     ``reflection.positive_zero``, ``pauli.parity`` and ``pauli.group_basis``),
-    folds dynamic work through Repeat counts without
-    expanding them, and counts static emission with each shared definition once.
-    It also bounds the final receipt. The emission pass (``fragments``) then
+    multiplies dynamic work by the Repeat counts without
+    expanding them, and counts the written statements with each shared definition once.
+    It also bounds the size of the final receipt. The writing pass (``fragments``) then
     streams text whose instruction and walk counts are already known to fit. The
-    byte cap is enforced while streaming, so exceeding it raises ``QasmWriteError``
-    with the accepted prefix. An admission rejection here leaves no output, and
-    the materializer can rebuild the same counts from the construction alone.
+    byte limit is enforced while streaming, so exceeding it raises ``QasmWriteError``
+    with the accepted prefix. A rejection by these checks leaves no output, and
+    ``materialize_qasm3_file`` can rebuild the same counts from the construction alone.
     """
 
     def __init__(self, construction, budget):
-        """Admit the supported QASM subset and count its static output before any byte is exposed."""
+        """Check the supported QASM subset and count its statements before any byte is written."""
         _metadata(construction, budget)
         self.construction = construction
         self.budget = budget
@@ -233,7 +234,7 @@ class _Prepared:
             return admission.bounded(a * b)
 
         def count(name):
-            """Count dynamic work and static emission of node ``name`` without expanding a repeated body."""
+            """Count the dynamic work and the written statements of node ``name`` without expanding a repeated body."""
             nonlocal work
             if name in memo:
                 return memo[name]
@@ -339,7 +340,7 @@ class _Prepared:
         written as ``z`` controlled by its leading qubits. The phase primitive is
         written as ``gphase``, a global phase in OpenQASM 3. Under ``ctrl`` it
         becomes a relative phase on the branch where all controls are one, which
-        is why a selected phase is emitted rather than dropped.
+        is why the phase of a recipe is written rather than dropped.
         """
         recipe = reversed(record.decomposition) if record.adjoint else record.decomposition
         for operation in recipe:
@@ -364,7 +365,7 @@ class _Prepared:
             yield "\n", False
 
     def fragments(self):
-        """Stream the admitted definitions and calls, marking instruction boundaries for the byte and count checks."""
+        """Stream the checked definitions and calls, marking instruction boundaries for the byte and count checks."""
         yield 'OPENQASM 3.0;\ninclude "stdgates.inc";\n', False
         for name, record in self.selected.items():
             width = self.gwidths[name]
@@ -430,7 +431,7 @@ class _Prepared:
 
 
 def _write(prepared, sink, cancel, completion):
-    """Stream the admitted text in bounded chunks to a blocking binary sink.
+    """Stream the checked text in pieces of bounded size to a blocking binary sink.
 
     A sink may accept fewer bytes than offered. The remainder is offered again
     until the chunk is complete. Cancellation is checked before each fragment and each retry. Any error
@@ -515,7 +516,7 @@ def write_qasm3_file(construction, path, *, budget: QasmWriteBudget, cancel=None
     into a temporary file in the destination's directory, and replaces the
     destination only after the text and its `QasmWriteReceipt` are complete. On failure or
     cancellation it removes the temporary file and leaves an existing destination
-    unchanged. No `fsync` or durability across power loss is promised.
+    unchanged. It calls no `fsync`, so the file may not survive a power loss.
 
     Args:
         construction (SelectedConstruction): The

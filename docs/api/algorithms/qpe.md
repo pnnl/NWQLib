@@ -92,4 +92,4 @@ The [QPE guide](../../algorithms/qpe.md) explains the meaning and units of the r
       heading_level: 3
       members: false
 
-`solve` calls `plan`, `analyze` and the other hooks of a Method. [Extending NWQLib](../extending.md) describes them.
+`solve` calls the Method's `plan` and `analyze` functions and the others that [Extending NWQLib](../extending.md) describes.

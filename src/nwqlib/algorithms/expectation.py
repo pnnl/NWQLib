@@ -1,15 +1,16 @@
-"""Finite Pauli expectation with one selected preparation and actual data.
+"""Finite Pauli expectation from one state preparation and the data it returns.
 
 For O=c0 I+sum(cj Pj), the normalized observable is c0+sum(cj <Pj>).
 With v=psi/||psi||, <Pj> means <v|Pj|v>, and the quadratic form multiplies
-the normalized value by s=||psi||^2. Four acquisition paths produce this
-value: exact grouped Pauli readout (the default), measured counts with
-binary inference (one experiment per qubit-wise commuting group, or with
-affine readout calibration one parity experiment per nonidentity term),
-one provider-managed estimate of the whole weighted sum, and a classical
-matvec in the original dimension.
+the normalized value by s=||psi||^2. Four evaluation paths produce this
+value: exact readout, in which a simulator computes the Pauli expectations
+without shot sampling, subject to numerical rounding (the default),
+measured counts with binary inference (one experiment per qubit-wise
+commuting group, or with affine readout calibration one parity experiment per
+nonidentity term), one provider estimate of the whole weighted sum, and a
+classical matrix-vector product in the original dimension.
 
-The shots selected from an absolute sampling tolerance follow Hoeffding
+The shots chosen for an absolute sampling tolerance follow Hoeffding
 (1963), doi:10.1080/01621459.1963.10500830, Theorem 2, for each label's
 parity, with a union bound over the measured labels and a triangle
 inequality (ExpectationMethod.sampling_shots). docs/mathematics.md,
@@ -17,13 +18,14 @@ Proposition 1, derives that shot count. Grouping unmitigated counts and one
 parity experiment per term under mitigation are NWQLib's design choices.
 The binary inference and the affine calibration
 model are derived in evidence/binary.py and docs/algorithms/expectation.md.
-Sampling, selected binary inference, calibration and provider uncertainty remain
-separate from preparation, native and physical-model accuracy.
+Sampling, binary inference, calibration and provider uncertainty remain
+separate from the accuracy of the state preparation, of the backend's
+simulation and of the physical model.
 
-Reading order: ExpectationMethod.plan selects the path, _measured_program
+Reading order: ExpectationMethod.plan chooses the path, _measured_program
 builds the group or parity experiments, and ExpectationMethod.analyze
 dispatches to _exact_value, _analyze_measured, _analyze_estimated or
-_analyze_classical. ExpectationAnalysis.validate_plan checks a stored Result
+_analyze_classical. ExpectationAnalysis.validate_plan checks a saved Result
 against its Plan without repeating inference.
 """
 
@@ -179,16 +181,17 @@ def _error_model(problem, output, construction, *, mitigated=False):
 def _classical_constant(operator, *, max_bytes):
     """Return c when the stored observable is exactly c*I, else None.
 
-    Classical planning recognizes an observable equal to cI by testing its
-    stored nonzero support and constant diagonal, or its identity-only Pauli
-    table. Such an observable has normalized expectation c for every nonzero
-    state, so it needs no acquisition. A general observable's mean diagonal
+    Classical planning recognizes an observable equal to cI by checking that
+    its stored matrix has nonzero entries only on the diagonal and a
+    constant diagonal, or that its Pauli table holds only identity terms.
+    Such an observable has normalized expectation c for every nonzero
+    state, so it needs no measurement. A general observable's mean diagonal
     does not establish this property.
 
     A Pauli table qualifies when every row with a nonzero coefficient has
     ``x|z == 0``. The value is the fsum of the real coefficients. Separate
-    cancelling nonidentity rows are deliberately not recognized. Admitted
-    dense/CSR/CSC storage is tested by
+    cancelling nonidentity rows are deliberately not recognized. A dense,
+    CSR or CSC observable that passed the input checks is tested by
     ``_eigen_inputs.classical_constant_matrix``, the test that
     ``gershgorin_frame`` applies for Lanczos. No eigensolve or format
     conversion is performed.
@@ -214,10 +217,11 @@ def _classical_constant(operator, *, max_bytes):
 
 
 def _classical_action_requirements(operator, state, *, max_bytes):
-    """Admit the classical kernel and return its (bytes, work) before any vector exists.
+    """Check the classical routine against max_bytes and return its (bytes, work) before any vector exists.
 
-    bytes adds the scaled observable copy with its matvec envelope
-    (_scaled_observable_requirements) to the state preparation arrays
+    bytes adds the scaled observable copy with the bytes allowed for its
+    matrix-vector product (_scaled_observable_requirements) to the state
+    preparation arrays
     (preparation_requirements). work adds their counted products. A custom
     circuit's unknown preparation work is left out. Raises ValueError when
     bytes exceeds max_bytes.
@@ -243,10 +247,10 @@ class PauliCoefficient(Record):
 
 
 class ExpectationSetting(Record):
-    """One selected QWC group, parity or calibration acquisition.
+    """One measurement setting: a qubit-wise commuting (QWC) group, a parity or a calibration.
 
-    Unmitigated sampled readout acquires one setting of role ``group`` per
-    qubit-wise commuting group. labels lists the group's nonzero
+    Measured counts without mitigation use one setting of role ``group``
+    per qubit-wise commuting group. labels lists the group's nonzero
     nonidentity labels in first-fit member order, basis is the group's
     accumulated local Pauli basis (one I/X/Y/Z per qubit, qubit zero
     rightmost), and qubits lists the group's support, the non-I sites of
@@ -303,8 +307,9 @@ class ExpectationReconstruction(Record):
     parity and calibration experiments, empty on the exact, provider and
     classical paths. A classical Plan stores either
     constant, when the observable is a scalar matrix or the state is zero, or
-    operator_exponent, the binary exponent e by which the kernel scaled O
-    before its matvec. Analysis restores 2**e in exact arithmetic.
+    operator_exponent, the binary exponent e by which the classical routine
+    scaled O before its matrix-vector product. Analysis restores 2**e in
+    exact arithmetic.
     """
 
     schema_version: Literal[4] = 4
@@ -323,7 +328,7 @@ class ExpectationReconstruction(Record):
 class ExpectationStatistics(Record):
     """Counts, inference and variance behind a measured `ExpectationAnalysis` value.
 
-    A run with positive shots stores it as `result.statistics`. `variance`
+    A run with positive shots returns it as `result.statistics`. `variance`
     is an empirical or delta-method estimate under its recorded covariance
     assumptions, not the total physical variance. `interval` has the
     statistical meaning of the chosen inference and no physical-model
@@ -353,13 +358,14 @@ class ExpectationStatistics(Record):
             per group, the empirical variance of the group's weighted score
             mean, so the covariance between terms of one group is included.
         variance_unavailable: Reason `variance` is None.
-        interval: Linear image of the simultaneous per-population intervals
-            for the requested output, or None for point inference.
+        interval: Linear image of the simultaneous per-term intervals (the
+            corrected ones with mitigation) for the requested output, or None
+            for point inference.
         fixed_time: Whether the data qualify for a fixed-time interval:
             exactly one complete original measurement per predeclared setting
             (group, parity or calibration) with its preparation records, no
-            recorded population reason that prevents interval inference, and
-            no cancellation or early stop.
+            recorded reason that rules out an interval for a setting's
+            counts, and no cancellation or early stop.
         fixed_time_reason: Why `fixed_time` holds or fails.
         applicability_reason: Why missing preparation records leave the
             target, compiler or layout unverified, or None.
@@ -499,15 +505,16 @@ class ExpectationAnalysis(Result):
         return tuple(views)
 
     def validate_plan(self, plan):
-        """Bind kept term availability and scale to the exact reconstruction.
+        """Check this Result's term availability and scale against the Plan's reconstruction.
 
-        A stored Result must agree with its Plan's selected output, state
-        scale, identity constant and provider reduction. For measured data it
-        must keep the complete predeclared setting family, the selected
-        interval kind, family size and probability, the fixed-time and
-        independence status, the variance role and each correction's exact
-        science and calibration populations. Only the stored per-setting
-        points are recombined. No inference is rerun and nothing is acquired.
+        A saved Result must agree with its Plan's output, state scale,
+        identity constant and provider mean. For measured data it must keep
+        the complete predeclared setting family, the interval kind, family
+        size and probability of the chosen inference, the fixed-time and
+        independence status, the variance kind and the exact science and
+        calibration counts (`BinaryPopulation`) of each correction. Only the
+        saved per-setting points are recombined. No inference is rerun and
+        nothing is measured.
         """
         self._validate_common_plan(plan, Plan)
         if (
@@ -605,7 +612,7 @@ def _science_parities(settings):
 
 
 def _population_names(settings):
-    """Return the stored population names: group labels, or every parity and calibration setting.
+    """Return the population names: group labels, or every parity and calibration setting.
 
     Their number is the family size F of the simultaneous intervals: L
     labels for grouped readout, all science and calibration settings with
@@ -617,7 +624,7 @@ def _population_names(settings):
 
 
 def _validate_measured_family(result, plan, inference):
-    """Check that stored measured statistics cover exactly the Plan's setting family.
+    """Check that saved measured statistics cover exactly the Plan's setting family.
 
     The statistics must name the inference options, list one population per
     predeclared label (grouped readout) or setting (mitigation) in order,
@@ -680,13 +687,14 @@ def _validate_measured_family(result, plan, inference):
 
 
 def _validate_interval_meaning(statistics, plan, inference):
-    """Check that every stored interval keeps the meaning of the selected inference.
+    """Check that every saved interval keeps the meaning of the chosen inference.
 
-    Each interval must have the selected kind (fixed-time, time-uniform or
-    Bayesian), family size and probability 1-delta. An unknown sampling
-    model, incomplete fixed-time data or settings that share a fixed stream
-    must leave the corresponding intervals, variance or posterior
-    unavailable. The variance must have the role _variance_kind selects.
+    Each interval must have the kind of that inference (fixed-time,
+    time-uniform or Bayesian), its family size and probability 1-delta. An
+    unknown sampling model, incomplete fixed-time data or settings that
+    share a fixed stream must leave the corresponding intervals, variance or
+    posterior unavailable. The variance must have the kind that
+    _variance_kind returns.
     Raises ValueError on the first disagreement.
     """
     family_size = len(_population_names(plan.reconstruction.settings))
@@ -747,7 +755,7 @@ def _validate_interval_meaning(statistics, plan, inference):
 
 
 def _validate_corrections_and_value(result, plan):
-    """Check fitted corrections against their data and recombine the stored value.
+    """Check fitted corrections against their data and recombine the saved value.
 
     With mitigation, each science term needs one correction built from its
     own science population and the zero and one calibration populations of
@@ -806,7 +814,7 @@ def _validate_corrections_and_value(result, plan):
 
 
 class _BinaryData(NamedTuple):
-    """Admitted count populations and the facts that decide which inference is legal.
+    """Checked count populations and the facts that decide which inference is valid.
 
     Attributes:
         populations: One BinaryPopulation per stored population name (_population_names): per label for grouped readout, per setting with mitigation.
@@ -815,7 +823,7 @@ class _BinaryData(NamedTuple):
         applicability_reason: Why missing receipts leave target, compiler or layout applicability unverified, or None.
         population_reasons: Setting name to the reason its population cannot support an interval: unknown sampling semantics, a stream reused within the setting, imported data or a broken chronological prefix.
         independence_reason: Why a fixed sampling stream shared across settings leaves their independence unverified, or None.
-        fixed_time: Whether the data are one complete original acquisition per setting with its receipts, no blocking population reason, and no cancellation or early termination.
+        fixed_time: Whether the data are one complete original measurement per setting with its receipts, no population reason that rules out an interval, and no cancellation or early termination.
         fixed_time_reason: Why fixed_time holds or fails.
         histograms: Group setting name to its joint histogram over distinct sources, outcome index to count, for grouped readout. Empty with mitigation.
     """
@@ -869,7 +877,7 @@ def _label_supports(labels):
 
 
 def _accumulated_populations(settings, groups, reused, associations, *, width):
-    """Return the stored populations and each group's joint histogram from distinct sources.
+    """Return the populations and each group's joint histogram from distinct sources.
 
     groups maps each setting to its distinct sources and their counts: an
     (n0, n1) pair for a parity or calibration setting, and the (outcome
@@ -939,7 +947,7 @@ def _prefix_reasons(trace, receipt_map, sources, groups, expected):
     Statistical inference needs every earlier prepared population of a
     setting, in trace order. A reason is recorded when the data come from an
     imported preparation without fresh history in this run, omit an earlier
-    population, or include an incomplete or uncertain acquisition. A later
+    population, or include an incomplete or uncertain measurement. A later
     event overwrites an earlier reason for the same setting.
     """
     updates = {}
@@ -976,7 +984,7 @@ def _prefix_reasons(trace, receipt_map, sources, groups, expected):
 
 
 def _parity_counts(chunk, plan, trace, events, expected, layouts, support=None):
-    """Admit one observed chunk as a parity or QWC group population and return its counts.
+    """Check one observed chunk as a parity or QWC group population and return its counts.
 
     trace.validate_observation first joins the chunk to its submission
     item. The chunk must then belong to this Plan and Run and to a
@@ -1056,25 +1064,26 @@ def _parity_counts(chunk, plan, trace, events, expected, layouts, support=None):
 
 
 class _ReceiptChecks:
-    """Admit each preparation receipt once and keep what all receipts must share.
+    """Check each preparation receipt once and record what all receipts must share.
 
-    All admitted receipts must share one producer context, with or without
-    mitigation. A fitted readout correction relies on this, because it
-    applies the channel measured by the calibration settings to the science
-    settings. With mitigation, a science term and the calibrations of its
-    pivot must also read the same physical qubit. The attributes record
-    those shared values as receipts are admitted.
+    All checked receipts must share one execution context (the `context`
+    attribute below), with or without mitigation. A fitted readout
+    correction relies on this, because it applies the channel measured by
+    the calibration settings to the science settings. With mitigation, a
+    science term and the calibrations of its pivot must also read the same
+    physical qubit. The attributes record those shared values as receipts
+    are checked.
 
     Attributes:
         admitted: prepared_id to its checked receipt, in first-use order.
         missing: Whether some observed preparation has no receipt, which
             leaves target, compiler and layout applicability unverified.
-        construction_ids: Setting name to its selected construction id,
-            looked up once per setting.
+        construction_ids: Setting name to the id of the construction that
+            planning chose for it, looked up once per setting.
         context: (target, (compiler name, version, domain), native basis,
-            backend configuration id) of the first admitted receipt. Every
+            backend configuration id) of the first checked receipt. Every
             later receipt must have the same context.
-        native_pivots: Logical pivot to the native qubit that the first
+        native_pivots: Logical pivot to the physical qubit that the first
             receipt using it maps it to, checked only with mitigation.
     """
 
@@ -1088,11 +1097,12 @@ class _ReceiptChecks:
         """Check the receipt of chunk's preparation the first time that preparation appears.
 
         The receipt must record the chunk's realization, observation, layouts,
-        execution kind and unconditional population, and the setting's
-        selected construction. A preparation without a receipt sets missing.
-        Raises ValueError for a differing receipt, a different producer
-        context, or with mitigation a native mapping of the wrong width or a
-        second native qubit for one logical pivot.
+        execution kind and unconditional population, and the construction
+        that planning chose for the setting. A preparation without a receipt
+        sets missing. Raises ValueError for a differing receipt, a different
+        execution context, or with mitigation a logical-to-physical qubit
+        mapping of the wrong width or a second physical qubit for one logical
+        pivot.
         """
         if chunk.prepared_id in self.admitted:
             return
@@ -1148,7 +1158,7 @@ def _note_source_limits(chunk, source, population_reasons, first_population, fir
     """Record why one observation's counts may not be fresh independent samples.
 
     source is the chunk's CountsSource. A fixed sampling stream is a seeded
-    sampler in one producer context, which returns the same counts for the
+    sampler in one execution context, which returns the same counts for the
     same circuit. The setting's entry in population_reasons is set, which
     makes its interval unavailable, when the source has unknown sampling
     semantics or when this setting already drew a different population
@@ -1184,8 +1194,8 @@ def _count_observation(chunk, source, pair, groups, reused, associations, receip
     groups[setting] maps a source identity to its first observation id and
     counts. A later observation of a known source, such as a rerun of a
     fixed-seed preparation, joins reused[setting] and adds no sample size.
-    Its counts must equal the first ones, since a frozen source reproduces
-    its population. associations[setting][source] collects, in first-use
+    Its counts must equal the first ones, since a fixed-seed source
+    reproduces its counts. associations[setting][source] collects, in first-use
     order, the preparations with a receipt in receipt_map (prepared_id to
     receipt) that produced the source. Raises ValueError for conflicting
     counts from one source.
@@ -1206,13 +1216,13 @@ def _count_observation(chunk, source, pair, groups, reused, associations, receip
 def _fixed_time(trace, settings, populations, expected, applicable, population_reasons):
     """Decide whether the data support a fixed-time (Hoeffding) interval.
 
-    The fixed-time bound holds for a sample size fixed before acquisition.
+    The fixed-time bound holds for a sample size fixed before measurement.
     The data qualify when the Run has one completed event per predeclared
     setting and was neither cancelled nor terminated early, every
     preparation has its receipt (applicable is None), no setting has a
     population reason, and every setting has exactly one observation that
     returned its requested shots. A label population ``<group>:<label>``
-    refers to its group setting's acquisition.
+    refers to the measurement of its group setting.
 
     Returns:
         (fixed_time, reason), with reason stating why fixed_time holds or fails.
@@ -1241,12 +1251,12 @@ def _fixed_time(trace, settings, populations, expected, applicable, population_r
 
 
 def _binary_data(plan, observations, trace, receipts):
-    """Admit measured parity data and tally one count population per setting.
+    """Check measured parity data and tally one count population per setting.
 
     After checking the receipts tuple and the Plan's fixed Program, the
     function derives each setting's expected observation
-    (_expected_observations). Each observed chunk is then admitted as a
-    parity population (_parity_counts), its preparation receipt is admitted
+    (_expected_observations). Each observed chunk is then checked as a
+    parity population (_parity_counts), its preparation receipt is checked
     once (_ReceiptChecks), its sampling source is classified
     (_note_source_limits) and its counts are added to its setting's
     distinct sources (_count_observation). Finally the populations are
@@ -1256,12 +1266,13 @@ def _binary_data(plan, observations, trace, receipts):
 
     Sources are identified by _counts.CountsSources. Same-context fixed-seed
     repetitions are one counted source even across preparations, and fresh
-    hardware acquisitions are identified by their provider coordinates.
-    Repeated observations of a frozen source therefore never add sample size.
+    hardware measurements are identified by their provider coordinates.
+    Repeated observations of a fixed-seed source therefore never add sample
+    size.
 
     Returns:
         _BinaryData with the per-setting populations, the used receipt and
-        contribution ids, and the facts that decide which inference is legal.
+        contribution ids, and the facts that decide which inference is valid.
 
     Raises:
         TypeError: receipts is not a tuple of PreparedArtifact records.
@@ -1350,7 +1361,8 @@ def _binary_data(plan, observations, trace, receipts):
 def _classical_value(plan, data):
     """Recover the classical output from its one scaled-observable scalar.
 
-    The kernel returned v^dagger (O*2**(-e)) v for the normalized direction v.
+    The classical routine returned v^dagger (O*2**(-e)) v for the normalized
+    direction v.
     Exact arithmetic applies 2**e and, for a quadratic form, ||psi||^2 before
     one rounding to binary64.
     """
@@ -1385,11 +1397,11 @@ def _classical_value(plan, data):
 
 
 def _exact_value(plan, data):
-    """Reduce exact grouped Pauli readout to the requested value.
+    """Reduce the Pauli expectations of exact readout to the requested value.
 
-    Every chunk must come from the one selected experiment and carry
+    Every chunk must come from the Plan's one experiment and carry
     PauliValue entries only for the nonzero nonidentity labels. Repeated
-    acquisitions of a label are averaged exactly by _mean, and the value is
+    values of a label are averaged exactly by _mean, and the value is
     _weighted_sum of those means in the output frame.
 
     Returns:
@@ -1481,8 +1493,8 @@ def _output_value(value, reconstruction):
 def _weighted_sum(terms, values, reconstruction):
     """c0+sum_j c_j*value_j in exact rationals, rounded once in the output frame.
 
-    Identity labels contribute their coefficient. None when a selected term
-    value is unavailable.
+    Identity labels contribute their coefficient. None when a term value is
+    unavailable.
     """
     arithmetic = ExactArithmetic()
     total = arithmetic.fraction(0)
@@ -2012,14 +2024,15 @@ def _analyze_measured(plan, observations, *, trace, receipts, inference):
 def _sampling_facts(plan, statistics, value, inference):
     """Export the sampling radius evaluated from the analyzed counts at its own confidence.
 
-    For eligible fixed-time point inference with an accuracy-selected
-    allocation, the normalized-frame radius is
+    For eligible fixed-time point inference with shots chosen for an
+    accuracy target, the normalized-frame radius is
     ``sum_j abs(c_j)*sqrt(2*log(2*L/delta)/n_g(j))``, where L counts labels
-    and ``n_g(j)`` is the actual returned population of label j's QWC group.
+    and ``n_g(j)`` is the number of shots returned for label j's QWC group.
     Multiply this radius by the input's squared physical norm for a
-    quadratic form. Shared parities refer to one acquisition exposure. A
-    conditional selected interval supplies the larger distance from the
-    reported output-frame point to its endpoints. Mitigated and Beta
+    quadratic form. Parities that share a group's shots refer to one
+    measurement. A conditional interval of the chosen inference supplies
+    the larger distance from the reported output-frame point to its
+    endpoints. Mitigated and Beta
     analyses have no raw-count sampling fact. The requested tolerance is
     not substituted for the achieved radius.
 
@@ -2136,12 +2149,11 @@ def _mean(values):
 
 
 def _analyze_estimated(plan, observations, *, trace, receipts):
-    """Keep the provider uncertainty for the weighted sum.
+    """Return the provider estimates of the weighted sum with their own uncertainty.
 
-    No count inference is done. Repeated acquired estimates have an
-    empirical arithmetic-mean point only. Their original standard errors
-    remain separate. No covariance or combined standard error is
-    manufactured for that mean.
+    No count inference is done. Repeated estimates have only an empirical
+    arithmetic-mean point. Their original standard errors remain separate.
+    No covariance or combined standard error is constructed for that mean.
     """
     events = {event.attempt: event for event in trace.events}
     receipt_map = {receipt.content_id: receipt for receipt in receipts}
@@ -2231,7 +2243,7 @@ def _measured_program(problem, labels, method, shots):
     ``Allocate(system), PREP(system), BASIS_g(system), Measure(system,
     readout), Release(system)``. PREP is the whole-register preparation
     (select_preparation with per_bit=False). BASIS_g is the group's own
-    selected block (select_pauli_group_basis on the accumulated basis,
+    block (select_pauli_group_basis on the accumulated basis,
     signature ``basis_<g>``), which applies H on the X sites and S† then H
     on the Y sites with no parity network. Classical bit i of readout holds
     qubit i, and one group count table supplies every label's parity
@@ -2244,10 +2256,10 @@ def _measured_program(problem, labels, method, shots):
     With mitigation, each nonidentity term gets its own science experiment,
     which applies the state PREP, the label's basis rotations and CX parity
     network, and then measures one bit on the pivot. That bit is the +/-1
-    population consumed by binary inference and by pivot calibration. One
-    all-zero preparation is shared, each distinct pivot gets its own
-    one-preparation, and each pivot acquires separate zero and one
-    calibration populations. A group histogram with local measurements has
+    sample that binary inference and pivot calibration use. One all-zero
+    preparation is shared, each distinct pivot gets its own one-preparation,
+    and each pivot is measured in separate zero and one calibration
+    settings. A group histogram with local measurements has
     a different readout channel, which these pivot calibrations do not
     describe.
     """
@@ -2393,7 +2405,7 @@ def _measured_program(problem, labels, method, shots):
 
 
 def _validate_inputs(problem, output, *, quantum):
-    """Admit an Expectation problem and its output before any planning work.
+    """Check an Expectation problem and its output before any planning work.
 
     The output must be a NormalizedExpectation or QuadraticForm of the
     Problem's own observable, and the state scale must be known. A normalized
@@ -2477,17 +2489,18 @@ class ExpectationMethod(Method):
     identity coefficient exactly, so an identity-only observable needs no
     measurement on any path.
 
-    The call chooses how the terms are measured:
+    The arguments decide how the terms are evaluated:
 
-    - Default, exact readout: one prepared state supplies every term.
+    - Default, exact readout: the simulator computes every term from one
+      prepared state without shot sampling, subject to numerical rounding.
     - `shots=n`: one circuit per qubit-wise commuting group, n shots each,
       with `inference` applied to each term's parity. The uncertainty
       includes the covariance of terms in one group.
     - `shots=n` with `mitigation`: one parity circuit per non-identity term,
       plus calibration circuits for each pivot qubit.
     - `estimate_precision`: one provider estimate of the whole weighted sum.
-    - `execution="classical"`: a matrix-vector product with the stored
-      observable in its original dimension.
+    - `execution="classical"`: a matrix-vector product with the observable
+      in its input format and original dimension.
 
     Instead of `shots`, `accuracy=Accuracy(component="sampling",
     absolute_tolerance=epsilon)` lets `sampling_shots` choose the shots per
@@ -2520,9 +2533,10 @@ class ExpectationMethod(Method):
             the known bytes of the operator, the state and the classical
             workspace.
         max_classical_products: Default `100_000_000`. Limit on the counted
-            classical operator applications, and on the comparisons that
-            sort the terms of sampled readout into qubit-wise commuting
-            groups.
+            scalar work of the classical evaluation, including matrix-vector
+            products, scaling, reductions and known state-preparation work.
+            It also limits the comparisons used to form qubit-wise commuting
+            groups for measured counts.
         max_admission_steps: Default `1_000_000`. Upper limit on the
             planning work of checking each `Program` that the method builds
             (NWQLib's description of a circuit as named steps). It caps the
@@ -2686,14 +2700,14 @@ class ExpectationMethod(Method):
             return max(1, int(required.to_integral_value(rounding=ROUND_CEILING)))
 
     def before_submit(self, plan, prepared, *, run):
-        """An accuracy-selected sample cannot reuse a known fixed population."""
+        """Reject a fixed sampling stream already known to the Run when the shots were chosen for an accuracy target."""
         if plan.selection_accuracy is None:
             return
         run.admit_count_preparations(prepared, require_all=True)
 
     def plan(self, problem, *, output, execution, shots, rng, accuracy=None):
-        """Select direct Pauli, measured group or parity, or provider-managed acquisition for the
-        normalized observable.
+        """Choose exact readout, measured group or parity counts, or a provider estimate
+        for the normalized observable.
         """
         if execution == "classical":
             if (
@@ -2810,13 +2824,13 @@ class ExpectationMethod(Method):
         )._bind(blocks=blocks)
 
     def _plan_classical(self, problem, output, rng):
-        """Plan the classical kernel, one matrix-vector product with the observable in its original dimension and its scalar reduction.
+        """Plan the classical routine, one matrix-vector product with the observable in its original dimension and its scalar reduction.
 
-        No circuit is built. The kernel's counted work adds the products of
+        No circuit is built. The routine's counted work adds the products of
         the scaled observable action and the known classical preparation
         products of the state. A custom circuit's unknown preparation work is
-        left out. An observable equal to cI, or a zero state, needs no kernel,
-        and the Plan's Program is one empty Sequence.
+        left out. An observable equal to cI, or a zero state, needs no
+        classical routine, and the Plan's Program is one empty Sequence.
         """
         from nwqlib.algorithms._eigen_inputs import preparation_requirements
         from nwqlib.algorithms._eigen_support import host_construction
@@ -2883,11 +2897,11 @@ class ExpectationMethod(Method):
         return plan._bind(blocks=self._host_blocks(plan) if experiments else ())
 
     def _host_blocks(self, plan):
-        """Bind the classical kernel that evaluates v^dagger (O*2**(-e)) v.
+        """Bind the classical routine that evaluates v^dagger (O*2**(-e)) v.
 
         v is the normalized state direction and e the Plan's
-        operator_exponent. The kernel checks the byte and product caps again
-        before it materializes v. It returns one unit-frame scalar
+        operator_exponent. The routine checks the byte and product limits
+        again before it forms v. It returns one unit-frame scalar
         ``scaled_observable``, or no value with a reason when scaling lost a
         nonzero component or the reduction is not finite. _classical_value
         restores 2**e and, for a quadratic form, ||psi||^2 in exact arithmetic.
@@ -2959,8 +2973,8 @@ class ExpectationMethod(Method):
         return result
 
     def analyze(self, plan, data, *, settings):
-        """Dispatch reconstruction from the acquired readout kind while preserving its
-        statistical assumptions.
+        """Dispatch the analysis by the kind of data returned, keeping its statistical
+        assumptions.
         """
         inference = settings.get("inference", self.inference)
         if not isinstance(inference, BinaryInferenceOptions):
@@ -3058,8 +3072,8 @@ class ExpectationMethod(Method):
 
         A classical Plan recomputes the observable's binary exponent from the
         stored operator and requires it to equal the saved one before binding
-        the host kernel. A quantum Plan rebinds the selected blocks to their
-        stored preparation payloads.
+        the classical routine. A quantum Plan rebinds the planned blocks to
+        their saved preparation data.
         Raises ValueError for another format or a changed exponent.
         """
         from nwqlib._choice_archive import unsupported_archive_format

@@ -52,8 +52,8 @@ class KernelReflectionPolynomial:
         kappa_be: Reciprocal of the gap `Delta = 1/kappa_be`, a lower
             bound on the nonzero singular values of the normalized input.
             It is not a matrix condition number. QLS passes its polynomial
-            domain parameter, which is at least its encoded gap parameter,
-            `alpha/sigma_min(A)` or the caller's bound on it (the `kappa`
+            domain parameter, which is at least its encoded inverse-gap
+            parameter `alpha/sigma_min(A)` or the caller's bound on it (the `kappa`
             setting of [`QLS`][nwqlib.algorithms.qls.method.QLS]). That
             parameter can exceed `sigma_max(A)/sigma_min(A)`
             ([QLS guide](../../algorithms/qls.md#inputs-scale-and-padding)).
@@ -132,7 +132,7 @@ def kernel_reflection_cost(plan) -> _FitCost:
     """Return the bytes and work counted for computing the kernel-reflection polynomial of one plan.
 
     With degree ``d = 2 ell`` and ``n = max(2001, 8 (d + 1))`` fit nodes,
-    ``peak_bytes`` counts 8-byte slots:
+    ``peak_bytes`` counts 8-byte entries:
 
     - ``3 n (d + 1)``: the Chebyshev-Vandermonde matrix built inside
       ``chebfit``, its column-scaled copy and the copy that ``lstsq``
@@ -160,9 +160,9 @@ def _realize_kernel_reflection(
     plan: KernelReflectionPolynomial,
     *, max_degree=256, max_work=1_000_000_000, max_bytes=DEFAULT_INPUT_BYTES,
 ) -> KernelReflectionPolynomial:
-    """Realize the synthesis coefficients of a sizing plan.
+    """Compute the Chebyshev coefficients of a sizing plan.
 
-    The selected polynomial's integer half-degree is
+    The polynomial's integer half-degree is
     ``ell = ceil(kappa_be * ln(2/eta) / 2)``, where
     ``kappa_be = plan.kappa_be`` is the reciprocal of the polynomial-domain
     gap ``Delta = 1/kappa_be`` and ``eta = plan.kr_eta`` is the
@@ -175,7 +175,7 @@ def _realize_kernel_reflection(
     ``K(0)=1`` and approximately ``-1`` off the kernel. The Chebyshev
     coefficients of ``K`` come from a least-squares fit of these exact
     values. Odd coefficients are then set to zero and the even ones divided
-    by the fitted ``K(0)``, so the stored table has exact even parity and
+    by the fitted ``K(0)``, so the coefficient table has exact even parity and
     ``K(0) = 1`` up to rounding.
 
     The argument ``z(x) = (1 + Delta^2 - 2x^2)/(1 - Delta^2)`` maps

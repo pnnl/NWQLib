@@ -1,6 +1,6 @@
-"""QHD symbolic admission, the binary64 range rule of planning and the exact dropped-angle ledger.
+"""Checks of the QHD symbolic input, the binary64 range rule of planning and the exact sum of dropped angles.
 
-Concrete scalar admission belongs to potential.
+The checks of concrete scalar values are in ``potential``.
 """
 
 from fractions import Fraction
@@ -26,14 +26,14 @@ _NORMAL_MIN, _NORMAL_MAX = float_info.min, float_info.max
 
 
 def _normal_range(result, name, exact=None, *, zero=False):
-    """Admit one operation used by a normal binary64 relative-error proof.
+    """Check one operation used by a normal binary64 relative-error proof.
 
-    The phase and angle ledgers of QHD planning
+    The phase and angle error sums of QHD planning
     (``method._compiled_phase_allowance``, ``circuit_errors``) bound each
     product with a relative rounding error, which an underflowed product
-    does not have, so every product they charge must pass this rule.
+    does not have, so every product they count must pass this rule.
 
-    Read the stored operands as exact real numbers. A multiplication,
+    The stored operands are read as exact real numbers. A multiplication,
     division or power-of-two scaling must have exact result zero or magnitude
     between ``nu = 2**-1022`` and ``Omega = sys.float_info.max``, inclusive.
     Then round-to-nearest gives ``fl(z) = z (1 + delta)`` with
@@ -48,10 +48,10 @@ def _normal_range(result, name, exact=None, *, zero=False):
     ``exact`` is None when the result is itself the stored quantity, such as
     a table value or a step weight, whose normality is the requirement.
 
-    A zero result is legal only when its operands or the producer's
-    mathematical structure establish zero (``zero``). A zero from nonzero
+    A zero result is legal only when its operands or the mathematical
+    structure of the computation establish zero (``zero``). A zero from nonzero
     operands is a rejection, even if a later operation would bring the exact
-    value back into range, so each producer checks an operation before
+    value back into range, so each computation checks an operation before
     another operation, pruning or zero omission can hide its range loss.
 
     Finite additions and subtractions may produce exact subnormal scratch
@@ -80,11 +80,11 @@ def _underflows(result, name, exact=None, *, zero=False):
 
     A lower-range failure is a nonzero exact result below ``2**-1022`` in
     magnitude, a zero from nonzero operands included, the one failure that
-    the omission policy of planning turns into an omitted contribution with
-    a charge (``potential.PotentialCompiler.select_occurrences``,
+    the omission policy of planning turns into an omitted contribution whose
+    magnitude enters the error bound (``potential.PotentialCompiler.select_occurrences``,
     ``binary.PhaseTable.synthesize``, ``initial_state.chain_selection``). A
     nonfinite result or an exact result above the largest binary64 number
-    still raises ValueError here, since no omission can charge it.
+    still raises ValueError here, since no omission can account for it.
     """
     if not isfinite(result):
         raise ValueError(f"{name} is {result!r}, not a finite binary64 number")
@@ -98,19 +98,19 @@ def _underflows(result, name, exact=None, *, zero=False):
 
 
 def _normal_product(x, y, name):
-    """Return ``fl(x y)`` after ``_normal_range`` admits it, with an exact zero only for a zero factor."""
+    """Return ``fl(x y)`` after ``_normal_range`` accepts it, with an exact zero only for a zero factor."""
     return _normal_range(x * y, name, lambda: Fraction(x) * Fraction(y), zero=x == 0 or y == 0)
 
 
 def _normal_quotient(x, y, name):
-    """Return ``fl(x/y)`` for a finite nonzero y after ``_normal_range`` admits it, zero only for x = 0."""
+    """Return ``fl(x/y)`` for a finite nonzero y after ``_normal_range`` accepts it, zero only for x = 0."""
     if y == 0 or not isfinite(y):
         raise ValueError(f"{name} divides by {y!r}, not a finite nonzero binary64 number")
     return _normal_range(x / y, name, lambda: Fraction(x) / Fraction(y), zero=x == 0)
 
 
 def _normal_products(factor, values, name):
-    """Return the elementwise ``fl(factor v)`` of an array after ``_normal_range`` admits every entry.
+    """Return the elementwise ``fl(factor v)`` of an array after ``_normal_range`` accepts every entry.
 
     An entry is an exact zero only where its value or the factor is zero
     (``_admitted_products`` classifies the entries).
@@ -126,7 +126,7 @@ def _normal_products(factor, values, name):
 
 
 def _admitted_products(factor, values, name):
-    """Return ``(products, omitted)``: the elementwise ``fl(factor v)`` with the lower-range failures set to zero.
+    """Return ``(products, omitted)``, the elementwise ``fl(factor v)`` with the lower-range failures set to zero.
 
     ``omitted`` marks the entries whose exact product is nonzero and below
     ``2**-1022`` (``_underflows``), where the product is replaced by exact
@@ -168,10 +168,10 @@ def angle_units(value):
 def _validate_qhd_problem_fields(problem):
     """Reject objectives and variables that cannot define a real diagonal potential.
 
-    ``Optimization`` already admits the ordered SymPy symbols, unique names,
+    ``Optimization`` already checks the ordered SymPy symbols, unique names,
     declared free symbols and one finite ``lower < upper`` interval per
-    variable. QHD additionally needs a live commutative SymPy expression and
-    commutative variables not declared non-real, because each grid value
+    variable. QHD additionally needs the objective as a commutative SymPy
+    expression object and commutative variables not declared non-real, because each grid value
     becomes a real diagonal entry of the Hamiltonian.
     """
     if not isinstance(problem.objective, sp.Expr):
@@ -183,7 +183,7 @@ def _validate_qhd_problem_fields(problem):
 
 
 def _kinetic_range_error(error):
-    """Return the refusal of a kinetic coefficient, energy or angle outside the admitted range, with its remedy.
+    """Return the error for a kinetic coefficient, energy or angle outside the accepted range, with its remedy.
 
     The lower-range omission policy covers contributions formed from
     objective data and the initial state, and the phase products of binary
@@ -192,7 +192,7 @@ def _kinetic_range_error(error):
     when weighted, the kinetic schedule weight a. One-hot kinetic angles also
     depend on the layer duration t, and the binary kinetic exponent is dt*a.
     Extreme spacings, weights or durations can put these quantities outside
-    the admitted binary64 range, so planning refuses them.
+    the accepted binary64 range, so planning rejects them.
     """
     return ValueError(f"{error}. The grid spacing h and the kinetic schedule weight a put this kinetic term, of "
                       "scale a/h**2, outside the range that planning admits. Choose a box and grid whose spacing "

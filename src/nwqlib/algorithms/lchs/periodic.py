@@ -4,8 +4,8 @@ The periodic operator is A = mass*I + diffusion*(2I - S - S^dagger) + i*potentia
 with S the cyclic shift. Its Cartesian parts are L = mass*I +
 diffusion*(2I - S - S^dagger), which is PSD analytically with
 ||L|| <= mass + 4*diffusion, and H = potential*Z_0. No 2**q array is formed.
-The k-grid comes from the same providers as the dense route, using the
-analytic norm bound for ||L||.
+The k-grid comes from the same kernel and quadrature rules as the dense route,
+using the analytic norm bound for ||L||.
 """
 
 from cmath import phase
@@ -34,12 +34,12 @@ SOURCE = Source(name="lchs.periodic", version="1", domain="periodic mass/diffusi
 
 @dataclass(frozen=True)
 class _PeriodicPayload:
-    """Selected periodic scalars shared by both native leaves and the archive.
+    """Planned periodic scalars shared by both circuit blocks and the saved archive.
 
     half_angles are the per-address even-bond rotation angles of one half
     step. phases combine each coefficient's argument with its identity
     evolution phase. parameter_id is periodic_identity of the other fields,
-    and both leaves record it as their input identity.
+    and both blocks record it as the content hash of their input.
     """
 
     operator: object
@@ -54,15 +54,15 @@ class _PeriodicPayload:
 
 
 def periodic_identity(payload, method):
-    """Digest every selected field of a periodic payload except parameter_id.
+    """Hash every planned field of a periodic payload except parameter_id.
 
-    The SHA-256 starts from the Method identity and feeds each field name and
-    value through _feed_selected_value, with type tags and container lengths,
-    as selected_identity does for LCHSData. The operator enters as its
-    admitted reference identity and its stencil parameters. Selection stores
-    the result as parameter_id and in both leaf records, so the Plan identity
-    changes with every selected periodic field, including the operator
-    parameters.
+    The SHA-256 starts from the Method's content hash and feeds each field
+    name and value through _feed_selected_value, with type tags and container
+    lengths, as selected_identity does for LCHSData. The operator enters as
+    the content hash of its input reference and its stencil parameters.
+    Planning saves the result as parameter_id and in both block records, so
+    the Plan's content hash changes with every planned periodic field,
+    including the operator parameters.
     """
     digest = sha256(method.content_id.encode())
     for field in fields(payload):
@@ -75,9 +75,9 @@ def periodic_identity(payload, method):
 
 
 def _construction_law(q, a, steps):
-    """Complete elementary slots, including QFT phases and one outer control.
+    """Complete elementary gate positions, including QFT phases and one outer control.
 
-    Counts are selected occurrences, not optimized native counts. Every step
+    Counts are the planned gate occurrences, not optimized Qiskit counts. Every step
     uses three H-UCRZ-H rotations and two one-band shifts. A QFT pair has
     q(q-1) controlled phases, 2*floor(q/2) SWAPs and 2q H. Each controlled
     phase has a two-CX/three-phase decomposition. Global phases survive a
@@ -117,7 +117,7 @@ def _magnitude_up(value):
     subnormal intermediates included. The ratio lies in [0, 1] and the root's
     argument near [1, 2], so no step leaves the binary64 range, and the
     product with s is formed exactly, so the magnitude need not be a binary64
-    number. Ordinary ``abs(c)`` has no such outward guarantee.
+    number. Ordinary ``abs(c)`` has no such upward-rounding guarantee.
     """
     real, imag = abs(value.real), abs(value.imag)
     if not (isfinite(real) and isfinite(imag)):
@@ -153,7 +153,7 @@ def select_periodic_parameters(operator, *, elapsed, method):
     O its off-diagonal reflection with phases exp(+/-i theta). Thus
     ||E+O|| = 2, ||[E,O]|| = 2*max_l|sin(theta_l)|, and both nested
     matching commutators have norm 4*max_l|sin(theta_l)|. That maximum is
-    zero for q = 1,2 and one for q >= 3. In the emitted order H_1=vZ_0,
+    zero for q = 1,2 and one for q >= 3. In the circuit order H_1=vZ_0,
     H_2=-bE, H_3=-bO, with signed b=k*diffusion and v=potential, the first
     tail is -b(E+O). Anticommutation gives nested norms 16*a**2*p and
     8*a*p**2 there, and 4*g*a**3 for each nested norm at the second term.
@@ -169,9 +169,9 @@ def select_periodic_parameters(operator, *, elapsed, method):
     B/r**2. With ``trotter_steps`` given, r is that value. With
     ``trotter_synthesis_tolerance`` eps instead, r is the smallest positive
     integer with B/r**2 <= eps, which is r = ceil(sqrt(n)) with
-    n = ceil(B/eps) (r = 1 when B = 0). B depends only on the selected grid,
+    n = ceil(B/eps) (r = 1 when B = 0). B depends only on the planned grid,
     T and the stencil, so r is chosen after the grid and before the
-    construction limits (max_trotter_steps, then the construction law's
+    construction limits (max_trotter_steps, then the construction formula's
     max_bytes and max_select_work) are applied.
 
     Evaluation. B is an exact rational: T, the diffusion and potential
@@ -183,15 +183,15 @@ def select_periodic_parameters(operator, *, elapsed, method):
     and eps (trotterization.error_budget._smallest_step_count, shared with
     the step rule of Childs et al., Sec. V B), so for r > 1, B/(r - 1)**2
     exceeds eps. The recorded bound is B/r**2 rounded upward, so it is at
-    most eps and positive whenever B is. With ``trotter_steps`` given, a B/r**2 above the
-    largest binary64 number is recorded as unavailable. The bound is
-    sufficient and not tight, so a smaller r may also keep the actual
-    synthesis error within eps.
+    most eps and positive whenever B is. With ``trotter_steps`` given, a
+    B/r**2 above the largest binary64 number is recorded as unavailable. The
+    bound is sufficient and not tight, so a smaller r may also keep the
+    synthesis error itself within eps.
 
-    Diffusion-only branches have B = 0 at q = 1,2 and select one step;
-    nonzero potential retains both cross terms. Zero diffusion gives W = 0
+    Diffusion-only branches have B = 0 at q = 1,2 and select one step, while
+    nonzero potential keeps both cross terms. Zero diffusion gives W = 0
     at every q, while selection still requires finite positive
-    mass+4*diffusion. Signed generators and the identity phase are retained.
+    mass+4*diffusion. Signed generators and the identity phase are kept.
     A zero ideal product-formula component does not bound phase/angle,
     execution or readout roundoff, which have separate components.
     """
@@ -254,11 +254,11 @@ def select_periodic_parameters(operator, *, elapsed, method):
 
 
 def _component_facts(payload, *, problem):
-    """Publish the periodic circuit-path stages with the analytic PSD premise.
+    """Report the periodic circuit-path stages with the analytic PSD assumption.
 
     L is PSD by construction, so there is no shift and every PSD recovery
-    factor exp(shift*t) is one. Direct PREP stages are exact zero, and the Strang bound is the
-    trotter_synthesis stage.
+    factor exp(shift*t) is one. Direct PREP stages are exact zero, and the
+    Strang bound is the trotter_synthesis stage.
     """
     from .analysis import fact
     from .solution_error_budget import _build_lchs_application_record,_stage_manifest,circuit_stage_bounds
@@ -284,10 +284,10 @@ def _component_facts(payload, *, problem):
 
 
 def _select_periodic_leaf(name,payload,*,basis,phase_only):
-    """Declare the address-phase leaf or the one-step Strang leaf with its CX laws.
+    """Declare the address-phase block or the one-step Strang block with its CX formulas.
 
-    The step leaf describes one Strang step, and the Program's Repeat node
-    supplies the step count, so resource folding multiplies it once.
+    The step block describes one Strang step, and the Program's Repeat node
+    supplies the step count, so the resource total multiplies it once.
     """
     q = payload.operator.periodic_stencil().num_qubits
     a = len(payload.amplitudes).bit_length()-1
@@ -378,7 +378,7 @@ def plan_periodic(method,problem,*,output,shots,rng):
 
 
 def construct_periodic_phase(block,arguments,method_context):
-    """Lower the address phase diagonal exp(i*phase_j) for every k-node address.
+    """Build the address phase diagonal exp(i*phase_j) for every k-node address.
 
     phase_j = arg(c_j) - T*k_j*(mass + 2*diffusion) combines the coefficient
     argument with the identity part of k_j*L, so the Strang steps need only
@@ -395,7 +395,7 @@ def construct_periodic_phase(block,arguments,method_context):
 
 
 def construct_periodic_step(block,arguments,method_context):
-    """Lower one symmetric Strang step for every address at once.
+    """Build one symmetric Strang step for every address at once.
 
     The order is Z_0 half step, even-bond half step, odd-bond full step
     (the even-bond rotation conjugated by the cyclic shift), even-bond half

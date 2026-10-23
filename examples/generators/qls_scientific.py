@@ -14,7 +14,7 @@
 # > - Sections 1 to 5: will it run, what it costs, how accurate, how large, what it assumes
 # > - Section 6: your own model
 # > - Sections 7 to 9: the paper's collision problem, its history system and the Dalzell solve
-# > - Section 10 and Appendix A to D: questions for extending the model, the selected construction, the weight of each time block, equation checks and the records of the run
+# > - Section 10 and Appendix A to D: questions for extending the model, the construction that `plan` chose, the weight of each time block, equation checks and the records of the run
 
 # %%
 from time import perf_counter
@@ -162,7 +162,7 @@ def show_card(result, predicted, aligned_direction, reference_direction, no_evol
     steps = (
         f"Computed the singular values of the {rec.original_dimension} × {rec.original_dimension} history matrix, "
         f"padded it to {rec.padded_dimension} coordinates and loaded A/α, with α = {rec.alpha:.3g}, as a dense block "
-        f"encoding (<code>{rec.encoding_family}</code>). The encoded condition number is κ = {rec.kappa_be:.3g}.",
+        f"encoding (<code>{rec.encoding_family}</code>). The encoded inverse-gap parameter is κ = {rec.kappa_be:.3g}.",
         f"Built Dalzell's augmented operator from the norm guess t = {rec.t:g}, selected the even kernel-reflection "
         f"polynomial of degree {rec.degree} for ε = {result.plan.method.epsilon_inv:g} and computed its "
         f"{len(rec.phase_solution)} phase angles.",
@@ -206,7 +206,7 @@ show_card(result, predicted, aligned_direction, reference_direction, no_evolutio
 # **`plan` checks the system against the method's limits before anything is built.** The table shows how this history uses them.
 #
 # - **Input.** A square invertible NumPy array $A$ and a vector $b$. The dense encoding loads any such matrix, at a gate count that grows steeply with its size (Section 4).
-# - **Output.** `result.value` is the unit direction $x/\|x\|$, defined up to a global phase. Populations, densities and momenta also need the norm $\|x\|$, which the shortcut does not return.
+# - **Output.** `result.value` is the unit direction $x/\|x\|$, defined up to a global phase. This run uses exact readout, in which the simulator computes every amplitude without shot sampling, subject to numerical rounding. Populations, densities and momenta also need the norm $\|x\|$, which the shortcut does not return.
 # - **Norm guess.** The shortcut needs a guess $t$ for the encoded solution norm. A guess far from that norm lowers the success probability (Section 9).
 # - **Refusal.** A system beyond a limit, such as a polynomial degree above `max_degree`, is refused by `plan` with an error that names the limit. The [QLS introduction](qls_linear_system_intro.ipynb) runs one refusal and its remedy.
 
@@ -224,7 +224,7 @@ show_table([
 #
 # **The gate-count formulas give the qubits before the circuit exists, but no CX count for this construction.** The compiled circuit gives that count, and the run records the classical cost: work, stored data and time.
 #
-# `estimate` adds up a gate-count formula for each block of the selected construction without building a circuit. Three blocks have no CX formula: the controlled dense-dilation query of $A$, the controlled preparation of $b$ and the multi-controlled RY rotation that loads $1/t$.
+# `estimate` adds up a gate-count formula for each block of the construction that `plan` chose, without building a circuit. Three blocks have no CX formula: the controlled dense-dilation query of $A$, the controlled preparation of $b$ and the multi-controlled RY rotation that loads $1/t$.
 #
 # `prepare` builds the circuit without running it, and `inspect_resources` compiles a copy to CX and single-qubit gates. The formulas of this construction give no depth or T count.
 
@@ -260,7 +260,7 @@ show_table([
 
 # %% [markdown]
 # - **Block applications** count every call of a building block, such as the preparation of $b$, the steps of each query and the phase rotations, so they exceed the polynomial degree.
-# - **Work.** `estimate` counts the work of each distinct block definition once. The run records the work it counted for the Qiskit definitions it built, so the two differ.
+# - **Work** is a nominal measure of classical computation that NWQLib derives from the problem sizes by formula and compares with limits such as `max_work` ([work units](../docs/glossary.md#work-units)). Its units combine estimates of arithmetic and of circuit construction, and they are neither a uniform count of scalar operations nor a time. `estimate` counts the work of each distinct block definition once, and the run records the work it counted for the Qiskit definitions it built, so the two differ.
 # - **Time.** The solve time includes building the circuit, the simulator call and the analysis of its output.
 # - **Not estimated:** peak memory on this route, physical qubits, error correction, run time on hardware and price.
 #
@@ -318,7 +318,7 @@ display(HTML("<p><strong>" + escape(conclusion) + "</strong></p>"))
 #
 # **The run is noiseless, every count is a logical count, and the model is a reduced form of the paper's.**
 #
-# - **Readout.** The simulator returns every amplitude exactly. Obtaining them on hardware would require a separate readout protocol. [Local Aer](../docs/aer.md) describes noise models for the local simulator, and [Choose a backend](../docs/backends.md) lists the other backends.
+# - **Readout.** The simulator returns every amplitude without shot sampling, subject to numerical rounding. Obtaining them on hardware would require a separate readout protocol. [Local Aer](../docs/aer.md) describes noise models for the local simulator, and [Choose a backend](../docs/backends.md) lists the other backends.
 # - **Model.** The reduction keeps the collision and Euler trajectories of this single node. It does not reproduce the paper's Carleman calculation, which lifts the nonlinear collision to a 39-coordinate linear system, its 100-step study, or Krovi's linear-ODE algorithm (doi:10.22331/q-2023-02-02-913) used in its complexity analysis.
 # - **Speedup.** The small dense simulation does not establish a quantum speedup.
 #
@@ -459,17 +459,17 @@ plt.show()
 #
 # A guess far from $\nu$ lowers the success probability (Section 9). A guess below $\nu$ also loosens Dalzell's bound on the direction error, which grows like $1/\cos\theta_t$ with $\cos\theta_t=t/\sqrt{t^2+\nu^2}$ (Dalzell, arXiv:2406.12086v2, App. C, Theorem 1, Eq. (68)). At $t=4$ this factor is 2% above its value at $t=\nu$.
 #
-# **The qubits.** With the default construction, padding from 15 to 16 coordinates uses four coordinate qubits. Dense encoding adds one ancilla, the shortcut adds two working ancillas and an augmentation qubit, and the QSVT construction adds two more, for ten total.
+# **The qubits.** With the default construction, padding from 15 to 16 coordinates uses four coordinate qubits. Dense encoding adds one ancilla, the shortcut adds two working ancillas and an augmentation qubit, and the quantum singular value transformation (QSVT) construction adds two more, ten in total.
 #
-# The dense base unitary is $32\times32$ and acts on five qubits. The tables report the current selected dimensions and width.
+# The dense base unitary is $32\times32$ and acts on five qubits. The tables give the dimensions and the circuit width of this Plan.
 #
-# **What `plan` computed.** `plan` performs a small SVD and selects the polynomial and its phases. The quantum circuit is constructed and executed by `solve`.
+# **What `plan` computed.** `plan` performs a small SVD and selects the polynomial and its phases. `solve` builds and runs the quantum circuit.
 #
-# NWQLib keeps the original equation separate from its encoded representation. The original dimension tells us what the answer means, while the padded dimension and total circuit width describe the quantum representation. The padding coordinate, whose right-hand-side entry is zero, is removed when the answer is read out.
+# NWQLib keeps the original equation separate from its encoded representation. The original dimension counts the physical history entries, while the padded dimension and the total circuit width describe the quantum representation. The padding coordinate, whose right-hand-side entry is zero, is removed when the answer is read out.
 #
-# The singular values of the original matrix determine its condition number. Encoding divides the matrix by $\alpha$, so the encoded condition number is $\kappa_{\rm be}=\alpha/\sigma_{\min}$. The polynomial can use a slightly larger domain parameter. These quantities answer different questions and should not be substituted for each other.
+# The singular values of the original matrix determine its condition number $\sigma_{\max}/\sigma_{\min}$. The encoded inverse-gap parameter is $\kappa_{\rm be}=\alpha/\sigma_{\min}$ (`kappa_be` in the [QLS guide](../docs/algorithms/qls.md)), and the two coincide for this dense encoding because $\alpha=\sigma_{\max}$. The polynomial can use a slightly larger domain parameter. These quantities answer different questions and should not be substituted for each other.
 #
-# The tables below read the selected records. The output is a unit vector modulo global phase, and recovering physical population values would also require the solution norm.
+# The tables below read these quantities from the Plan. The output is a unit vector modulo global phase, and recovering physical population values would also require the solution norm.
 #
 # The appendix displays numbers to six significant figures, while calculations and saved records keep their full precision. The parameter table is open, and a click on a summary line opens each of the other tables.
 
@@ -501,7 +501,7 @@ show_table([
 #
 # A finite even polynomial approximates that reflection (Dalzell, App. B.3, Eq. (62)). Its behavior in the gap between zero and the selected positive singular domain is not an accuracy claim.
 #
-# The first panel plots the stored, unrescaled reflection polynomial $K(s)$. The circuit implements a bounded version $K(s)/\mathrm{rescale}$ through its selected phases. The second panel shows those stored phases in radians. The phase-fit bound applies to that rescaled polynomial action, not directly to the final normalized solution error.
+# The first panel plots the Plan's unrescaled reflection polynomial $K(s)$. The circuit implements a bounded version $K(s)/\mathrm{rescale}$ through its phase angles. The second panel shows those phases in radians. The phase-fit bound applies to that rescaled polynomial action, not directly to the final normalized solution error.
 
 # %%
 show_table([
@@ -529,13 +529,13 @@ plt.show()
 # %% [markdown]
 # ## Appendix B. Success mass and final-time weight
 #
-# Algorithm success mass, the success probability of the result card, refers to the selected branch of the full circuit state. The following history weights are conditional on the original-coordinate unit-vector output.
+# The success probability of the result card, `result.algorithm_success_mass`, is the probability of the outcome in which the ancilla qubits signal success. The history weights below are computed from the returned unit vector, so they are conditional on that outcome and on the 15 original coordinates.
 #
 # The weights group every three amplitudes into one time block. The final-time sector contains blocks 2, 3 and 4, including both copies.
 #
 # Fidelity $|\langle x_{\rm ref}|x_{\rm QLS}\rangle|^2$ and phase-aligned L2 error assess the unit-state result. They do not bound Euler's physical time-discretization error, which Figure 1 shows separately. Copy discrepancies compare three-amplitude blocks within the same unit history, not independently normalized copies.
 #
-# **Figure 3.** The first panel compares the five conditional history weights. The second reports output discrepancies. The simulator readout is exact, so the figure has no error bars.
+# **Figure 3.** The first panel compares the five conditional history weights. The second shows the direction error and the discrepancies of the two copies. The simulator uses exact readout, without shot sampling, so the figure has no error bars.
 
 # %%
 probabilities = np.abs(direction)**2
@@ -570,7 +570,7 @@ plt.show()
 #
 # This projective residual checks the equation using only the original inputs and the returned unit direction. It does not reconstruct a physical solution norm.
 #
-# The `spectral_domain` verification of Section 3 checks whether the selected $\alpha$ and $\kappa$ cover the original singular endpoints. This dense Plan already stores those endpoints, so the check reuses them.
+# The `spectral_domain` verification of Section 3 checks whether the Plan's $\alpha$ and $\kappa$ cover the original singular endpoints. This dense Plan already holds those endpoints, so the check reuses them.
 #
 # The check addresses the encoding domain, while fidelity and the projective residual address the returned direction. None of them alone is a complete physical-error certificate.
 

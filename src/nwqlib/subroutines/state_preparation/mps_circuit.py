@@ -60,8 +60,8 @@ def _complete_unitary_from_fixed_columns(
     columns become an orthonormal basis of their orthogonal complement, as
     in Ran (arXiv:1908.07958v2), Eqs. (7)-(9). ``atol`` is the canonical-form
     tolerance for the norms and overlaps of the fixed columns. Its default
-    ``1e-9`` is an untuned column-admission window registered in
-    docs/ENGINEERING_CONSTANTS.md.
+    ``1e-9`` is an untuned tolerance for accepting a fixed column,
+    registered in docs/ENGINEERING_CONSTANTS.md.
     """
 
     completed = np.asarray(matrix, dtype=complex).copy()
@@ -274,9 +274,10 @@ class MPSCircuitStatePreparation:
     returns it with the fidelity fields unset, and
     [`validate_mps_circuit_state_preparation`][nwqlib.subroutines.state_preparation.mps_circuit.validate_mps_circuit_state_preparation]
     returns a copy with them evaluated. Its `circuit` field holds the
-    result. It stores the decomposition and the normalized target used by
-    the validator, and no compression-analysis object or other
-    reconstructed vector. The fields below are read-only.
+    result. It holds the decomposition and the normalized target with which
+    `validate_mps_circuit_state_preparation` compares the circuit output,
+    and no compression-analysis object or other reconstructed vector. The
+    fields below are read-only.
 
     Attributes:
         circuit: The layered MPS disentangling state-preparation circuit.
@@ -363,7 +364,7 @@ def build_mps_circuit_state_preparation(
         max_bytes (int): Default 10 GB (decimal, `10_000_000_000` bytes).
             Limit on the known input and TT-SVD arrays. It does not measure
             process memory. The layered construction
-            ([layered construction law](../../ENGINEERING_CONSTANTS.md#layered-mps-construction-law))
+            ([layered construction formula](../../ENGINEERING_CONSTANTS.md#layered-mps-construction-law))
             and the exact syntheses of the two-qubit unitaries are checked
             against it separately, before either starts.
         max_svd_work (int): Default `100_000_000`. Limit on the whole-sweep
@@ -374,9 +375,9 @@ def build_mps_circuit_state_preparation(
 
     Returns:
         preparation (MPSCircuitStatePreparation): The circuit with its
-            compression data, and unevaluated circuit diagnostics. The
-            TT-SVD discarded weight describes core compression, not the
-            finite-layer circuit error.
+            compression data, and circuit fidelity fields that are not yet
+            evaluated. The TT-SVD discarded weight describes core
+            compression, not the finite-layer circuit error.
 
     Examples:
         The 3-qubit GHZ state has bond dimension 2, and the validated
@@ -466,7 +467,7 @@ def validate_mps_circuit_state_preparation(
 ) -> MPSCircuitStatePreparation:
     """Simulate a built MPS circuit once and return a copy with its fidelity to the target.
 
-    This helper performs one statevector simulation, whose cost grows
+    This function performs one statevector simulation, whose cost grows
     exponentially with the qubit count, for small-instance validation. It
     compares the circuit output with the stored normalized target and
     returns a copy of `preparation` with `prepared_state`,

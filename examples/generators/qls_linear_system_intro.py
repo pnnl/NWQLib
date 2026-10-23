@@ -131,7 +131,7 @@ def show_card(result, reference, check, predicted, seconds, peak_bytes):
     plt.show()
     steps = (
         f"Chose a block encoding of A (<code>{rec.encoding_family}</code>, normalization α = {format_value(rec.alpha)}), "
-        f"which makes the encoded condition number κ = α/σ<sub>min</sub>(A) = {format_value(rec.kappa_be)}.",
+        f"which makes the encoded inverse-gap parameter κ = α/σ<sub>min</sub>(A) = {format_value(rec.kappa_be)}.",
         f"Selected an odd polynomial of degree {rec.degree} that matches 1/(κx) to relative error ε = "
         f"{result.plan.method.epsilon_inv:g} on [1/κ, 1], and computed its QSVT phase angles.",
         f"Built the {rec.width}-qubit circuit and simulated it on the Aer statevector simulator.",
@@ -160,9 +160,9 @@ show_card(result, reference, check, predicted, seconds, peak_bytes)
 # **`plan` decides whether your problem fits before anything is built, and a refusal names the limit to change.**
 #
 # - **Input.** A square invertible NumPy array, real or complex, a Qiskit `SparsePauliOp`, or a periodic stencil. Planning refuses a SciPy CSR matrix with an `ApplicabilityError`. For a small matrix, `.toarray()` converts it ([Supply inputs](../docs/inputs.md)).
-# - **Output.** `result.x` is the physical solution, available from exact simulator readout. Finite-shot runs return one requested quantity instead (Go deeper B).
+# - **Output.** `result.x` is the physical solution, available from exact readout, in which the simulator computes the amplitudes without shot sampling, subject to numerical rounding. Finite-shot runs return one requested quantity instead (Go deeper B).
 # - **Size.** A dimension that is not a power of two is padded and uses a dense block encoding, which costs many more CX gates. `plan` reports the qubits before anything runs.
-# - **Conditioning.** The polynomial degree grows with the encoded condition number κ. At ε = 0.01 the default cap `max_degree=256` stops planning above κ ≈ 44.
+# - **Conditioning.** The polynomial degree grows with the encoded inverse-gap parameter κ, the ratio $\alpha/\sigma_{\min}(A)$ of the block encoding's normalization to the smallest singular value of $A$ (`kappa_be` in the [QLS guide](../docs/algorithms/qls.md)). It is at least the condition number of $A$, and Go deeper A compares the two. At ε = 0.01 the default cap `max_degree=256` stops planning above κ ≈ 44.
 #
 # The cell plans a 10-unknown 1D Poisson matrix, whose κ lies above that limit. Planning refuses it with a `ValueError` that names `max_degree`. Raising the cap is the remedy, and the second half of the cell plans and solves it, one solve in about 4 s.
 
@@ -180,7 +180,7 @@ raised = plan(steep, method=QLS(epsilon_inv=EPSILON, max_degree=512), seed=7)  #
 steep_x = np.asarray(solve(raised, progress=False).x).real
 steep_reference = np.linalg.solve(poisson, np.ones(n))
 show_table([
-    ("Encoded condition number κ", raised.reconstruction.kappa_be, "Above the limit of the default cap"),
+    ("Encoded inverse-gap parameter κ", raised.reconstruction.kappa_be, "Above the limit of the default cap"),
     ("Polynomial degree", raised.reconstruction.degree, f"Allowed by max_degree = {raised.method.max_degree}"),
     ("Qubits", raised.reconstruction.width,
      f"{n} unknowns padded to {raised.reconstruction.padded_dimension} amplitudes"),
@@ -195,7 +195,7 @@ show_table([
 #
 # **`estimate` predicts the quantum cost before the circuit exists, and the run records the classical cost.** Quantum cost means qubits, gates and shots, and classical cost means memory, work and time on this computer.
 #
-# `estimate` adds up a gate-count formula for each block of the selected construction without building a circuit. `prepare` builds the circuit without running it, and `inspect_resources` compiles a copy with Qiskit. The formulas of this construction give no depth or T count.
+# `estimate` adds up a gate-count formula for each block of the construction that `plan` chose, without building a circuit. `prepare` builds the circuit without running it, and `inspect_resources` compiles a copy with Qiskit. The formulas of this construction give no depth or T count.
 
 # %%
 from nwqlib import prepare
@@ -231,7 +231,7 @@ show_table([
 
 # %% [markdown]
 # - **Peak memory** is the largest total of Python allocations, traced with `tracemalloc` while the card cell repeats plan and solve. Memory that Aer allocates in C++ is not traced.
-# - **Work.** `estimate` counts the work of each distinct block definition once. The run records the work it counted for the Qiskit definitions it built, so the two differ.
+# - **Work** is a nominal measure of classical computation that NWQLib derives from the problem sizes by formula and compares with limits such as `max_work` ([work units](../docs/glossary.md#work-units)). Its units combine estimates of arithmetic and of circuit construction, and they are neither a uniform count of scalar operations nor a time. `estimate` counts the work of each distinct block definition once, and the run records the work it counted for the Qiskit definitions it built, so the two differ.
 # - **Not estimated:** physical qubits, error correction, run time on hardware and price.
 #
 # ## 3. How accurate?
@@ -291,7 +291,7 @@ show_table([
 # %% [markdown]
 # ## 5. What does it assume?
 #
-# **The runs are noiseless, and every count is a logical count.** The circuit is read out exactly, or sampled with finite shots without noise. The same finite-shot request runs with a noise model on the local simulator ([Local Aer](../docs/aer.md)), and [Choose a backend](../docs/backends.md) lists the other backends.
+# **The runs are noiseless, and every count is a logical count.** The circuit uses exact readout, without shot sampling and subject to numerical rounding, or is sampled with finite shots without noise. The same finite-shot request runs with a noise model on the local simulator ([Local Aer](../docs/aer.md)), and [Choose a backend](../docs/backends.md) lists the other backends.
 #
 # ## 6. Your own system
 #
@@ -299,9 +299,9 @@ show_table([
 #
 # - **Input.** `my_A` is a square invertible NumPy array, real or complex, and `my_b` a vector of the same length. A non-Hermitian matrix is embedded in a Hermitian matrix of twice the size.
 # - **SciPy sparse matrices.** Convert a small one with `.toarray()`, as the cell does. This is not a route for large sparse matrices.
-# - **Size limits.** The encoded κ must stay below about 44 at ε = 0.01 with the default `max_degree`, and the circuit within 20 qubits. The 8-unknown example sits just below the κ limit.
+# - **Size limits.** The encoded inverse-gap parameter κ must stay below about 44 at ε = 0.01 with the default `max_degree`, and the circuit within 20 qubits. The 8-unknown example sits just below the κ limit.
 # - **A Qiskit `SparsePauliOp`** works as A when you also pass `QLS(kappa=K)` with $K\ge\alpha/\sigma_{\min}(A)$. Here α is the sum of the absolute Pauli coefficients.
-# - **Output.** `my_result.x` is the physical solution, read out exactly by the simulator, and `my_result.algorithm_success_mass` the success probability.
+# - **Output.** `my_result.x` is the physical solution, from exact readout by the simulator, and `my_result.algorithm_success_mass` the success probability.
 
 # %%
 import numpy as np
@@ -315,7 +315,7 @@ my_b = np.ones(8)                                                               
 
 my_plan = plan(LinearSystem(A=my_A, b=my_b), method=QLS(epsilon_inv=0.01), seed=7)  # nothing runs yet
 my_rec = my_plan.reconstruction
-print(f"encoded condition number {my_rec.kappa_be:.3g}, polynomial degree {my_rec.degree}, {my_rec.width} qubits")
+print(f"encoded inverse-gap parameter {my_rec.kappa_be:.3g}, polynomial degree {my_rec.degree}, {my_rec.width} qubits")
 
 my_result = solve(my_plan, progress=False)
 my_x = np.asarray(my_result.x)
@@ -363,11 +363,11 @@ plt.show()
 #
 # The circuit queries the block encoding once per polynomial degree, so the degree sets most of the cost. It grows with $\kappa$ and with $\log(1/\epsilon)$. The table reads these choices from the Plan.
 #
-# <details><summary>Why κ is larger than the condition number of A</summary>
+# <details><summary>Why κ is at least the condition number of A</summary>
 #
-# The block encoding writes $A$ as a combination of Pauli operators and loads it into a larger unitary, and $\alpha$ is the normalization of that combination. Quantum singular value transformation (QSVT) applies the polynomial to that unitary.
+# The block encoding writes $A$ as a combination of Pauli operators and loads it into a larger unitary, and $\alpha$ is the normalization of that combination. Quantum singular value transformation (QSVT) alternates that unitary and its adjoint with projector-controlled phase rotations, which places the rescaled polynomial $P(A/\alpha)/s$ in the block where the ancilla qubits signal success (Go deeper D gives the rescale $s$).
 #
-# Following $1/(\kappa x)$ on $[1/\kappa,1]$ gives the inverse of $A/\alpha$ up to the known factor $1/\kappa$ (Gilyén, Su, Low and Wiebe, [arXiv:1806.01838v1](https://arxiv.org/abs/1806.01838v1), Corollary 18). The condition number $\kappa_A=\sigma_{\max}/\sigma_{\min}$ of $A$ itself is smaller, because $\alpha\ge\sigma_{\max}$.
+# Following $1/(\kappa x)$ on $[1/\kappa,1]$ gives the inverse of $A/\alpha$ up to the known factor $1/\kappa$ (Gilyén, Su, Low and Wiebe, [arXiv:1806.01838v1](https://arxiv.org/abs/1806.01838v1), Corollary 18). The condition number $\kappa_A=\sigma_{\max}/\sigma_{\min}$ of $A$ itself is at most $\kappa$, because $\alpha\ge\sigma_{\max}$. For this plate it is smaller, as the table below shows.
 #
 # </details>
 
@@ -377,7 +377,7 @@ show_table([
      f"{rec.padded_dimension} amplitudes on {int(np.log2(rec.padded_dimension))} system qubits"),
     ("Block encoding", rec.encoding_family, f"Normalization α = {format_value(rec.alpha)}"),
     ("Condition number κ_A of A", rec.condition_number, "Largest / smallest singular value of A"),
-    ("Encoded condition number κ", rec.kappa_be, "α / smallest singular value. The polynomial must cover [1/κ, 1]"),
+    ("Encoded inverse-gap parameter κ", rec.kappa_be, "α / smallest singular value. The polynomial must cover [1/κ, 1]"),
     ("Polynomial degree", rec.degree, "Block-encoding queries in the circuit"),
     ("Qubits", rec.width, "System qubits plus encoding and QSVT ancillas"),
 ])
@@ -385,11 +385,11 @@ show_table([
 # %% [markdown]
 # ### B. A finite-shot measurement
 #
-# **What does a run with finite shots return?** Hardware returns bit strings, so you request each quantity separately, with its own shots. Only exact simulator readout gives `result.x` itself.
+# **What does a run with finite shots return?** Hardware returns bit strings, so you request each quantity separately, with its own shots. Only exact readout gives `result.x` itself.
 #
 # | Output request | Quantity | Needs the magnitude of $x$ |
 # | --- | --- | --- |
-# | `Solution()`, the default | $x$ itself, from exact simulator readout only | yes |
+# | `Solution()`, the default | $x$ itself, from exact readout only | yes |
 # | `QuadraticForm(observable=O)` | $x^\dagger Ox$ | yes |
 # | `NormSquared()` | $x^\dagger x$ | yes |
 # | `NormalizedExpectation(observable=O)` | $x^\dagger Ox/x^\dagger x$ | no |
@@ -471,7 +471,7 @@ print(f"Encoded solution norm ν = {rec.alpha * np.linalg.norm(reference) / np.l
 #
 # The polynomial only needs to match $1/(\kappa x)$ where eigenvalues of $A/\alpha$ lie, so it is free to turn around inside the grey gap. Its peak slightly exceeds one, and the circuit implements $P/s$ with the rescale $s$ from the table, which keeps every value within $[-1,1]$.
 #
-# The error bound is the maximum of $|\kappa xP(x)-1|$ on $[1/\kappa,1]$, and $\epsilon$ is its target.
+# The reported error bound is an upper bound on the maximum of $|\kappa xP(x)-1|$ over $[1/\kappa,1]$, obtained from the residual at the points of a Chebyshev grid with a polynomial norming inequality and evaluated in binary64 arithmetic. Planning chooses the degree so that this bound is at most $\epsilon$.
 
 # %%
 show_table([
@@ -497,7 +497,7 @@ plt.show()
 # %% [markdown]
 # ### E. Accuracy against circuit size
 #
-# **How does the requested accuracy ε set the polynomial degree, the CX count and the error?** The cell plans and solves the plate for six values of ε, six solves in about 2 s, each read out exactly.
+# **How does the requested accuracy ε set the polynomial degree, the CX count and the error?** The cell plans and solves the plate for six values of ε, six solves in about 2 s, each with exact readout.
 #
 # A smaller ε raises the degree, and with it the queries and CX gates that `plan` and `estimate` give before any circuit runs. The measured error follows ε closely. The success probability falls slowly, because a more accurate polynomial must be rescaled more strongly to stay bounded.
 
@@ -562,7 +562,7 @@ show_estimate(predicted)
 # %% [markdown]
 # ### B. A saved result, reloaded and recomputed
 #
-# `result.save` stores the plan, the polynomial and phases, and the solution. Loading restores them without repeating the singular-value computation, the phase fit or the circuit run. The cell recomputes the card's relative error from the loaded solution and compares the two.
+# `result.save` saves the plan, the polynomial and its phases, and the solution. Loading restores them without repeating the singular-value computation, the phase fit or the circuit run. The cell recomputes the card's relative error from the loaded solution and compares the two.
 
 # %%
 from pathlib import Path

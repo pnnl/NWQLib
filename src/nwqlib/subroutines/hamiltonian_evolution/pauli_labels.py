@@ -1,4 +1,4 @@
-"""Compact Pauli-label helpers for sparse Hamiltonian evolution.
+"""Compact Pauli labels for sparse Hamiltonian evolution and their conversion to Qiskit strings.
 
 A compact label such as ``"x0z2"`` names X on qubit 0 and Z on qubit 2, with
 strictly increasing qubit indices. Qiskit's dense label puts qubit 0 in the

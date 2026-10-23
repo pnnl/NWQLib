@@ -1,16 +1,16 @@
 """Saving, reporting and loading of a Result folder. Opening never plans or analyzes again.
 
 A saved Result folder holds ``result.json`` (format, selection, data and result)
-and its payload files. Saving checks the associations between Plan, receipts,
-attempts, observations and arrays before any file is written. Reporting checks
-the shared format and returns the metadata. Loading reconstructs concrete records
-through the Method archive hook and attaches the Result to its Plan and observations.
-Both operations use saved data without acquisition or analysis.
+and its payload files. Saving checks the associations between Plan, preparation
+records, attempts, observations and arrays before any file is written. Reporting
+checks the shared format and returns the metadata. Loading reconstructs concrete
+records through the Method archive hook and attaches the Result to its Plan and
+observations. Both operations use the saved data and run no circuit and no analysis.
 
-Published arrays load as read-only memory maps. Their headers (shape, dtype,
-byte order, size, contiguity) are always checked and a mismatch rejects. That
-check reads no payload bytes, and it keeps a mismatched file from being read as
-data of the wrong shape.
+Saved arrays load as read-only memory maps. Their headers (shape, dtype,
+byte order, size, contiguity) are always checked, and a mismatch is rejected.
+That check reads no payload bytes, and it keeps a mismatched file from being
+read as data of the wrong shape.
 """
 
 from nwqlib._limits import DEFAULT_MAX_BYTES
@@ -32,21 +32,22 @@ RESULT_FORMAT = "nwqlib.result/14"
 
 
 def _validate_recorded_data(plan_id, observations, trace, receipts, manifests):
-    """Validate portable acquisition joins without loading a Method or array.
+    """Check that every observation matches its attempt and preparation record, without loading a Method or array.
 
-    Every chunk must join to a completed attempt and to its own receipt, with the
-    same realization, readout, bindings, layouts and population. This is also
-    where a chunk meets its receipt before the Result is saved, so the
-    exact-probability unit bound is checked here. Every array a chunk names must
-    have its manifest in the saved inventory.
+    Every chunk must match a completed attempt and its own preparation record,
+    with the same realization, readout, bindings, layouts and population. This
+    is also where a chunk meets its preparation record before the Result is
+    saved, so the exact-probability unit bound is checked here. Every array a
+    chunk names must have its manifest among the saved arrays.
 
-    The chunks are grouped by attempt, in one pass, and each group is frozen
-    once. An ordinary readout's attempt holds its one chunk, whose identity
-    the completed event names. A trajectory's attempt holds one chunk per
-    declared point, placed by the receipt's point index. A duplicate or
-    missing point is refused, and the event names the identity of the
-    ``ObservationView`` of the ordered collection. Each point chunk declares
-    the one-point readout of its point in the receipt's trajectory
+    The chunks are grouped by attempt, in one pass, and the content hash of
+    each group is computed once. An ordinary readout's attempt holds its one
+    chunk, whose content hash the completed event names. A trajectory's
+    attempt holds one chunk per declared point, placed by the point index of
+    the preparation record. A duplicate or missing point is refused, and the
+    event names the content hash of the ``ObservationView`` of the ordered
+    collection. Each point chunk declares the one-point readout of its point
+    in the preparation record's trajectory
     (``ObservationChunk.declares_readout_of``).
     """
     if trace.plan_id != plan_id:
@@ -115,7 +116,7 @@ def _saved_arrays(data):
     They are the RunData's artifact handles, as given, then the arrays of
     probability chunks that the handles do not hold, for example a chunk
     built with ``ObservationChunk.from_histogram``, which keeps its arrays in
-    memory. ``read()`` returns the stored array. It is called only when the
+    memory. ``read()`` returns the saved array. It is called only when the
     array is written.
     """
     arrays = [(handle.manifest, lambda handle=handle: handle.array) for handle in data.artifacts]
@@ -134,10 +135,11 @@ def _saved_arrays(data):
 def _validate_data(plan, data):
     """Check RunData against its Plan before a Result is saved.
 
-    Every observation is joined to its receipt, attempt and arrays
-    (``_validate_recorded_data``), and every receipt and attempt to the
-    selected construction and forecast (``_validate_selection``). Some Methods
-    also call this when they analyze or verify.
+    Every observation is checked against its preparation record, attempt and
+    arrays (``_validate_recorded_data``), and every preparation record and
+    attempt against the construction that planning chose and the forecast
+    (``_validate_selection``). Some Methods also call this when they analyze
+    or verify.
     """
     _validate_recorded_data(plan.content_id, data.observations, data.trace, data.receipts,
         tuple(manifest for manifest, _ in _saved_arrays(data)))
@@ -145,7 +147,7 @@ def _validate_data(plan, data):
 
 
 def _validate_selection(plan, data):
-    """Join the receipts and attempts of RunData to its selected Plan and forecast."""
+    """Check the preparation records and attempts of RunData against its Plan and forecast."""
     from nwqlib._run_archive import validate_provenance
     validate_provenance(plan, data.forecast, data.allocation)
     receipts = {receipt.content_id: receipt for receipt in data.receipts}
@@ -177,10 +179,10 @@ def _validate_selection(plan, data):
 
 
 def read_report(path):
-    """Read current saved metadata without loading Method code or binary data.
+    """Read the saved metadata of the current format without loading Method code or binary data.
 
     The shared format is checked. The saved mapping is returned directly,
-    without loading native payloads or running analysis.
+    without loading backend payloads or running analysis.
     """
     files = ArchiveFiles(Path(path), None)
     saved = files.read_json("result.json")
@@ -190,12 +192,12 @@ def read_report(path):
 
 
 def save_data(data, files, method):
-    """Write RunData as JSON records plus one NPY file per distinct published array.
+    """Write RunData as JSON records plus one NPY file per distinct saved array.
 
     The arrays are the RunData's artifacts and the arrays of its probability
     chunks (``_saved_arrays``). Method context is written only through the
-    Method's own hook. No reference, analysis or missing cache is computed for
-    storage.
+    Method's own hook. No reference, analysis or missing cache is computed
+    for saving.
     """
     return dict(observations=data.observations.model_dump(mode="json"),
         trace=data.trace.model_dump(mode="json"),
@@ -244,11 +246,11 @@ def load_data(data, files, method):
 
 
 def save_result(result, path):
-    """Save the selected science and sufficient data to one new directory.
+    """Save a Result with its Plan and its sufficient data to one new directory.
 
-    The associations are validated before any file is written. The directory
-    must not exist, and it is removed if saving fails, so a partial folder is
-    never left that could look like a complete archive.
+    The associations are checked before any file is written. The directory
+    must not exist, and it is removed if saving fails, so no partial folder
+    is left that could look like a complete saved Result.
     """
     if not isinstance(result, Result):
         raise TypeError("save_result requires a scientific Result")
@@ -272,7 +274,7 @@ def save_result(result, path):
 
 
 def load_result(path, *, method=None):
-    """Restore a saved Result with its Plan and RunData, keeping arrays as lazy mmaps.
+    """Restore a saved Result with its Plan and RunData, keeping arrays as memory maps read on demand.
 
     Concrete records are reconstructed and the Result is attached to its
     original Plan and observations. Array payloads are read on demand.

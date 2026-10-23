@@ -1,7 +1,8 @@
-"""Product-energy BFGS, the classical Taylor-model gradient and established finite generalized/insertion shifts.
+"""Product-energy BFGS, the classical Taylor-model gradient and the established finite generalized and insertion shift rules.
 
-The controller supplies every energy query, owns checkpoints and counts the
-original global query allowance. This module submits no circuit itself.
+The ADAPT iteration supplies every energy query, saves the checkpoints and
+counts each query against the global evaluation limit. This module submits
+no circuit itself.
 """
 
 from math import fsum, isfinite, pi
@@ -27,8 +28,8 @@ def taylor_action_derivative(action, state, theta, steps, degree):
     """Return the fixed-step scaled Taylor action on ``state`` and its derivative in ``theta``.
 
     This differentiates all scaled Taylor steps with the step count fixed.
-    ``action`` is the admitted generator action. The degree and step count
-    must come from the same owner as the forward exponential
+    ``action`` is the action of the checked generator. The degree and step
+    count must come from the same source as the forward exponential
     (``fermionic_pool.GENERATOR_TAYLOR_DEGREE`` and ``_taylor_steps``). The
     value's multiply then add order matches ``_scaled_taylor_step`` with the
     same action. For a fixed step count ``s`` and ``h = theta/s``, each step is
@@ -124,13 +125,13 @@ def normalized_taylor_energy_gradient(
     Cases. ``k = 0`` evaluates one reference energy and returns shape
     ``(0,)``. At ``theta = 0, s = 0`` the raw tangent is A times the input, at
     nonzero underflow-to-zero steps it is zero, and at a zero generator it
-    is zero. A nonfinite or zero factor norm rejects.
+    is zero. A nonfinite or zero factor norm raises ``ValueError``.
 
     Cost. One energy-and-gradient evaluation stores the normalized forward
     states and raw parameter tangents, uses one Hamiltonian action, and
     differentiates each fixed-step Taylor factor and normalization.
-    Admission includes both forward derivative actions and the unnormalized
-    reverse actions (``adapt_records._energy_gradient_work``).
+    The work check includes both forward derivative actions and the
+    unnormalized reverse actions (``adapt_records._energy_gradient_work``).
     """
     k = len(theta)
     if len(generators) != k:
@@ -171,7 +172,7 @@ def normalized_taylor_energy_gradient(
 
 
 class _EvaluationBudgetExhausted(Exception):
-    """Raised by the controller's ``evaluate`` when a new energy query would exceed ``optimize_max_evaluations``."""
+    """Raised by the ``evaluate`` callback of the ADAPT iteration when a new energy query would exceed ``optimize_max_evaluations``."""
 
 
 def _generator_shift_rule(
@@ -186,7 +187,7 @@ def _generator_shift_rule(
 
     The frequencies are eigenvalue gaps of -iA. Fermionic permutations
     preserve that spectrum, including occupied spectators. Only blocks up to
-    dimension eight on at most eight active modes are admitted here. Pauli
+    dimension eight on at most eight active modes are allowed here. Pauli
     insertion shifts after the complete generator are valid without termwise
     commutation. Custom commuting generators use that rule without a
     spectral construction. Under SHOTS the insertion rule is returned
@@ -211,8 +212,8 @@ def _generator_shift_rule(
     Pauli insertion rule. For a Pauli string, ``exp(i s pi/4 P) = (I + i s P)/sqrt(2)``
     and inserting that factor gives ``<[O, i P]> = E(+) - E(-)``. This is the
     two-eigenvalue rule of Schuld et al., arXiv:1811.11184v1, Sec. III.A,
-    Theorem 1, Eq. (8), and Eqs. (13)-(14). NWQLib's step is where the factor
-    goes. For ``A = i sum_k c_k P_k``, ``A`` commutes with ``exp(theta A)``, so
+    Theorem 1, Eq. (8), and Eqs. (13)-(14). NWQLib's own step is the
+    position of the inserted factor. For ``A = i sum_k c_k P_k``, ``A`` commutes with ``exp(theta A)``, so
     ``dE/dtheta = <chi|[O, A]|chi>`` with ``chi`` the state after the complete
     exponential and ``O`` the observable seen from there. Inserting each
     ``P_k`` factor after the complete exponential then gives
@@ -388,8 +389,8 @@ def optimize_product(*, options, execution, selected, starting, evaluate, comple
     evaluation. Circuit modes supply the measured gradient from the
     generalized or Pauli insertion shift rule of each selected generator.
     ``options.optimize_rounds_n`` caps the BFGS iterations. The caller's
-    ``evaluate`` charges every new parameter point to the global allowance and
-    raises when it is exhausted. Analytic gradients bound neither the number
+    ``evaluate`` counts every new parameter point against the global
+    evaluation limit and raises when the limit is reached. Analytic gradients bound neither the number
     of BFGS iterations nor the number of objective points.
     """
     initial = np.asarray(starting, dtype=float)
@@ -407,7 +408,7 @@ def optimize_product(*, options, execution, selected, starting, evaluate, comple
         ``E_k(+-)`` is the energy with the Pauli factor
         ``exp(+-i pi/4 P_k)`` inserted after the ``j``-th exponential. Every
         energy comes from ``evaluate``, which reuses an already collected
-        point and charges only new ones.
+        point and counts only new ones.
         """
         # ``evaluate`` charges only points that are not yet collected.
         # Reserving the full shift count in advance would reject a derivative

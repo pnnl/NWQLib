@@ -61,7 +61,7 @@ print(result.solution)
 
 The result is the physical solution vector u(0.1), including its scale and phase. It is not normalized to unit length.
 
-LCHS, the linear combination of Hamiltonian simulation of An, Childs and Lin (ACL, arXiv:2312.03916v2, Eq. (6)), writes `exp(-tA)` for a matrix A with positive semidefinite Hermitian part as an integral over a kernel variable k of unitary evolutions, and approximates the integral by a quadrature sum. NWQLib shifts an A whose Hermitian part is not positive semidefinite and restores the resulting growth. Each quadrature node is one branch of that sum. SELECT is the circuit block that applies the branch whose index an address register holds (ACL Appendix A.3, Lemma 24, Eq. (178)). The default Aer circuit uses one system qubit and eight coefficient ancillas, which hold the address. It has 204 branches, padded to 256 address slots, the branch count rounded up to a power of two. The [LCHS guide](algorithms/lchs.md) describes the construction.
+LCHS, the linear combination of Hamiltonian simulation of An, Childs and Lin (ACL, arXiv:2312.03916v2, Eq. (6)), writes `exp(-tA)` for a matrix A with positive semidefinite Hermitian part as an integral over a kernel variable k of unitary evolutions, and approximates the integral by a quadrature sum. NWQLib shifts an A whose Hermitian part is not positive semidefinite and restores the resulting growth. Each quadrature node is one branch of that sum. SELECT is the circuit block that applies the branch whose index an address register holds (ACL Appendix A.3, Lemma 24, Eq. (178)). The default Aer circuit uses one system qubit and eight coefficient ancillas, which hold the address. Its 204 branches are padded to 256 address slots, the basis states of the eight-qubit address register, because the number of slots is the branch count rounded up to a power of two. The [LCHS guide](algorithms/lchs.md) describes the construction.
 
 ## Check the answer
 
@@ -82,11 +82,11 @@ print(np.linalg.norm(result.solution - reference))
 0.0008214720329548587
 ```
 
-The printed absolute L2 discrepancy, about `.000821472`, is that of the default finite LCHS approximation in this example. LCHS gives half of `LCHS.approximation_tolerance`, 0.01 by default, to the tail of the k integral that the cutoff drops and half to the k quadrature. Here the tail bound is `.005` and the quadrature bound is about `.00431140`. For this unit input without a shift, they equal the facts `kernel_approximation` and `k_quadrature` in `result.plan.facts` ([LCHS frames](conventions.md#lchs-frames)). These two component bounds do not bound the total physical-output error, which also depends on the preparation, evolution and numerical approximations. The [LCHS guide](algorithms/lchs.md#selection-and-accuracy) describes these bounds, and [Check accuracy and verify a result](verification.md) describes NWQLib's own checks.
+The printed absolute L2 discrepancy, about `.000821472`, is that of the default finite LCHS approximation in this example. LCHS assigns half of `LCHS.approximation_tolerance`, 0.01 by default, to the tail of the k integral that the cutoff drops and half to the k quadrature. Here the tail bound is `.005` and the quadrature bound is about `.00431140`. For this unit input without a shift, they equal the bounds recorded as `kernel_approximation` and `k_quadrature` in `result.plan.facts` ([LCHS frames](conventions.md#lchs-frames)). These two bounds cover only the cutoff and the quadrature. They do not bound the total error of the physical output, which also depends on the preparation, evolution and numerical approximations. The [LCHS guide](algorithms/lchs.md#selection-and-accuracy) describes these bounds, and [Check accuracy and verify a result](verification.md) describes NWQLib's own checks.
 
 ## Change the approximation
 
-A smaller `approximation_tolerance` uses more quadrature nodes. Evaluate the finer finite sum classically:
+With a smaller `approximation_tolerance`, LCHS uses more quadrature nodes. Evaluate the finer finite sum classically:
 
 ```python
 refined = solve(
@@ -103,7 +103,7 @@ print(np.linalg.norm(refined.solution - reference))
 5.3260455987202175e-05
 ```
 
-For this input, the finer construction uses 396 nodes and has absolute L2 discrepancy about `.0000532605`. This comparison evaluates its finite sum classically. A dense quantum construction needs 512 address slots and ten total qubits, within the default `max_dense_select_slots=4096`. These two observations do not establish monotonic convergence for every input. Each branch of the dense SELECT is a classically computed matrix exponential. Larger systems need a supported structured construction with its own limit check.
+For this input, the finer construction uses 396 nodes and has absolute L2 discrepancy about `.0000532605`, with its finite sum evaluated classically. As a circuit, the same dense construction needs 512 address slots and ten qubits in total, within the default limit `max_dense_select_slots=4096`. These two observations do not establish monotonic convergence for every input. Each branch of the dense SELECT is a classically computed matrix exponential. Larger systems need a supported structured construction with its own limit check.
 
 ## See the cost before running {#inspect-or-select-work-before-running-it}
 
@@ -147,7 +147,7 @@ print(restored.solution)
 
 ## Next steps
 
-- [Examples](examples.md): the linear dynamics notebook (`examples/lchs_linear_dynamics_intro.ipynb`) applies LCHS to advection-diffusion. It separates product-formula error from quadrature error and compares kernels, quadratures, and exact and MPS state preparation by their errors and success probabilities, with compiled gate counts for the isolated state loaders.
+- [Examples](examples.md): the linear dynamics notebook (`examples/lchs_linear_dynamics_intro.ipynb`) applies LCHS to advection-diffusion. It separates product-formula error from quadrature error and compares kernels, quadratures, and exact and MPS state preparation by their errors and success probabilities, with compiled gate counts for the state-preparation circuits alone.
 - [Plan, compare and solve](scientist.md) compares Lanczos and FixedGCIM for the same `Eigenproblem`.
 - [Supply inputs](inputs.md) covers dense, sparse and structured inputs.
 - [Run on a backend](prepared_execution.md) and [Continue an interrupted run](run_archives.md) cover submitting to a backend and continuing a saved run.

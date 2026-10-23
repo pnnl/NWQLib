@@ -1,10 +1,11 @@
-"""Selected simulator amplitudes in original physical coordinates.
+"""Simulator amplitudes of selected qubits, in the original physical coordinates.
 
 Block-encoding convention: An, Childs & Lin, arXiv:2312.03916v2,
 Appendix A.2 Definition 23 and A.3 Lemma 24, Eq. (178).
 https://arxiv.org/html/2312.03916v2#A3
 The method supplies its positive recovery factor. This module projects the
-actual native output and never reconstructs a missing state from counts.
+state that the simulator returned and never reconstructs a missing state
+from counts.
 """
 
 from nwqlib._limits import DEFAULT_MAX_BYTES
@@ -32,7 +33,7 @@ def _slice(native, free, fixed, *, size=None):
 
     Free bits are least significant first in the output index. Contiguous bit
     positions produce a strided view. A noncontiguous projection allocates only
-    the requested number of coordinates, never a full-native-width index map.
+    the requested number of coordinates, never an index map over the full simulated width.
     """
     import numpy as np
 
@@ -52,12 +53,19 @@ def _slice(native, free, fixed, *, size=None):
 
 
 def validate_amplitude_masses(declaration, values):
-    """Validate the actual algorithm and narrower physical populations.
+    """Check the algorithm-success mass and the narrower physical-slice mass.
 
-    Locally derived from orthogonal coordinate projection: when P_phys is a
-    subprojector of P_success, ||P_phys psi||² <= ||P_success psi||². Equality
-    requires the same fixed bits AND the whole coordinate register, so a padded
-    three-coordinate solution does not inherit four-coordinate mass equality.
+    The bound is derived locally from orthogonal coordinate projection. When
+    P_phys is a subprojector of P_success, ||P_phys psi||² <= ||P_success psi||².
+    When the readout has no narrower physical projection, that is, no
+    condition qubits are fixed and the output dimension fills the whole
+    coordinate register, the two projections are equal, so the masses are
+    equal for every state and the check requires equality. With a
+    narrower physical projection, such as a padded three-coordinate solution in
+    a four-coordinate register, equality holds only when the excluded
+    coordinates have zero amplitude, so the check requires only the
+    inequality. Both tests allow a roundoff window of
+    ``NUMERICAL_RELATION_RTOL * max(1, algorithm-success mass)``.
     """
     from nwqlib.execution import ScalarValue
 
@@ -87,7 +95,7 @@ class AmplitudeReadout(Record):
     trajectory carry it as `amplitudes`. The returned amplitudes are complex
     and keep their phase.
 
-    `coordinates` are least significant first. `success` is the algorithm event.
+    `coordinates` are least significant first. `success` is the algorithm's success event.
     The `conditions` and the original output length select the physical coordinates.
     No execution limit enters this scientific selection. `recovery` is a positive
     method scale, not an observed norm or a promise about approximation error.
@@ -129,10 +137,10 @@ class AmplitudeReadout(Record):
 
     @model_validator(mode="after")
     def _projection(self):
-        """Require a projection that reads each native qubit exactly once.
+        """Require a projection that reads each simulated qubit exactly once.
 
         The coordinates and the fixed success and condition qubits must
-        partition the native width, fixed values must be 0 or 1, and the
+        partition the simulated circuit width, fixed values must be 0 or 1, and the
         original vector dimension must fit the coordinate register. The output
         is a complex128 vector. A physical-frame output needs a recovery, and
         any recovery must be positive with ``composed_floating_point_recovery`` evidence.
@@ -160,12 +168,12 @@ class AmplitudeReadout(Record):
         return bool(self.conditions) or self.output.basis.dimension != 1 << len(self.coordinates)
 
     def admit_materialization(self, *, max_bytes=DEFAULT_AMPLITUDE_BYTES, max_bytes_source=None):
-        """Check native return and known projection scratch before allocation.
+        """Check the bytes of the simulator's returned state and of the known projection scratch before allocation.
 
-        The finite bound includes complex native data, the requested gather,
+        The finite bound includes the complex state data, the requested gather,
         normalization/physical-scaling scratch, and an optional wider mass
         projection. It excludes undocumented SDK workspace and process overhead.
-        A refusal appends ``max_bytes_source``, when given, to name where
+        An error message appends ``max_bytes_source``, when given, to name where
         ``max_bytes`` comes from, such as a Run's ``max_data_bytes``.
         """
         if type(max_bytes) is not int or max_bytes < 0:
@@ -205,7 +213,7 @@ class AmplitudeReadout(Record):
 
 
 def reduce_amplitudes(readout, native, *, max_bytes=DEFAULT_AMPLITUDE_BYTES, max_bytes_source=None):
-    """Return the requested vector, physical norm, absence and selected masses.
+    """Return the requested vector, physical norm, reason for absence and selected masses.
 
     ``max_bytes`` and ``max_bytes_source`` go to ``admit_materialization``.
 

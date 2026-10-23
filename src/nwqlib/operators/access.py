@@ -1,4 +1,7 @@
-"""Small descriptive input manifests and byte admission, without SDKs."""
+"""Metadata records of operator and state inputs, and the checks made before work.
+
+The byte and product checks run without Qiskit or SciPy.
+"""
 
 from nwqlib._limits import DEFAULT_MAX_BYTES
 
@@ -20,11 +23,12 @@ DEFAULT_INPUT_BYTES = DEFAULT_MAX_BYTES
 def _check_bytes(size: int, max_bytes: int, operation: str = "input") -> None:
     """Reject an operation whose peak live arrays would exceed max_bytes, before it allocates.
 
-    ``size`` is the caller's byte law, an upper bound on the arrays alive at
-    the same time at the peak of one operation, as far as they are known
-    before allocation. It excludes SDK and LAPACK workspace, Python object overhead
-    and process RSS. Each caller states which arrays its terms count. A
-    dimension integer such as ``2**q`` is charged by its own byte length.
+    ``size`` is the caller's byte formula, an upper bound on the arrays alive
+    at the same time at the peak of one operation, as far as they are known
+    before allocation. It excludes workspace inside SciPy, Qiskit and LAPACK,
+    Python object overhead and the resident memory of the process. Each
+    caller states which arrays its terms count. A dimension integer such as
+    ``2**q`` is counted by its own byte length.
     docs/CODE_TOUR.md, "Byte and work budgets", explains why budgets are
     checked before work.
     """
@@ -40,7 +44,7 @@ def _check_products(count: int, max_products: int, limit_name: str = "max_produc
     ``count`` is a derived count of the scalar products the action will
     perform, fixed by its representation before any product runs. It is a
     work limit, not measured CPU time. ``limit_name`` is the caller's option
-    that supplies ``max_products``, and the refusal names it.
+    that supplies ``max_products``, and the error message names it.
     """
     if type(max_products) is not int or max_products < 1:
         raise ValueError(f"{limit_name} must be a positive integer")
@@ -49,16 +53,16 @@ def _check_products(count: int, max_products: int, limit_name: str = "max_produc
 
 
 def refuse_known_need(family, field, cap, known_need, later):
-    """Refuse when the largest planning requirement already known exceeds ``cap``.
+    """Raise when the largest planning requirement already known exceeds ``cap``.
 
     At each planning boundary a Method passes the maximum of the complete
     requirements of every phase whose occurrence and dimensions are already
-    known. Cumulative work laws stay sums where the Method counts a sum.
+    known. Cumulative work formulas stay sums where the Method counts a sum.
     Successive peak-memory phases combine by maximum, with data held across
-    them added inside each phase. A hypothetical branch that might not be
-    selected is a sufficient envelope, not a necessary requirement, and is
-    not passed here. ``later`` names the phases whose populations depend on
-    coefficients, selected ranks, spectra or observations, which can need
+    them added inside each phase. A branch that the Method might not take
+    gives a sufficient upper bound, not a necessary requirement, and is not
+    passed here. ``later`` names the phases whose sizes depend on
+    coefficients, chosen ranks, spectra or observations, which can need
     more. No eigensolve, symbolic expansion, grouping or pair scan is run to
     discover a remedy.
     """
@@ -71,11 +75,11 @@ def refuse_known_need(family, field, cap, known_need, later):
 
 
 class InputManifest(Record):
-    """Metadata of an accepted operator or state: content hash, representation, basis, size and checks.
+    """Metadata of an operator or state input: content hash, representation, basis, size and checks.
 
     `OperatorInput.manifest` and `StateInput.manifest` hold it. Reading or
-    saving it never reads the numerical data. `access` lists the classical
-    operations of the handle only. How a state can be prepared on qubits is
+    saving it never reads the numerical data. `access` lists only the
+    classical operations of the input object. How a state can be prepared on qubits is
     recorded separately, in
     [`StatePreparationSpec`][nwqlib.problems.inputs.StatePreparationSpec].
     The fields below are read-only.
@@ -93,11 +97,11 @@ class InputManifest(Record):
         byte_order: `"little"` or `"big"` for stored numbers,
             `"not_applicable"` for one-byte data, or `None`.
         payload_bytes: Bytes of the stored data, or `None` when unknown.
-        access: Classical operations of the handle, among `"matvec"`,
+        access: Classical operations of the input object, among `"matvec"`,
             `"entries"`, `"pauli_terms"` and `"fermion_terms"`.
-        checked: Properties checked when the input was accepted, such as
-            finite entries or exact equality with the conjugate transpose.
-        work_law: Text form of the cost of accepting and applying this
+        checked: Properties checked when the input object was created, such
+            as finite entries or exact equality with the conjugate transpose.
+        work_law: Text form of the cost of converting and applying this
             representation.
     """
 

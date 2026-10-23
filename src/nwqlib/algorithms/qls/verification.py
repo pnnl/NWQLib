@@ -116,9 +116,9 @@ class QLSVerification(Record):
         )
 
     def verification_checks(self, result):
-        """Return one CheckSpec per selected comparison, named ``name + "." + comparison``.
+        """Return one CheckSpec per requested comparison, named ``name + "." + comparison``.
 
-        Each check compares the comparison's top-level fact with the
+        Each check compares the comparison's principal fact with the
         threshold that ``_threshold`` selects. With an explicit tolerance the
         fact is the raw discrepancy in its own metric. Without one, the
         inverse error and the mass comparisons report the raw discrepancy
@@ -126,12 +126,12 @@ class QLSVerification(Record):
         within that allowance. ``shortcut_direction`` keeps its raw
         phase-aligned discrepancy and, without ``direction_tolerance``,
         compares it with ``5 * epsilon_inv``. Every value is nonnegative and
-        dimensionless. Each CheckSpec carries these options' identity, so a
-        fact answers only this selection. When no vector comparison runs on
-        a Result whose grid or noisy-search model recorded its encoded
-        reference norm, each check other than ``spectral_domain`` names that
-        recorded value as its reference: the model's own intermediate, not
-        independent evidence.
+        dimensionless. Each CheckSpec carries the content hash of these
+        options, so a fact applies only to these options. When no vector
+        comparison runs on a Result whose grid or noisy-search model recorded
+        its encoded reference norm, each check other than ``spectral_domain``
+        names that recorded value as its reference, which is the model's own
+        intermediate value and not independent evidence.
         """
         plan = result.plan
         result.validate_plan(plan)
@@ -155,10 +155,10 @@ class QLSVerification(Record):
 def verify(plan, result, *, checks):
     """Run one explicit ``QLSVerification`` and return ``(receipt, facts)``.
 
-    ``facts`` holds one receipt-witnessed fact per selected comparison, in
-    the order of ``checks.verification_checks(result)``, ready for
-    ``Certificate.with_verification`` with the same options. The receipt
-    also keeps the companion facts, such as raw discrepancies and
+    ``facts`` holds one fact per requested comparison, each tied to the
+    receipt, in the order of ``checks.verification_checks(result)``, ready
+    for ``Certificate.with_verification`` with the same options. The receipt
+    also contains the companion facts, such as raw discrepancies and
     allowances.
     """
     if type(checks) is not QLSVerification:
@@ -193,9 +193,9 @@ def _admit_solver(plan, choice):
 
 
 def _metric(choice, name):
-    """Return ``(metric, heuristic)`` for the fact ``name`` of this selection.
+    """Return ``(metric, heuristic)`` for the fact ``name`` of these options.
 
-    A top-level comparison fact takes the metric of its comparison. The
+    The principal fact of a comparison takes the metric of that comparison. The
     inverse error and the mass comparisons report a ratio to their
     allowance unless the options supply an explicit tolerance, and the
     mass ratio is heuristic. A companion fact, whose name has one more
@@ -244,12 +244,14 @@ def _threshold(plan, choice, comparison):
 
 
 def _target(plan, result, choice):
-    """Admit the requested comparisons and return the acquired vector they compare.
+    """Check the requested comparisons and return the computed vector they compare.
 
-    ``verification_checks`` has already admitted the solver: inverse
-    comparisons need an inverse Plan, and shortcut comparisons a shortcut
-    Plan. Mass comparisons need an observed algorithm mass from a
-    nonempty population. Vector comparisons need the Result's own stored
+    ``verification_checks`` has already checked the solver, since inverse
+    comparisons need an inverse Plan and shortcut comparisons a shortcut
+    Plan. Mass comparisons need an existing algorithm success mass, and
+    for a sampled result the mass measurement must have a positive number
+    of returned shots. Results of exact readout (`shots=None`) and of
+    classical evaluation need no shots. Vector comparisons need the Result's own saved
     vector in its declared frame, which keeps physical scale and phase for
     the inverse and is a unit vector modulo global phase for a shortcut. Returns
     ``(vector, manifest)``, or ``(None, None)`` when no vector is compared.
@@ -281,7 +283,7 @@ def _target(plan, result, choice):
 
 
 def _verify(plan, result, choice):
-    """Run the explicitly requested spectral, inverse or direction reference comparisons under their work caps.
+    """Run the explicitly requested spectral, inverse or direction reference comparisons within their work limits.
     """
     import numpy as np
     from nwqlib._linalg_laws import singular_values_work
@@ -471,12 +473,12 @@ def _verify(plan, result, choice):
 
 
 def _comparisons(plan, result, options, *, bounds, norm, discrepancy, parameters):
-    """Nominal method criteria and separate raw/heuristic facts, without replay.
+    """Return the method's nominal criteria and the separate raw and heuristic facts, without rerunning the circuit.
 
     NWQLib's derivations, with ``y = (A/alpha)^{-1} b_hat``, ``k`` the
     polynomial domain parameter, ``s`` the rescale, ``e = epsilon_inv`` and
     ``delta`` the phase-fit residual bound (zero for the classical model).
-    All allowances require the spectral premise to hold within the
+    All allowances require the spectral assumption to hold within the
     spectral tolerance.
 
     - ``inverse_relative_error``: the executed polynomial is
@@ -495,7 +497,7 @@ def _comparisons(plan, result, options, *, bounds, norm, discrepancy, parameters
       ``QLS_EQ17_ABSOLUTE_WINDOW`` and the same shot term without a variance
       floor.
 
-    These are component allowances under the stated premises, not
+    These are component allowances under the stated assumptions, not
     certified total-error or confidence bounds.
     """
     from nwqlib.problems.inputs import compose_recovery

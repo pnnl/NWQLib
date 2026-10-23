@@ -1,4 +1,4 @@
-"""Explicit operation inventory of existing native circuits. Compilation runs only on request."""
+"""Operation counts of circuits already prepared for a backend. Compilation runs only on request."""
 
 import os
 import sys
@@ -12,28 +12,27 @@ def _options_snapshot(value, *, max_bytes):
     """Copy portable options under one byte/depth bound, before compilation.
 
     Sixty-four container levels leave headroom below Python recursion limits.
-    Native SDK object payloads are outside this portable scalar/list/dict
-    interface.
+    SDK objects are outside this portable scalar, list and dict interface.
 
-    The charge bounds the length of the options written as UTF-8 JSON
-    (``json.dumps(..., ensure_ascii=False)``), the form that the Run journal
-    and record content identities use. The copy shares the caller's strings
-    and numbers and creates only new containers, so the charge measures the
-    options' content, not Python object memory. Charged sizes:
+    The counted size bounds the length of the options written as UTF-8 JSON
+    (``json.dumps(..., ensure_ascii=False)``), the form that the run log and
+    record content hashes use. The copy shares the caller's strings and
+    numbers and creates only new containers, so the counted size measures the
+    options' content, not Python object memory. Counted sizes:
 
     - A string, ``6*len + 2``, where ``len`` counts code points. The longest
       UTF-8 JSON form of one code point is the six-byte ``\\u00XX`` escape of
       a control character. A code point outside the Basic Multilingual Plane
       takes four bytes, and the 2 covers the quotes. ASCII-escaped JSON
       (``ensure_ascii=True``, the ``json.dumps`` default) writes such a code
-      point as a 12-byte surrogate pair, so this charge does not bound that
+      point as a 12-byte surrogate pair, so this count does not bound that
       form.
     - An integer, ``max(8, bit_length + 2)``. Its decimal text has at most
       bit_length digits (one digit for zero), and the 2 covers a sign.
     - None, a Boolean or a float, 32 bytes. The longest shortest-round-trip
       binary64 text has 24 characters.
     - A list, tuple or dictionary, ``32 + 16*len`` for its brackets and the
-      separators of each entry. Dictionary keys are charged as strings.
+      separators of each entry. Dictionary keys are counted as strings.
 
     docs/ENGINEERING_CONSTANTS.md ("Resource forecast and explicit inspection
     bounds") registers these allowances.
@@ -42,13 +41,13 @@ def _options_snapshot(value, *, max_bytes):
     size = 0
 
     def reserve(amount):
-        """Charge ``amount`` more bytes, rejecting the total above ``max_bytes`` before it changes."""
+        """Count ``amount`` more bytes, rejecting a total above ``max_bytes`` before it changes."""
         nonlocal size
         _check_bytes(size + amount, max_bytes, "native inspection options")
         size += amount
 
     def copy(value, depth):
-        """Copy one acyclic portable options subtree while charging its serialized size and
+        """Copy one acyclic portable options subtree while counting its serialized size and
         depth.
         """
         if depth > 64:
@@ -105,17 +104,18 @@ def inspect_circuit_resources(
     including measurements, barriers, simulator saves, ``Clifford`` objects and
     user-defined gates. Definitions and control-flow bodies are not expanded,
     and names are reported as they are, without interpretation. A nonempty
-    ``transpile_options`` inventories one auxiliary transpiled copy instead,
+    ``transpile_options`` counts the operations of one transpiled copy instead,
     with simulator saves removed before compilation. The executable circuit is
-    never copied for the raw inventory, mutated or run.
+    never copied for the count without compilation, mutated or run.
 
     Returns a mapping with ``circuit`` (what was counted), ``basis``,
     ``compiler`` (Qiskit version and resolved options, or ``None``),
     ``operations`` (name to count), ``total_operations``, ``num_qubits``,
     ``num_clbits`` and ``depth`` (Qiskit's default depth, which skips
     directives such as barriers and simulator saves). ``max_operations`` covers the input and a
-    compiled copy. ``max_bytes`` covers known inspection collections and
-    options, not compiler expansion, vendor workspace or process RSS.
+    compiled copy. ``max_bytes`` covers the counted size of the options and of
+    the collections the inspection builds, not compiler expansion, SDK
+    workspace or process RSS.
     """
     if type(max_operations) is not int or max_operations < 1:
         raise ValueError("max_operations must be a positive integer")

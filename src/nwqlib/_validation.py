@@ -1,4 +1,4 @@
-"""Scalar input checks and the binary64 roundoff windows of exact simulator readouts and host state evolution."""
+"""Scalar input checks, and the binary64 roundoff windows of exact simulator readouts and of classical state evolution."""
 
 from __future__ import annotations
 
@@ -172,15 +172,15 @@ def exact_readout_roundoff(qubits: int) -> float:
 
 def exact_probability_window(operations: int | None, qubits: int, *,
                              per_operation: float = AER_STATEVECTOR_ROUNDOFF_PER_OPERATION) -> float:
-    """Admitted |total - 1| of one exact binary64 statevector probability population.
+    """Accepted |total - 1| of the probabilities of one exact binary64 statevector.
 
     The window is ``(per_operation*G + exact_readout_roundoff(n))*u`` for G
-    native instructions on n qubits, never below ``NUMERICAL_RELATION_RTOL``.
+    simulator instructions on n qubits, never below ``NUMERICAL_RELATION_RTOL``.
     ``per_operation`` is the derived constant of the executing simulator. The
-    default is Aer's, the larger one, which a receipt from a target without a
-    derivation of its own also uses. An unknown operation count keeps the floor.
-    The instructions the derivation excludes are listed in the receipt's
-    ``probability_window_exclusions``.
+    default is Aer's, the larger one, which the preparation record of a
+    target without a derivation of its own also uses. An unknown operation
+    count keeps the floor. The instructions the derivation excludes are
+    listed in the preparation record's ``probability_window_exclusions``.
     """
     if operations is None:
         return NUMERICAL_RELATION_RTOL
@@ -192,20 +192,20 @@ def exact_probability_window(operations: int | None, qubits: int, *,
 
 
 def native_state_error(operations: int, per_operation: float) -> float:
-    """First-order 2-norm error budget delta of the final state of one exact native execution.
+    """First-order 2-norm error budget delta of the final state of one exact simulator execution.
 
     ``per_operation`` is a simulator's constant above, which doubles each
-    instruction's 2-norm charge for the squared norm, so one instruction moves
+    instruction's 2-norm contribution for the squared norm, so one instruction moves
     the state by at most ``per_operation/2`` units of u. One global-phase
     multiplication adds ``GLOBAL_PHASE_STATE_ROUNDOFF``, so
-    ``delta = (per_operation*G/2 + 5)*u`` for G native operations (the
-    receipt's ``native_operations``, which on Aer counts no save instruction), relative
-    to the unitary native circuit with its binary64 gate parameters read
-    exactly. It holds under the assumptions of those constants, for an
+    ``delta = (per_operation*G/2 + 5)*u`` for G simulator operations (the
+    preparation record's ``native_operations``, which on Aer counts no save
+    instruction), relative to the unitary circuit given to the simulator,
+    with its binary64 gate parameters read exactly. It holds under the assumptions of those constants, for an
     execution whose assessed ``probability_window_exclusions`` are empty or
     bounded by the caller's own readout (``PreparedArtifact.state_error``).
     The readout term and the ``NUMERICAL_RELATION_RTOL`` floor of
-    ``exact_probability_window`` bound a population total and are not part
+    ``exact_probability_window`` bound a probability total and are not part
     of it.
     """
     operations = operator.index(operations)
@@ -226,7 +226,7 @@ def probability_difference_window(delta: float, evaluation: float) -> float:
     at most ``2*delta + delta**2``. If each probability is evaluated with
     relative error at most e, the two evaluations add at most
     ``e*(q_i + q_j) <= e*(1 + delta)**2``, and ``evaluation`` is that e. The
-    same expression bounds the change of a whole population total when
+    same expression bounds the change of a whole probability total when
     ``evaluation`` is the relative error of the summed total.
 
     An overflowing nonnegative state term returns infinity before the
@@ -262,7 +262,7 @@ def expm_multiply_call_roundoff(norm: float, nonzeros: int) -> float:
     The call applies ``exp(-i G)`` for a generator ``G`` whose floating-point
     matrix is exactly Hermitian. ``norm`` is a bound N on
     ``||G - (trace(G)/D) I||_1`` and ``nonzeros`` a bound r on the nonzeros in
-    a row of ``G``. The charge is
+    a row of ``G``. The bound is
 
     ``c = N + sqrt(2)*2*r*N*e**theta_bar + S*(2*e**theta_bar + 7)``,
     ``theta_bar = min(N, EXPM_MULTIPLY_THETA_MAX)`` and
@@ -270,7 +270,7 @@ def expm_multiply_call_roundoff(norm: float, nonzeros: int) -> float:
 
     relative to the exact exponential of the shifted matrix that SciPy
     evaluates, up to a global phase. The rounding of the trace shift is not
-    included (``expm_multiply_state_error`` charges it).
+    included (``expm_multiply_state_error`` adds it).
 
     Derivation, first order in u, for Algorithm 3.2 of Al-Mohy and Higham,
     doi:10.1137/100788860, with ``T_m`` the degree-m Taylor polynomial of
@@ -309,7 +309,7 @@ def expm_multiply_call_roundoff(norm: float, nonzeros: int) -> float:
       into the partial sums at most ``m + e**theta`` (the partial sums are
       bounded by the Taylor remainder on the imaginary axis), and the product
       with the unit phase ``exp(mu/s)`` and the early exit at most 6. The
-      substep charge ``(2*theta + 1)*e**theta + m + 6`` is at most
+      substep bound ``(2*theta + 1)*e**theta + m + 6`` is at most
       ``m*(2*e**theta + 7)`` because every entry of SciPy's theta table has
       ``theta_m <= m/4``, and ``m*s <= S`` gives the S term. A degree-zero
       call only multiplies by the phase, which S also covers.
@@ -324,8 +324,8 @@ def expm_multiply_call_roundoff(norm: float, nonzeros: int) -> float:
     two assumptions the bound holds for every unit input state, so it can
     exceed the roundoff of a smooth state by several orders of magnitude.
 
-    The charge is returned as inf when S or the sum exceeds the binary64
-    range, and callers refuse the nonfinite budget.
+    The bound is returned as inf when S or the sum exceeds the binary64
+    range, and callers reject the nonfinite budget.
     """
     norm = float(norm)
     if not math.isfinite(norm) or norm < 0.0:
@@ -354,7 +354,7 @@ def expm_multiply_state_error(calls: Iterable[tuple[float, int]], *, start: floa
     each initial state: 2 for the uniform state, whose D equal entries
     ``1/sqrt(D)`` take one correctly rounded square root and one division of
     an exactly representable D, and the per-variable amplitude and product
-    roundings of the other states. Each call adds its charge c and a further
+    roundings of the other states. Each call adds its bound c and a further
     ``N*u`` for the rounded subtraction of the trace shift from the diagonal,
     whose exact value is a scalar phase choice. Each final multiplication of
     the state by a unit phase adds ``GLOBAL_PHASE_STATE_ROUNDOFF``:
@@ -362,22 +362,22 @@ def expm_multiply_state_error(calls: Iterable[tuple[float, int]], *, start: floa
     ``delta = u*(start + sum_calls (c + N) + 5*phase_multiplications)``.
 
     Exact unitary propagation carries each local error to the final state
-    unchanged in norm, so the charges add. The budget is relative to the
+    unchanged in norm, so the bounds add. The budget is relative to the
     ordered product of the exact exponentials of the floating-point
     generators passed to SciPy, applied to the exact start state, up to a
     global phase. It excludes the error
     of those generators relative to exact coefficients and every time,
-    splitting or grid discretization error. The centering charge is first
+    splitting or grid discretization error. The centering term is first
     order and assumes that the N of each call also bounds the shifted matrix
     that SciPy forms, so a huge scalar offset whose second-order terms, such
-    as ``u**2*D*||G||``, dominate lies outside it. The one budget serves both
-    consumers: ``state_mass_window`` turns it into the mass window and
-    ``algorithms.qhd.method._host_window`` into the most-probable tie window
-    of the QHD ``schrodinger`` kernel, which is also its Plan's ceiling
-    ``algorithms.qhd.method._host_tie_window``.
+    as ``u**2*D*||G||``, dominate lies outside it. The one budget has two
+    uses. ``state_mass_window`` turns it into the mass window, and
+    ``algorithms.qhd.method._host_window`` turns it into the most-probable
+    tie window of the QHD ``schrodinger`` classical evaluation, which is also
+    the upper limit that its Plan sets, ``algorithms.qhd.method._host_tie_window``.
 
-    The budget is returned as inf when the charges sum beyond the binary64
-    range, and callers refuse the nonfinite budget.
+    The budget is returned as inf when the bounds sum beyond the binary64
+    range, and callers reject the nonfinite budget.
     """
     # Start vector, each call c + N (centering), each final phase product 5, in units of u.
     try:
@@ -391,7 +391,7 @@ def expm_multiply_state_error(calls: Iterable[tuple[float, int]], *, start: floa
 
 
 def state_mass_window(delta: float, dimension: int) -> float:
-    """Admitted |total - 1| of the D probabilities ``np.abs(z)**2`` of a state computed within delta of a unit state.
+    """Accepted |total - 1| of the D probabilities ``np.abs(z)**2`` of a state computed within delta of a unit state.
 
     The window is
     ``max(NUMERICAL_RELATION_RTOL, probability_difference_window(delta, (D + 4)*u))``
@@ -400,15 +400,16 @@ def state_mass_window(delta: float, dimension: int) -> float:
     of one. Evaluating the D probabilities with ``np.abs(z)**2``
     (``ABSOLUTE_SQUARE_ROUNDOFF``, 5u) and summing them with at most D - 1
     additions adds at most ``(D + 4)*u*(1 + delta)**2`` to first order.
-    Every QHD host kernel takes delta for its mass window from the Plan's
-    state budget of its flavor (``algorithms.qhd.method._host_state_error``,
+    Every classical QHD evaluation takes delta for its mass window from the
+    Plan's state budget of its ``theory_flavor``
+    (``algorithms.qhd.method._host_state_error``,
     which is ``expm_multiply_state_error``,
     ``algorithms.qhd.theory.binary_product_state_error`` or
     ``algorithms.qhd.split_step.state_error``), and the same delta gives the
-    ceiling of its tie window (``algorithms.qhd.method._host_tie_window``).
-    The ``split_step`` kernel selects its most probable point with the
+    upper limit of its tie window (``algorithms.qhd.method._host_tie_window``).
+    The ``split_step`` evaluation selects its most probable point with the
     smaller budget that ``algorithms.qhd.split_step.evolve`` observes on its
-    trajectory, and the other kernels with the Plan's budget.
+    trajectory, and the other evaluations with the Plan's budget.
 
     Raises:
         ValueError: delta is not finite and nonnegative.
@@ -421,16 +422,17 @@ def state_mass_window(delta: float, dimension: int) -> float:
 
 
 def validate_normalized_mass(value: float | None, window: float | None = None) -> None:
-    """Admit one independently known observed probability, keeping raw roundoff.
+    """Accept one independently known observed probability, keeping its raw roundoff.
 
     Alone, the mass is only known to be nonnegative. How far roundoff may carry
     it above one depends on the execution that produced it, so a caller that
     holds that execution's window passes it. A circuit's window comes from its
-    preparation receipt: direct probability and Pauli readouts use
+    preparation record. Direct probability and Pauli readouts use
     ``PreparedArtifact.probability_window``, and masses formed from a corrected
-    saved state use ``PreparedArtifact.saved_state_probability_window``. A host
-    kernel's window is ``NUMERICAL_RELATION_RTOL`` unless the kernel derives
-    its own, as the QHD kernel does with ``state_mass_window``. This domain
+    saved state use ``PreparedArtifact.saved_state_probability_window``. The
+    window of a classical routine is ``NUMERICAL_RELATION_RTOL``
+    unless the routine derives its own, as QHD's classical evaluation does
+    with ``state_mass_window``. This domain
     does not apply to unnormalized norms or reference predictions. None
     denotes unavailable evidence and does not constrain another mass.
     """
@@ -440,7 +442,7 @@ def validate_normalized_mass(value: float | None, window: float | None = None) -
 
 
 def boolean(value: Any, name: str) -> bool:
-    """Return a native Boolean without interpreting numbers or strings as flags."""
+    """Return a Python bool without interpreting numbers or strings as flags."""
 
     if not isinstance(value, bool):
         raise ValueError(f"{name} must be a native bool")

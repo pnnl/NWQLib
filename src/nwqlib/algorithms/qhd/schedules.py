@@ -4,7 +4,8 @@ A schedule gives the weights of ``H(t) = a(t) K + b(t) V``, where K is the
 kinetic operator ``-Delta/2`` and V the objective. They are ``exp(phi_t)``
 and ``exp(chi_t)`` of Eq. (1) in Leng, Hickman, Li and Wu, arXiv:2303.01471v1.
 Each record carries only its own parameter, and its ``kind`` names the
-formula, so two schedules with equal parameters keep distinct identities.
+formula, so two schedules with equal parameters but different formulas
+remain distinct records with distinct content hashes.
 ``step_weights`` turns a record into the per-step weights of the Method's
 coefficient rule, from the point values or from the interval integrals.
 
@@ -84,13 +85,13 @@ _UNIT_MEAN_NODES = tuple(
 
 
 def _admitted(value, name, remedy, exact=None, *, zero=False):
-    """Return a schedule value after ``validation._normal_range`` admits it, or raise its refusal with ``remedy()`` appended.
+    """Return a schedule value after ``validation._normal_range`` accepts it, or raise its error with ``remedy()`` appended.
 
-    ``remedy`` is called only for a refusal. On t >= 0 each kinetic weight
-    is nonincreasing and each potential weight is nondecreasing. The
+    ``remedy`` is called only for a rejected value. On t >= 0 each kinetic
+    weight is nonincreasing and each potential weight is nondecreasing. The
     quadratic weights are constant when gamma = 0. The two cubic kinetic
-    weights strictly decrease with s. Their lower-range refusals can
-    require reducing both s and total_time, because either denominator
+    weights strictly decrease with s. Their rejections below the normal
+    range can require reducing both s and total_time, because either denominator
     contribution may already be too large by itself. Increasing s reduces
     an overflowing cubic kinetic weight. For midpoint scheduling, fewer
     steps or more total_time increase the first midpoint and its cubic
@@ -155,7 +156,7 @@ def _scaled_product(numerators, denominators=(), exponent_offset=0):
 
 
 def _potential_remedy(value):
-    """Return the remedy of a refused potential weight, interval integral or step average (``_admitted``).
+    """Return the remedy of a rejected potential weight, interval integral or step average (``_admitted``).
 
     Every schedule's potential weight b is nondecreasing on t >= 0, the
     cubic ``b(t) = 2 t**3`` and the quadratic ``1 + gamma t**2``, so a value
@@ -164,7 +165,7 @@ def _potential_remedy(value):
     above it from late times, where a shorter ``total_time`` lowers b. More
     steps reduce a late step's integral but not its average, which stays
     near ``b(total_time)``, so they are not the remedy above the range.
-    ``value`` is the refused weight or step average.
+    ``value`` is the rejected weight or step average.
     """
     return "Choose fewer steps or a longer total_time" if value < 1 else "Choose a shorter total_time"
 
@@ -269,7 +270,7 @@ class QuadraticSchedule(Record):
 
         It is the reciprocal of ``potential_weight``, one more rounding, and must be a
         positive normal binary64 number. That fails once ``b(t)`` exceeds about 4.5e307, and
-        the refusal names a shorter ``total_time`` as the remedy.
+        the error message names a shorter ``total_time`` as the remedy.
         """
         b = self.potential_weight(t)
         return _admitted(1.0 / b, f"the kinetic schedule weight a({t!r})", lambda: "Choose a shorter total_time",
@@ -279,8 +280,8 @@ class QuadraticSchedule(Record):
         """Return ``b(t) = 1 + gamma t**2`` with relative error at most 3u to first order, or raise when it overflows.
 
         ``(gamma t) t`` has two roundings and adding the positive 1 a third, so b is at
-        least 1 and fails the range only by overflowing, for which the refusal names a
-        shorter ``total_time``.
+        least 1 and fails the range only by overflowing, for which the error message names
+        a shorter ``total_time``.
         """
         t = _time(t)
         return _admitted(1.0 + self.gamma * t * t, f"the potential schedule weight b({t!r})",
@@ -457,9 +458,9 @@ class CubicSchedule(Record):
         ``t**3`` as ``(t t) t`` has two roundings, the positive sum one and the division
         one. a is positive for every t, so a result that is zero or subnormal, such as
         ``a(1e103)`` with s = 1 whose exact value is about 2e-309, lies outside the normal
-        binary64 range and raises. A lower-range refusal recommends reducing s and/or
-        total_time, since both may need to change. An upper-range refusal recommends a
-        larger s.
+        binary64 range and raises. Below the range the error message recommends reducing
+        s and/or total_time, since both may need to change. Above the range it recommends
+        a larger s.
         """
         t = _time(t)
         value = 2.0 / (self.s + t * t * t)
@@ -471,8 +472,8 @@ class CubicSchedule(Record):
         """Return ``b(t) = 2 t**3`` with relative error at most 2u to first order, or raise outside the normal range.
 
         Doubling is exact, and ``(2 t t) t`` has two roundings. b is zero only at t = 0, so
-        another zero or a subnormal value raises. The refusal names fewer steps or a longer
-        ``total_time`` below the range, and a shorter ``total_time`` above it.
+        another zero or a subnormal value raises. The error message names fewer steps or a
+        longer ``total_time`` below the range, and a shorter ``total_time`` above it.
         """
         t = _time(t)
         value = 2.0 * t * t * t
@@ -620,9 +621,9 @@ class ShiftedCubicSchedule(Record):
         """Return ``a(t) = (2/(s + t))**3`` with relative error at most 8u to first order, or raise outside the normal range.
 
         ``x = 2/(s + t)`` has two roundings, which cubing triples, and the two products add
-        two more. a is positive for every t, so a result that is zero or subnormal raises. A
-        lower-range refusal recommends reducing s and/or total_time, since both may need to
-        change. An upper-range refusal recommends a larger s.
+        two more. a is positive for every t, so a result that is zero or subnormal raises.
+        Below the range the error message recommends reducing s and/or total_time, since
+        both may need to change. Above the range it recommends a larger s.
         """
         t = _time(t)
         x = 2.0 / (self.s + t)
@@ -634,8 +635,8 @@ class ShiftedCubicSchedule(Record):
         """Return ``b(t) = 2 t**3`` with relative error at most 2u to first order, or raise outside the normal range.
 
         Doubling is exact, and ``(2 t t) t`` has two roundings. b is zero only at t = 0, so
-        another zero or a subnormal value raises. The refusal names fewer steps or a longer
-        ``total_time`` below the range, and a shorter ``total_time`` above it.
+        another zero or a subnormal value raises. The error message names fewer steps or a
+        longer ``total_time`` below the range, and a shorter ``total_time`` above it.
         """
         t = _time(t)
         value = 2.0 * t * t * t
@@ -712,7 +713,7 @@ Schedule = Annotated[
 
 
 def step_weights(schedule, rule, total_time, num_steps):
-    """Return one ``(t, kinetic_weight, potential_weight)`` row per step of the selected evolution.
+    """Return one ``(t, kinetic_weight, potential_weight)`` row per step of the evolution.
 
     Step k covers ``[k dt, (k + 1) dt]`` with ``dt = total_time/num_steps``,
     and t is its midpoint ``(k + 1/2) dt`` under both rules. The
@@ -733,30 +734,30 @@ def step_weights(schedule, rule, total_time, num_steps):
     ``compiler.QHDCompiler.build_step_pauli_ir`` splits the exponent
     ``-i dt (a_k K + b_k V)`` of step k, with the weights ``a_k`` and ``b_k``
     of its row, into product-formula factors. Under the integrated rule that
-    exponent is ``Omega_1``.
-    Adjacent steps share their binary64 endpoint ``(k + 1) dt``, so the
-    intervals tile ``[0, num_steps dt]``.
+    exponent is ``Omega_1``. Adjacent steps share their binary64 endpoint
+    ``(k + 1) dt``, so the intervals tile ``[0, num_steps dt]``.
 
-    Range admission (``validation._normal_range``). With ``N = num_steps``
-    and fl denoting binary64 round-to-nearest,
-    ``dt = fl(total_time/N)`` is positive and normal, and so is ``dt/2``,
-    which is both the first midpoint and the second-order half duration
-    and is then exact. Every step's binary64
-    endpoints ``k dt < (k + 1) dt`` are finite and increasing, and under the
-    midpoint rule its midpoint lies strictly between them. Every weight is
-    positive and normal. The point values raise otherwise, and under the
-    integrated rule each interval integral and its division by dt are
-    checked. These conditions protect the endpoint-rounding argument and the
-    exact half durations of the error ledger, whose reference remains the
-    exact products of the stored dt (``circuit_errors``, ``evolution_bounds``).
-    A refused duration, partition or point weight names the input to change
-    (``_admitted``). The two interval integrals are admitted separately
-    (``_step_average``). A refused potential integral or step average names
-    its remedy too (``_potential_remedy``): fewer steps or a longer
-    total_time below the range, and a shorter total_time above it, since
-    more steps reduce a step's integral but not its average. A refused
-    kinetic integral or step average names none, because a short first
-    step, late times and the schedule's s can each cause it.
+    Range check (``validation._normal_range``). With ``N = num_steps`` and
+    fl denoting binary64 round-to-nearest, ``dt = fl(total_time/N)`` is
+    positive and normal, and so is ``dt/2``, which is both the first
+    midpoint and the second-order half duration and is then exact. Every
+    step's binary64 endpoints ``k dt < (k + 1) dt`` are finite and
+    increasing, and under the midpoint rule its midpoint lies strictly
+    between them. Every weight is positive and normal. The point values
+    raise otherwise, and under the integrated rule each interval integral
+    and its division by dt are checked. These conditions protect the
+    endpoint-rounding argument and the exact half durations of the error
+    sources, whose reference remains the exact products of the stored dt
+    (``circuit_errors``, ``evolution_bounds``). The error for a rejected
+    duration, partition or point weight names the input to change
+    (``_admitted``). The two interval integrals are checked separately
+    (``_step_average``). The error for a rejected potential integral or step
+    average also names its remedy (``_potential_remedy``), fewer steps or a
+    longer total_time below the range and a shorter total_time above it,
+    since more steps reduce a step's integral but not its average. The
+    error for a rejected kinetic integral or step average names no remedy,
+    because a short first step, late times and the schedule's s can each
+    cause it.
 
     Raises:
         ValueError: A duration, endpoint, midpoint or weight fails these
@@ -789,17 +790,17 @@ def step_weights(schedule, rule, total_time, num_steps):
 
 
 def _step_average(schedule, name, step, start, end, dt):
-    """Return the step average ``I/dt`` of the kinetic or potential interval integral I of one step, both admitted.
+    """Return the step average ``I/dt`` of the kinetic or potential interval integral I of one step, both range-checked.
 
-    Each integral is computed and admitted on its own, so a refusal names
-    the schedule, the quantity and the step. An integral whose value leaves
-    the binary64 range is refused by the arithmetic helper
+    Each integral is computed and checked on its own, so an error names the
+    schedule, the quantity and the step. An integral whose value leaves the
+    binary64 range is rejected by the arithmetic helper
     (``_scaled_product``), and one below the range and the average by
-    ``validation._normal_range``. A refused potential integral or average
-    names the direction of ``_potential_remedy``, read from the average,
-    infinite for an overflow. A refused kinetic one names none, because a
-    short first step, late times and a large s can each put it below the
-    range, and a small s above it.
+    ``validation._normal_range``. The error for a rejected potential
+    integral or average names the direction of ``_potential_remedy``, read
+    from the average, infinite for an overflow. The error for a rejected
+    kinetic one names no remedy, because a short first step, late times and
+    a large s can each put it below the range, and a small s above it.
     """
     integral = schedule.kinetic_integral if name == "kinetic" else schedule.potential_integral
     quantity = f"the {name} integral over step {step} of the {schedule.kind} schedule"

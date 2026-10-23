@@ -1,4 +1,7 @@
-"""Physical-vector sufficient statistics reduced into requested scalar quantities."""
+"""Norm squared, quadratic form and normalized expectation of a physical vector.
+
+They are computed from the vector's sufficient statistics.
+"""
 
 from math import isfinite
 
@@ -9,8 +12,9 @@ def physical_scalar(kind, *, norm_squared, scale, numerator=None, numerator_fram
     Exactly one of the two is None.
 
     norm_squared is u†u, without postselection or quantum success probability.
-    numerator is u†Ou in the same physical frame. The method supplies both
-    values and owns approximation/scale evidence. No clipping or epsilon divide.
+    numerator is u†Ou in the same physical frame. The Method supplies both
+    values and is responsible for their approximation and scale evidence.
+    Nothing is clipped, and no epsilon is added to a divisor.
     """
     if norm_squared is not None and (not isfinite(norm_squared) or norm_squared < 0):
         raise ValueError("physical norm squared must be finite and nonnegative")
@@ -41,7 +45,7 @@ def physical_scalar(kind, *, norm_squared, scale, numerator=None, numerator_fram
 
 
 def _observable_moment(vector, observable, *, vector_exponent=0, recovery=None):
-    """Reduce once, combining operator/vector scales before the requested float."""
+    """Compute the moment with one operator action, combining the operator and vector scales before forming the requested float."""
     from math import frexp, ldexp
     from nwqlib.operators.inputs import _scaled_observable_moment
 
@@ -67,8 +71,9 @@ def _observable_moment(vector, observable, *, vector_exponent=0, recovery=None):
 def physical_vector_statistics(solution, *, observable=None, numerator_frame="physical", need_direction=False, recovery=None):
     """Statistics of solution or recovery*solution, with one observable action.
 
-    Optional positive binary recovery never participates in unit normalization.
-    Its physical norm/moment may be known when a recovered array is unavailable.
+    The optional positive recovery scale never enters the unit normalization.
+    The physical norm and moment can be known even when the recovered array
+    is not available.
     Physical moments keep the input's power-of-two frame, not a unit-vector
     frame. Observable scaling is recovered only after that one scaled action.
     Dividing the vector by its power-of-two norm frame is exact unless a

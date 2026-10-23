@@ -25,7 +25,7 @@ Entry headings show the object's name. The anchor of an entry names a module pat
 | Build a molecular Hamiltonian and its reference energies from a geometry | [`build_gcim_chemistry_problem`](algorithms/gcim.md#nwqlib.algorithms.gcim.chemistry.build_gcim_chemistry_problem) | [Chemistry inputs and reference energies](../algorithms/gcim.md#chemistry-inputs-and-reference-energies) |
 | Plan, compare or estimate before running | [Plan, compare and estimate](workflow.md#planning-execution-and-reports) | [Plan, compare and solve](../scientist.md) |
 | Count qubits, gates and shots of a Plan | [Resource estimates](resources.md) | [Estimate resources](../resources.md) |
-| Rank candidate Plans by shots, width or predicted time | [Rank candidate plans](workflow.md#finite-search) | [Rank candidate plans](../search.md) |
+| Rank Plans by shots, width or predicted time | [Rank candidate plans](workflow.md#finite-search) | [Rank candidate plans](../search.md) |
 | Check accuracy or verify a result | [Accuracy and verification](evidence.md) | [Check accuracy and verify a result](../verification.md) |
 | Choose a backend, check device fit or export OpenQASM | [Backends, profiles and export](backends.md) | [Choose a backend](../backends.md), [Check device fit and run time](../profiles.md) |
 | Run step by step, continue an interrupted run, or reopen saved work | [Run step by step](workflow.md#actual-execution-state), [Save and reopen](workflow.md#save-and-reopen) | [Run on a backend](../prepared_execution.md), [Continue an interrupted run](../run_archives.md), [Save, load and reanalyze results](../saved_evidence.md) |

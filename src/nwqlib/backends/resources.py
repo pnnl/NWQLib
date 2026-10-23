@@ -1,4 +1,4 @@
-"""Standard gate classes, representative sampled blocks and dense/block-encoding CX laws."""
+"""Standard gate classes, representative sampled blocks and CX-count formulas for dense unitaries and block encodings."""
 
 from __future__ import annotations
 
@@ -16,8 +16,8 @@ from nwqlib._validation import integer
 def _standard_gate_classes():
     """Classes of Qiskit's standard gates, built once per process.
 
-    Native circuit intake (``blocks._qiskit_intake``) starts its set of
-    library gate classes from this one.
+    Intake of supplied Qiskit circuits (``blocks._qiskit_intake``) starts its
+    set of library gate classes from this one.
     """
     from qiskit.circuit.library import get_standard_gate_name_mapping
     return frozenset(gate.base_class for gate in get_standard_gate_name_mapping().values())
@@ -38,7 +38,7 @@ def dense_unitary_cx_qsd_upper_bound(total_qubits: int) -> int:
     recurrence starts at two qubits.
 
     The count bounds that paper's circuits, not NWQLib's. A dense unitary
-    that a backend lowers is synthesized by
+    that a backend translates is synthesized by
     ``_dense_synthesis.dense_unitary_circuit``, which takes
     ``(22/48) 4**n - (3/2) 2**n + 5/3`` CX for a generic input but up to
     ``(25/48) 4**n - (3/2) 2**n + 2/3`` when optimization A.2 keeps three CX
@@ -46,8 +46,8 @@ def dense_unitary_cx_qsd_upper_bound(total_qubits: int) -> int:
     that ``build_block_encoding`` made of matrices near diagonal, scalar,
     rank-one or Kronecker-structured ones took up to 21 CX on three qubits
     and 105 on four, above the 20 and 100 returned here. Routing and the
-    per-query law of the dense dilation therefore use this count as an
-    estimate.
+    per-query count formula of the dense dilation therefore use this count as
+    an estimate.
     """
 
     if total_qubits < 1:
@@ -63,10 +63,10 @@ def block_encoding_per_query_cx(
     implementation: str,
     system_qubits: int,
 ) -> float | None:
-    """Per-``U_BE``-query CX count from the implementation's synthesis law.
+    """Per-``U_BE``-query CX count from the implementation's synthesis formula.
 
-    The banded and multiplexed-Pauli branches consume the exact structural
-    census created by ``BlockEncodingPlan``. Dense dilation uses the count
+    The banded and multiplexed-Pauli branches use the exact structural counts
+    created by ``BlockEncodingPlan``. Dense dilation uses the count
     of Shende, Bullock and Markov's optimized quantum Shannon decomposition
     that routing uses, an estimate that NWQLib's exact synthesis can exceed
     (:func:`dense_unitary_cx_qsd_upper_bound`). Other implementations have
@@ -115,5 +115,5 @@ class SampledBlock:
     multiplicity: int
 
     def __post_init__(self) -> None:
-        """Admit ``multiplicity`` as a nonnegative integer."""
+        """Check that ``multiplicity`` is a nonnegative integer."""
         object.__setattr__(self, "multiplicity", integer(self.multiplicity, "multiplicity", 0))

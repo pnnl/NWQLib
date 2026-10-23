@@ -2,14 +2,15 @@
 
 The augmented-Lagrangian layer (``constrained.solve_augmented_lagrangian``)
 and box refinement (``refinement.refine_box``) each run one ordinary QHD Plan
-per round or level through ``prepare`` and ``submit``. This module owns what
+per round or level through ``prepare`` and ``submit``. This module holds what
 both do the same way: the arguments they share with ``nwqlib.solve``, the
 random streams of each inner Plan, the remainder of the cumulative execution
-limits, the counts read from an inner Run and its selected construction, the
-sums of those counts, and the point that a point rule reads from an inner
-result. Each layer keeps its own records and decides what it compares. When
-the augmented-Lagrangian layer runs box refinement in each round, this module
-also owns how the refinement's stop decides the round (``refinement_stop``).
+limits, the counts read from an inner Run and from the construction that its
+planning chose, the sums of those counts, and the point that a point rule
+reads from an inner result. Each layer keeps its own records and decides what
+it compares. When the augmented-Lagrangian layer runs box refinement in each
+round, this module also states how the refinement's stop decides the round
+(``refinement_stop``).
 """
 
 from dataclasses import dataclass
@@ -55,7 +56,7 @@ def plan_round(problem, qhd, execution, shots, child):
 
     A layer draws ``root = numpy.random.SeedSequence(seed)`` once and gives
     every round its own ``child = root.spawn(1)[0]``, as
-    ``nwqlib.scientist.compare`` gives every candidate its own child. The
+    ``nwqlib.scientist.compare`` gives every Plan it compares its own child. The
     streams of one round then do not shift those of another, an integer seed
     reproduces every round, and the child's entropy and spawn key, which the
     layer records, identify the streams. ``_plan_with_streams`` is the internal
@@ -71,7 +72,7 @@ def plan_round(problem, qhd, execution, shots, child):
 
 
 def round_limits(limits, used, shots):
-    """Return ``(ExecutionLimits, None)`` for the next round's Run, or ``(None, reason)`` when none is funded.
+    """Return ``(ExecutionLimits, None)`` for the next round's Run, or ``(None, reason)`` when the limits cannot cover one.
 
     ``limits`` caps the whole run cumulatively, and ``used`` holds the
     ``USED_COUNTS`` of the rounds so far. A Run caps its circuit preparations
@@ -84,21 +85,21 @@ def round_limits(limits, used, shots):
     circuit allowance of at least one, a remaining shot allowance of at least
     ``shots`` (one when ``shots is None``), and remaining data-byte and
     synthesis-work allowances of at least one each.
-    A remainder that passes this test can still be too small for the Run's
-    own reservations, which the Run then refuses.
+    A remainder that passes this test can still be too small for the amounts
+    that the Run sets aside, which the Run then refuses.
 
     A refusal of the first round can end in two ways. When this test refuses
     it, for example because ``shots`` exceeds ``max_total_shots``, the layer
-    knows before starting the round that it cannot be funded, and ends the
-    run with ``budget_exhausted`` after zero completed rounds, reporting the
-    short limits. When the first round's Run refuses its own reservations,
-    the refusal is an error of the round's inner preparation or execution,
+    knows before starting the round that the limits cannot cover it, and ends
+    the run with ``budget_exhausted`` after zero completed rounds, reporting the
+    short limits. When the first round's Run refuses the amounts it would set
+    aside, the refusal is an error of the round's inner preparation or execution,
     and ``inner_failure`` states the rule for those. Before any outer round
     has completed, the original inner error propagates, which keeps its
     diagnosis. With box refinement the rule applies to the levels of the
     first round, so the error propagates only while no level of it has
-    completed. A durable Run folder of the refused round keeps its journal
-    with the charges it recorded.
+    completed. The saved Run folder of the refused round keeps its run log
+    with the amounts it recorded.
     """
     from nwqlib.execution import ExecutionLimits
 
@@ -129,7 +130,7 @@ def inner_failure(error, completed):
     and work remain useful. Before that nothing has completed, so a record
     would report nothing, and the error is most often a configuration that
     QHD rejects, such as ``keep_state`` with shots or a ``max_work`` below the
-    admitted work of the first problem, or limits that the first round's Run
+    counted work of the first problem, or limits that the first round's Run
     refuses (``round_limits``), which should surface at once, so the
     original exception is re-raised. Call it from the ``except`` block that
     caught ``error``, and only for errors of those inner steps.
@@ -217,19 +218,19 @@ def refinement_stop(termination, levels):
 
 @dataclass(frozen=True)
 class HeaderlessRun:
-    """The folder of a durable Run whose creation raised before it committed its journal header.
+    """The folder of a saved Run whose creation raised before it wrote the header of its run log.
 
-    ``Run.__init__`` stores the selected inputs, the selection file and
-    ``run.json`` before it commits the header, and nothing is prepared or
-    acquired before that commit (``_durable.header_committed``). So every
+    ``Run.__init__`` stores the chosen inputs, the selection file and
+    ``run.json`` before it writes the header, and nothing is prepared or
+    executed before that write (``_durable.header_committed``). So every
     count of ``run_counts`` is a known zero except ``data_bytes``, the
-    stored size of the files in its Run folder apart from the journal
-    (``run.sqlite``, its lock and its rollback journal), which
+    stored size of the files in its Run folder apart from the run log
+    (``run.sqlite``, its lock and its SQLite rollback journal), which
     ``_durable.closed_trace`` reads, or None with ``reason`` when the folder
-    cannot be read. The journal is left out because ``max_data_bytes``
-    charges its rows, not its file (``_run_archive.stored_file_bytes``). The
-    Run has no recorded identity, because only the header names it. When
-    the journal itself cannot be read, ``closed_trace`` gives a reason in
+    cannot be read. The run log is left out because ``max_data_bytes``
+    counts its rows, not its file (``_run_archive.stored_file_bytes``). The
+    Run has no recorded identifier, because only the header names it. When
+    the run log itself cannot be read, ``closed_trace`` gives a reason in
     place of this record, and every count is unknown.
     """
 
@@ -238,20 +239,21 @@ class HeaderlessRun:
 
 
 def run_counts(trace, reason=None):
-    """Return ``(counts, unavailable)``: the ``RUN_COUNTS`` of one inner Run.
+    """Return ``(counts, unavailable)``, the ``RUN_COUNTS`` of one inner Run.
 
-    With a trace, read after the Run finished or failed so that it holds
-    every charge, including data recorded after the Result's own snapshot:
-    circuit preparations are ``preparations - host_preparations``, circuit
-    attempts and shots count the events of every status, the completed counts
-    the events with status ``completed``, and construction work includes the
-    classical kernel's setup (``host_preparation_work_reserved``). A
+    A trace is read after the Run finished or failed, so that it holds every
+    counted amount, including data recorded after the Result was formed.
+    With a trace, circuit preparations are ``preparations - host_preparations``,
+    circuit attempts and shots count the events of every status, the
+    completed counts the events with status ``completed``, and construction
+    work includes the setup of the classical routine
+    (``host_preparation_work_reserved``). A
     ``HeaderlessRun`` in place of the trace gives zero for every count except
     its ``data_bytes``. Without a trace and without ``reason`` no Run was
     started, so every count is zero. Without a trace and with ``reason`` a
     Run was started but its counters could not be read, as when a
     preparation raises and closes an in-memory Run (``_durable.closed_trace``
-    reads the counters of a durable one), so every count is None and
+    reads the counters of a saved one), so every count is None and
     ``unavailable`` names it with that reason.
     """
     if isinstance(trace, HeaderlessRun):
@@ -275,24 +277,25 @@ def run_counts(trace, reason=None):
 
 
 def law_count(plan, metric, circuits, reason=None):
-    """Return ``(value, reason)``: the law value for ``metric`` of the circuit that a round or level prepared.
+    """Return ``(value, reason)``, the value of the cost rule (``ResourceLaw``) for ``metric`` of the circuit that a round or level prepared.
 
     ``circuits`` is the ``circuit_preparations`` count of the round's or
     level's Run (``run_counts``), or None with ``reason`` when the count is
-    unknown or the preparation raised. A static QHD Plan has one experiment,
-    so its Run prepares at most one circuit. With zero preparations the round
-    or level contributes 0, since it compiled no circuit, whether its
-    planning raised, its Run's creation raised before the journal header
-    (``HeaderlessRun``), it stopped before preparing, or its execution is
-    classical. None gives None with ``reason``. A preparation that raised is
-    counted as an attempt, and its record does not establish that the
-    circuit was built, so the caller passes None and its law is not added
-    as that of a prepared circuit. With one or more the value is the
-    selected block's ``ResourceLaw`` with that metric in ``plan``, the CX
-    upper bound for ``"cx"`` and the arbitrary-rotation count for
+    unknown or the preparation raised. A QHD Plan has one experiment, fixed
+    at planning, so its Run prepares at most one circuit. With zero
+    preparations the round or level contributes 0, since it compiled no
+    circuit, whether its planning raised, its Run's creation raised before
+    the header of its run log (``HeaderlessRun``), it stopped before
+    preparing, or its execution is classical. None gives None with
+    ``reason``. A preparation that raised is counted as an attempt, and its
+    record does not establish that the circuit was built, so the caller
+    passes None and its count is not added as that of a prepared circuit.
+    With one or more the value is that of the cost rule (``ResourceLaw``) with that metric of
+    the block that planning chose in ``plan``, the CX upper bound for
+    ``"cx"`` and the arbitrary-rotation count for
     ``"arbitrary_rotations"`` (``resources.rotation_law``, or the binary
     encoding's upper bound on rotation gates), for one circuit and not
-    multiplied by shots. A Qiskit state preparation has neither law in the
+    multiplied by shots. A Qiskit state preparation has neither count in the
     record, so the value is then None with that reason. Summed over the
     rounds or levels of a quantum run whose Runs each prepared at most one
     circuit, the values equal the body totals ``sum_e circuits_e R_e`` of
@@ -311,7 +314,7 @@ def law_count(plan, metric, circuits, reason=None):
 
 
 def total_counts(entries, names):
-    """Return ``(counts, unavailable)``: each named count summed over ``entries``, or None when any is unknown.
+    """Return ``(counts, unavailable)``, each named count summed over ``entries``, or None when any is unknown.
 
     ``entries`` pairs a label, such as ``"round 2"``, with a record whose
     counts may be None and whose ``unavailable`` names the reason. An unknown
@@ -389,9 +392,9 @@ def mean_point(result, grid_value, value_at):
     not follow, which is why the value at the mean is evaluated and
     compared. When the two values nearly tie, the comparison of computed
     values does not certify the exact order. On a periodic grid the mean of
-    coordinates depends on where the box puts the seam, the lower edge of
-    each side, so probability that wraps across the seam can give a mean far
-    from where the probability lies.
+    coordinates depends on where the box cuts the period, at the lower edge
+    of each side, so probability that wraps across that cut can give a mean
+    far from where the probability lies.
 
     The experiment code behind the results of Wu et al., arXiv:2605.12066v1,
     whose text describes only the most probable point (Sec. V), takes the
@@ -429,8 +432,8 @@ def range_bound(tables):
     sum bounds ``max F - min F`` over the grid whatever the tables share.
     Tables whose supports overlap need not reach their extremes at the same
     grid point, so the bound can exceed the range. It needs only the tables,
-    and no evaluation over the ``K**d`` grid points. QHD's classical
-    admission bounds the potential range the same way
+    and no evaluation over the ``K**d`` grid points. QHD's classical work
+    check bounds the potential range the same way
     (``method._schrodinger_step_bounds``). The sum is formed exactly from the stored
     values and rounded up, so the returned number is at least the exact sum
     and less than one unit in the last place above it. The result is None

@@ -1,10 +1,13 @@
-"""Bounded exact expression and declared lifecycle admission, without execution.
+"""Program admission, the structural check of a Program, without running anything.
 
-Every Program is admitted here before any consumer does work with it: Program
-construction, Plan points, experiment selection, logical lowering, the
-resource fold and acquisition resolution. The public contract is
-docs/development/program_checks.md, which states the declared quantum and
-classical lifecycle.
+The check evaluates the Program's integer expressions exactly and its real
+expressions in binary64, within the declared limits, and follows the declared
+lifecycle of its registers and classical values. Every
+Program is checked here before any other part of the library works with it:
+Program construction, Plan points, experiment selection, construction of the
+logical circuit, the resource total and the resolution of the measurements
+to run. docs/development/program_checks.md states the rules, including the
+declared quantum and classical lifecycle.
 """
 
 import math
@@ -39,9 +42,9 @@ def children(node):
 
 
 class AdmissionStepsExceeded(ValueError):
-    """A Program's kept field slots or admission work exceed ``AdmissionLimits.max_steps``.
+    """A Program's kept field slots (record fields and tuple entries) or admission work exceed ``AdmissionLimits.max_steps``.
 
-    A Method whose ``max_admission_steps`` field sets the ceiling catches this
+    A Method whose ``max_admission_steps`` field sets the limit catches this
     type to name that field (``admission_refusal``,
     ``admitted_program``). Raised inside Program construction, it reaches the
     caller wrapped in Pydantic's ValidationError, whose ``errors()`` entry
@@ -50,13 +53,13 @@ class AdmissionStepsExceeded(ValueError):
     Attributes:
         stage: ``"stored field inventory"`` or ``"admission work"``.
         need: For the stored field inventory, the complete count of kept
-            field slots: a ``max_steps`` of at least this value passes the
-            inventory, and later admission, preparation and lowering can
-            still need more. For admission work, the count when the check
-            stopped. Work is charged before the item it pays for, so the
-            complete count is at least this value, and it is not a value
-            that admits.
-        ceiling: The ``max_steps`` that refused.
+            field slots. A ``max_steps`` of at least this value passes the
+            inventory, and later admission, preparation and circuit
+            construction can still need more. For admission work, the count
+            when the check stopped. Work is counted before the item it pays
+            for, so the complete count is at least this value, and this
+            value is not guaranteed to pass.
+        ceiling: The ``max_steps`` that was exceeded.
         complete: Whether ``need`` is the complete count of its stage
             (true for the stored field inventory only).
     """
@@ -79,7 +82,7 @@ class AdmissionDefinitionsExceeded(ValueError):
 
     Attributes:
         need: The complete count.
-        ceiling: The ``max_definitions`` that refused.
+        ceiling: The ``max_definitions`` that was exceeded.
     """
 
     def __init__(self, need, ceiling):
@@ -88,7 +91,7 @@ class AdmissionDefinitionsExceeded(ValueError):
 
 
 def limit_exceeded(error, kinds=(AdmissionStepsExceeded, AdmissionDefinitionsExceeded)):
-    """Return the admission-limit refusal of ``kinds`` that a Program construction error carries, or None.
+    """Return the exceeded-limit error of the given ``kinds`` that a Program construction error carries, or None.
 
     Pydantic wraps an error raised in the Program validator and keeps the
     original as ``ctx["error"]`` of its ``errors()`` entry.
@@ -105,18 +108,18 @@ def limit_exceeded(error, kinds=(AdmissionStepsExceeded, AdmissionDefinitionsExc
 
 
 def admission_refusal(option, exceeded, *, subject="the Program"):
-    """Word a refusal that names the limit that refused.
+    """Write the error message of an exceeded limit, naming that limit.
 
     For ``AdmissionStepsExceeded``, ``option`` is the public spelling of the
-    Method field owning ``max_steps``, such as
-    ``"FixedGCIM.max_admission_steps"``. The message names the refused stage,
-    its counted need and the ceiling. For the stored field inventory the
+    Method field that sets ``max_steps``, such as
+    ``"FixedGCIM.max_admission_steps"``. The message names the stage, its
+    counted need and the limit. For the stored field inventory the
     need is the complete count, and that value passes the inventory. For
     admission work it is the lower bound reached when the check stopped.
-    Neither is a promised admitting value: later admission, preparation and
-    lowering can need more. For
+    Neither value is guaranteed to pass, because later admission,
+    preparation and circuit construction can need more. For
     ``AdmissionDefinitionsExceeded`` the message names the shared
-    ``AdmissionLimits.max_definitions``, the complete count and the ceiling.
+    ``AdmissionLimits.max_definitions``, the complete count and the limit.
     """
     if isinstance(exceeded, AdmissionDefinitionsExceeded):
         return ValueError(
@@ -137,9 +140,9 @@ def admission_refusal(option, exceeded, *, subject="the Program"):
 
 
 def admitted_program(option, max_steps, **fields):
-    """Construct a Program with ``AdmissionLimits(max_steps=max_steps)`` or refuse naming ``option``.
+    """Construct a Program with ``AdmissionLimits(max_steps=max_steps)`` or raise an error naming ``option``.
 
-    A Method whose field ``max_admission_steps`` sets its Programs' ceiling
+    A Method whose field ``max_admission_steps`` sets its Programs' limit
     builds them here, so an oversized Program is refused as a ValueError
     naming that field (``admission_refusal``), and a Program above the
     shared ``max_definitions`` is refused naming that limit, not as a
@@ -157,7 +160,7 @@ def admitted_program(option, max_steps, **fields):
 
 
 def check_program(program):
-    """Admit a whole Program at its own bindings and return its Readiness."""
+    """Check a whole Program at its own bindings and return its Readiness."""
     return _Admission(program).check()
 
 
@@ -167,7 +170,7 @@ class _Admission:
     The check follows declarations only. It never simulates a state and never
     proves that a selected implementation honors its signature. Its purpose
     is to reject an illegal lifecycle before a circuit, a resource estimate or
-    a native preparation exists: use after release, a live quantum state
+    a prepared backend circuit exists: use after release, a live quantum state
     crossing a host boundary, a coherence promise that a measurement already
     broke, branch arms that disagree on live registers, a loop whose state
     changes between iterations, or an independent experiment that leaks a wire.
@@ -182,20 +185,21 @@ class _Admission:
     - ``epoch`` counts the register's coherence generations. Measurement,
       reset, release, a new preparation and reallocation advance it, so a
       claim made before a measurement cannot match after it. ``None`` means
-      unresolved: it blocks readiness instead of matching a claim.
-    - ``group`` is the interned set of registers that a joint call may have
-      correlated with this one. A nonunitary effect on one member makes every
-      partner ``mixed``, because measuring part of an entangled state leaves
-      the rest without a coherent-state guarantee.
+      unresolved, and it blocks readiness instead of matching a claim.
+    - ``group`` is the set of registers that a joint call may have
+      correlated with this one, kept as one shared object per distinct set.
+      A nonunitary effect on one member makes every partner ``mixed``,
+      because measuring part of an entangled state leaves the rest without a
+      coherent-state guarantee.
 
     Known violations raise ``ValueError``. Unresolved requirements, such as an
     unbound width or an unknown block effect, become readiness blockers, so a
-    symbolic Program stays representable until the consumer that needs a
+    symbolic Program stays representable until the code that needs a
     value binds it.
 
-    Work is charged by ``tick`` before the collection or context it pays for
+    Work is counted by ``tick`` before the collection or context it pays for
     is built, against ``AdmissionLimits.max_steps`` (ENGINEERING_CONSTANTS.md,
-    "Shared Program admission limits"). Visits are memoized per distinct
+    "Shared Program admission limits"). Visits are cached per distinct
     (node, register states, available classical values, binding, protected
     registers) context, so cost follows the kept graph and its distinct
     contexts, never Repeat counts or setting multiplicity. The resource fold
@@ -205,9 +209,9 @@ class _Admission:
     Attributes:
         p: The Program under admission.
         limits: Its AdmissionLimits.
-        steps: Admission work charged so far, including expression evaluations.
+        steps: Admission work counted so far, including expression evaluations.
         evaluations: Expression evaluations, reported separately in Readiness.
-        step_limit: Work ceiling, ``limits.max_steps`` unless a consumer raises it.
+        step_limit: Work limit, ``limits.max_steps`` unless the code using this instance raises it.
         blockers: Unresolved requirements collected so far.
         nodes: Definition ID to node.
         expr: Expression ID to expression value.
@@ -219,7 +223,7 @@ class _Admission:
         expression_definitions: Expression ID to Expression record, used by experiment selection.
         contexts: Evaluated expression values per distinct binding, filled by ``expressions``.
         memo: Result of ``visit`` per distinct context, as described above.
-        groups: Interned correlation groups, so equal groups are one object.
+        groups: Canonical correlation groups, so equal groups are one object.
         contains_batch: Whether each node is or contains a MeasurementBatch, set by setup.
         node_order: Definition IDs in dependency order, set by setup.
         order: Expression IDs in dependency order, set by setup.
@@ -229,9 +233,9 @@ class _Admission:
     def __init__(self, program):
         """Index the Program's tables, rejecting an oversized or ambiguous Program first.
 
-        The slot walk counts every kept record and tuple field of the Program
-        and rejects when the complete count exceeds ``max_steps``, before any
-        table is built. Duplicate names in any table reject. Definitions, expressions,
+        The field walk counts every kept record and tuple field of the Program
+        and rejects it when the complete count exceeds ``max_steps``, before any
+        table is built. Duplicate names in any table are rejected. Definitions, expressions,
         parameters, registers, classical values and signatures together must
         not exceed ``max_definitions``. Nothing here depends on bindings.
         ``setup`` and ``check`` do the structural and lifecycle work.
@@ -275,7 +279,7 @@ class _Admission:
         self.step_limit = self.limits.max_steps
 
     def tick(self, amount=1):
-        """Charge work before doing it, so an oversized Program rejects before the work exists."""
+        """Count work before doing it, so an oversized Program is rejected before the work is done."""
         self.steps += amount
         if self.steps > self.step_limit:
             if self.step_limit == self.limits.max_steps:
@@ -283,7 +287,7 @@ class _Admission:
             raise ValueError("resource fold work exceeds its limit proportional to Program admission work")
 
     def bounded(self, value):
-        """Admit an exact integer within max_integer_bits or a finite real."""
+        """Accept an exact integer within max_integer_bits or a finite real."""
         if type(value) is int and value.bit_length() > self.limits.max_integer_bits:
             raise ValueError("integer growth exceeds max_integer_bits")
         if type(value) is float and not math.isfinite(value):
@@ -291,7 +295,7 @@ class _Admission:
         return value
 
     def binding_map(self, bindings):
-        """Admit distinct declared parameters with in-domain values and return plain numbers."""
+        """Check that bindings name distinct declared parameters with values in their domains, and return plain numbers."""
         self.tick(3 * len(bindings))
         table = unique(bindings, "parameter", "binding")
         for name, binding in table.items():
@@ -315,8 +319,8 @@ class _Admission:
     def arguments(self, arguments, context, formal=None):
         """Check call or stage arguments against their formal domains in one context.
 
-        A known value outside the formal domain rejects. An unknown value
-        becomes a blocker, because the consumer needs a concrete argument.
+        A known value outside the formal domain is rejected. An unknown value
+        becomes a blocker, because the code that uses it needs a concrete argument.
         """
         self.tick(2 * len(arguments))
         table = unique(arguments, "parameter", "argument")
@@ -345,7 +349,7 @@ class _Admission:
         expression, and checks signatures, port order and aliasing, Parallel
         disjointness, range-axis endpoints and setting bindings. It also
         records which nodes contain a MeasurementBatch, which fixes the
-        terminal/outer distinction for acquisition kinds. Nothing here depends
+        terminal/outer distinction for observation kinds. Nothing here depends
         on parameter values, so a Plan runs it once and reuses the index for
         every selected point.
         """
@@ -487,9 +491,11 @@ class _Admission:
         """Evaluate every kept expression once for one binding context.
 
         A missing parameter evaluates to None, meaning unknown, and never to
-        zero or false. A false constraint rejects, while an unknown constraint
-        or width becomes a blocker. Multiplication checks the result's bit
-        length before forming it, so an oversized integer is never allocated.
+        zero or false. A false constraint is rejected, while an unknown constraint
+        or width becomes a blocker. An integer multiplication is rejected before
+        the product is formed when the operand bit lengths prove that it exceeds
+        ``max_integer_bits``. A product only one bit over the limit can be
+        formed and is then rejected by ``bounded``.
         Results are cached per binding, which keeps width scans at one per
         distinct context however many settings share it.
         """
@@ -551,7 +557,7 @@ class _Admission:
         return values
 
     def integer(self, value, context, role, positive=False):
-        """Read a count or width. Unknown adds a blocker, and a known value below the minimum rejects."""
+        """Read a count or width. Unknown adds a blocker, and a known value below the minimum is rejected."""
         self.tick()
         result = context[value.expression] if isinstance(value, ExprRef) else value
         if result is None:
@@ -578,9 +584,9 @@ class _Admission:
             raise ValueError("classical value read before definition")
 
     def stage(self, stage, q, available, context):
-        """Admit one ClassicalStage and return the classical values available after it.
+        """Check one ClassicalStage and return the classical values available after it.
 
-        Its inputs must already be available and its arguments admitted. A
+        Its inputs must already be available and its arguments accepted. A
         host stage runs outside the quantum job, so no register may be live
         when it starts. Its outputs join the available values.
         """
@@ -776,7 +782,7 @@ class _Admission:
         return {name for name, (state, _, _) in q.items() if state != "released"}
 
     def positive_parameter_count(self, count):
-        """Only the admitted direct integer ParameterRef domain proves positivity."""
+        """Only the checked domain of a direct integer ParameterRef proves positivity."""
         if isinstance(count, ExprRef):
             expression = self.expr[count.expression]
             if isinstance(expression, ParameterRef):
@@ -794,7 +800,7 @@ class _Admission:
         nonunitary effect on part of a possibly entangled state leaves the
         rest without a coherent-state guarantee. All of them advance one
         epoch, and an unresolved epoch stays unresolved. Breaking a group that
-        holds a protected wire rejects.
+        holds a protected wire is rejected.
         """
         group = q[wire][2]
         self.tick(3 * len(group) + len(protected))
@@ -812,9 +818,9 @@ class _Admission:
         """Connect ``wires`` into one group and give every member ``status``.
 
         ``mixed`` records a known loss of coherence. Each member advances one
-        epoch, and a protected member rejects. ``unknown`` records an unknown
+        epoch, and a protected member is rejected. ``unknown`` records an unknown
         input state or an undeclared effect. Its epochs become unresolved
-        (None) and nothing rejects, even for a protected member, because the
+        (None) and nothing is rejected, even for a protected member, because the
         effect may still turn out legal. The caller has already added the
         readiness blocker for that unknown.
         """
@@ -827,7 +833,7 @@ class _Admission:
             q[wire] = (status, None if status == "unknown" or epoch is None else self.bounded(epoch + 1), group)
 
     def connect(self, q, wires):
-        """Merge the correlation groups of ``wires`` into one interned group and return it.
+        """Merge the correlation groups of ``wires`` into one canonical group and return it.
 
         A caller skips this when a signature promises independent coupling.
         """
@@ -848,7 +854,7 @@ class _Admission:
         return group
 
     def canonical_group(self, members):
-        """Intern once per content so memo-key equality never rescans a group per wire."""
+        """Return one shared object per distinct group, so cache-key comparisons never rescan a group per wire."""
         if type(members) is frozenset:
             # The immutable group already exists: charge its first hash, not
             # a copy that neither this branch nor frozenset would perform.
@@ -927,7 +933,7 @@ class _Admission:
         """Read every declared register, classical and port width in one binding context.
 
         An unknown width becomes a blocker. A negative width, or a classical
-        bit width below one, rejects.
+        bit width below one, is rejected.
         """
         for reg in self.registers.values():
             self.integer(reg.width, context, "register width")
@@ -939,7 +945,7 @@ class _Admission:
                 self.integer(port.width, context, "port width")
 
     def check(self):
-        """Admit the whole Program at its own bindings, starting from an empty root context."""
+        """Check the whole Program at its own bindings, starting from an empty root context."""
         self.setup()
         binding = self.binding_map(self.p.bindings)
         self.expressions(binding)
@@ -949,20 +955,20 @@ class _Admission:
                          lifecycle_steps=self.steps - self.evaluations)
 
     def admitted(self):
-        """Index an admitted Program for a consumer and return its stored Readiness.
+        """Index an accepted Program for the code that uses it and return its recorded Readiness.
 
-        A Program runs ``check`` once, at construction, and stores the
-        Readiness (``Program.check_readiness``). A consumer that needs the
+        A Program runs ``check`` once, at construction, and records the
+        Readiness (``Program.check_readiness``). Code that needs the
         tables, the root binding context and the work counter runs
         ``setup``, the root binding and its expressions, exactly as ``check``
-        does, skips the lifecycle visit whose result is stored, and continues
-        from the work that the full check measured: ``steps`` and
+        does, skips the lifecycle visit whose result is recorded, and continues
+        from the work that the full check measured. ``steps`` and
         ``evaluations`` are set to that check's totals and ``blockers`` to its
         blockers. The root binding context is evaluated here as ``check``
         evaluates it. Other binding contexts that the skipped visit would
         have evaluated, such as a setting's bindings, are evaluated on first
-        use and charged one expression pass each, so a consumer that reads
-        such a context charges that pass in addition to the stored total.
+        use and counted as one expression pass each, so code that reads
+        such a context adds that pass to the recorded total.
         """
         readiness = self.p.check_readiness()
         self.setup()

@@ -1,4 +1,7 @@
-"""Bounded explicit Qiskit consumer of the selected shared Program subset."""
+"""Construction of the Qiskit circuit of a selected Program.
+
+Only the supported Program nodes are built, within explicit size limits.
+"""
 
 from dataclasses import dataclass
 
@@ -10,12 +13,13 @@ from .selection import SelectedBlock, direct_preparation_amplitudes
 
 
 class _ConstructorContext:
-    """The context argument that lowering passes to every native constructor.
+    """The context argument that circuit construction passes to every constructor of a Qiskit gate.
 
     Calling it with a factory returns the method context of the Run, or of
-    one standalone lowering or explicit sample. ``max_direct_amplitudes`` is
-    the limit against which lowering admitted every declared direct state
-    preparation (``selection.direct_preparation_amplitudes``), and the
+    one standalone circuit construction or explicit sample.
+    ``max_direct_amplitudes`` is the limit against which circuit construction
+    checked every declared direct state preparation
+    (``selection.direct_preparation_amplitudes``), and the
     constructors that call ``prepare_qiskit`` pass it on.
     """
 
@@ -30,7 +34,7 @@ class _ConstructorContext:
 
 
 def _local_method_context(max_direct_amplitudes=DEFAULT_MAX_DIRECT_AMPLITUDES):
-    """One lazy empty context for a standalone lowering or explicit sample."""
+    """One empty context, created on first use, for a standalone circuit construction or explicit sample."""
     context = None
 
     def get(factory, *, marks_changes=False):
@@ -150,13 +154,14 @@ def _lower_qiskit(construction, *, blocks, max_operations=100_000, max_qubits=40
 
     ``definition`` names the Program definition to lower, the Program's root by
     default. Another definition, such as the coherent tail or inverse of a
-    trajectory readout view, is lowered onto the same registers, with the
+    trajectory readout view, is built onto the same registers, with the
     same bindings, selected blocks, caches and limits, so its gates act on
     the wires its ports name in the bound body.
 
-    The context getter creates empty method metadata. Only admitted native
-    constructors may populate it, under their selected work/workspace laws.
-    Standalone lowering shares one context during this call, then releases it.
+    The context getter creates empty method metadata. Only the checked
+    constructors of Qiskit gates may fill it, under the work and workspace
+    rules of their selections. A standalone circuit construction shares one
+    context during this call, then releases it.
     Constructors must not keep the getter in payloads, contexts or gates.
     A Run passes its ``ExecutionLimits.max_direct_amplitudes``, and its
     ``_charge_synthesis`` as ``synthesis_charge``, which a controlled
@@ -193,14 +198,14 @@ def _lower_qiskit(construction, *, blocks, max_operations=100_000, max_qubits=40
     repeat_counts = {}
 
     def count(name):
-        """Admit the reachable bindings of one node and return its ``(visits, work)``.
+        """Check the reachable bindings of one node and return its ``(visits, work)``.
 
-        visits is the number of dynamic IR visits, with every enclosing
-        Repeat multiplying its body's count. work adds each visited
+        visits is the number of dynamic Program node visits, with every
+        enclosing Repeat multiplying its body's count. work adds each visited
         BlockCall's selected construction_work and each Measure or Reset
         register width, multiplied the same way. Both are computed from the
-        memoized body counts, so a huge Repeat costs one multiplication and
-        rejects against max_operations before Qiskit is imported.
+        cached body counts, so a huge Repeat costs one multiplication and is
+        rejected against max_operations before Qiskit is imported.
         """
         if name in memo:
             return memo[name]
@@ -313,10 +318,10 @@ def _lower_qiskit(construction, *, blocks, max_operations=100_000, max_qubits=40
         method_context = _ConstructorContext(method_context, max_direct_amplitudes)
 
     def charge_control(base, name):
-        """Charge the exact syntheses that controlling ``base`` makes, and Qiskit's control of them.
+        """Count the work of the exact syntheses that controlling ``base`` makes, and of Qiskit's control of them, against the limit.
 
         ``qiskit_compat.controlled`` synthesizes each distinct dense unitary
-        of the realized base once and Qiskit controls every occurrence of
+        of the built base once and Qiskit controls every occurrence of
         the synthesized gates, so the work is ``dense_synthesis_size`` of
         each width that ``dense_synthesis_widths`` lists plus
         ``gatewise_control_size`` of the ``dense_control_counts`` triple.
@@ -331,17 +336,18 @@ def _lower_qiskit(construction, *, blocks, max_operations=100_000, max_qubits=40
             synthesis_charge(work, f"controlled transform {name!r}")
 
     def gate(block, arguments=()):
-        """Return the native gate of one selected block at one argument tuple, building it once.
+        """Return the Qiskit gate of one selected block at one argument tuple, building it once.
 
-        A static definition is cached by its selected identity in ``gates``,
-        which a live Run shares across preparations. A parameterized one is
-        cached per ``(identity, arguments)`` in ``current``, reusing an entry
-        of ``previous``, the specializations the Run kept from its preceding
-        preparation. A control or adjoint is derived from the realized base
-        gate, so the base's global phase is kept. A controlled base is built
-        once and shared by the controlled and controlled-adjoint forms. Every
-        identity used, including a base reached through a cache hit, is
-        recorded in ``defined``.
+        A static definition is cached by the content hash of its selection in
+        ``gates``, which a live Run shares across preparations. A
+        parameterized one is cached per ``(content hash, arguments)`` in
+        ``current``, reusing an entry of ``previous``, the gates for fixed
+        argument values that the Run kept from its preceding preparation. A
+        control or adjoint is derived from the built base gate, so the base's
+        global phase is kept. A controlled base is built once and shared by
+        the controlled and controlled-adjoint forms. Every content hash used,
+        including a base reached through a cache hit, is recorded in
+        ``defined``.
         """
         identity = block.record.content_id
         key = (identity, arguments) if arguments else identity
@@ -381,8 +387,8 @@ def _lower_qiskit(construction, *, blocks, max_operations=100_000, max_qubits=40
         already bounded. BlockCall ports map to whole registers in signature
         order, and a zero-width register contributes no qubits.
         A BlockCall node's gate is looked up once and kept in ``realized``,
-        so a Repeat body appends the same gate without reading its selected
-        identity again.
+        so a Repeat body appends the same gate without looking up its
+        selection again.
         """
         node = nodes[name]
         if isinstance(node, Sequence):

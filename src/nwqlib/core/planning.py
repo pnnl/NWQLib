@@ -1,8 +1,9 @@
 """Plans, their experiments and readout declarations, the registry of saved-state reducers, and the random streams a Plan records.
 
-Methods own their concrete Problem, Method and output record types.
-Interchange never loads a class from a Source. Callers deserialize with the
-same module-level concrete class used to construct the Plan.
+Each Method defines its own concrete Problem, Method and output record types.
+Loading a saved record never imports a class named by a Source. Callers
+deserialize with the same module-level concrete class that constructed the
+Plan.
 """
 
 from collections.abc import Callable, Mapping
@@ -65,7 +66,7 @@ class ObservableEstimateSpec(Record):
 
 @dataclass(frozen=True)
 class ReducerOutput:
-    """One output component of a registered acquisition-time reduction.
+    """One output component of a registered reduction applied to a saved simulator state during data collection.
 
     ``shape`` is the component's array shape, whose product is its number of
     logical output values.
@@ -109,7 +110,7 @@ class Reducer:
     - ``work(parameters, width)``: the classical work of one reduction of a
       saved state of ``width`` qubits, as a nonnegative integer in the unit
       that the calling Method's work allowance counts. ``admit_reductions``
-      requires the calling Method's remaining work allowance and refuses a
+      requires the calling Method's remaining work allowance and rejects a
       schedule whose summed registered work exceeds it, before the circuits
       run. The allowance is specific to the calling Method.
     - ``execute(state, parameters, bindings)``: the reduction itself. It
@@ -297,9 +298,10 @@ process that has not imported its module.
 def registered_reducer(name):
     """Return the reducer registered under `name`, or `None` when there is none.
 
-    On a miss, each module of `BUILTIN_REDUCER_MODULES` is imported (an
-    already imported module is not imported again, and a module registers its
-    reducers once, at import), and `READOUT_REDUCERS` is read again.
+    When `name` is not registered, each module of `BUILTIN_REDUCER_MODULES`
+    is imported (an already imported module is not imported again, and a
+    module registers its reducers once, at import), and `READOUT_REDUCERS`
+    is read again.
 
     Args:
         name (str): The reducer's registered name.
@@ -322,8 +324,8 @@ def reducer_outputs(name, parameters):
     """Resolve a registered reducer's output components from its validated parameters.
 
     An unknown reducer, a shape function that fails, or a result that is not
-    a nonempty tuple of ``ReducerOutput`` rejects before native work: an
-    unresolved output shape is never counted as zero.
+    a nonempty tuple of ``ReducerOutput`` is rejected before any backend
+    work, so an unresolved output shape is never counted as zero.
     """
     reducer = registered_reducer(name)
     if reducer is None:
@@ -341,14 +343,14 @@ def reducer_outputs(name, parameters):
 
 
 def admit_reductions(observation, *, width, allowance):
-    """Admit a trajectory's reductions before acquisition and return their registered host work.
+    """Check a trajectory's reductions before the circuits run and return their registered classical work.
 
     Each reduction point needs a reducer registered with its execution and
     work functions. The work of the schedule is the sum of ``work(parameters,
     width)`` over its reduction points, checked against ``allowance`` point
     by point. ``allowance`` is the calling Method's remaining work allowance,
     taken from the Method's own work record. A schedule with reductions and no
-    allowance is refused. Nothing here runs a reduction.
+    allowance is rejected. Nothing here runs a reduction.
     """
     total = 0
     for point in observation.positions:
@@ -376,15 +378,16 @@ def admit_reductions(observation, *, width, allowance):
 def execute_reduction(point, state, *, bindings, context=None):
     """Run the registered reduction of ``point`` once on the state saved at that point.
 
-    ``context`` is the ``ReductionContext`` of the producing receipt. A
-    reducer registered with ``receives_context`` receives it as the keyword
-    ``context``, and the call refuses without one. Any other reducer is
-    called with the state, parameters and bindings only.
+    ``context`` is the ``ReductionContext`` of the preparation record that
+    produced the state. A reducer registered with ``receives_context``
+    receives it as the keyword ``context``, and the call raises an error
+    without one. Any other reducer is called with the state, parameters and
+    bindings only.
 
     The state can be shared with other points at the same boundary, so the
     reducer receives a view whose own array and every array it is based on
-    are read-only, and no copy of the state is made: the reducer cannot
-    write the state through that view or re-enable writing on it. A
+    are read-only, and no copy of the state is made. The reducer therefore
+    cannot write the state through that view or re-enable writing on it. A
     registered reducer must not change the writability of the arrays its
     view is based on. The returned arrays must match the registered
     components' dtypes and shapes. Each is returned read-only.
@@ -417,15 +420,17 @@ def execute_reduction(point, state, *, bindings, context=None):
 
 
 class ReadoutView(Record):
-    """Optional reference to the selected coherent readout tail and its bound wire mapping.
+    """Optional reference to the coherent readout tail that the Plan chose, and to its wire mapping.
 
-    Its inverse restores the continuation state in ideal arithmetic. The
-    receipt includes every executed forward and inverse operation.
+    Its inverse restores, in exact arithmetic, the state from which the
+    evolution continues. The preparation record counts every executed
+    forward and inverse operation.
 
     Attributes:
-        tail: Definition ID of the selected coherent readout tail.
-        inverse: Definition ID of the selected exact inverse of that tail,
-            which reverses and adjoints the tail's actual operation sequence.
+        tail: Definition ID of the coherent readout tail.
+        inverse: Definition ID of the exact inverse of that tail, which
+            reverses the tail's operation sequence and takes the adjoint of
+            each operation.
         wires: Bound logical wires of the tail, in the tail's own port order.
     """
 
@@ -478,9 +483,10 @@ class ObservationPoint(Record):
             converted. Other kinds keep ``{}``.
         view: Default `None`. The point's `ReadoutView`: the circuit
             definitions of its basis change and of the exact inverse, and the
-            logical wires they act on. Its inverse restores the continuation
-            state in ideal arithmetic. The preparation record includes every
-            executed forward and inverse operation.
+            logical wires they act on. Its inverse restores, in exact
+            arithmetic, the state from which the evolution continues. The
+            preparation record counts every executed forward and inverse
+            operation.
     """
 
     id: Text
@@ -496,7 +502,7 @@ class ObservationPoint(Record):
     @field_validator("parameters", mode="before")
     @classmethod
     def _parameters(cls, value):
-        """Admit a JSON object with a deterministic identity: canonical sorted-key compact text."""
+        """Accept a JSON object and write it as canonical sorted-key compact text, so that its content hash is deterministic."""
         if isinstance(value, Mapping):
             value = dict(value)
         else:
@@ -507,7 +513,7 @@ class ObservationPoint(Record):
 
     @model_validator(mode="after")
     def _point(self):
-        """Admit only the detail fields that the point's readout kind uses.
+        """Accept only the detail fields that the point's readout kind uses.
 
         Pauli labels are nonempty, distinct and use IXYZ. A probability
         marginal names at least one wire (``q_k >= 1``), each once. An
@@ -537,21 +543,21 @@ class ObservationPoint(Record):
 def point_items(point, *, width=None, max_items=None, max_items_source=None):
     """Return the number of logical items ``L_k`` one trajectory point produces.
 
-    This per-point item count is used by the Pauli JSON-envelope reservation,
-    the binary probability-array reservation at eight bytes per outcome,
-    and the amplitude capacity check at 16 bytes per complex128 value.
-    By the NWQLib admission law, for one declared trajectory,
+    The bytes set aside for the JSON of Pauli values, the probability-array
+    bytes set aside at eight bytes per outcome and the amplitude capacity
+    check at 16 bytes per complex128 value all use this item count per point.
+    By NWQLib's counting rule, for one declared trajectory,
     ``N_items = sum_k L_k``. A Pauli point contributes its number of distinct
-    requested labels. A probability marginal on ``q_k`` selected wires
-    contributes ``2**q_k`` logical outcomes regardless of its eventual sparse
-    stored-entry count. An amplitude point contributes the dimension of its
-    selected output declaration. A reduction contributes the output
+    requested labels. A probability marginal on ``q_k`` chosen wires
+    contributes ``2**q_k`` logical outcomes regardless of how many entries
+    its sparse form eventually stores. An amplitude point contributes the
+    dimension of its output declaration. A reduction contributes the output
     cardinality computed by its registered shape function from the validated
     parameters. Two distinct views at one boundary contribute both payloads.
     Positions are neither repetitions nor shots.
 
-    For a marginal on ``q_k`` selected wires and nonnegative remaining item
-    capacity ``M_items``, the point rejects when
+    For a marginal on ``q_k`` chosen wires and nonnegative remaining item
+    capacity ``M_items``, the point is rejected when
     ``q_k >= max(1, M_items.bit_length())`` before forming ``1 << q_k``.
     The nonempty-marginal domain requires ``q_k >= 1``.
 
@@ -617,9 +623,13 @@ class ReadoutDetails(Record):
             the returned values.
         qubits: Default `()`. Measured or marginal qubit positions, least
             significant first.
-        population: Default `"unconditional"`. `"unconditional"` or
-            `"native_conditioned"`, the measured shots that the readout
-            covers.
+        population: Default `"unconditional"`. The declared conditioning
+            of an exact readout, `"unconditional"` or `"native_conditioned"`.
+            The value `"native_conditioned"`, accepted only for Pauli
+            expectation and probability readouts, marks a preceding
+            measurement or reset that can condition the simulator state
+            from which the readout is computed. Every other readout kind,
+            sampled counts included, uses `"unconditional"`.
         padding: Default
             `"no padding; all returned bit patterns belong to the declared registers"`.
             Meaning of any padding, and which returned coordinates belong to
@@ -644,7 +654,7 @@ class ReadoutDetails(Record):
 
     @model_validator(mode="after")
     def _schedule(self):
-        """Admit one ordered point schedule: unique point IDs and nondecreasing boundaries.
+        """Accept one ordered schedule of points, with unique point IDs and nondecreasing boundaries.
 
         The end-position shorthand (None) resolves to the body length, the
         largest boundary, so a point with an explicit boundary cannot follow it.
@@ -665,11 +675,11 @@ class ReadoutDetails(Record):
         return self
 
     def boundaries(self, body_length):
-        """Resolve every point's boundary against the selected body length.
+        """Resolve every point's boundary against the body length.
 
         Requires ``0 <= position <= body_length`` for each point and resolves
-        the end-position shorthand to ``body_length``. Resolution precedes
-        native preparation.
+        the end-position shorthand to ``body_length``. Resolution happens
+        before the circuit is built.
         """
         if type(body_length) is not int or body_length < 0:
             raise ValueError("body length must be a nonnegative integer")
@@ -686,8 +696,9 @@ class ReadoutDetails(Record):
         """Return the schedule position of the point with this ID.
 
         The ID-to-position map is built on the first call, in one pass, and
-        kept in a slot that equality, identity and serialization do not see,
-        so joining K point chunks to one declaration takes O(K) lookups.
+        kept in an attribute that equality, the content hash and
+        serialization do not see, so matching the `ObservationChunk` records
+        of K points to one declaration takes O(K) lookups.
         """
         try:
             index = object.__getattribute__(self, "_point_index")
@@ -775,9 +786,13 @@ class ObservationSpec(ReadoutDetails):
             the returned values.
         qubits: Default `()`. Measured or marginal qubit positions, least
             significant first.
-        population: Default `"unconditional"`. `"unconditional"` or
-            `"native_conditioned"`, the measured shots that the readout
-            covers.
+        population: Default `"unconditional"`. The declared conditioning
+            of an exact readout, `"unconditional"` or `"native_conditioned"`.
+            The value `"native_conditioned"`, accepted only for Pauli
+            expectation and probability readouts, marks a preceding
+            measurement or reset that can condition the simulator state
+            from which the readout is computed. Every other readout kind,
+            sampled counts included, uses `"unconditional"`.
         padding: Default
             `"no padding; all returned bit patterns belong to the declared registers"`.
             Meaning of any padding, and which returned coordinates belong to
@@ -800,7 +815,7 @@ class ObservationSpec(ReadoutDetails):
 
     @model_validator(mode="after")
     def _readout(self):
-        """Admit only the detail fields that each readout kind uses.
+        """Accept only the detail fields that each readout kind uses.
 
         The class docstring lists the fields of each kind. The count range
         ``1 <= shots <= 2**63 - 1`` is ``_validation.MAX_COUNT``.
@@ -812,8 +827,8 @@ class ObservationSpec(ReadoutDetails):
             if self.shots:
                 raise ValueError("a trajectory has zero raw shots")
             if self.population != "unconditional":
-                raise ValueError("a trajectory observes deterministic coherent evolution; measurement-conditioned "
-                                 "populations are not admitted")
+                raise ValueError("a trajectory requires deterministic coherent evolution "
+                                 "without preceding measurements or resets")
             return self
         if self.positions:
             raise ValueError("observation points belong only to trajectory readout")
@@ -963,9 +978,10 @@ def readout_shape(*, kind, details, width, classical_width, repetitions=None, ma
     (``point_items``), checked against the remaining capacity point by point.
     The same call checks that the detail fields agree with the layout.
 
-    width is the sum of all selected circuit quantum registers, and counts use
-    the actual classical bits layout. This does not select/prepare a Program or
-    require execution-only positive repetitions or an instruction position.
+    width is the total width of the circuit's quantum registers, and counts
+    use the circuit's classical bit layout. This neither chooses nor prepares
+    a Program, and it requires neither the positive repetitions that
+    execution needs nor an instruction position.
 
     Args:
         kind: Readout kind, or None for a node without readout.
@@ -973,8 +989,8 @@ def readout_shape(*, kind, details, width, classical_width, repetitions=None, ma
         width: Total quantum width, or None when unresolved.
         classical_width: Total classical bit width, or None when unresolved.
         repetitions: Shots for counts, or None when unresolved.
-        max_items: Optional admitted entry limit, checked without forming ``2**k`` or ``2**classical_width``.
-        max_items_source: Optional clause that a refusal appends to name where
+        max_items: Optional limit on the entries, checked without forming ``2**k`` or ``2**classical_width``.
+        max_items_source: Optional clause that the error message appends to name where
             ``max_items`` comes from, such as a Run's ``max_data_bytes``.
 
     Returns:
@@ -983,7 +999,8 @@ def readout_shape(*, kind, details, width, classical_width, repetitions=None, ma
     """
     for size in (width, classical_width, repetitions, max_items):
         if size is not None and (type(size) is not int or size < 0):
-            raise ValueError("readout dimensions/populations require nonnegative integers or unknown")
+            raise ValueError("width, classical_width, repetitions and max_items "
+                             "must be nonnegative integers or None")
     if kind != "trajectory" and details.positions:
         raise ValueError("observation points belong only to trajectory readout")
     if (kind == "estimated_observable") != (details.estimate is not None):
@@ -1108,12 +1125,13 @@ class Experiment(Record):
         return self
 
     def _resolved_observation(self, admission, *, construction_id: ContentID | None = None) -> tuple[str, ObservationSpec]:
-        """Return this experiment's setting label and `ObservationSpec`, taking a batch experiment's kind and repetitions from the admitted Program.
+        """Return this experiment's setting label and `ObservationSpec`, taking a batch experiment's kind and repetitions from the checked Program.
 
         ``construction_id`` is required for a probability batch carrying an
         amplitude declaration, whose declaration is bound to that
-        construction. Preparation, analysis and restoration supply the same
-        selected child identity. Direct readouts keep their declaration.
+        construction. Preparation, analysis and restoration supply the
+        content hash of the same construction. Direct readouts keep their
+        declaration.
         """
         if self.batch is None:
             return self.setting, self.observation
@@ -1137,12 +1155,12 @@ class Experiment(Record):
 
 
 class RandomState(Record):
-    """Resolved entropy and exact PCG64 states, without an array or a live generator.
+    """The root entropy and the exact PCG64 states of the random streams, as text, without a NumPy generator.
 
     Attributes:
         entropy: Root nonnegative seed entropy used by NumPy SeedSequence.
         spawn_key: Child-stream path under the original root seed.
-        method_state: Serialized PCG64 state for scientific selection decisions.
+        method_state: Serialized PCG64 state of the stream for the Method's random choices.
         backend_state: Serialized independent PCG64 stream used to generate backend seeds.
     """
 
@@ -1169,11 +1187,11 @@ class RandomStreams:
     `Method.plan` receives it as `rng`, and a Method draws its random
     choices from `rng.method`.
     The root SeedSequence spawns two independent PCG64 streams. The method
-    stream serves scientific selection (for example a default random
-    initialization). The backend stream only generates execution seeds. Keeping
+    stream serves the Method's random choices (for example a default random
+    initial state). The backend stream only generates execution seeds. Keeping
     them apart means that the number of backend seeds drawn never shifts the
-    method's draws, so one seed reproduces the same selection however often
-    it is executed. ``snapshot`` records the exact generator states in the
+    method's draws, so one seed reproduces the same choices however often
+    the Plan is executed. ``snapshot`` records the exact generator states in the
     Plan, and ``restore`` resumes them without replaying earlier draws.
 
     Args:
@@ -1255,8 +1273,8 @@ class Plan(Record):
     Run, the settings of a later analysis and a later accuracy criterion
     are not Plan fields, so they do not change its content hash. A row of a
     comparison or search holds at most one Plan, and selecting a row returns
-    it with the same Plan object ([Execute the selected
-    row](../scientist.md#execute-the-selected-row)). A Plan holds its input
+    it with the same Plan object ([Solve the compared
+    rows](../scientist.md#execute-the-selected-row)). A Plan holds its input
     data and the circuit blocks that the Method attached to it, and its JSON
     description cannot rebuild them.
 
@@ -1292,7 +1310,7 @@ class Plan(Record):
         assumptions: Default `()`. Mathematical or experimental assumptions,
             kept without checking them.
         requirements: Default `()`. Unmet operational or scientific
-            requirements that the Method reports. `prepare` refuses a Plan
+            requirements that the Method reports. `prepare` rejects a Plan
             that has any.
         content_id: The Plan's content hash, read-only. It covers the fields
             above, with the concrete types of the Problem, Method and output,
@@ -1350,7 +1368,8 @@ class Plan(Record):
     def to_record(self):
         """Return the JSON form of the Plan's fields.
 
-        It acquires nothing and serializes no bound native data.
+        It runs no circuit and serializes none of the blocks or inputs bound
+        to the Plan with `_bind`.
         """
         return self.model_dump(mode="json", exclude_computed_fields=True)
 
@@ -1377,9 +1396,9 @@ class Plan(Record):
 
     @property
     def blocks(self):
-        """The live circuit blocks that the Method bound to this Plan with `_bind`.
+        """The in-memory circuit blocks that the Method bound to this Plan with `_bind`.
 
-        A Method's archive hook saves them, as [Run your own
+        A Method's `save_archive` hook saves them, as [Run your own
         circuit](../own_circuit.md) shows.
         """
         return self._blocks
@@ -1390,8 +1409,8 @@ class Plan(Record):
         A supported hook for Method authors ([Add a
         Method](../algorithm_protocol.md#supported-protected-extension-hooks)).
         It compiles nothing, measures nothing and does not rebuild the
-        inputs. An archive reader restores the same blocks with it instead
-        of planning again.
+        inputs. A Method's `load_archive` hook restores the same blocks with
+        it instead of planning again.
 
         Args:
             blocks (tuple): The live circuit blocks of the construction.
@@ -1411,7 +1430,7 @@ class Plan(Record):
         return self
 
     def __eq__(self, other):
-        """Compare concrete type and portable identity. Bound native data is ignored."""
+        """Compare the concrete type and the content hash, ignoring the blocks and inputs bound with `_bind`."""
         return type(self) is type(other) and self.content_id == other.content_id
 
     @property
@@ -1481,12 +1500,12 @@ class Plan(Record):
         """Return the experiment and the merged parameter values of one point.
 
         The values merge, in order, the Plan's Program bindings, the selected
-        setting's bindings and the explicit ``bindings``. Each is admitted in
-        its declared domain. A name bound twice must have equal values, so a
-        point can add choices but never override one. Overriding needs a new
-        Plan. Every range axis must then have an on-grid value, and the
-        Method's ``validate_point`` checks its own relations. No selected
-        record is constructed here.
+        setting's bindings and the explicit ``bindings``. Each value is
+        checked against its declared domain. A name bound twice must have
+        equal values, so a point can add choices but never override one.
+        Overriding needs a new Plan. Every range axis must then have an
+        on-grid value, and the Method's ``validate_point`` checks its own
+        relations. No record is constructed here.
         """
         selected = self._experiment_map.get(experiment)
         if selected is None:
@@ -1524,11 +1543,12 @@ class Plan(Record):
         return selected, values
 
     def _resolve_selection(self, experiment, bindings):
-        """Reuse the latest resolution and its canonical binding alias.
+        """Reuse the most recent resolution, matched by its requested or canonical bindings.
 
-        This Plan keeps one resolution pair. A miss releases this slot before
-        resolving the requested point. The stored pair owns its selected
-        Experiment and Program, with their shared children.
+        This Plan caches one resolution. When a request does not match it,
+        the cached entry is released before the requested point is resolved.
+        The cached entry holds its Experiment and Program, with the records
+        they share.
         """
         raw = tuple(bindings)
         cached = self._cache.get("resolution_memo")
@@ -1544,7 +1564,7 @@ class Plan(Record):
         return resolved
 
     def _resolve_selection_once(self, experiment, bindings):
-        """Merge and admit the point's bindings, let the Method specialize the experiment, and build the point's Program.
+        """Merge and check the point's bindings, let the Method specialize the experiment, and build the point's Program.
 
         The specialized experiment must keep its name, setting, batch and
         setting index.
@@ -1559,7 +1579,7 @@ class Plan(Record):
         return selected, self._selected_program(selected, values)
 
     def _selected_program(self, selected, values):
-        """Construct and validate the complete effective point after admission."""
+        """Construct and validate the Program of the point after its bindings are checked."""
         program = self.construction.program
         batch = self._program_nodes[selected.batch] if selected.batch is not None else None
         if batch is not None:
@@ -1578,11 +1598,12 @@ class Plan(Record):
         return program
 
     def _selected_construction(self, experiment, bindings):
-        """Reuse the latest construction and its canonical binding alias.
+        """Reuse the most recent construction, matched by its requested or canonical bindings.
 
-        The single construction slot can share its Program with the resolution
-        slot when both describe that point. A miss releases this slot before
-        deriving the new construction. Its normal admission runs on each miss.
+        The cached construction can share its Program with the cached
+        resolution when both describe that point. When a request does not
+        match it, the cached entry is released before the new construction is
+        derived, and the new construction is checked as usual.
         """
         raw = tuple(bindings)
         cached = self._cache.get("construction_memo")
@@ -1598,13 +1619,14 @@ class Plan(Record):
         return resolved
 
     def _selected_construction_once(self, experiment, bindings):
-        """Derive the construction of one admitted point without reselecting it.
+        """Derive the construction of one checked point without choosing it again.
 
-        Selected definitions and encodings are reused from the Plan, filtered
-        to the point's Program. A Method may change a host-kernel declaration
-        at a point only as a revision of its selected template with the same
-        name, implementation, inputs and dependencies, so the point cannot
-        substitute another kernel or input. When nothing changes, the Plan's
+        The definitions and encodings that the Plan chose are reused, filtered
+        to the point's Program. A Method may change the declaration of a
+        classical routine at a point only as a revision of the
+        Plan's declaration with the same name, implementation, inputs and
+        dependencies, so the point cannot substitute another routine or
+        input. When nothing changes, the Plan's
         own construction object is returned.
         """
         selected, program = self._resolve_selection(experiment, bindings)
@@ -1666,7 +1688,7 @@ class Realization(Record):
         return self
 
     def _selected_program(self, plan: Plan):
-        """Validate the pair once and return its experiment and selected Program."""
+        """Validate this Realization against the Plan once and return its experiment and Program."""
         if self.plan_id != plan.content_id:
             raise ValueError("realization requires its exact immutable Plan")
         selected, program = plan._resolve_selection(self.experiment, self.bindings)
@@ -1675,7 +1697,7 @@ class Realization(Record):
         return selected, program
 
     def validate_plan(self, plan: Plan) -> Experiment:
-        """Validate this reference/choice pair without traversing the experiment table."""
+        """Check this Realization against `plan` and return its experiment, without traversing the experiment table."""
         return self._selected_program(plan)[0]
 
     def _selected_construction(self, plan: Plan):
@@ -1687,21 +1709,21 @@ class Realization(Record):
         return selected, construction
 
     def selected_construction(self, plan: Plan) -> SelectedConstruction:
-        """Derive the selected graph using the same pair-boundary merge rule."""
+        """Return the construction of this point, derived with the same merge rule for its bindings."""
         return self._selected_construction(plan)[1]
 
     def resolved_observation(self, plan: Plan) -> tuple[str, ObservationSpec]:
-        """Resolve IR acquisition using the effective point, before native reservation.
+        """Return the setting label and readout of this point, before any bytes are set aside for its data.
 
-        The point is resolved through the Plan's memo and its Program's
-        stored Readiness, so repeated calls for the point that occupies the
-        recent-resolution slot (and, for a batch amplitude readout, the
-        recent-construction slot) repeat neither the Method's point relations
-        nor the Program admission. An evicted point is resolved and admitted
-        again. A caller that already holds the point's Experiment and
-        SelectedConstruction calls ``Experiment._resolved_observation`` with
-        an ``_Admission`` of that construction's Program
-        (``_Admission.admitted``) and its identity.
+        The point is resolved through the Plan's cache and its Program's
+        stored readiness, so repeated calls for the point in the cached
+        resolution (and, for a batch amplitude readout, in the cached
+        construction) repeat neither the Method's checks of the point nor
+        the Program checks. A point that is not in the cache is resolved and
+        checked again. A caller that already holds the point's Experiment
+        and SelectedConstruction calls ``Experiment._resolved_observation``
+        with an ``_Admission`` of that construction's Program
+        (``_Admission.admitted``) and its content hash.
         """
         selected, program = self._selected_program(plan)
         if selected.batch is None:
@@ -1722,6 +1744,6 @@ MAX_RUNTIME_SEED = 2**32 - 1
 
 
 class RuntimeOptions(Record):
-    """Actual uint32 backend seed saved with one preparation."""
+    """The uint32 backend seed that one preparation used, saved with it."""
 
     seed: Annotated[StrictInt, Field(ge=0, le=MAX_RUNTIME_SEED)]

@@ -1,4 +1,4 @@
-"""Explicit selected component bounds, without acquiring a solution vector."""
+"""Explicit component bounds of a planned LCHS construction, without computing a solution vector."""
 
 from nwqlib._limits import DEFAULT_MAX_BYTES
 
@@ -24,11 +24,12 @@ class LCHSRefinement(Record):
     `result.verify(checks=...)`, for example
     `result.verify(checks=LCHSRefinement(components=("duhamel",)))`.
     `components` is the only required argument. The call returns
-    `(receipt, facts)`: a `VerificationReceipt` that records the check, its
-    raw values and the numerical calls it made, and a tuple of `FramedFact`
-    records that cite the receipt. `facts` holds the refined physical L2 components and
-    their sum carried into the requested output, `algorithmic_approximation`,
-    which `result.assess` can use. A request for `"spectral_norms"` alone
+    `(receipt, facts)`, where `receipt` is a `VerificationReceipt` that
+    records the check, its raw values and the numerical calls it made, and
+    `facts` is a tuple of `FramedFact` records that cite the receipt.
+    `facts` holds the refined physical L2 components and their sum carried
+    into the requested output, `algorithmic_approximation`, which
+    `result.assess` can use. A request for `"spectral_norms"` alone
     leaves `facts` empty.
     Refinement defines no pass or fail check.
 
@@ -56,15 +57,17 @@ class LCHSRefinement(Record):
             not error components, such as the spectral norms.
         dense_validation: Default `False`. Also evaluate dense commutator
             norms for `"fixed_pf"`, as a check of the Pauli-triangle bound
-            that does not replace it. Requires `"fixed_pf"`, and a periodic
+            (the commutator bound summed term by term over the Pauli
+            commutation table), which it does not replace. Requires `"fixed_pf"`, and a periodic
             stencil refuses it.
         max_bytes: Default 10 GB (decimal, `10_000_000_000` bytes). Upper
             limit on the known arrays of this call.
         max_dense_work: Default `1e8` (`100_000_000`). Upper limit on the
             counted dense work of this call.
         max_structural_work: Default `1e9`. Upper limit on the counted work
-            of reading the stored node table, preparing the count of Pauli
-            commutator terms and evaluating them.
+            of reading the saved node table, preparing the Pauli commutation
+            table (the anticommuting Pauli pairs and nested-commutator triples
+            of the commutator bound) and evaluating its terms.
         max_node_evaluations: Default `4096`. Upper limit on the number of
             k nodes times operator applications evaluated.
         max_steps: Default `100_000`. Largest saved product-formula step
@@ -99,7 +102,7 @@ class LCHSRefinement(Record):
             reference="ACL arXiv:2312.03916v2 Eq.(2); DLMF3.5.19/21; CSTWZ PRX11,011020 doi:10.1103/PhysRevX.11.011020 Props9-10, Eqs120-121")
 
     def verification_checks(self, result):
-        """Declare no checks, since refinement publishes component bounds rather than a pass test."""
+        """Declare no checks, since refinement reports component bounds rather than a pass test."""
         _validate_result(result.plan, result)
         return ()
 
@@ -107,9 +110,9 @@ class LCHSRefinement(Record):
 def _spectral_norm(matrix, checks, counts):
     """Return ||matrix||_2, or None when a nonzero matrix gives a nonfinite or zero norm.
 
-    The 4*d*d entrywise scan and scaled copy are admitted first, and the
-    singular values (_linalg_laws.singular_values_work) only for a nonzero
-    matrix. An exactly zero matrix has norm zero.
+    The 4*d*d entrywise scan and scaled copy are counted against the work
+    limit first, and the singular values (_linalg_laws.singular_values_work)
+    only for a nonzero matrix. An exactly zero matrix has norm zero.
     """
     from nwqlib._linalg_laws import singular_values_work
     from .inhomogeneous_theory import _scaling_safe_spectral_norm
@@ -160,8 +163,8 @@ def _fixed_pf(plan, grid, checks, counts):
     Propositions 9-10 (see
     time_independent_terms._fixed_trotter_certificate_records). It is then
     weighted by its physical input and PSD recovery. Step counts are read
-    from the Plan's host actions (classical) or the selected SELECT
-    (quantum), never reselected. Returns the bound, an unavailability
+    from the Plan's classical actions (classical execution) or the planned
+    SELECT (quantum execution), never chosen again. Returns the bound, an unavailability
     reason, and the optional dense validation values per application.
     """
     from .time_independent_terms import (stored_pf_nodes,
@@ -212,20 +215,21 @@ def _fixed_pf(plan, grid, checks, counts):
 def refine(plan, result, *, checks):
     """Evaluate requested component bounds for an existing LCHS Result.
 
-    Refinement answers what the selected construction's error components
-    are, at the saved quadrature, Duhamel nodes and step counts. It never
-    acquires a solution vector, reselects a grid or steps, or densifies a
-    compact input. All published quantities, their frames and the argument
-    record are admitted against max_bytes before any numerical work, and each
-    numerical kernel is admitted against its own work cap before it runs.
+    Refinement evaluates the error components of the planned construction
+    at the saved quadrature, Duhamel nodes and step counts. It never computes
+    a solution vector, chooses a new grid or step count, or converts a
+    compact input to a dense matrix. All reported quantities, their frames
+    and the argument record are checked against max_bytes before any
+    numerical work, and each numerical routine is checked against its own
+    work limit before it runs.
 
     Refined duhamel_quadrature and trotter_synthesis values replace the
     planned components of the same name. The complete set is then propagated
     once into the requested output frame as algorithmic_approximation
     (solution_error_budget.propagate_physical_error). That value stays None
     while any component is unknown, because a missing term is not zero.
-    Spectral norms and dense diagnostics are published under the checks name
-    and answer no error term.
+    Spectral norms and dense diagnostics are reported under the checks name
+    and belong to no error term.
 
     Returns:
         A VerificationReceipt holding every observation, and a tuple with the

@@ -1,4 +1,4 @@
-"""Implementation registry for LCU PREP subroutines."""
+"""Table of the LCU PREP implementations, with their methods and capabilities."""
 
 from __future__ import annotations
 

@@ -1,7 +1,8 @@
-"""Sampling identities of count populations, derived from preparation receipts and provider job coordinates.
+"""Identifiers of the sampling behind sets of counts, from preparation records and provider job coordinates.
 
-This records known reuse, not circuit equivalence or statistical independence.
-There is no native traversal, payload hash, numerical work or acquisition here.
+The identifiers record known reuse of a sampling stream, not circuit
+equivalence or statistical independence. This module traverses no backend
+circuit, hashes no saved circuit data, does no numerical work and runs nothing.
 """
 
 from dataclasses import dataclass
@@ -13,11 +14,11 @@ from nwqlib.operators.access import DEFAULT_INPUT_BYTES
 
 @dataclass(frozen=True)
 class CountsSource:
-    """Identity of one counts population and of its fixed sampling stream, if any.
+    """Identifier of one set of counts and of its fixed sampling stream, if any.
 
-    ``kind`` is ``fixed_seed`` when the preparation receipt fixes the sampler
+    ``kind`` is ``fixed_seed`` when the preparation record fixes the sampler
     seed, ``unknown`` when sampling semantics are not recorded, or the
-    receipt's own sampling kind otherwise.
+    record's own sampling kind otherwise.
     """
 
     identity: str
@@ -26,21 +27,21 @@ class CountsSource:
 
 
 class CountsSources:
-    """Bounded sampling identities for one Run's admission or one reduction.
+    """Sampling identifiers, within byte limits, for the submission checks of one Run or for one reduction.
 
-    Likelihood-based estimators multiply the likelihoods of counts
-    populations and so assume those populations are independent. A backend
-    sampler with a fixed seed returns the same counts for the same circuit
-    and context. Feeding that population in twice, or two queries sharing one
-    seeded stream, would count one set of samples as independent evidence
-    more than once and overstate confidence. This owner derives a sampling
-    identity from the preparation receipt (seed, backend configuration,
-    target, compiler, environment and the prepared point), refuses a new
-    submission whose stream is already used, and refuses a reduction that
-    would count a population twice. Re-reading the very same acquisition,
-    for example during pending recovery, stays legal. Consumers are the Run's
-    submission admission, expectation counts reduction and the QPE likelihood
-    controllers.
+    Likelihood-based estimators multiply the likelihoods of sets of counts and
+    so assume those sets are independent samples. A backend sampler with a
+    fixed seed returns the same counts for the same circuit and context.
+    Feeding that set in twice, or two queries sharing one seeded stream, would
+    count one set of samples as independent evidence more than once and
+    overstate confidence. This class derives a sampling identifier from the
+    preparation record (seed, backend configuration, target, compiler,
+    environment and the prepared point), refuses a new submission whose
+    stream is already used, and refuses a reduction that would count one set
+    of counts twice. Reading the same data collection again, for example while
+    a pending job is recovered, stays allowed. It is used by the Run's
+    submission checks, by the reduction of expectation counts and by the QPE
+    likelihood controllers.
     """
 
     def __init__(self, receipt_for, acquisition_for, *, max_bytes=DEFAULT_INPUT_BYTES):
@@ -60,17 +61,17 @@ class CountsSources:
         return "sha256:" + sha256(encoded.encode("utf-8")).hexdigest()
 
     def _preparation(self, prepared_id):
-        """Return the cached CountsSource that one preparation receipt determines.
+        """Return the cached CountsSource that one preparation record determines.
 
-        A fixed-seed receipt yields a stream identity (seed, backend
-        configuration, target, compiler and environment) and a population
-        identity that adds the prepared point, construction, observation,
+        A fixed-seed record yields a stream identifier (seed, backend
+        configuration, target, compiler and environment) and a counts
+        identifier that adds the prepared point, construction, observation,
         native basis, logical-to-native map and logical and native layouts.
-        Preparations with equal population identities are one population,
-        since the fixed seed reproduces their counts. Without a receipt the
-        kind is ``unknown``. Otherwise the receipt's own sampling kind is kept,
-        and resolve derives the identity from the actual acquisition. Raises
-        ValueError for a receipt that is not a counts preparation.
+        Preparations with equal counts identifiers give one set of counts,
+        since the fixed seed reproduces their counts. Without a record the
+        kind is ``unknown``. Otherwise the record's own sampling kind is kept,
+        and resolve derives the identifier from the data collection that took
+        place. Raises ValueError for a record that is not a counts preparation.
         """
         cached = self.preparations.get(prepared_id)
         if cached is None:
@@ -94,7 +95,7 @@ class CountsSources:
         return cached
 
     def admit_preparation(self, prepared_id):
-        """Reject already known unusable likelihood input before a new submit."""
+        """Reject likelihood input already known to be unusable before a new submission."""
         source = self._preparation(prepared_id)
         if source.kind == "unknown":
             raise ValueError("independent count likelihoods require known sampling preparation semantics")
@@ -102,10 +103,10 @@ class CountsSources:
             raise ValueError("one fixed sampling stream cannot supply another independent likelihood population")
 
     def reserve_preparation(self, prepared_id):
-        """Keep a committed fixed stream, including unused or uncertain attempts.
+        """Keep a saved fixed stream, including unused or uncertain attempts.
 
-        Reservation does not claim an observed population. The actual completed
-        acquisition is still joined and checked by require_independent.
+        Keeping the stream does not claim observed counts. The completed data
+        collection is still joined and checked by require_independent.
         """
         source = self._preparation(prepared_id)
         if source.kind == "fixed_seed":
@@ -115,11 +116,11 @@ class CountsSources:
         """Return the CountsSource of one attempt of a preparation.
 
         A fixed-seed preparation is its own source. Any other preparation is
-        identified by the provider coordinates of the actual acquisition
-        (provider, account, instance, project, region, cluster, host, job,
-        child job, item and result key), so that one preparation can supply
-        several fresh populations. An attempt without a provider locator is an
-        unresolved gap of kind ``unknown``. Raises ValueError when the
+        identified by the provider coordinates of the data collection that took
+        place (provider, account, instance, project, region, cluster, host,
+        job, child job, item and result key), so that one preparation can
+        supply several fresh sets of counts. An attempt without a provider job
+        locator is an unresolved gap of kind ``unknown``. Raises ValueError when the
         attempt's submission item names another preparation.
         """
         cached = self._preparation(prepared_id)
@@ -138,10 +139,10 @@ class CountsSources:
         return CountsSource(identity, None, cached.kind)
 
     def observation(self, chunk):
-        """Return the CountsSource of an observed chunk after checking its receipt.
+        """Return the CountsSource of an observed chunk after checking its preparation record.
 
-        When a receipt exists, it must record the chunk's Plan, point,
-        observation, layouts and population. Raises ValueError otherwise.
+        When a record exists, it must record the chunk's Plan, point,
+        observation, layouts and population field. Raises ValueError otherwise.
         """
         receipt = self.receipt_for(chunk.prepared_id)
         if receipt is not None and (receipt.plan_id != chunk.plan_id or receipt.realization_id != chunk.realization_id
@@ -151,15 +152,17 @@ class CountsSources:
         return self.resolve(chunk.prepared_id, chunk.attempt)
 
     def require_independent(self, chunk):
-        """Refuse known reused/unknown likelihood data before a caller consumes it.
+        """Refuse likelihood data known to be reused, or of unknown sampling, before a caller uses it.
 
-        Re-reading the very same acquisition is legal for pending recovery. It
-        does not authorize a second likelihood update. The controller owns that
-        saved transition. Distinct seeds/acquisitions still need model premises.
+        Reading the same data collection again is allowed when a pending job is
+        recovered. It does not permit a second likelihood update, a saved
+        transition that belongs to the controller. Distinct seeds or data
+        collections still need the model's assumptions.
         """
         source = self.observation(chunk)
         if source.kind == "unknown":
-            raise ValueError("independent count likelihoods require actual sampling preparation receipts")
+            raise ValueError("count likelihood updates require known sampling semantics "
+                             "and an identified source of count data")
         previous = self.counted.get(source.identity)
         if previous is not None and previous != chunk.acquisition_key:
             raise ValueError("one frozen counts source cannot supply independent likelihood populations")

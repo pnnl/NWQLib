@@ -1,11 +1,14 @@
-"""IBM Quantum Runtime detached adapter for SamplerV2 counts and EstimatorV2 estimates.
+"""IBM Quantum Runtime adapter for SamplerV2 counts and EstimatorV2 estimates, with jobs that continue after Python exits.
 
-Preparation compiles each selected circuit to the device ISA with the Plan's
-runtime seed and keeps the logical-to-physical layout. Every submitted job
-carries the tag ``nwqlib:<submission UUID>``, which is how ``reconcile`` finds
-a job whose creation acknowledgement was lost. Each PUB carries its original
-coordinate and preparation snapshot in circuit metadata, so decoding does not
-depend on the order of returned PUBs. The adapter follows the contract in
+Preparation compiles each circuit to the device's instruction set (an ISA
+circuit, in IBM's terms) with the Plan's runtime seed and keeps the
+logical-to-physical layout. Every submitted job carries the tag
+``nwqlib:<submission UUID>``, which is how ``reconcile`` finds a job whose
+creation acknowledgement was lost. Each PUB (primitive unified bloc, a circuit
+with its parameter values and settings, the unit of input of an IBM primitive)
+carries its original coordinate and the UUID of its
+prepared circuit (``snapshot``) in circuit metadata, so decoding does not
+depend on the order of returned PUBs. The adapter follows the rules in
 ``nwqlib.backends.connection``. docs/ibm.md records the offline qualification
 scope.
 """
@@ -28,15 +31,15 @@ from nwqlib.backends._qpy_buffer import QpyBuffer
 
 
 def sampler_decode_bytes(widths, shots):
-    """Bound one scalar Sampler PUB's join and decode ndarray element bytes.
+    """Bound the NumPy array element bytes of joining and decoding one scalar Sampler PUB.
 
     Args:
         widths: Nonnegative classical-register widths in join order, with
             at least one register. Their sum w can exceed 64.
-        shots: Nonnegative common returned-shot population S.
+        shots: Nonnegative number S of returned shots, common to all registers.
 
-    Let Q=sum(ceil(w_r/8)) and B=ceil(w/8). Include the selected packed
-    input arrays, counting shared element buffers once. Qiskit 2.6.0
+    Let Q=sum(ceil(w_r/8)) and B=ceil(w/8). Include the packed input arrays
+    that are used, counting shared element buffers once. Qiskit 2.6.0
     concatenation holds the inputs, their padded unpacked bases and the
     concatenated bits, using S*(9*Q+w) bytes. Repacking holds the inputs,
     concatenated bits, padding when needed and the packed output, using
@@ -49,20 +52,21 @@ def sampler_decode_bytes(widths, shots):
     defaultdict(int) accumulation use Python objects, with no new ndarray
     element buffer. The final dict copy shares its keys and values. The
     adapter's bit-string permutation also uses Python objects. The only
-    live array payload after joining is S*(Q+B), already below the join
+    array data still held after joining is S*(Q+B), already below the join
     bound, so this branch returns the join bound.
 
     At w<=64, byte packing and gather hold at most four uint64 shot arrays,
-    or 32*S bytes. NumPy 2.5.2 unique(return_counts=True) holds native
-    outcomes, gathered input, a sorted flattening copy, a Boolean mask,
+    or 32*S bytes. NumPy 2.5.2 unique(return_counts=True) holds the outcome
+    array, gathered input, a sorted flattening copy, a Boolean mask,
     unique values and run-start/count arrays, bounded by 25*S+24*M+16
     bytes with M=min(S, 2**w). Packed inputs and joined bytes add S*(Q+B).
     Disjoint phases use their maximum, including the returned pair.
 
-    This logical payload bound assumes eight-byte intp, uint64 and int64
-    and release of previous PUB temporary arrays before the next admission.
-    It excludes Python headers, dictionaries, strings, integers, public
-    records, transport, other PUBs and fixed native workspace. It is not
+    This bound on array data assumes eight-byte intp, uint64 and int64 and
+    release of the previous PUB's temporary arrays before the next PUB is
+    checked. It excludes Python headers, dictionaries, strings, integers,
+    public records, transport, other PUBs and the fixed workspace of compiled
+    libraries. It is not
     a Python-heap or process-RSS bound. Re-derive it when Qiskit's join,
     padding or get_counts, the gather expressions, NumPy's sorted unique
     implementation, dtype widths, output representation or lifetimes change.
@@ -118,7 +122,7 @@ class IBMRuntimeBackend(Record):
     Construction reads no credential and contacts no service. Preparation and
     retrieval use the saved SDK account named by `account_name`, or otherwise the
     token in the environment variable named by `token_env`, and no credential is
-    stored in the configuration or the Run's files.
+    saved in the configuration or the Run's files.
 
     Preparation compiles each circuit for the device with the Plan's runtime seed
     and keeps the logical-to-physical layout. The Estimator's resilience level is
@@ -143,7 +147,7 @@ class IBMRuntimeBackend(Record):
         token_env: Default `"NWQLIB_IBM_RUNTIME_TOKEN"`. Environment variable that
             holds the API token, read only during preparation or retrieval.
         mode: Default `"job"`. `"batch"` or `"session"` attaches every job to the
-            existing container `container_id`.
+            existing Batch or Session whose ID is `container_id`.
         container_id: Default `None`. ID of an existing Batch or Session. Required
             in batch and session mode, and must be `None` in job mode.
         calibration_id: Default `None`. Device calibration ID passed to the IBM
@@ -163,8 +167,9 @@ class IBMRuntimeBackend(Record):
             gives no bound at any level.
         initial_layout: Default `None`. Physical qubit for each logical qubit,
             without repeats.
-        max_input_bytes: Required. Positive. Limit in bytes on the QPY copy of
-            each prepared circuit, which only a Run saved to a directory writes.
+        max_input_bytes: Required. Positive. Limit in bytes on the QPY copy
+            (Qiskit's binary circuit format) of each prepared circuit, which only
+            a Run saved to a directory writes.
 
     Raises:
         ValueError: If `container_id` is given in job mode or missing in batch or
@@ -206,7 +211,7 @@ class IBMRuntimeBackend(Record):
         return self
 
     def target_for(self, observation):
-        """Admit counts or a provider estimate before any service contact.
+        """Accept counts or a provider estimate before any contact with the service.
 
         A zero observable is rejected because its expectation is exactly zero,
         so the Method can resolve that scalar without a job.
@@ -228,7 +233,7 @@ class IBMRuntimeBackend(Record):
         """Open an SDK service from the saved account or, otherwise, the token variable.
 
         The credential is read here, at the first explicit action, and is never
-        saved with the configuration or in the Run's files. The live service
+        saved with the configuration or in the Run's files. The service object
         stays in the Run's backend context only while the process runs.
         """
         from nwqlib._optional import optional_import
@@ -241,13 +246,13 @@ class IBMRuntimeBackend(Record):
         return IBMQuantumComputeService(channel="ibm_quantum_platform", token=token, instance=self.instance)
 
     def _service(self, context):
-        """The Run's one live service, opened on first use and never saved."""
+        """The Run's one service object, opened on first use and never saved."""
         if "service" not in context:
             context["service"] = self._new_service()
         return context["service"]
 
     def _backend(self, context):
-        """The Run's live device handle, checked to be the configured device."""
+        """The Run's device object, checked to be the configured device."""
         if "device" not in context:
             context["device"] = self._service(context).backend(self.device, instance=self.instance,
                                                          calibration_id=self.calibration_id)
@@ -257,7 +262,7 @@ class IBMRuntimeBackend(Record):
         return backend
 
     def _options(self, run, kind):
-        """Build the requested primitive options and their canonical JSON identity.
+        """Build the requested primitive options and their canonical JSON form.
 
         The same JSON is compared at launch, so a job is submitted with exactly
         the options recorded at preparation. Estimator precision belongs to the
@@ -305,10 +310,10 @@ class IBMRuntimeBackend(Record):
     def _observable(estimate, layout, width, run):
         """Map the full weighted logical observable onto the ISA circuit's physical qubits.
 
-        The byte admission and the exact-zero simplification are described in
+        The byte check and the exact-zero simplification are described in
         ENGINEERING_CONSTANTS.md, "IBM primitive preparation". The mapped
-        observable of the most recent (estimate identity, layout, width) is
-        kept in the open Run's live state and shared by consecutive points that
+        observable of the most recent (estimate content hash, layout, width) is
+        kept in the open Run's in-memory state and shared by consecutive points that
         repeat that key. A new key replaces it, and a reopened Run builds it
         again when needed.
         """
@@ -323,7 +328,7 @@ class IBMRuntimeBackend(Record):
 
     @staticmethod
     def _mapped_observable(estimate, layout, width, run):
-        """Build and admit one layout-mapped ``ObservablesArray`` (``_observable``)."""
+        """Build and check one layout-mapped ``ObservablesArray`` (``_observable``)."""
         from qiskit.primitives.containers import ObservablesArray
         from qiskit.quantum_info import SparseObservable, SparsePauliOp
         terms, logical_width = len(estimate.labels), len(estimate.labels[0])
@@ -339,15 +344,16 @@ class IBMRuntimeBackend(Record):
         return ObservablesArray(sparse, num_qubits=width, validate=False)
 
     def prepare(self, circuit, *, observation, runtime, position, source_definitions, run, snapshot):
-        """Compile the bound point to IBM ISA while preserving logical readout and observable
-        layout.
+        """Compile the circuit of the parameter-bound point to an IBM ISA circuit, keeping the
+        logical readout and observable layout.
 
         The Plan's runtime seed selects the transpiler seed, so compilation is
-        repeatable for the same device target. The snapshot is written into circuit
-        metadata and later checked on every returned PUB. The named classical
+        repeatable for the same device target. The UUID of the prepared circuit
+        (``snapshot``) is written into circuit metadata and later checked on
+        every returned PUB. The named classical
         registers must survive compilation unchanged, because the decoder joins
         them per shot and restores the original bit positions. The circuit is
-        saved as QPY before submission only when the Run is durable.
+        saved as QPY before submission only when the Run has a folder on disk.
         """
         context = run._state["backend_context"]
         from importlib.metadata import version
@@ -425,7 +431,7 @@ class IBMRuntimeBackend(Record):
             probability_window_exclusions=("optimization_level",) if self.optimization_level != 1 else None)
 
     def restore_native(self, record, payload=None, *, run):
-        """Rebuild the prepared association from a saved receipt, loading QPY only when supplied.
+        """Rebuild the prepared association from a saved preparation record, loading QPY only when supplied.
 
         Retrieval of a known job needs no circuit, so ``payload`` is None there.
         A new submission from saved data needs the QPY. No recompilation happens
@@ -449,7 +455,7 @@ class IBMRuntimeBackend(Record):
                                          requested_options_json=record.provider_options_json), observable)
 
     def admit_batch(self, natives):
-        """Admit PUBs that one primitive job can carry.
+        """Accept PUBs that one primitive job can carry.
 
         They share one primitive and one option set. Estimator PUBs share one
         precision, and Sampler PUBs share one positive shot count.
@@ -466,7 +472,7 @@ class IBMRuntimeBackend(Record):
             raise ValueError("IBM sampled acquisitions require positive shots")
 
     def launch(self, natives, *, submission_id, run):
-        """Submit one primitive job for the admitted PUBs and return its locator.
+        """Submit one primitive job for the accepted PUBs and return its job locator.
 
         The job is tagged ``nwqlib:<submission_id>`` for ``reconcile``. Options
         must equal those recorded at preparation. In job mode an ambient
@@ -542,7 +548,7 @@ class IBMRuntimeBackend(Record):
     def reconcile(self, submission, natives, *, run):
         """Find a job whose creation acknowledgement was lost by its submission tag.
 
-        At most two matches are requested. One verified match becomes the
+        At most two matches are requested. One verified match becomes the job
         locator. No match leaves the intent unresolved, and two raise, because
         neither case identifies the original job and neither authorizes a new
         submission.
@@ -566,7 +572,7 @@ class IBMRuntimeBackend(Record):
         return locator
 
     def _decode(self, result, natives, *, job_id, run, completed=()):
-        """Validate the full PUB association, then yield unconsumed observations."""
+        """Validate the full PUB association, then yield the observations not yet saved."""
         from qiskit.primitives.containers import BitArray, PrimitiveResult, PubResult, SamplerPubResult
         from nwqlib.backends.results import BackendRunResult, gather_bits
         from nwqlib.execution import ExecutionMode
@@ -715,7 +721,7 @@ class IBMRuntimeBackend(Record):
         Pending states (INITIALIZING, QUEUED, VALIDATING and RUNNING) map to
         "acknowledged", ERROR and CANCELLED to terminal
         failure or cancellation, and any other state to "uncertain". PUBs that
-        the Run has already published are skipped, and a decode error after
+        the Run has already saved are skipped, and a decode error after
         some PUBs succeeded is returned with those results.
         """
         from nwqlib.backends.connection import BackendRefresh

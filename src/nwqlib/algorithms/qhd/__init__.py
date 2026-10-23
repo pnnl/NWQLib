@@ -1,10 +1,10 @@
 """QHD Method on a one-hot Dirichlet or periodic grid or a binary periodic grid, its schedules, initial
-states, result records, the augmented-Lagrangian layer, box refinement and fault-tolerant resource laws.
+states, result records, the augmented-Lagrangian layer, box refinement and fault-tolerant resource estimates.
 
-Each public name resolves on first use from the module that owns it (``_OWNERS``, PEP 562), so importing
-this package loads no SymPy, SciPy or Qiskit code, as ``docs/FRAMEWORK.md``, "Package Import Surface",
-requires. The QHD guide, ``docs/algorithms/qhd.md``, is the reading entry, and the ``method`` module
-docstring maps the Method to Leng et al., arXiv:2303.01471v1.
+Each public name is imported on first use from the module that defines it (``_OWNERS``, PEP 562), so
+importing this package loads no SymPy, SciPy or Qiskit code, as the package-import section of
+``docs/FRAMEWORK.md`` (anchor ``package-import-surface``) requires. Readers start with the QHD guide, ``docs/algorithms/qhd.md``, and the
+``method`` module docstring maps the Method to Leng et al., arXiv:2303.01471v1.
 """
 
 from importlib import import_module

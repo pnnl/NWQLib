@@ -1,12 +1,15 @@
-"""Bounded selected-construction fold. No payload access, SDK or recipe selection.
+"""Resource totals of a selected construction, from one bounded walk over its Program.
 
-Planning must report what a selected construction costs without building,
-transpiling or simulating it (docs/FRAMEWORK.md, "Resource estimation before
-execution"). This module walks the same Program that logical lowering
-consumes and combines the laws declared on its selected definitions into
-located quantities, each with its interpretation and original evidence. The
-contract for each quantity is docs/resources.md, and docs/development/execution.md
-("Resource estimate bookkeeping") describes how this fold combines the laws.
+The walk, called the fold, combines the costs of the Program's nodes into
+totals and peaks. It reads no input data, imports no quantum SDK and chooses
+no recipe. Planning must report what a selected construction costs without
+building, transpiling or simulating it (docs/FRAMEWORK.md, "Resource
+estimation before execution"). This module walks the same Program from which
+the logical circuit is built and combines the costs declared on its
+selected definitions into quantities, each with its location,
+interpretation and original evidence. docs/resources.md states the meaning
+of each quantity, and docs/development/execution.md ("Resource estimate
+bookkeeping") describes how the fold combines these costs.
 """
 
 from dataclasses import dataclass, replace
@@ -34,16 +37,17 @@ class _Value:
 
     ``value`` is a concrete number, a string naming an entry of the fold's
     local expression table (an unresolved symbolic cost), or None for an
-    unknown cost. Unknown is kept distinct from zero because a missing law,
-    workspace or acquisition kind says nothing about the cost. Treating it as
+    unknown cost. Unknown is kept distinct from zero because a missing cost
+    rule, workspace or observation kind says nothing about the cost. Treating it as
     zero would make an incomplete estimate look cheaper and complete.
 
     ``interpretation`` orders as exact < upper_bound < conditional < estimate.
     A combination takes the weakest meaning among its operands. ``sources``
     are all evidence identities attached to the value. ``derivation_sources``
     are the ones that determined it, which excludes evidence used only to
-    check a known recipe against a declared law. ``requires_serial`` marks a
-    peak that holds only when independent acquisitions run one at a time.
+    check a known gate decomposition against a declared cost rule.
+    ``requires_serial`` marks a peak that holds only when the independent
+    circuit executions of a measurement batch run one after another.
     """
 
     value: int | float | str | None = 0
@@ -71,40 +75,43 @@ _EMPTY = _Value()
 class _Fold:
     """Fold one SelectedConstruction into a WorkloadEstimate without building circuits.
 
-    The fold is an interpretation of the admitted Program in which every node
-    returns a cost per count metric and a peak per located footprint. Its
-    rules are:
+    The fold is an interpretation of the accepted Program in which every node
+    returns a cost per count metric and a peak per (metric, location)
+    footprint. Its rules are:
 
-    - Composition. Sequence and ordered primitive recipes add work and depth.
-      Parallel adds work and takes the maximum depth. Repeat multiplies the
-      body cost by its count without unrolling. A Branch takes the per-metric
-      maximum of its arms as an upper bound, with no probability model. An
-      adaptive body without a declared per-round envelope has unknown costs.
-    - Laws. A BlockCall costs what its SelectedDefinition declares: an exact
-      primitive recipe, applicable ResourceLaw summaries, or one of the
-      registered native CX envelopes. A call with none of these has unknown
-      gate metrics, never zero. When a recipe and a law describe the same
-      metric, the recipe must conform to the law.
+    - Composition. Sequence and ordered gate decompositions add work and
+      depth. Parallel adds work and takes the maximum depth. Repeat
+      multiplies the body cost by its count without unrolling. A Branch
+      takes the per-metric maximum of its arms as an upper bound, with no
+      probability model. An adaptive body without a declared per-round upper
+      bound has unknown costs.
+    - Block costs. A BlockCall costs what its SelectedDefinition declares: an
+      exact gate decomposition, applicable ResourceLaw summaries, or one of
+      the registered CX slot bounds of the library's own blocks. A call with
+      none of these has unknown gate metrics, never zero. When a gate
+      decomposition and a cost rule describe the same metric, the
+      decomposition must agree with the rule.
     - Footprints. Allocate and Release move a running quantum width per
       (role, location). Workspace declarations add bytes per location. Peaks
       are maxima over the traversal, and a batch peak that assumes one job at
       a time is marked as requiring a serial schedule.
-    - Acquisition. Terminal MeasurementBatch settings contribute shots or
+    - Measurement. Terminal MeasurementBatch settings contribute shots or
       exact evaluations according to their declared observation kind.
       Unknown kinds or repetitions stay unknown.
 
-    The fold first runs the full Program admission in its own admission
-    instance and then continues on that instance, reusing its node tables,
-    exact integer and depth limits and work counter. Its work ceiling is
+    The fold first runs Program admission, the full structural check that
+    accepts or rejects the Program, in its own admission instance and then
+    continues on that instance, reusing its node tables, exact integer and
+    depth limits and work counter. Its work limit is
     ``max(max_steps, FOLD_WORK_PER_ADMISSION_STEP * a)``, where ``a`` is the
     admission work just measured (ENGINEERING_CONSTANTS.md, "Shared Program
-    admission limits"). A fold proportional to its Program is admitted, and
-    one that grows faster is rejected. Node visits are memoized per
-    (node, binding, live footprint, classical availability) and law lookups
-    per (selected identity, actual cost parameters).
+    admission limits"). A fold proportional to its Program is accepted, and
+    one that grows faster is rejected. Node visits are cached per
+    (node, binding, live footprint, classical availability) and cost-rule
+    lookups per (selection content hash, cost parameters).
 
-    Consumers are ``nwqlib.estimate`` and ``compare``, ``search.scan`` and
-    the device assessment in ``backends.assessment``.
+    ``nwqlib.estimate``, ``compare``, ``search.scan`` and the device
+    assessment in ``backends.assessment`` use the fold.
 
     Attributes:
         construction: The SelectedConstruction being folded.
@@ -113,33 +120,36 @@ class _Fold:
         readiness: Readiness returned by that admission. Its blockers become assumptions of the estimate.
         program: The folded Program.
         selected: Signature name to SelectedDefinition.
-        kernels: Host kernel name to SelectedKernel.
-        identities: Signature name to selected content identity.
-        evidence: Output source table, evidence identity to Evidence.
+        kernels: Name of each classical routine to its SelectedKernel.
+        identities: Signature name to the content hash of its selection.
+        evidence: Output source table, evidence content hash to Evidence.
         expr: Output expression table, local ID to Expression.
         expr_keys: Structural key to local ID, so equal expressions are stored once.
         contexts: Program expression values per distinct binding.
-        memo: ``visit`` result per distinct node context.
-        leaves: ``leaf`` result per (selected identity, actual cost parameters).
+        memo: Cache of the ``visit`` result per distinct node context.
+        leaves: ``leaf`` result per (selection content hash, cost parameters).
         quantum_footprints: Cache from a running width aggregate of ``update_live`` to its width quantities per (role, location) and total logical width per location, filled by ``quantum_snapshot``.
         zero_costs: Shared exact-zero cost map, the additive identity element of ``merge_cost``.
-        defined: Potentially reached selected and kernel identities.
+        defined: Content hashes of the selections and classical routines
+            that the run may reach.
         terminal_points: Distinct terminal batch points and their axis cardinalities.
         unique_unavailable: Reasons that make the distinct-point count unknown.
         unique_conditional: Whether unresolved control flow makes that count an upper bound.
         root_populations: Root batch declaration and repetition totals.
         fold_evidence: The fold's own proved-relation Evidence record.
-        fold_id: Identity of ``fold_evidence``, attached to recipe counts.
+        fold_id: Content hash of ``fold_evidence``, attached to counts taken
+            from gate decompositions.
     """
 
     def __init__(self, construction, context):
-        """Admit the Program, set the fold's work ceiling and create empty tables.
+        """Check the Program, set the fold's work limit and create empty tables.
 
         The full Program admission runs first, and its measured work sets
-        ``step_limit``. The selected definitions, kernels and context are
-        then walked with the same charge-before-copy rule, and every integer
-        in them is checked against ``max_integer_bits``, before their
-        identities are hashed or the fold traverses them.
+        ``step_limit``. The selected definitions, classical routines and
+        context are then walked under the same rule, which counts work before
+        copying, and every integer in them is checked against
+        ``max_integer_bits``, before their content hashes are computed or the
+        fold traverses them.
         """
         self.construction = construction
         self.context = context
@@ -177,14 +187,14 @@ class _Fold:
         self.fold_id = self.source(self.fold_evidence)
 
     def source(self, evidence):
-        """Store one evidence record in the shared source table and return its identity."""
+        """Add one evidence record to the shared source table and return its content hash."""
         self.admission.tick(1 + len(evidence.work))
         identity = evidence.content_id
         self.evidence[identity] = evidence
         return identity
 
     def expression(self, node):
-        """Intern a symbolic cost node in the output expression table and return its local ID.
+        """Add a symbolic cost node to the output expression table once per structure and return its local ID.
 
         Structurally equal nodes share one entry, so a symbolic cost reused
         across the graph is stored once and JSON never expands it.
@@ -204,15 +214,19 @@ class _Fold:
         return self.expr_keys[key]
 
     def operand(self, value):
-        """Return the expression ID of a symbolic value, interning a number as a Constant."""
+        """Return the expression ID of a symbolic value, adding a number as a Constant."""
         return value if isinstance(value, str) else self.expression(Constant(value=Float64(value=value) if type(value) is float else value))
 
     def arithmetic(self, op, left, right):
-        """Apply one exact operation to numbers, or build a symbolic node if either is symbolic.
+        """Apply one arithmetic operation to numerical costs, or build a symbolic node if either operand is symbolic.
 
-        Identities with 0 and 1 are applied before a node is built, so
-        combining a symbolic cost with 0 or 1 creates no node. Integer
-        products check their bit length first, as in Program admission.
+        Integer operations are exact, and operations on binary64 values can
+        round. Identities with 0 and 1 are applied before a node is built, so
+        combining a symbolic cost with 0 or 1 creates no node. As in Program
+        admission, an integer product is rejected before it is formed when the
+        operand bit lengths prove that it exceeds ``max_integer_bits``. A sum
+        or product only one bit over the limit can be formed and is then
+        rejected by ``bounded``.
         """
         self.admission.tick()
         if op == "multiply" and (left == 0 or right == 0):
@@ -295,7 +309,7 @@ class _Fold:
         """Evaluate Program expressions for one binding, keeping unbound parameters symbolic.
 
         This differs from admission, where an unbound parameter is unknown.
-        Here it becomes a local ParameterRef so the published cost can still
+        Here it becomes a local ParameterRef so the reported cost can still
         be evaluated when the caller later supplies a value.
         """
         key = tuple(sorted(bindings.items()))
@@ -322,18 +336,18 @@ class _Fold:
         return self.values(bindings)[value.expression] if isinstance(value, ExprRef) else value
 
     def primitive(self, selected):
-        """Count an exact ordered primitive recipe in the context's metric basis.
+        """Count an exact ordered gate decomposition in the context's metric basis.
 
         A selected outer control adds one wire to every primitive, including
         the global phase, which becomes an observable one-qubit phase. A phase
         is Clifford only at a stored multiple of pi/2 in [-2pi, 2pi] and a T
         gate only at exactly +-pi/4, with no tolerance, so a nearby angle is
         never renamed. Any other non-Clifford operation leaves the T count
-        unknown until a precision and synthesis law are selected. In the
-        ``cx`` and ``clifford_t`` bases a recipe element outside the basis
-        makes the gate metrics unknown (the arbitrary-rotation count is
-        kept), because no synthesis is invented here. Without a recipe every
-        gate metric is unknown.
+        unknown until a precision and a synthesis rule are selected. In the
+        ``cx`` and ``clifford_t`` bases a gate of the decomposition outside
+        the basis makes the gate metrics unknown (the arbitrary-rotation
+        count is kept), because no synthesis is invented here. Without a gate
+        decomposition every gate metric is unknown.
         """
         if selected.decomposition is None:
             return {metric: _unknown(f"{selected.signature.name}: no selected {metric} law/decomposition") for metric in GATES}
@@ -391,12 +405,12 @@ class _Fold:
         return result
 
     def native_cx(self, selected, bindings):
-        """Evaluate a registered native CX envelope for one call, or return None.
+        """Evaluate a registered CX slot bound of a library block for one call, or return None.
 
-        Only the four laws owned by ``_preparation_laws`` and
-        ``blocks.selection`` are recognized, and only when both the cost-law
-        Source and the implementation Source equal their registered
-        identities. A record that merely reuses a law name therefore cannot
+        Only the four CX bound functions defined in ``_preparation_laws`` and
+        ``blocks.selection`` are recognized, and only when both the
+        ``cost_law`` Source and the implementation Source equal their
+        registered values. A record that merely reuses a function name therefore cannot
         borrow a bound derived for another construction. The result is an
         upper bound on CX slots before cancellation and routing.
         """
@@ -438,17 +452,18 @@ class _Fold:
                       assumptions=frozenset((selected.cost_context, "native CX slot envelope before cancellation/routing")))
 
     def leaf(self, call, bindings):
-        """Cost one BlockCall from its selected laws, recipe and native envelope.
+        """Cost one BlockCall from its cost rules, gate decomposition and registered CX slot bound.
 
         A ResourceLaw applies only when its basis, control, adjoint,
         precision and synthesis equal this context and selection, and its
-        fixed bindings equal the call's actual cost parameters (names listed
-        in ``unbound_parameters`` may take any admitted value). Two applicable
-        laws for one metric are ambiguous and reject. An applicable law owns
-        its metric. When an exact recipe also fixes that metric, the recipe
-        value is kept and must equal an exact law or stay within an upper
-        bound, so a declared summary cannot silently contradict the recipe it
-        describes. Laws backed by observed, empirically predicted or
+        fixed bindings equal the call's cost parameters (names listed in
+        ``unbound_parameters`` may take any accepted value). Two applicable
+        rules for one metric are ambiguous and raise ValueError. An
+        applicable rule supplies the value of its metric. When an exact gate
+        decomposition also fixes that metric, the decomposition's value is
+        kept and must equal an exact rule or stay within an upper bound, so a
+        declared summary cannot silently contradict the decomposition it
+        describes. Rules backed by observed, empirically predicted or
         numerically estimated evidence are reported as estimates whatever
         interpretation they declare.
         """
@@ -549,9 +564,9 @@ class _Fold:
         return {metric: self.combine(value, factor, "multiply") for metric, value in costs.items()}
 
     def update_live(self, live, wire, bindings, direction):
-        """Update a width aggregate, not a second copy of admitted wire state.
+        """Update a width aggregate without copying the wire state that Program admission checked.
 
-        Admission already verifies exact wire membership and branch lifetimes.
+        Program admission already verifies exact wire membership and branch lifetimes.
         Numeric widths add/remove directly. An unresolved width is a formal
         expression with a multiplicity, so release needs no symbolic subtraction
         or cancellation of evidence. Register widths carry no external sources.
@@ -678,7 +693,7 @@ class _Fold:
         return frozenset(values.items())
 
     def join_classical(self, left, right):
-        """Keep may-live storage as well as guaranteed classical availability.
+        """Join the classical values of two paths, keeping possibly live and certainly defined values.
 
         A value defined on either path stays in the set, so its storage
         counts in the peak. It is certain only when both paths define it
@@ -705,13 +720,13 @@ class _Fold:
             footprint and classical values it leaves behind.
 
         MeasurementBatch settings are independent experiments. Their summed
-        depth is a serial envelope over jobs, not a per-circuit depth, and a
-        peak that reuses space across settings requires a serial schedule. The
-        batch's observation kind decides which acquisition population it
-        contributes: ``counts`` adds shots, ``pauli_expectation`` and
+        depth is an upper bound for running the jobs one after another, not a
+        per-circuit depth, and a peak that reuses space across settings
+        requires a serial schedule. The batch's observation kind decides what
+        it contributes. ``counts`` adds shots, ``pauli_expectation`` and
         ``probabilities`` add exact evaluations, and ``estimated_observable``
         leaves shots unknown because the provider chooses them. A known kind
-        proves the other population zero even when repetitions are unknown.
+        proves the other count zero even when repetitions are unknown.
         """
         self.admission.tick(1 + len(bindings) + len(live) + len(classical))
         key = (name, tuple(sorted(bindings.items())), live, classical)
@@ -938,13 +953,13 @@ class _Fold:
         return result
 
     def quantity(self, metric, value, *, location=None, population="dynamic workload"):
-        """Publish one partial cost as a ResourceQuantity with its derived evidence kind.
+        """Return one partial cost as a ResourceQuantity with its derived evidence kind.
 
         The evidence kind is the weakest among the sources that determined the
         value: any observed or empirically predicted input makes the result an
         empirical prediction, then numerical estimate, user assertion, external
         specification and certified bound follow in that order, and a value
-        derived only from exact recipes is a proved relation. An unknown value
+        derived only from exact gate decompositions is a proved relation. An unknown value
         becomes an unavailable Fact carrying its reasons. A peak that needs a
         serial schedule is conditional unless the context declares one.
         """
@@ -1075,8 +1090,10 @@ def estimate(construction: SelectedConstruction, *, context: ResourceContext | N
     Returns:
         workload (WorkloadEstimate): One quantity per metric and location.
             Every quantity has `lifecycle="planned"` and keeps its label,
-            location and original evidence. A metric without an applicable
-            cost rule is present as unavailable, not as zero.
+            location and original evidence. A metric whose value cannot be
+            determined, such as a gate count that no exact gate list,
+            registered CX bound or cost rule (`ResourceLaw`) of the blocks
+            gives, is present as unavailable, not as zero.
 
     Raises:
         ValueError: If an exact count needs more integer bits than

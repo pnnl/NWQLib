@@ -1,4 +1,4 @@
-"""Leaf record-serialization helpers shared by reporting and LCHS records.
+"""Conversion of records to JSON-like values, shared by reporting and LCHS records.
 
 This module imports no other NWQLib module, so ``reporting.records`` and the
 LCHS provider and application records (``algorithms/lchs/provider_config.py``,
@@ -20,8 +20,8 @@ def _record_value(value: Any) -> Any:
 
     Enums serialize to their value, NumPy real scalars to native floats, other
     NumPy scalars through ``item``, and nested records through their own
-    ``to_dict``. Containers recurse into their values. Array formats remain the
-    responsibility of their record owners.
+    ``to_dict``. Containers recurse into their values. Each record that holds
+    an array defines that array's format itself.
     """
 
     if isinstance(value, Enum):
@@ -40,7 +40,7 @@ def _record_value(value: Any) -> Any:
 
 
 class FieldSerializedRecord:
-    """``dataclasses.fields()``-driven ``to_dict`` base for contract records.
+    """Base class whose ``to_dict`` lists the fields that ``dataclasses.fields()`` returns.
 
     Keys follow dataclass field declaration order. Subclasses override
     ``to_dict`` only for genuine custom serialization (numpy arrays, derived

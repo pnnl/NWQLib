@@ -1,8 +1,8 @@
 """NWQLib package root.
 
-Root modules resolve lazily (PEP 562), so importing the root does not load
-the whole library. ``__all__`` lists the public names. Each scientific
-module defines its own operations.
+Submodules and public names are imported on first use (PEP 562), so
+importing ``nwqlib`` does not load the whole library. ``__all__`` lists the
+public names. Each scientific module defines its own operations.
 """
 
 from importlib import import_module
@@ -37,7 +37,7 @@ __all__ = [
 ]
 
 def __getattr__(name: str) -> Any:
-    """Resolve a root name lazily (PEP 562), importing only its owner.
+    """Return a public name of the package on first use (PEP 562), importing only the module that defines it.
 
     A missing first-level module becomes AttributeError. An ImportError raised
     inside an existing module, such as a missing optional dependency, propagates

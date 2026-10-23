@@ -8,11 +8,11 @@ Eq. (14)), and a shift does not change that span. The check reports
 abs(E_target-E_baseline-c), which is zero in exact arithmetic. It measures
 floating-point departure for exact or classical moments and also contains
 the sampling difference between two sampled runs. Both results must share
-frame and sector. A table relation also requires matched basis, unit,
-preparations and subspace rule and order, so that the trial spaces are the
-same, and establishes H_target-H_baseline=cI exactly from the stored
-operators before the comparison. An asserted relation stays an open check
-prerequisite. This comparison is NWQLib's own design.
+error frame and sector. A relation established from the operator tables also
+requires matched basis, unit, preparations and subspace rule and order, so
+that the trial spaces are the same, and establishes H_target-H_baseline=cI
+exactly from the saved operators before the comparison. An asserted relation
+stays an open assumption of the check. This comparison is NWQLib's own design.
 """
 
 import math
@@ -44,9 +44,9 @@ _FLOAT_JSON_CHARACTERS = 24
 
 
 class EnergyEndpoint(Record):
-    """Actual selected scalar, operator table and normalized preparation recipes.
+    """Energy of one Result with the operator table and preparations it was computed from.
 
-    It stores exactly one operator payload, either the Pauli terms or the
+    It holds exactly one operator table, either the Pauli terms or the
     distinct nonzero (row, column, real, imag) matrix entries in original
     coordinates. subspace_rule and order name the trial-space rule and its
     size, for Lanczos the Chebyshev rule and the Krylov dimension.
@@ -108,12 +108,13 @@ class EnergyEndpoint(Record):
 def _operator_payload(operator, *, max_bytes):
     """Return the endpoint's operator table, ``terms`` for Pauli input or ``matrix_entries`` for a dense or compressed matrix, after a byte check.
 
-    It is explicit endpoint evidence, never run or cached by ordinary solve
-    or analysis.
+    It is computed only for the explicit energy-shift check, never by an
+    ordinary solve or analysis, and is not cached.
 
-    Dense scans visit stored entries, and CSR/CSC scans visit only nnz. The record stores
-    one nonzero table under a known scalar/index envelope, not a Python RSS bound.
-    No operator realization, Pauli transform or reference solve is performed.
+    Dense scans visit stored entries, and CSR/CSC scans visit only nnz. The record holds
+    one table of nonzero entries within a known bound on its scalar and index bytes,
+    which does not bound Python's resident memory (RSS).
+    No new operator is constructed, and no Pauli transform or reference solve is performed.
 
     The byte check covers the returned table, the EnergyEndpoint record that
     both callers (the Lanczos and FixedGCIM ``energy_endpoint``) build from it
@@ -123,20 +124,20 @@ def _operator_payload(operator, *, max_bytes):
     shares the scalar objects. The check counts the borrowed operator
     storage, the scalars and label characters of the table and the table's
     part of those two JSON copies. The record's fixed fields, which do not
-    grow with the operator, are not counted. This endpoint-capture check
-    excludes tuple, list and set slots from its logical table and JSON
-    payload charges. ENGINEERING_CONSTANTS.md, "Eigen input conversion and
-    classical preparation", registers both laws.
+    grow with the operator, are not counted. This byte check leaves tuple,
+    list and set slots out of the logical bytes it counts for the table and
+    its JSON text. ENGINEERING_CONSTANTS.md, "Eigen input conversion and
+    classical preparation", records both formulas.
 
-    Endpoint capture admits coordinate expansion, zero filtering and
-    gathered values in addition to its tuple and JSON payloads. Extraction
+    The byte check also counts coordinate expansion, zero filtering and
+    gathered values in addition to the tuple and JSON bytes. Extraction
     preserves the input representation's established entry order. For a
     matrix, let n be the scanned count, including explicit compressed zeros,
-    or D^2 for dense input. The capture charge with F = 24 is
+    or D^2 for dense input. The counted bytes, with F = 24, are
 
         B_operator + n {32 + 2[6 + 2 digits(D-1) + 2F]} + 4 + 41n + 24D + H0.
 
-    The added ``B_extraction = 41n + 24D + H0`` prices the new coordinate
+    The added ``B_extraction = 41n + 24D + H0`` counts the new coordinate
     arrays. For CSR/CSC, arange(D), diff(indptr) and a possible intp
     repeat-count conversion need at most 24D bytes. The repeated
     major-coordinate vector is 8n, its keep mask n, and gathered row,
@@ -146,12 +147,12 @@ def _operator_payload(operator, *, max_bytes):
     when its tuple is built. Dense input needs at most D^2 mask bytes plus
     32 times its surviving count, covered by 41D^2, and omits 24D. Empty
     compressed rows still contribute index preparation, explicit zeros are
-    priced before filtering, and dense zero matrices scan D^2 entries. No
+    counted before filtering, and dense zero matrices scan D^2 entries. No
     flattened row*D+column key is formed. Dense nonzero coordinates keep
     row-major order. Compressed extraction keeps its compressed-major order,
     including CSC. The extraction arrays are released before the table's
-    JSON is serialized. The 32 per tuple is a logical field charge, not
-    Python object storage. H0 is ``BOOKKEEPING_BYTES``.
+    JSON is serialized. The 32 bytes per tuple count its logical fields,
+    not Python object storage. H0 is ``BOOKKEEPING_BYTES``.
     """
     if "pauli_terms" in operator.manifest.access:
         m, q = operator.manifest.shape[0], operator.basis.dimension.bit_length() - 1
@@ -242,7 +243,7 @@ class EnergyShiftOptions(Record):
 
     Both Results must share the output frame and sector. With
     `relation="pauli_table"` or `"matrix_entries"`, the check first
-    establishes `H_target - H_baseline = c I` exactly from the stored
+    establishes `H_target - H_baseline = c I` exactly from the saved
     binary64 operator tables, with absent entries meaning zero. It also
     requires the same basis, unit, preparations and subspace rule and order,
     so that the two trial spaces are the same. A valid operator relation
@@ -429,18 +430,18 @@ def _triple_zero(t, b, c):
 
 
 def _relation_bytes(base_count, target_count, *, pauli_width=None):
-    """Return the byte admission of the exact relation workspace, checked before allocation.
+    """Return the bytes of the exact relation's workspace, checked against the limit before allocation.
 
-    The exact relation check admits linear coordinate, value, grouping and
-    NumPy sort workspace before allocation. Missing matrix diagonals are
-    counted without materializing them. Existing endpoint
-    objects belong to B_held and are not charged here.
+    The count covers the linear coordinate, value, grouping and NumPy sort
+    workspace. Missing matrix diagonals are counted without materializing
+    them. Existing endpoint objects belong to B_held and are not counted
+    here.
 
     Matrix relations, ``U = N_base + N_target``, where ``N_base`` and
     ``N_target`` count the stored entries of the two endpoints:
     ``B_matrix = 192U + H0 + B_coord_objects``. Here H0 is
-    ``BOOKKEEPING_BYTES`` and ``B_coord_objects`` charges newly boxed coordinate
-    integers. The 160U logical envelope covers converted coordinates and
+    ``BOOKKEEPING_BYTES`` and ``B_coord_objects`` counts newly boxed coordinate
+    integers. The 160U logical bound covers converted coordinates and
     values (32U), concatenated coordinates (16U), sorted coordinates (16U),
     the returned permutation (8U), starts and group maps (17U), base and
     target union arrays (at most 32U) and masks and gathered comparison
@@ -464,7 +465,7 @@ def _relation_bytes(base_count, target_count, *, pauli_width=None):
 
     Pauli relations, N = N_base + N_target + 1 including the identity-shift
     contribution and q the label width: ``B_Pauli = [16 max(1,q) + 256]N +
-    H0``. Four Unicode populations (original labels, unique's flattened
+    H0``. Four Unicode arrays (original labels, unique's flattened
     copy, the permuted copy and the returned unique labels) take at most
     4*max(1,q)*N bytes each. 256N covers values, inverse, count, group and
     index arrays, temporary list references, grouped values, masks, gathers
@@ -483,11 +484,11 @@ def _pauli_relation(baseline, target, shift, *, max_bytes):
 
     Missing entries denote zero.
 
-    Every public Pauli ``OperatorInput`` is coalesced by
-    ``operators/inputs.py::_coalesced_input``, which merges identical
-    words. The Lanczos and FixedGCIM endpoint producers read that table
-    through ``_operator_payload``, and a reopened Plan restores the stored
-    coalesced tables. Thus each endpoint has at most one coefficient per
+    Every public Pauli ``OperatorInput`` is merged by
+    ``operators/inputs.py::_coalesced_input``, which combines identical
+    words. The ``energy_endpoint`` methods of Lanczos and FixedGCIM read that
+    table through ``_operator_payload``, and a reopened Plan restores the
+    saved merged tables. Thus each endpoint has at most one coefficient per
     word.
 
     The relation groups the baseline coefficient with a minus sign, the
@@ -495,7 +496,7 @@ def _pauli_relation(baseline, target, shift, *, max_bytes):
     group has at most two contributions and the identity group at most
     three. Singletons are compared with zero, pairs with exact negation,
     and triples with ``_triple_zero`` under its stated CPython and IEEE
-    premises. These tests decide equality of the represented binary64
+    assumptions. These tests decide equality of the represented binary64
     operators without a tolerance. Pauli words are linearly independent,
     so these conditions are equivalent to
     ``H_target - H_baseline = shift * I``, where ``H_target`` and ``H_baseline``
@@ -505,11 +506,11 @@ def _pauli_relation(baseline, target, shift, *, max_bytes):
     ``[16*max(1,q)+256]*(N_base+N_target+1)+BOOKKEEPING_BYTES`` bytes.
 
     The comment above ``_triple_zero`` gives the exact-zero argument under
-    the stated CPython and IEEE premises. Its docstring explains why an
+    the stated CPython and IEEE assumptions. Its docstring explains why an
     intermediate overflow implies a nonzero exact three-term sum. The
     contributions are grouped by label with
     ``np.unique(..., return_inverse=True, return_counts=True)`` and a
-    stable argsort. The exact relation concerns the coalesced binary64
+    stable argsort. The exact relation concerns the merged binary64
     operators, not exact sums of the user's original decimal or duplicate
     coefficient stream before ingestion rounded it.
     """
@@ -578,11 +579,11 @@ def _matrix_relation(baseline, target, shift, *, max_bytes):
     and ``N_target`` count the two endpoints' stored entries, the merge uses
     O(U log U) coordinate comparisons and O(U) array entries of working
     storage. These counts do not grow with D. Python-integer coordinate
-    comparisons can depend on coordinate bit length. The workspace law is
+    comparisons can depend on coordinate bit length. The workspace formula is
     ``_relation_bytes``.
     Under the supported IEEE arithmetic model, every decision equals that of
-    exact rational arithmetic on the recorded binary64 values, and its only
-    resource refusal is the workspace law.
+    exact rational arithmetic on the recorded binary64 values, and the only
+    refusal for lack of resources comes from the workspace formula.
     """
     _matched_coordinates(baseline, target)
     if baseline.matrix_entries is None or target.matrix_entries is None:
@@ -631,7 +632,7 @@ def verify_energy_shift(
     """Run the energy-shift check of a target Result against the baseline in `options`, running neither method again.
 
     `result.verify(checks=options)` calls this for Lanczos and FixedGCIM.
-    The target's stored energy, operator table and preparations are read
+    The target's saved energy, operator table and preparations are read
     once. The exact operator relation is checked first, and the discrepancy
     `abs(E_target - E_baseline - c)` is computed in exact arithmetic.
 
@@ -653,7 +654,7 @@ def verify_energy_shift(
         TypeError: If `options` is not an `EnergyShiftOptions`, or the
             Result has no saved energy endpoint.
         ValueError: If the Results differ in frame or sector, basis, unit,
-            preparations or subspace rule, the stored tables do not
+            preparations or subspace rule, the saved tables do not
             establish the relation exactly, or an exact intermediate value
             needs more than `max_integer_bits` bits.
     """

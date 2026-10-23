@@ -36,7 +36,7 @@ Import each Problem from `nwqlib`. [Supply inputs](inputs.md) lists the matrix, 
 
 Not every Method supports every valid Problem. Construction checks Hermiticity where the Problem requires it, dimensions and coordinate order. Each Method checks its own further assumptions. For example, a `unitary` given to SpectralEstimation is not proved unitary by the Problem, and the Method checks it. Saved JSON stores symbolic expressions as descriptions and never evaluates them as code.
 
-Accepted inputs keep their physical magnitude, complex phase and original coordinates. A full-space eigenvalue and an eigenvalue in an explicitly supplied subspace are recorded as different quantities. The Problem sets the scope of its output, and the output records the condition its value depends on, such as a nonzero norm or an explicitly supplied subspace.
+A Problem keeps the physical magnitude, complex phase and original coordinates of its inputs. A full-space eigenvalue and an eigenvalue in an explicitly supplied subspace are recorded as different quantities. The Problem sets the scope of its output, and the output records the condition its value depends on, such as a nonzero norm or an explicitly supplied subspace.
 
 ## Outputs {#outputs}
 
@@ -54,7 +54,7 @@ Import each output from `nwqlib` and pass it as `output=`. `NormalizedExpectatio
 | `Samples()` | Measurement outcomes in the original coordinates, for the shots in which the Method's success event occurred | Total variation between distributions |
 | `OptimizationCandidate()` | A candidate point of the box and its objective value | Objective gap, which does not imply an optimality certificate |
 
-Declaring an output computes nothing. It creates no measured data and no live quantum state.
+Declaring an output computes nothing, creates no measured data and prepares no quantum state.
 
 ## Units {#units}
 
@@ -68,9 +68,9 @@ An output unit whose symbol differs from the unit that the Problem defines, or t
 
 ## Constraint residuals {#constraint-residuals}
 
-ConstrainedOptimization stores each constraint as a residual, with `h_i(x) = 0` for equalities and `g_j(x) <= 0` for inequalities. This is the form of problem (4.1) in Birgin and Martínez, *Practical Augmented Lagrangian Methods for Constrained Optimization*, SIAM 2014, doi:10.1137/1.9781611973365, with the box as its set Ω.
+ConstrainedOptimization represents each constraint by a residual, with `h_i(x) = 0` for equalities and `g_j(x) <= 0` for inequalities. This is the form of problem (4.1) in Birgin and Martínez, *Practical Augmented Lagrangian Methods for Constrained Optimization*, SIAM 2014, doi:10.1137/1.9781611973365, with the box as its set Ω.
 
-| You pass | Stored residual | Constraint |
+| You pass | Residual | Constraint |
 | --- | --- | --- |
 | `Eq(a, b)` in `equalities` | `a - b` | `a - b = 0` |
 | `Le(a, b)` in `inequalities` | `a - b` | `a - b <= 0` |
@@ -94,4 +94,4 @@ print(problem.equalities, problem.inequalities)  # (x - y,) (-x - y + 1,)
 
 Strict relations are rejected, because `g(x) <= 0` cannot express strictness, so state a margin explicitly. `Ne`, relations that SymPy has already evaluated to True or False, matrices and constraints with symbols outside `variables` are also rejected.
 
-ConstrainedOptimization is not an Optimization, so a box-only Method such as QHD refuses it at planning instead of ignoring its constraints. The QHD family solves it with `solve_augmented_lagrangian`, a sequence of QHD box problems ([QHD guide](algorithms/qhd.md#constrained-problems)).
+ConstrainedOptimization is not an Optimization, so a box-only Method such as QHD rejects it at planning instead of ignoring its constraints. The QHD family solves it with `solve_augmented_lagrangian`, a sequence of QHD box problems ([QHD guide](algorithms/qhd.md#constrained-problems)).

@@ -1,46 +1,46 @@
-"""Packed classical ADAPT Pauli actions and their shared admission law.
+"""Packed classical ADAPT Pauli actions and their shared cost formula.
 
 A classical ADAPT Plan packs the nonidentity Hamiltonian rows, each processed
 generator's ordered rows and the unit-coefficient insertion rows once, and
 every classical Pauli action of its queries and of explicit verification uses
-those tables. Every action is admitted by the shared single-column law of
-``operators._pauli.pauli_action_requirements``.
+those tables. Every action is checked with the shared single-column cost
+formula of ``operators._pauli.pauli_action_requirements``.
 
-Shared action law. Let ``d = 2**q``, L the stored row count of the acting
+Shared action formula. Let ``d = 2**q``, L the stored row count of the acting
 table including zeros and duplicates, ``g = min(L, d)`` and
-``t = min(d, 1024)``. For an already-complex128 single state and a packed
-table the installed owner gives
+``t = min(d, 1024)``. For one state that is already complex128 and a packed
+table, that function gives
 
     B_A = 33d + 24L + 16g + 8 + max(9L, 96t),
     W_A = 2dL + dg + 2d + 4L + g.
 
-The 33d term includes input, output and the finite-mask reserve. Group
-metadata and rotated coefficients remain live during action. The 9L
-preprocessing frontier and 96t retry tile share a maximum. The work includes
-group metadata, the three L-row preprocessing passes, the attempted grouped
-action and a full possible ordered retry. Supplying ``out`` does not remove
-the output slot. The empty-table allowance is conservatively 2d work. Every
-Pauli action owner calls ``pauli_action_requirements(d, L, min(L, d),
-complex_input=True)``. No ``d*L`` substitution is made, no successful grouped
+The 33d term includes input, output and the bytes set aside for the finite
+mask. Group metadata and rotated coefficients remain in memory during the
+action. The 9L preprocessing peak and the 96t retry tile enter as one
+maximum. The work includes group metadata, the three L-row preprocessing
+passes, the attempted grouped action and a full possible ordered retry.
+Supplying ``out`` does not remove the output term. The empty-table allowance
+is conservatively 2d work. Every code path that performs a Pauli action
+calls ``pauli_action_requirements(d, L, min(L, d), complex_input=True)``. No ``d*L`` substitution is made, no successful grouped
 path is inferred from a finite answer and the retry allowance is not
 subtracted.
 
 Packing. Let L0 be the nonidentity Hamiltonian rows and T_j the row count of
-generator j. The new packed-row population is
+generator j. The number of new packed rows is
 
     R = L0 + 2 sum_j T_j,  B_permanent = 32R,  B_construction <= 64R,
     W_packing = R(q + 4).
 
 There are eight-byte X and Z masks and one complex128 coefficient per row.
-Source plus immutable snapshot gives 64R. Packing visits q label letters and
-one coefficient, then copies the three arrays into the snapshot, giving
-``q + 4`` pass units per row. The extra ``sum T_j`` population is the
-insertion table population. Labels already held by the input and Python object
-headers are separate from these logical payloads.
+The source arrays plus their immutable copy give 64R. Packing visits q label
+letters and one coefficient, then copies the three arrays into the immutable
+copy, giving ``q + 4`` pass units per row. The extra ``sum T_j`` rows are
+those of the insertion table. Labels already held by the input and Python
+object headers are separate from these logical byte counts.
 
 The tables live in ``AdaptInputs.cache["action_tables"]``, alive with that
-Plan's bound inputs. They contain no Run, receipt, vector, sampled value or
-controller decision, and they are derived again when an archive reconstructs
+Plan's bound inputs. They contain no Run, preparation record, vector, sampled
+value or decision of the iteration, and they are derived again when an archive reconstructs
 the Plan. A different processed coefficient table, row order, width or
 generator input needs a different Plan/input cache. Quantum execution builds
 no classical generator-action tables.
@@ -56,12 +56,13 @@ from nwqlib.subroutines.fermionic_pool import GENERATOR_TAYLOR_DEGREE, _taylor_s
 
 
 def pack_action_rows(rows, q):
-    """Pack admitted ordered rows once, without coalescing or dropping any row.
+    """Pack checked ordered rows once, without summing or dropping any row.
 
-    This single-word full-state owner requires ``0 <= q < 63``. The permanent
-    table has 32L bytes and the source-plus-snapshot frontier has 64L bytes.
-    ``build_action_tables`` charges ``L(q + 1) + 3L`` pass units per table
-    before calling, including the snapshot copy. Row order, duplicate labels,
+    This packing, with one 64-bit word per mask over the full state, requires
+    ``0 <= q < 63``. The permanent table has 32L bytes, and the peak with the
+    source and its immutable copy has 64L bytes. ``build_action_tables``
+    counts ``L(q + 1) + 3L`` pass units per table before calling, including
+    the copy. Row order, duplicate labels,
     zero coefficients and complex phases stay, so an action on this table is
     the action on the same rows given as labels.
     """
@@ -89,8 +90,8 @@ def pack_action_rows(rows, q):
 def action_requirements(d, terms):
     """Return the shared packed ``(B_A, W_A)`` of one action on a complex128 state.
 
-    ``pauli_action_requirements(d, L, min(L, d), complex_input=True)``: see
-    the module docstring for ``B_A`` and ``W_A``.
+    This is ``pauli_action_requirements(d, L, min(L, d), complex_input=True)``.
+    The module docstring gives ``B_A`` and ``W_A``.
     """
     return pauli_action_requirements(d, terms, min(terms, d), complex_input=True)
 
@@ -99,9 +100,9 @@ def packed_exponential(table, state, theta):
     """Apply ``exp(theta * A)`` with the Plan's packed table of A.
 
     This is ``fermionic_pool.apply_generator_exponential`` on the packed
-    table: the same ``_taylor_steps`` count, the same degree-18 Horner order,
-    coefficient order, scaling and addition, so it introduces no numerical
-    approximation beyond that kernel's. Each step starts from ``r = state``
+    table, with the same ``_taylor_steps`` count, the same degree-18 Horner
+    order, coefficient order, scaling and addition, so it introduces no
+    numerical approximation beyond that routine's. Each step starts from ``r = state``
     and evaluates ``r <- state + (step / k) * A r`` for ``k = 18, ..., 1``.
     """
     vector = np.asarray(state, dtype=np.complex128).reshape(-1)
@@ -123,15 +124,16 @@ def packed_exponential(table, state, theta):
 
 
 def build_action_tables(inputs, q, *, max_bytes, max_products, other_live=0):
-    """Build the Plan-owned packed tables before classical queries, with one packing charge.
+    """Build the Plan's packed tables before classical queries, counting the packing work once.
 
     R counts the H0 rows, the generator rows and their unit-coefficient
-    insertion rows. Packing charges ``R(q + 4)`` pass units against
-    ``max_products``. The permanent logical payload is 32R. Reserving 64R
-    beside ``other_live`` covers all snapshots and one working population.
-    The immutable processed full Hamiltonian already owns its packed table,
-    and a dense or sparse Hamiltonian has no H0 table. This private cache
-    contains no state vector, Run, receipt or query result. Returns the dict
+    insertion rows. Packing counts ``R(q + 4)`` pass units against
+    ``max_products``. The permanent logical size is 32R bytes. Setting aside
+    64R bytes beside ``other_live`` covers all immutable copies and one set
+    of working rows. The immutable processed full Hamiltonian already holds
+    its packed table, and a dense or sparse Hamiltonian has no H0 table. This
+    private cache contains no state vector, Run, preparation record or query
+    result. Returns the dict
     ``h0``, ``generators``, ``insertions``, ``resident_bytes`` (32R) and
     ``packing_work`` (``R(q + 4)``).
     """
@@ -162,9 +164,9 @@ def action_sizes(inputs, d):
 
     These are the full Hamiltonian's ``OperatorInput.matvec`` allowance, the
     packed H0 action for Pauli input, each generator's packed action and the
-    one-row insertion action. The classical frontier adds the largest
+    one-row insertion action. The classical workspace bound adds the largest
     ``B_A - 32d``, because the input and output vectors of one action are
-    already in the frontier's vector slots.
+    already counted among its workspace vectors.
     """
     from nwqlib.operators.inputs import _matvec_requirements
 
@@ -177,10 +179,10 @@ def action_sizes(inputs, d):
 
 
 def restored_record_allowance(inputs, rec):
-    """Reapply the classical reconstruction's logical record law on load.
+    """Recompute on load the logical record size of the classical reconstruction.
 
     This is the ``other_live`` that ``adapt_inputs.prepare_adapt_inputs``
-    passes to ``build_action_tables``: the generator records, the Pauli
+    passes to ``build_action_tables``. It covers the generator records, the Pauli
     identity bytes of every stored row and four copies of the
     reconstruction's fixed JSON shell.
     """
@@ -196,13 +198,13 @@ def restored_record_allowance(inputs, rec):
 
 
 def query_work(plan, experiment, program):
-    """Price one complete classical query before invocation.
+    """Count the work of one complete classical query before it runs.
 
     The sum covers the reference preparation, the selected prefix/reference
     chain exponentials (``adapt_records._exponential_action_work``) and the
     query's own actions. ``W_H0`` is the packed nonidentity action for Pauli
     input, and ``W_H + offset_free_action_work`` for a dense or sparse
-    matrix, whose conservative sparse setup is charged on every query. With
+    matrix, whose conservative sparse setup is counted for every query. With
     ``W_Aj`` the shared action of generator j and ``W_A(1)`` the one-row
     insertion action, the additions to the chain exponentials are
 
@@ -216,8 +218,8 @@ def query_work(plan, experiment, program):
             per entry of the right chain for the single-generator states.
 
     The insertion's ``W_A(1) + 3d`` is its one-row action, the scaling, the
-    sum and the division by sqrt(2). Packing is absent: it has its
-    once-per-Plan charge.
+    sum and the division by sqrt(2). Packing is absent, because it is
+    counted once per Plan.
     """
     from nwqlib.ir.expressions import number
     from .adapt_records import _energy_gradient_work, _exponential_action_work, chain

@@ -65,7 +65,7 @@ A wire is the name of a register. `state_input` accepts only a circuit without c
 
 ## Nodes
 
-Each step of a Program is a node, stored with its id in a `Definition`. A node refers to other nodes by id, so one definition can be used in several places.
+Each step of a Program is a node, recorded with its id in a `Definition`. A node refers to other nodes by id, so one definition can be used in several places.
 
 | Node | What it does | Minimal constructor |
 | --- | --- | --- |
@@ -91,20 +91,20 @@ A Program can also use `MeasurementBatch` for several settings of one body, `Bra
 
 ## Check, bind and save a Program {#check-bind-and-save-a-program}
 
-`Program(...)` and `SelectedConstruction(...)` run the structural check when they are built and raise a `ValueError` for an invalid Program. A requirement that cannot be decided yet, such as a width or `Repeat` count given by an unbound parameter, is not an error. It is reported as a readiness blocker.
+`Program(...)` and `SelectedConstruction(...)` run the structural check when they are built and raise a `ValueError` for an invalid Program. A requirement that cannot be decided yet, such as a width or `Repeat` count given by an unbound parameter, is not an error. It is reported as a blocker, an open requirement that `check_readiness` lists.
 
 | Operation | What it does |
 | --- | --- |
 | `program.check_readiness()` | Rejects known-invalid values and returns the blockers for unresolved requirements in `.blockers`, with `.ready` true when there are none |
 | `program.check_readiness().require_ready()` | Raises if any blocker remains |
 | `program.bind(n=...)` | Returns a new, checked Program with the parameter bound. The original is unchanged |
-| `program.model_dump_json()`, `Program.model_validate_json(text)` | Save and reload the Program as JSON. Reloading checks the stored content hashes |
+| `program.model_dump_json()`, `Program.model_validate_json(text)` | Save and reload the Program as JSON. Reloading checks the saved content hashes |
 
 The parameters, bindings, widths, port mappings, metadata references, `premises` and `limits` of a Program all enter its content hash, so changing any of them gives a different Program.
 
 The check rejects a Program, or records a blocker, when
 
-- a register is used before `Allocate` or after `Release`, or is still allocated when a host `ClassicalStage` runs,
+- a register is used before `Allocate` or after `Release`, or is still allocated when a `ClassicalStage` runs on the host computer, outside the quantum job,
 - a `BlockCall` does not map each port of the block exactly once, maps two ports to the same register, or maps a port to a register of a different known width,
 - a width, count or constraint is unbound, which gives a blocker and is never read as zero or false,
 - a promise that a register is coherent, made before a measurement, is relied on after it, on the measured register or on any register that a joint or undeclared block call may have entangled with it.

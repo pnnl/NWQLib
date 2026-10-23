@@ -1,4 +1,4 @@
-"""Compact UCGate storage around QPY's builtin-constructor limitation.
+"""Compact storage of UCGate that works around a limitation of QPY's reconstruction of built-in gates.
 
 With Qiskit 2.6.0, QPY writes a ``UCGate`` but cannot load it. Its loader passes
 the gate's 2x2 matrices to the constructor as separate positional arguments,
@@ -9,7 +9,7 @@ the gate's nominal width whose first parameter is a JSON header (name, label,
 active controls) followed by the stored matrices. Decoding rebuilds the gate
 directly, without simplifying the table again or synthesizing its matrix.
 ``docs/development/execution.md`` (Circuit entries and Qiskit UCGate
-compatibility) is the public contract, including when this storage may change.
+compatibility) describes this storage, including when it may change.
 
 The container prefix selects this codec, and ordinary raw QPY is never
 interpreted as this storage format. Within a container the marker is chosen
@@ -213,7 +213,7 @@ def encode_circuit(circuit):
 
 
 def decode_circuit(circuit):
-    """Restore an explicitly identified codec container without synthesis."""
+    """Restore a circuit from a container that its file prefix identifies, without synthesis."""
     from qiskit.circuit import Gate
     from qiskit.circuit.library import UCGate
 

@@ -1,4 +1,4 @@
-"""Exact sector-expectation QA helpers for GCiM states."""
+"""Exact particle-number and spin expectations for checking GCiM states."""
 
 from __future__ import annotations
 
@@ -112,7 +112,7 @@ def _expectation_action(action: np.ndarray, state: np.ndarray) -> float:
 
 
 def _sector_work(num_qubits: int) -> int:
-    """Return the work charged for one ``sector_expectations`` call on ``2**num_qubits`` amplitudes.
+    """Return the work counted for one ``sector_expectations`` call on ``2**num_qubits`` amplitudes.
 
     The unit is one amplitude visited by one elementwise pass or reduction.
     With ``q = num_qubits`` (even) and ``N = 2**q``:
@@ -126,15 +126,15 @@ def _sector_work(num_qubits: int) -> int:
       scans of the factor actions, the ``S_z (S_z + 1)`` combination and the
       final inner product.
     - ``S_- S_+`` as two sequential Pauli-sum actions, each with the ``2q``
-      Jordan-Wigner terms of ``S_+`` or ``S_-``, charged by the shared
-      action owner ``pauli_action_requirements`` at one column with the
-      count-only flip-group bound ``g = min(2q, N)``. Each charge covers
+      Jordan-Wigner terms of ``S_+`` or ``S_-``, counted by the shared
+      action formula ``pauli_action_requirements`` at one column with the
+      count-only flip-group bound ``g = min(2q, N)``. Each count covers
       the attempted grouped pass and a possible ordered retry. The factors
       are never multiplied out into a product of ``(2q)**2`` terms.
 
     So ``W_sector = N*[9*(q/2) + 15] + q*N/2 + 4q + 2 + 2*W_action``.
     Mapping ``S_+`` and ``S_-`` to Pauli sums does not scale with ``N`` and is
-    admitted by its own law in ``fermionic_pool._native_ladder_sum``. The
+    checked by its own formula in ``fermionic_pool._native_ladder_sum``. The
     occupation-statistic scratch is ``8q + 65536`` bytes beyond the existing
     probabilities, with no additional N-vector. ``apply_spin_squared`` keeps
     its own index and diagonal workspace for ``S^2``.

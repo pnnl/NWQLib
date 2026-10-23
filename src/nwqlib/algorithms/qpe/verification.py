@@ -98,7 +98,7 @@ def _projector_weight(vectors, indices, reference, occupation):
 
 
 def _resolution(result):
-    """Grid spacing of the Result's actual analysis grid in the output frame.
+    """Grid spacing of the analysis grid the Result used, in the units of the requested output.
 
     SPE scans a span of pi, while QCELS and RFE cover 2*pi. RWPE reports
     its Gaussian phase width. Phase output divides by 2*pi and energy output
@@ -123,9 +123,10 @@ def verify(plan, result, *, checks):
     """Run one QPEVerification and return ``(receipt, facts)``.
 
     The Result must belong to ``plan`` and hold an estimate. ``facts`` holds
-    the receipt-witnessed ``component_error`` and ``overlap_deficit`` facts,
-    in the order of ``checks.verification_checks(result)``, ready for
-    ``Certificate.with_verification`` with the same options. The receipt
+    the ``component_error`` and ``overlap_deficit`` facts that the
+    verification record ``receipt`` supports, in the order of
+    ``checks.verification_checks(result)``, ready for
+    ``Certificate.with_verification`` with the same options. The record
     keeps every fact that ``_verify`` lists.
     """
     if type(checks) is not QPEVerification:

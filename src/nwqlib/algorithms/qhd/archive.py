@@ -1,4 +1,4 @@
-"""Store the original symbolic input and already-selected QHD tables."""
+"""Save a QHD Plan with its original symbolic input and the support tables that planning evaluated, and load it."""
 
 import pickle
 import sympy as sp
@@ -34,11 +34,11 @@ class _SymbolicReader(pickle.Unpickler):
     a node that was built with ``evaluate=False``. An expression that plain
     unpickling reproduces thus comes back as it does, and a reopened
     objective, variable or constraint keeps the ``srepr`` and content
-    identity that the archive records. When neither build reproduces a
+    hash that the archive records. When neither build reproduces a
     ``Sum``, its saved args and commutativity reconstruct the node directly.
     Other unreproduced nodes keep the evaluated build, or raise its error.
     The expression comparisons in ``load`` and ``_durable.live_problem``
-    refuse a rebuilt problem that differs from the selected one.
+    refuse a rebuilt problem that differs from the saved one.
     """
 
     def find_class(self, module, name):
@@ -205,13 +205,13 @@ def save(method, plan, files):
 
 
 def load(saved, files):
-    """Rebind a saved QHD Plan from its stored objective and selected tables.
+    """Rebind a saved QHD Plan from its stored objective and support tables.
 
     The Plan is restored from the stored Method, reconstruction and
     SymPy objective without recompiling the schedule or evaluating the
     objective. The restored objective and ordered variables are compared
-    directly with their stored expression descriptions. The classical kernel
-    or native block is then bound to the stored reconstruction.
+    directly with their stored expression descriptions. The classical routine
+    or the circuit block is then bound to the stored reconstruction.
     Any other format, including an earlier QHD format, is rejected before a
     file is read.
     """

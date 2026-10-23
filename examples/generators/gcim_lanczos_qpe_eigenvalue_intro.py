@@ -1,7 +1,7 @@
 # %% [markdown]
 # # Ground-state energy of a stretched hydrogen chain
 #
-# Four hydrogen atoms in a row, 2 Å apart, form a strongly correlated molecule, whose ground-state energy is the smallest eigenvalue of an 8-qubit Pauli-sum Hamiltonian. ADAPT-GCIM computes it in a small basis of many-electron states, optimizing no angle, and the notebook compares it with the exact energy.
+# Four hydrogen atoms in a row, 2 Å apart, form a strongly correlated molecule, whose ground-state energy is the smallest eigenvalue of an 8-qubit Pauli-sum Hamiltonian. ADAPT-GCiM, the adaptive generator-coordinate-inspired method, computes it in a small basis of many-electron states without optimizing any angle, and the notebook compares it with the exact energy.
 #
 # Install with `python -m pip install "nwqlib[aer,notebook,chemistry]"`. To work on NWQLib itself, run `python -m pip install -e ".[aer,notebook,chemistry]"` in a clone of the repository instead. The notebook simulates circuits of at most 8 qubits and runs in about 7 s on an Apple M3 Max with 36 GiB of memory (Python 3.12.14, Qiskit 2.6.0, Aer 0.18.0).
 #
@@ -24,7 +24,7 @@ GEOMETRY = "; ".join(f"H 0 0 {index * BOND_LENGTH}" for index in range(4))
 BASIS = "sto-3g"          # one orbital per atom: 8 spin orbitals, 8 qubits
 ACTIVE_SPACE = (4, 4)     # (electrons, spatial orbitals), all active, so CASCI is the exact (FCI) energy
 POOL = "spin_adapted_sd"  # spin-adapted generalized singles and doubles (Zheng et al., arXiv:2312.07691v3, Appendix E)
-THETA = pi / 4            # fixed angle of every generator, as in all ADAPT-GCIM runs of the paper (arXiv:2312.07691v3)
+THETA = pi / 4            # fixed angle of every generator, as in all ADAPT-GCiM runs of the paper (arXiv:2312.07691v3)
 MAX_ITERATIONS = 8        # the eighth generator brings the error to roundoff (Section 3)
 
 started = perf_counter()
@@ -149,7 +149,7 @@ def show_card(result, exact, references, molecule, host_cost, circuit_cost, seco
     cx = amount(circuit_cost, "cx")
     display(HTML(
         f"<p><strong>Result.</strong> After {result.history[-1].iteration} iterations, without optimizing any angle, "
-        f"the ADAPT-GCIM energy lies {abs(errors[-1]):.2g} mHa from the exact (FCI) energy, {verdict} chemical "
+        f"the ADAPT-GCiM energy lies {abs(errors[-1]):.2g} mHa from the exact (FCI) energy, {verdict} chemical "
         f"accuracy (1.6 mHa). The closest classical approximation, {closest}, lies {abs(gap):.2g} mHa "
         f"{'below' if gap < 0 else 'above'} it. Execution: <code>execution=\"classical\"</code>, every matrix "
         f"element evaluated exactly from state vectors on this computer. Output: <code>result.eigenvalue</code>, "
@@ -162,7 +162,7 @@ def show_card(result, exact, references, molecule, host_cost, circuit_cost, seco
         f"seconds), {seconds:.1f} s on this computer, chemistry setup included.</p>"))
     fig, ax = plt.subplots(figsize=(8, 3.8), layout="constrained")
     iterations = [step.iteration for step in result.history]
-    ax.semilogy(iterations, np.maximum(np.abs(errors), 1e-9), "o-", color="#0072B2", label="ADAPT-GCIM")
+    ax.semilogy(iterations, np.maximum(np.abs(errors), 1e-9), "o-", color="#0072B2", label="ADAPT-GCiM")
     ax.axhspan(1e-9, MILLIHARTREE * CHEMICAL_ACCURACY, color="#009E73", alpha=0.12, label="Chemical accuracy")
     for (name, energy), color in zip(references.items(), ("#999999", "#E69F00", "#D55E00"), strict=True):
         ax.axhline(MILLIHARTREE * abs(energy - exact), linestyle="--", color=color, label=f"|{name} error|")
@@ -204,10 +204,10 @@ show_card(result, E_FCI, references, molecule, host_cost, circuit_cost, seconds)
 #
 # - **Input.** A Qiskit `SparsePauliOp`, or a dense or sparse matrix for exact evaluation. The chemistry helper builds the Pauli sum from a geometry with PySCF and OpenFermion.
 # - **Initial state.** The methods start from a state with a sizable overlap with the ground state, here the Hartree–Fock state.
-# - **Output.** `result.eigenvalue`, in the unit of the `Eigenproblem`, the smallest eigenvalue of a projected problem.
+# - **Output.** `result.eigenvalue` is the smallest eigenvalue of a projected problem, in the unit of the `Eigenproblem`.
 # - **Size.** Exact evaluation holds state vectors of the full Hamiltonian in classical memory. As circuits, the Aer simulator accepts 20 qubits by default (Section 4).
 #
-# The cell plans QCELS, another eigenvalue method of this family (Go deeper D), on the dense 256 × 256 matrix of the chain. With `max_work` set to 100,000,000 for this demonstration (the default is 1,000,000,000), planning refuses it before any evaluation. The remedy is the default `max_work`, and the solve takes under a second.
+# The cell plans QCELS, a quantum phase estimation (QPE) method for the same eigenvalue problem (Go deeper D), on the dense 256 × 256 matrix of the chain. `max_work` limits the classical work of QCELS. Work is a nominal measure of classical computation that NWQLib derives from the problem sizes by formula ([work units](../docs/glossary.md#work-units)). Its units combine estimates of arithmetic and of circuit construction, and they are neither a uniform count of scalar operations nor a time. With `max_work` set to 100,000,000 for this demonstration (the default is 1,000,000,000), planning refuses it before any evaluation. The remedy is the default `max_work`, and the solve takes under a second.
 
 # %%
 from nwqlib import Eigenproblem
@@ -245,9 +245,9 @@ show_table([
 #
 # **As circuits, the quantum cost is circuits, qubits and shots. The classical cost is memory, work and time on this computer.** No gate-count formula covers these circuits, so CX gates, depth and T gates are not predicted.
 #
-# The card cell planned the chain as circuits without running them.
+# The card cell planned the chain as circuits without running them. Counts marked exact readout assume that the simulator evaluates the matrix elements directly from the complex state amplitudes, without shot sampling. These calculations still use floating-point arithmetic.
 #
-# `estimate` predicts the first iteration, because ADAPT chooses later circuits from earlier results. The pair rule of Appendix A counts the whole run, and Go deeper B checks it against executed circuits on H₂.
+# `estimate` predicts the first iteration, because ADAPT chooses later circuits from earlier results. The pair rule of Appendix A, one circuit for each pair of basis states, counts the whole run, and Go deeper B checks it against executed circuits on H₂.
 
 # %%
 basis_states = len(result.pencil.overlap)
@@ -337,7 +337,7 @@ show_table([
 # %% [markdown]
 # ## 5. What does it assume?
 #
-# **The runs are noiseless, and every count is a logical count.** Exact evaluation and the circuits of this notebook use exact outcome probabilities, and finite shots are sampled without noise.
+# **The runs are noiseless, and every circuit count is a logical count.** Exact evaluation computes states and matrix elements directly, and for the ADAPT-GCiM circuits the simulator reduces the final state amplitudes to matrix elements without shot sampling. Finite-shot runs sample outcomes without a noise model.
 #
 # The same finite-shot request runs with a noise model on the local simulator ([Local Aer](../docs/aer.md)), and [Choose a backend](../docs/backends.md) lists the other backends.
 #
@@ -345,7 +345,7 @@ show_table([
 #
 # ## 6. Another molecule, or your own Hamiltonian
 #
-# The cell below is the eigenvalue workflow without the chemistry helper. It writes H₂ at 0.74 Å in the STO-3G basis as 15 Pauli strings and compares Lanczos and ADAPT-GCIM with exact diagonalization. Replace `my_H` and `my_initial_state` with your own.
+# The cell below is the eigenvalue workflow without the chemistry helper. It writes H₂ at 0.74 Å in the STO-3G basis as 15 Pauli strings and compares Lanczos and ADAPT-GCiM with exact diagonalization. Replace `my_H` and `my_initial_state` with your own.
 #
 # - **Another molecule.** Change `GEOMETRY`, `BASIS` and `ACTIVE_SPACE` in the first cell and run the notebook again. For example, `"Li 0 0 0; H 0 0 1.6"` with `ACTIVE_SPACE = (2, 5)` is a 10-qubit LiH problem.
 # - **Active space.** When it leaves orbitals out, CASCI is exact only within it, while MP2 and CCSD use all orbitals.
@@ -378,28 +378,28 @@ my_adapt = solve(my_problem, method=ADAPT(initial_state=my_initial_state, pool="
                  seed=7, progress=False)
 my_exact = np.linalg.eigvalsh(my_H.to_matrix())[0]
 print(f"exact diagonalization {my_exact:.6f} Ha, error of Lanczos {my_lanczos.eigenvalue - my_exact:.1e} Ha, "
-      f"of ADAPT-GCIM {my_adapt.eigenvalue - my_exact:.1e} Ha")
+      f"of ADAPT-GCiM {my_adapt.eigenvalue - my_exact:.1e} Ha")
 
 # %% [markdown]
 # ## 7. What NWQLib adds
 #
 # - **Planning beyond simulation.** `plan` and `estimate` work at sizes no simulator holds ([Planning at scale](resource_estimation_at_scale.ipynb)).
 # - **The formula behind every number.** The circuit counts follow the pair rule of Appendix A, which Go deeper B checks against executed circuits. [Mathematics](../docs/mathematics.md) gives the resource formulas, and the resource notebook compares them with compiled circuits at small sizes.
-# - **One argument switches the method.** `method=Lanczos(...)` or `method=QCELS(...)` in the same `solve` call replaces ADAPT-GCIM (Go deeper D).
-# - **Reanalysis without new evaluation.** The result stores every matrix element, so `result.analyze` solves again with another overlap cutoff (Go deeper C).
+# - **One argument switches the method.** `method=Lanczos(...)` or `method=QCELS(...)` in the same `solve` call replaces ADAPT-GCiM (Go deeper D).
+# - **Reanalysis without new evaluation.** The result keeps every matrix element, so `result.analyze` solves again with another overlap cutoff (Go deeper C).
 # - **Saved and reloaded.** A saved result reloads with its matrix elements, and its numbers can be recomputed (Appendix B).
 #
 # [Why NWQLib](../docs/why_nwqlib.md) compares this workflow with other packages.
 #
 # ## Go deeper
 #
-# ### A. The chain, its reference energies and ADAPT-GCIM step by step
+# ### A. The chain, its reference energies and ADAPT-GCiM step by step
 #
-# **Why is this chain hard for classical methods, and what does each ADAPT-GCIM iteration do?** This section reads the references and the run, and runs no solve.
+# **Why is this chain hard for classical methods, and what does each ADAPT-GCiM iteration do?** This section reads the references and the run, and runs no solve.
 #
 # The minimal STO-3G basis gives each hydrogen atom one orbital. Four spatial orbitals hold four electrons, and each spin orbital becomes one qubit. `ACTIVE_SPACE = (4, 4)` keeps every orbital active, so complete-active-space CI (CASCI) is exact diagonalization, the full configuration interaction (FCI) reference.
 #
-# Errors are in millihartree (mHa). A negative error means an energy below the exact value, which a variational method can never produce. CCSD, the usual workhorse of quantum chemistry, is not variational, and at this bond length its error has the wrong sign.
+# Errors are in millihartree (mHa). A negative error means an energy below the exact value, which a variational method can never produce. CCSD, widely used in quantum chemistry, is not variational, and at this bond length its error has the wrong sign.
 
 # %%
 show_table([
@@ -416,23 +416,23 @@ show_table([
 # 2. **Expand.** Add new basis states built from the selected generator, including its product with the earlier ones.
 # 3. **Diagonalize.** Evaluate $H_{ij}=\langle\psi_i|H|\psi_j\rangle$ and $S_{ij}=\langle\psi_i|\psi_j\rangle$ for the new basis states and solve the generalized eigenvalue problem $Hc=ESc$.
 #
-# The lowest generalized eigenvalue is the ADAPT-GCIM energy. It comes from a subspace, so in exact arithmetic it cannot fall below the exact energy when $H_{ij}$ and $S_{ij}$ are exact (the Rayleigh–Ritz principle).
+# The lowest generalized eigenvalue is the ADAPT-GCiM energy. It comes from a subspace, so in exact arithmetic it cannot fall below the exact energy when $H_{ij}$ and $S_{ij}$ are exact (the Rayleigh–Ritz principle).
 #
 # With `execution="classical"` the gradients and matrix elements are exact, and the selection rule and eigenvalue problem are those of the quantum algorithm.
 #
 # <details><summary>Sources, orbital signs and the stopping rule</summary>
 #
-# ADAPT-GCIM comes from Zheng, Peng, Li, Yang and Kowalski, [*npj Quantum Information* **10**, 127 (2024)](https://doi.org/10.1038/s41534-024-00916-8), arXiv:2312.07691v3. Its Figure 4 follows the same algorithm on linear and square H₄, LiH, BeH₂ and H₆. This notebook uses a linear H₄ chain at a longer bond length than the paper's H₄ panels.
+# ADAPT-GCiM comes from Zheng, Peng, Li, Yang and Kowalski, [*npj Quantum Information* **10**, 127 (2024)](https://doi.org/10.1038/s41534-024-00916-8), arXiv:2312.07691v3. Its Figure 4 follows the same algorithm on linear and square H₄, LiH, BeH₂ and H₆. This notebook uses a linear H₄ chain at a longer bond length than the paper's H₄ panels.
 #
 # The selection rule is steps 5–7 of ADAPT-VQE (Grimsley et al., arXiv:1812.11173v2, Sec. II.B). The fixed angle and the basis growth follow the METHODS section of arXiv:2312.07691v3 (p. 9). $Hc=ESc$ is the discretized Hill–Wheeler equation, Eq. (13) of Zheng et al., arXiv:2212.09205v1.
 #
-# The GCiM guide (`docs/algorithms/gcim.md`) links each step to its code.
+# The [GCiM guide](../docs/algorithms/gcim.md) (`docs/algorithms/gcim.md`) links each step to its code.
 #
 # The iterations depend on the signs of the molecular orbitals. Every generating function uses the same fixed angle, and replacing $A_k$ by $-A_k$ changes the states $e^{\theta A_k}\cdots|\phi_0\rangle$ that the basis spans.
 #
-# NWQLib fixes each arbitrary orbital sign when it builds the Hamiltonian, so the same geometry gives the same iterations on every computer.
+# NWQLib fixes each arbitrary orbital sign when it builds the Hamiltonian, which removes the dependence on the eigensolver's sign choices. A rotation within a subspace of degenerate orbitals, or rounding that decides between generators whose gradients tie in exact arithmetic, can still change the sequence of iterations.
 #
-# `MAX_ITERATIONS` caps the run. The ADAPT-GCIM paper stops a run once the energy has changed by less than $10^{-6}$ Ha in ten consecutive iterations, its setting for H₄, or in fewer iterations when 20% of the unselected pool members, rounded up, is smaller. NWQLib applies this rule within the cap.
+# `MAX_ITERATIONS` caps the run. The ADAPT-GCiM paper stops a run once the energy has changed by less than $10^{-6}$ Ha in ten consecutive iterations, its setting for H₄, or in fewer iterations when 20% of the unselected pool members, rounded up, is smaller. NWQLib applies this rule within the cap.
 #
 # With `MAX_ITERATIONS = 32`, the largest value the default cap of 64 basis states allows, the rule stops this run at iteration 18, ten iterations after the energy reached FCI.
 #
@@ -440,11 +440,11 @@ show_table([
 #
 # ### B. The same algorithm as quantum circuits
 #
-# **Do quantum circuits give the same energies as the exact evaluation, and how many circuits does ADAPT-GCIM need?** The cell builds H₂ at 0.74 Å with the chemistry helper and runs ADAPT-GCIM once as circuits and once with exact evaluation, under a second.
+# **Do quantum circuits give the same energies as the exact evaluation, and how many circuits does ADAPT-GCiM need?** The cell builds H₂ at 0.74 Å with the chemistry helper and runs ADAPT-GCiM once as circuits and once with exact evaluation, under a second.
 #
-# With exact outcome probabilities each pair of basis states $\psi_i,\psi_j$ is prepared once, as the joint state $(|0\rangle|\psi_i\rangle+|1\rangle|\psi_j\rangle)/\sqrt2$ of one ancilla qubit and the system. The simulator reduces the final state to the overlap $\langle\psi_i|\psi_j\rangle$ and to $\langle\psi_i|H_0|\psi_j\rangle$, where $H_0$ is $H$ without its identity term.
+# With exact readout each pair of basis states $\psi_i,\psi_j$ is prepared once, as the joint state $(|0\rangle|\psi_i\rangle+|1\rangle|\psi_j\rangle)/\sqrt2$ of one ancilla qubit and the system. The simulator reduces the final state to the overlap $\langle\psi_i|\psi_j\rangle$ and to $\langle\psi_i|H_0|\psi_j\rangle$, where $H_0$ is $H$ without its identity term.
 #
-# A diagonal element needs only the system state $\psi_i$. The circuit of the current full product state also returns the commutator gradients of the selection step, so a screening adds no circuit.
+# A diagonal element needs only the system state $\psi_i$. The circuit of the current full product state also returns the commutator gradients that the selection step uses, so that step adds no circuit.
 #
 # <details><summary>Hadamard tests for finite shots</summary>
 #
@@ -487,9 +487,9 @@ show_table([
 #
 # ### C. When the energy becomes exact, and another overlap cutoff
 #
-# **Which directions does the final eigenvalue problem keep, and what changes with the overlap cutoff?** This section reads the stored result and solves four small eigenvalue problems, under a second.
+# **Which directions does the final eigenvalue problem keep, and what changes with the overlap cutoff?** This section reads the result and solves four small eigenvalue problems, under a second.
 #
-# The basis states overlap strongly, so some eigenvalues of the overlap matrix $S$ are tiny. NWQLib drops the directions whose overlap eigenvalue falls below the cutoff, $10^{-12}$ by default, before it solves $Hc=ESc$.
+# The basis states overlap strongly, so some eigenvalues of the overlap matrix $S$ are tiny. NWQLib drops the directions whose overlap eigenvalues are at or below the cutoff, $10^{-12}$ by default, before it solves $Hc=ESc$.
 
 # %%
 reachable, exhausted = krylov_dimension(hamiltonian, molecule.reference_occupations)
@@ -504,19 +504,19 @@ show_table([
     ("Basis states / kept rank", (len(pencil.overlap), pencil.kept_rank), "Directions kept after the overlap cutoff"),
     ("Numerical Krylov dimension by two-pass reorthogonalization",
      f"{reachable} (exhaustion flag True)" if exhausted else f"constructed {reachable} directions, vector limit reached",
-     "Relative tolerance 1e-10 on the residual, relative to ||H - trace(H) I/n||_inf, with a flag for whether the "
-     "64-vector budget was exhausted. Compared with the kept ADAPT rank as a separate diagnostic."),
+     "Relative tolerance 1e-10 on the residual, relative to ||H - trace(H) I/n||_inf, with a flag that is True when the "
+     "Krylov space was exhausted within the 64-vector budget. Compared with the kept ADAPT rank as a separate diagnostic."),
     ("Stop reason", result.stop_reason, "max_iterations: the iteration budget was used"),
 ])
 
 # %% [markdown]
-# The Krylov count is the numerical dimension at the displayed tolerance. An equal number of kept ADAPT-GCIM directions does not establish that the two spaces coincide or contain the ground state.
+# The Krylov count is the numerical dimension at the displayed tolerance. An equal number of kept ADAPT-GCiM directions does not establish that the two spaces coincide or contain the ground state.
 #
 # Exact Rayleigh–Ritz recovers the ground energy when its trial space contains a ground-state eigenvector. Here the independently computed FCI energy establishes the accuracy. For another molecule, inspect the energy error and the overlap spectrum separately from the two dimension counts.
 #
 # A small energy error does not by itself certify the ground state. For larger molecules, where FCI is out of reach, the convergence of the energy with iterations and the overlap diagnostics are the available evidence.
 #
-# `result.analyze(overlap_cutoff=...)` solves the final eigenvalue problem again from the stored matrix elements, with no new evaluation, as one would for noisy matrix elements from finite shots. The table repeats the solve with larger cutoffs.
+# `result.analyze(overlap_cutoff=...)` solves the final eigenvalue problem again from the matrix elements kept in the result, with no new evaluation, as one would for noisy matrix elements from finite shots. The table repeats the solve with larger cutoffs.
 
 # %%
 rows = []
@@ -529,11 +529,11 @@ show_table(rows, headers=("Overlap cutoff", "Kept directions", "Overlap conditio
 # %% [markdown]
 # Discarding more nearly dependent directions lowers the condition number of $S$ by four orders of magnitude, which protects the solve against errors in the matrix elements. It also removes part of the ground state, and the energy error grows to tens of mHa.
 #
-# The cutoff is therefore an analysis setting to choose from the accuracy of the matrix elements, and the stored result lets you try several without repeating the evaluation.
+# The cutoff is therefore an analysis setting to choose from the accuracy of the matrix elements, and the result lets you try several without repeating the evaluation.
 #
 # ### D. Other eigenvalue methods on the chain
 #
-# **How do Chebyshev Lanczos and QCELS, started from the same Hartree–Fock state, compare with ADAPT-GCIM on H₄?** The cell makes ten solves with exact evaluation, about 1 s, and plans each method's quantum circuit without running it.
+# **How do Chebyshev Lanczos and QCELS, started from the same Hartree–Fock state, compare with ADAPT-GCiM on H₄?** The cell makes ten solves with exact evaluation, about 1 s, and plans each method's quantum circuit without running it.
 #
 # **Chebyshev Lanczos** (Kirby, Motta and Mezzacapo, [*Quantum* **7**, 1018 (2023)](https://doi.org/10.22331/q-2023-05-23-1018), arXiv:2208.00567v4) builds a Krylov space from Chebyshev polynomials of $H$ applied to the initial state. Each extra Krylov dimension adds higher polynomial moments, measured through a block encoding of $H$.
 #
@@ -604,7 +604,7 @@ lanczos_plan = plan(problem, method=Lanczos(initial_state=initial_state, krylov_
                     execution="quantum", seed=7)
 qcels_plan = plan(problem, method=QCELS(initial_state=initial_state), execution="quantum", seed=7)
 show_table([
-    ("ADAPT-GCIM", f"{result.history[-1].iteration} iterations", MILLIHARTREE * (result.eigenvalue - E_FCI),
+    ("ADAPT-GCiM", f"{result.history[-1].iteration} iterations", MILLIHARTREE * (result.eigenvalue - E_FCI),
      molecule.num_qubits + 1, "Pair circuits of fixed-angle excitations. The circuit count grows with the basis size."),
     ("Lanczos", f"Krylov dimension {krylov_dimensions[2]}", lanczos_errors[2],
      amount(estimate(lanczos_plan), "logical_width", "logical_device"),
@@ -621,7 +621,7 @@ display(HTML(f"<p>Squared overlap p<sub>0</sub> of the Hartree–Fock state with
 # %% [markdown]
 # With the default parameters, Lanczos reaches chemical accuracy with a four-dimensional Krylov space. Its circuits need more qubits, because the block encoding addresses each Pauli term with extra qubits.
 #
-# QCELS keeps the 9-qubit width of ADAPT-GCIM but needs long coherent evolution. At the shortest time the fit locks onto a mixture of eigenvalues and the error is hundreds of mHa.
+# QCELS keeps the 9-qubit width of ADAPT-GCiM but needs long coherent evolution. At the shortest time the fit locks onto a mixture of eigenvalues and the error is hundreds of mHa.
 #
 # In this example, extending the longest time to 40/Ha separates the ground-state frequency, although the overlap stays below the 0.71 that the paper's guarantee assumes.
 #
@@ -634,9 +634,9 @@ display(HTML(f"<p>Squared overlap p<sub>0</sub> of the Hartree–Fock state with
 #
 # ### A. Circuit count of a quantum run of the chain
 #
-# With exact probabilities each pair $i\le j$ of the $b$ basis states is one circuit, whose final state the simulator reduces to $S_{ij}$ and to the matrix element of $H$ without its identity term.
+# With exact readout each pair $i\le j$ of the $b$ basis states is one circuit, whose final state the simulator reduces to $S_{ij}$ and to the matrix element of $H$ without its identity term.
 #
-# A diagonal pair prepares one basis state, and the circuit of each full product state also returns the gradients of that iteration's screening. Together,
+# A diagonal pair prepares one basis state, and the circuit of each full product state also returns the gradients of that iteration's selection step. Together,
 #
 # $$N_{\rm exact}(b)=\frac{b(b+1)}{2},$$
 #
@@ -644,7 +644,7 @@ display(HTML(f"<p>Squared overlap p<sub>0</sub> of the Hartree–Fock state with
 #
 # $$N_{\rm Hadamard}(b)=bP+\frac{b(b-1)}{2}\,(2P+2),$$
 #
-# and the gradients add one circuit per group of commuting Pauli terms at each screening. Circuits from earlier iterations are reused, so both are cumulative counts. The helper cell after the first code cell implements both, and the table evaluates them for the basis sizes of this run.
+# and the gradients add one circuit per group of commuting Pauli terms at each selection step. Circuits from earlier iterations are reused, so both are cumulative counts. The helper cell after the first code cell implements both, and the table evaluates them for the basis sizes of this run.
 
 # %%
 show_table([(step.iteration, 2 * step.iteration, pair_circuits(2 * step.iteration),

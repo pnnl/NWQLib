@@ -1,4 +1,8 @@
-"""Preserved factor tuples with explicit bounded classical action/expansion."""
+"""Products of operators kept as separate factors.
+
+Their classical action and expansion are checked against byte and product
+limits before they run.
+"""
 
 from dataclasses import dataclass
 
@@ -12,10 +16,10 @@ from ._pauli import pauli_product_requirements
 
 @dataclass(frozen=True, eq=False, init=False, slots=True)
 class FactorizedOperatorProduct:
-    """Ordered product `A_1 A_2 ... A_k` of operator handles, kept as separate factors.
+    """Ordered product `A_1 A_2 ... A_k` of operators, kept as separate factors.
 
     Build it with a nonempty tuple of
-    [`OperatorInput`][nwqlib.operators.inputs.OperatorInput] handles that
+    [`OperatorInput`][nwqlib.operators.inputs.OperatorInput] objects that
     share one basis, for example `FactorizedOperatorProduct((A, B))`. The
     factors are referenced, not copied or read. `matvec` applies the product
     to a vector factor by factor, and `expand` multiplies it out into one
@@ -23,7 +27,7 @@ class FactorizedOperatorProduct:
     read-only.
 
     Attributes:
-        factors: The factor handles, in product order.
+        factors: The factors, as OperatorInput objects, in product order.
         manifest: The [`ProductManifest`][nwqlib.operators.access.ProductManifest]:
             factor references, shared basis and sizes. Its structure is
             always `"general"`.
@@ -33,11 +37,11 @@ class FactorizedOperatorProduct:
     manifest: ProductManifest
 
     def __init__(self, factors, *, max_bytes=DEFAULT_INPUT_BYTES):
-        """Build the product from its factor handles, in order, without reading their data.
+        """Build the product from its factors, in order, without reading their data.
 
         Args:
-            factors (tuple[OperatorInput, ...]): Nonempty tuple of handles
-                with one shared basis and dimension.
+            factors (tuple[OperatorInput, ...]): Nonempty tuple of
+                OperatorInput objects with one shared basis and dimension.
             max_bytes (int): Limit on the bytes of the factor references and
                 dimension metadata. Default 10 GB (decimal,
                 `10_000_000_000`).
@@ -122,9 +126,9 @@ class FactorizedOperatorProduct:
     def expansion_requirements(self, *, max_bytes=DEFAULT_INPUT_BYTES, max_products=1_000_000_000):
         """Check and return the size of `expand` as `(items, bytes, work)`, before any multiplication.
 
-        For sparse factors, the first product `A*B` has
-        `C = sum over stored A[i, k] of row_nnz(B, k)` candidate scalar
-        products, with `C >= structural nnz >= final nnz` of `A*B`. Each later
+        For sparse factors, the first product `A*B` takes
+        `C = sum over stored A[i, k] of row_nnz(B, k)` scalar products,
+        with `C >= structural nnz >= final nnz` of `A*B`. Each later
         factor multiplies the previous nnz bound by its largest row nnz. No
         sparsity-pattern pass is made. A Pauli step multiplies the running
         M-row product by the next K-row factor and counts the bytes that the
@@ -134,8 +138,8 @@ class FactorizedOperatorProduct:
         Args:
             max_bytes (int): Byte limit. Default 10 GB (decimal,
                 `10_000_000_000`).
-            max_products (int): Limit on the sparse candidate products.
-                Default `1_000_000_000`.
+            max_products (int): Limit on the scalar products of a sparse
+                expansion. Default `1_000_000_000`.
 
         Returns:
             sizes (tuple[int, int, int]): Items, bytes and work of the
@@ -197,16 +201,16 @@ class FactorizedOperatorProduct:
 
         Pauli, ordered fermionic, and CSR or CSC factors can be expanded. The
         sizes from `expansion_requirements` are checked first. Terms are
-        combined only in the final step: identical Pauli words or fermionic
-        strings are summed and exact zeros removed, and a sparse product is
-        returned in canonical form with duplicate entries summed and zeros
-        removed.
+        combined only in the final step, in which identical Pauli words or
+        fermionic strings are summed and exact zeros removed, and a sparse
+        product is returned in canonical form with duplicate entries summed
+        and zeros removed.
 
         Args:
             max_bytes (int): Byte limit. Default 10 GB (decimal,
                 `10_000_000_000`).
-            max_products (int): Limit on the sparse candidate products.
-                Default `1_000_000_000`.
+            max_products (int): Limit on the scalar products of a sparse
+                expansion. Default `1_000_000_000`.
 
         Returns:
             operator (OperatorInput): The expanded operator.
@@ -242,14 +246,14 @@ def _sparse_layout(nnz, d):
 
 
 def _sparse_chain_requirements(factors, d, max_bytes, max_products):
-    """Admit a whole sparse product chain from row counts, before multiplying.
+    """Check the size of a whole sparse product chain from row counts, before multiplying.
 
-    For the first product A*B the candidate count is the sum over stored
-    ``A[i, k]`` of ``row_nnz(B, k)``, which bounds the structural and final
-    nnz of A*B. Each later factor multiplies the previous nnz bound by its
-    largest row nnz. Products, bytes and work are checked cumulatively, so no
-    prefix product runs only to discover that a later step exceeds a limit.
-    The laws are in docs/development/input_contracts.md.
+    For the first product A*B the number of scalar products is the sum over
+    stored ``A[i, k]`` of ``row_nnz(B, k)``, which bounds the structural and
+    final nnz of A*B. Each later factor multiplies the previous nnz bound by
+    its largest row nnz. Products, bytes and work are checked cumulatively,
+    so no prefix product runs only to discover that a later step exceeds a
+    limit. The formulas are in docs/development/input_contracts.md.
     """
     scan = sum(f._data.nnz + d for f in factors)
     # All CSR/CSC normalization copies, including index conversion and scratch.

@@ -1,4 +1,4 @@
-"""QHD Method: one-hot or binary grid planning, native or classical execution, and result analysis.
+"""QHD Method: planning on a one-hot or binary grid, circuit or classical execution, and result analysis.
 
 The Method evolves the time-dependent Hamiltonian of Leng et al., arXiv:2303.01471v1, Eq. (1), p. 3,
 ``H(t) = exp(phi_t) (-Delta/2) + exp(chi_t) f(x)``, written here as ``H(t) = a(t) K + b(t) V`` with the
@@ -8,7 +8,7 @@ workflow. It meshes the box, prepares an initial state, applies one product-form
 and measures the position. The QHD guide, ``docs/algorithms/qhd.md``, section "Source map", names the
 paper, version and equation behind each step, or marks the step as standard or NWQLib's own.
 
-NWQLib departs from Algorithm 1 in these choices, each stated with its reason at its owner.
+NWQLib departs from Algorithm 1 in these choices, each stated with its reason where the code makes it.
 
 - Register. Algorithm 1 gives each variable a q-qubit register whose basis states enumerate its
   ``2**q`` mesh points. The default one-hot register uses K qubits per variable, one per grid point
@@ -19,36 +19,37 @@ NWQLib departs from Algorithm 1 in these choices, each stated with its reason at
 - Kinetic operator and boundary. Algorithm 1 assumes a periodic box and the Fourier eigenvalues of
   ``-Delta/2``, which ``kinetic_model="spectral"`` selects. The default kinetic operator is the
   finite-difference stencil of Eqs. (F.7) and (F.9), pp. 46-47, because every route applies it
-  (``QHD._kinetic_route``). The default boundary is Dirichlet, because it admits the default K = 2
+  (``QHD._kinetic_route``). The default boundary is Dirichlet, because it accepts the default K = 2
   with the one-hot encoding (``QHD._periodic_grid``), and its default interior grid has the vanishing
   boundary values of Eq. (F.4).
 - Time sampling and order. Algorithm 1 applies the potential and then the whole kinetic factor with
   weights at the left endpoint ``t_j = j s``, a first-order product. Every route takes the weights at
   the step midpoint or averages them over the step (``QHD.coefficient_rule``), because left-endpoint
   weights leave a product first order in the step even with symmetric placement (guide, "Split-step
-  classical evaluation"). The block order shared by circuit selection and the numerical
+  classical evaluation"). The block order shared by the compiled circuit and the numerical
   ``ir_product`` reference is symmetric and second order by default
   (``QHD.trotter_order``). The compiled one-hot products further
   split the kinetic factor into link exponentials, which give local hopping gates. Adjacent links do not
   commute. First order applies them in increasing link order, and second order uses odd half, even
   full, odd half layers (``kinetic.KineticCompiler``). This is an additional product approximation to
   the whole kinetic exponential in Algorithm 1. Compiled binary kinetic factors use a Fourier
-  conjugation of a phase diagonal, with synthesis approximations charged separately. The ``split_step``
-  flavor always applies a symmetric potential/whole-kinetic product, and the default ``schrodinger``
-  flavor applies the exponential of each step's full Hamiltonian through ``expm_multiply``.
+  conjugation of a phase diagonal, and their synthesis approximations are separate error sources. The
+  ``split_step`` classical evaluation always applies a symmetric potential/whole-kinetic product, and the
+  default ``schrodinger`` evaluation applies the exponential of each step's full Hamiltonian through
+  ``expm_multiply``.
 - Initial state. Algorithm 1, step 3, suggests the uniform or a Gaussian state. The default is the
   kinetic ground state, for the reasons in the comment above ``QHD.initial_state``.
-- Readout. Algorithm 1, step 6, measures one grid point. Analysis reports the best observed candidate
-  and the most probable point of the observed population, with invalid one-hot outcomes kept as
-  invalid mass (``_summarize``).
+- Readout. Algorithm 1, step 6, measures one grid point. Analysis reports the best observed point
+  (the candidate) and the most probable point of the observed outcomes, and counts invalid one-hot
+  outcomes as invalid mass (``_summarize``).
 
 Reading order of the module. ``QHD.plan`` evaluates each objective support table once, compiles the
-step blocks when a circuit or the ``ir_product`` flavor needs them, stores both in
-``records.QHDReconstruction`` and binds the native block (``native.construct_qhd``) or the classical
-kernel (``_execute_theory``). ``_constant_phase`` to ``_admit_compiled_phase`` bound the rounding of
-the global phase that a kept state (``QHD.keep_state``) carries. Inside that span,
+step blocks when a circuit or the ``ir_product`` evaluation needs them, saves both in
+``records.QHDReconstruction`` and binds the circuit construction (``native.construct_qhd``) or the
+classical routine (``_execute_theory``, a host kernel in the code). ``_constant_phase`` to ``_admit_compiled_phase`` bound the
+rounding of the global phase that a kept state (``QHD.keep_state``) carries. Inside that span,
 ``_schrodinger_kinetic_bounds`` to ``_schrodinger_state_error`` bound the state error of the
-``schrodinger`` kernel, which ``_host_state_error`` uses. ``_host_state_error`` to
+``schrodinger`` routine, which ``_host_state_error`` uses. ``_host_state_error`` to
 ``_readout_window`` bound the roundoff of the probabilities that the readout compares. ``_summarize``
 and ``QHD.analyze`` turn observed probabilities or counts into the reported points.
 """
@@ -255,11 +256,11 @@ _KERNEL_CALL_BYTES = 262144
 
 
 def _initial_state_bytes(d, k):
-    """Return the bytes that planning admits for evaluating and storing the initial state of d variables on K points.
+    """Return the bytes that planning counts for evaluating and storing the initial state of d variables on K points.
 
-    Store the initial amplitudes as one immutable float64 vector per
-    variable, preserving the selected entries and axis order. Charge each
-    distinct data buffer and its array and container headers once.
+    The initial amplitudes are stored as one immutable float64 vector per
+    variable, with the entries and axis order of the evaluated state. Each
+    distinct data buffer and its array and container headers count once.
 
     ``320 d K + B_A + B_cache + d F + 4096 (d + 1)``, with
     ``B_A = 8 d K + 120 d + 40`` for the normalized float64 vectors and their
@@ -268,8 +269,8 @@ def _initial_state_bytes(d, k):
     separately owning one-dimensional float64 arrays of length K, which
     counts data 8dK, ndarray headers 112d, the outer tuple 8d + 40 and the
     existing 24-byte error float. The record copies the evaluated vectors
-    into its own arrays (``core.records.FrozenArray``), so both populations
-    exist and B_A and B_cache are both charged. ``F = _FROZEN_ARRAY_BYTES``
+    into its own arrays (``core.records.FrozenArray``), so both sets of
+    arrays exist and B_A and B_cache both count. ``F = _FROZEN_ARRAY_BYTES``
     is the measured engineering allowance for each vector's FrozenArray
     wrapper. The stored initial vectors cost ``8dK + 324d + 64`` bytes on
     the qualified runtime, including each owning array, its separate
@@ -280,7 +281,7 @@ def _initial_state_bytes(d, k):
     (``_INITIAL_STATE_BYTES``, ``_INITIAL_STATE_OBJECT_BYTES``), so the
     allowance is measured and specific to the implementation and runtime
     named there, not a derived bound. The early check of ``QHD.plan`` and
-    the final admission of ``QHD._admit_symbolic_work`` include the same
+    the final byte check of ``QHD._admit_symbolic_work`` include the same
     value.
     """
     arrays = 8 * d * k + 120 * d + 40
@@ -297,15 +298,17 @@ def _binary_source_reservation(d, k, table_specs, num_steps, trotter_order, *, g
     qualified table/metadata inventory of _support_table_bytes. Add the
     source payload 8*sum(E), stored initial vectors 8*d*k+324*d+64,
     _STEP_BYTES*N, _BLOCK_BYTES*B and (32+L+12*digits(max(0,d-1)))*J
-    for variable-sized block support slots and their identity encoding.
+    for the variable-sized support entries of the blocks and their
+    content-hash encoding.
     The source allowance includes each source table payload once.
 
     Planning also holds its normalized initial arrays, 8*d*k+120*d+40,
     and 16 bytes per position in the decomposer's grouped-term lists.
-    It reserves the future stored vectors as well. The source-record and
-    planning byte allowances exclude symbolic SymPy expression payloads.
-    Identity array encoding has its separate successive-phase workspace I.
-    These are qualified object allowances, not a process-RSS bound.
+    It sets aside the bytes of the vectors stored later as well. The
+    source-record and planning byte allowances exclude symbolic SymPy
+    expression payloads. Encoding the arrays for the content hash needs its
+    own workspace I, used after the evaluation phase. These are qualified
+    object allowances, not a process-RSS bound.
     """
     from .binary import _integer_storage
 
@@ -329,18 +332,19 @@ def _binary_source_reservation(d, k, table_specs, num_steps, trotter_order, *, g
 def _support_table_bytes(max_bytes, d, k, held, nodes):
     """Return ``(F_tables, W_eval, I, chunks)``, the byte phases of the support tables of ``QHD._admit_symbolic_work``.
 
-    Admit the final float64 tables, centered coordinates, support metadata
-    and the largest live construction workspace, including the source array
-    and finite-value mask during freezing. The metadata allowance covers the
-    compiler's shared arrays and both SupportValues populations created
-    while the reconstruction is validated.
+    The phases count the final float64 tables, centered coordinates, support
+    metadata and the largest live construction workspace, including the
+    source array and finite-value mask while a table is copied into its
+    read-only array. The metadata allowance covers the compiler's shared
+    arrays and both sets of SupportValues records created while the
+    reconstruction is validated.
 
     For T tables with M total support indices in d variables, the qualified
     metadata allowance is ``65536 + 6144T + (24 + L(b_d))M + 256d`` bytes,
     where ``b_d = bit_length(max(0, d - 1))`` and
     ``L(b) = 32 + 4 ceil(max(1,b)/30)``. Array data are counted separately
-    and shared buffers count once. Its inventory: ``2 * 2048 T`` for the two
-    SupportValues populations (per record the object, field dictionary and
+    and shared buffers count once. It consists of ``2 * 2048 T`` for the two
+    sets of SupportValues records (per record the object, field dictionary and
     field-name set, the wrapper, a 44-byte hash allowance, a 112-byte cached
     identity string, three 24-byte extrema and a 40-byte support-tuple
     header), ``2048 T`` for one shared owning-array/view header pair, the
@@ -356,21 +360,23 @@ def _support_table_bytes(max_bytes, d, k, held, nodes):
     Evaluation phase. With ``n_S = K**|S|`` and ``E = sum_S n_S``,
     ``F_tables = 8E + 8dK + H_tables`` and
     ``W_eval = max(40K if T else 0, max_S 9 n_S, max_S B_slab,S(b_S))``,
-    with empty maxima zero. Freezing a float64 table keeps its source
-    ``8 n_S`` bytes, its new owner and an ``n_S``-byte ``isfinite`` mask
-    simultaneously, so after the final 8E are reserved the snapshot term is
-    ``9 n_S``. Each centered axis is built from a Python list of K floats,
-    ``40K`` bytes (24 per float and 16 per list slot), one axis at a time.
-    With ``R = max_bytes - B_held - F_tables``, the chunk b_S of each support
-    is the largest with ``B_slab,S(b_S) <= R`` (``compiler.support_chunk_size``),
-    and reducing the chunk cannot repair an unaffordable snapshot or staging
-    term. When R cannot hold one entry, the chunk is one entry and the
-    admission refuses the Plan.
+    with empty maxima zero. Copying a float64 table into its read-only array
+    holds its source ``8 n_S`` bytes, the new array and an ``n_S``-byte
+    ``isfinite`` mask at the same time, so after the final 8E are set aside
+    the copy term is ``9 n_S``. Each centered axis is built from a Python
+    list of K floats, ``40K`` bytes (24 per float and 16 per list slot), one
+    axis at a time. With ``R = max_bytes - B_held - F_tables``, the
+    evaluation block b_S of each support, the number of its entries
+    evaluated together, is the largest with ``B_slab,S(b_S) <= R``
+    (``compiler.support_chunk_size``), and a smaller block cannot make an
+    unaffordable copy or staging term affordable. When R cannot hold one
+    entry, the block is one entry and planning rejects the Plan.
 
-    Identity phase. For each serialized array occurrence i with raw length
-    ``b_i``, ``q_i = 4*((b_i+2)//3)``, ``Q = sum(q_i)`` and ``q_max = max(q_i)``.
-    The first identity read of the reconstruction serializes its tables and
-    its d initial vectors of length K, with
+    Content-hash phase. For each serialized array occurrence i with raw
+    length ``b_i``, ``q_i = 4*((b_i+2)//3)``, ``Q = sum(q_i)`` and
+    ``q_max = max(q_i)``. The first computation of the reconstruction's
+    content hash serializes its tables and its d initial vectors of length
+    K, with
 
     ``J_S = 227 + digits(n_S) + sum_(j in S) digits(j) + max(0, s_S - 1) + 4*((8*n_S + 2)//3)``,
     ``J_tables = 2 + max(0, T - 1) + sum_S J_S``,
@@ -387,13 +393,14 @@ def _support_table_bytes(max_bytes, d, k, held, nodes):
     storage of the complete JSON text. For the arrays,
     ``H_json,arrays = H0 + 2048 (T + d) + (8 + L(b_d)) M`` and J is the
     arrays' part ``J_tables + J_initial + 40``. The other fields of the
-    reconstruction and their non-array tokens keep their existing identity
+    reconstruction and their non-array tokens keep their own content-hash
     allowances (``_STEP_BYTES``, ``_BLOCK_BYTES``). The returned I is the
     arrays' serialization workspace.
 
-    The caller admits ``B_held + F_tables + max(W_eval, I)``: the evaluation
-    and identity workspaces are successive, and B_held covers the other data
-    of both phases.
+    The caller checks ``B_held + F_tables + max(W_eval, I)`` against
+    ``max_bytes``, because the evaluation and content-hash workspaces are
+    used one after the other, and B_held covers the other data of both
+    phases.
 
     Raises:
         ValueError: A table has more entries than a NumPy index can address.
@@ -447,7 +454,7 @@ def _support_table_bytes(max_bytes, d, k, held, nodes):
 def _grid(plan):
     """Return the Plan's grid, built once from its Problem bounds and Method grid options.
 
-    ``OneHotGrid`` owns the coordinates and spacing of both encodings. The
+    ``OneHotGrid`` computes the coordinates and spacing of both encodings. The
     binary register places variable j on qubits ``j b`` to ``j b + b - 1``
     instead of ``j K`` to ``j K + K - 1`` (``binary`` module docstring).
     The validated immutable grid is kept in the Plan's private cache with the
@@ -470,11 +477,11 @@ def _bits(method):
 
 
 def _admit_register_basis(width):
-    """Raise at planning when the native register's basis dimension ``2**width`` cannot enter a content identity.
+    """Raise at planning when the circuit register's basis dimension ``2**width`` cannot enter a content hash.
 
-    Native execution records the register basis, ``2**width`` states, as the
-    integer ``Basis.dimension`` of its selected block and of a kept state, and
-    a record's content identity writes every integer as decimal text. Python
+    Circuit execution records the register basis, ``2**width`` states, as the
+    integer ``Basis.dimension`` of its ``SelectedBlock`` and of a kept state,
+    and a record's content hash writes every integer as decimal text. Python
     refuses to convert an integer with more decimal digits than
     ``sys.get_int_max_str_digits()``, 4300 by default and no limit when it is
     0. ``2**width`` has at most L digits exactly when ``2**width < 10**L``.
@@ -501,7 +508,7 @@ def _admit_register_basis(width):
 def _table_values(reconstruction, indices, k):
     """Return the value of each stored support table at grid tuple ``indices``.
 
-    No SymPy expression or native code is evaluated. A table for support
+    No symbolic expression is evaluated and no circuit is built. A table for support
     ``(j_1, ..., j_s)`` stores values in C order with ``j_1`` most
     significant, the order in which the compiler evaluated them, and each
     value is read by its index as a Python float.
@@ -534,7 +541,7 @@ def _constant_phase(reconstruction, method):
     ``exp(-i c dt b_k) exp(-i dt (a_k K + b_k V_0))``, and the ``split_step``
     step, whose two potential halves each carry ``dt b_k/2``, likewise gains
     ``exp(-i c dt b_k)``. Over all steps, with the step weights of the
-    coefficient rule, ``phi = -c sum_k dt b_k``. Both flavors evolve ``V_0``
+    coefficient rule, ``phi = -c sum_k dt b_k``. Both evaluations evolve ``V_0``
     (``split_step.potential_diagonal``), and
     ``_execute_theory`` multiplies the kept state by ``exp(i phi)`` once,
     after the probabilities are read, so they do not depend on c. Each term
@@ -546,12 +553,12 @@ def _constant_phase(reconstruction, method):
     ``(3u + 3u**2 + u**3) S_C`` of the exact angle, which is ``3u S_C`` to
     first order (``_admit_constant_phase``). It is a global phase, and the
     multiplication adds at most ``GLOBAL_PHASE_STATE_ROUNDOFF`` u to the
-    state. The ``ir_product`` flavor already restores the compiler's
+    state. The ``ir_product`` evaluation already restores the compiler's
     physical phase, which includes the constant. Each product ``fl(dt b_k)``
     passes the range rule (``validation._normal_range``), which supplies the
-    normal-arithmetic premise. A finite final product that would be nonzero
-    and below ``2**-1022`` is omitted as phase zero, and its exact value
-    ``|c fsum(fl(dt b_k))|`` is charged by ``_admit_constant_phase``, since
+    normal-arithmetic assumption. A finite final product that would be nonzero
+    and below ``2**-1022`` is omitted as phase zero, and ``_admit_constant_phase``
+    adds its exact value ``|c fsum(fl(dt b_k))|`` to the allowance, since
     ``|exp(i a) - 1| <= |a|``. An overflowing sum or product is left to
     ``_admit_constant_phase``, which names the constant as its cause.
     """
@@ -581,7 +588,7 @@ def _admit_constant_phase(reconstruction, method):
     example ``c = 1e308`` over two unit steps, and the kept state would then
     be NaN after the whole evolution. Otherwise phi lies within the finite
     allowance ``(3u + 3u**2 + u**3) S_C`` of the exact angle, with
-    ``S_C = |c| sum_k |dt b_k|``, under the premises of ``_constant_phase``,
+    ``S_C = |c| sum_k |dt b_k|``, under the assumptions of ``_constant_phase``,
     among them a correctly rounded ``math.fsum``. When the final product was
     omitted below the normal range, its exact magnitude is added to the
     allowance, since it replaces a product whose rounding the allowance
@@ -591,7 +598,7 @@ def _admit_constant_phase(reconstruction, method):
     before any evolution. The allowance is evaluated upward at every
     operation (``_add_up``, ``_mul_up``, ``_sum_up``), so rounding cannot
     move an allowance above pi below the threshold. The probabilities are
-    read before the phase is applied, so the same objective is admitted
+    read before the phase is applied, so the same objective is accepted
     without ``keep_state``.
     """
     c = reconstruction.constant
@@ -707,7 +714,7 @@ def _schrodinger_kinetic_bounds(grid):
     ``sparsetools/coo.h`` (``coo_tocsr``), ``_compressed.py``
     (``sum_duplicates``) and ``sparsetools/csr.h`` (``csr_sum_duplicates``)
     at tag v1.18.1. K >= 2, the same axis coefficients in every column and
-    ordinary ordered binary64 addition are further premises. An axis-major
+    ordinary ordered binary64 addition are further assumptions. An axis-major
     fill, another conversion path, explicit sorting before conversion, a
     changed dependency or reassociating arithmetic needs requalification.
 
@@ -751,10 +758,11 @@ def _schrodinger_step_bounds(method, grid, tables, step_weights):
     bounds. Symmetry bounds the spectral norm by the column 1-norm and
     exact centering increases a perturbation bound by at most two.
 
-    The arithmetic premise is round-to-nearest binary64 with gradual
+    The arithmetic assumption is round-to-nearest binary64 with gradual
     underflow and finite assembly intermediates. The SciPy state model
-    remains conditional and first order, including its computed-trace-shift
-    premise. This assembly allowance does not establish that model.
+    remains conditional and first order, including its assumption on the
+    computed trace shift. This assembly allowance does not establish that
+    model.
 
     For overflow of the assembly intermediate before gamma_3, lower
     total_time or increase num_steps at fixed weights, scale the objective
@@ -830,7 +838,7 @@ def _schrodinger_state_error(method, grid, tables, step_weights, start):
     ``Q_k`` of ``_schrodinger_step_bounds`` without kinetic exponential
     amplification:
     ``delta_sch = u (start + sum_k [c(N_k, r) + N_k]) + sum_k Q_k``, with
-    ``c(N, r)`` the numerical call charge of ``expm_multiply_state_error``.
+    ``c(N, r)`` the per-call numerical error term of ``expm_multiply_state_error``.
     Analytic spacing, kinetic-entry formation, table evaluation, schedule
     approximation and time discretization are outside this stored-matrix and
     table reference, and the objective constant is outside its phase
@@ -849,7 +857,7 @@ def _schrodinger_state_error(method, grid, tables, step_weights, start):
 
 
 def _phase_contributions(reconstruction, method):
-    """Return M, the number of contributions that the compiled phase ledger sums, from the reconstruction.
+    """Return M, the number of contributions that the running phase total sums, from the reconstruction.
 
     Without compiled steps nothing is recorded and M = 0, in either
     encoding.
@@ -866,9 +874,9 @@ def _phase_contributions(reconstruction, method):
 
     ``M = N (1 + [c != 0] + F R)``.
 
-    Binary. The ledger holds only the constant's contributions
-    (``binary.compile_binary_steps``), ``M = N [c != 0]``. Planning's admission
-    (``_admit_compiled_phase``) and the error ledger
+    Binary. The running phase total holds only the constant's contributions
+    (``binary.compile_binary_steps``), ``M = N [c != 0]``. Planning's check
+    (``_admit_compiled_phase``) and the error sources
     (``circuit_errors.phase_allowance``, ``circuit_errors.binary_phase_allowance``)
     take M from here.
     """
@@ -897,7 +905,7 @@ def _compiled_phase_allowance(reconstruction, method, grid, contributions):
 
     Formation. With ``S_C = |c| sum_k |dt b_k|``,
     ``S_P = sum_k |dt b_k| sum_(S,r) 2**-|S| |v_(S,r)|`` and
-    ``S_K = sum_k |dt a_k| sum_l h_l**-2``, each admitted constant and
+    ``S_K = sum_k |dt a_k| sum_l h_l**-2``, each included constant and
     projector contribution is two rounded products of stored binary64 values
     (``compiler.QHDCompiler`` normalizes c once), so its relative formation
     error is at most ``eta_2 = (1 + u)**2 - 1 = 2u + u**2``, the power-of-two
@@ -925,7 +933,7 @@ def _compiled_phase_allowance(reconstruction, method, grid, contributions):
     ``1 + u``, so the kinetic formation is within
     ``eta_K = (1 + u)**2 (1 + beta_d)/(1 - u) - 1``, evaluated in the
     expanded form ``(3u + u**2 + (1 + 2u + u**2) beta_d)/(1 - u)``, which
-    subtracts no nearly equal numbers, of S_K. The formation charge is
+    subtracts no nearly equal numbers, of S_K. The formation allowance is
     ``D = eta_2 (S_C + S_P) + eta_K S_K``.
 
     Accumulation. The recorder adds the M = ``contributions`` formed angles
@@ -942,11 +950,12 @@ def _compiled_phase_allowance(reconstruction, method, grid, contributions):
     argument gives ``[eta_2 + (1 + eta_2) beta_N] S_C``. Cancellation between
     contributions does not reduce it. The bound assumes round-to-nearest
     binary64 arithmetic and no overflow. Planning establishes the stated
-    relative-error premises for admitted contributions. The empty ledger has
-    allowance zero.
+    relative-error assumptions for the included contributions. Without
+    contributions the allowance is zero.
 
-    ``_phase_ledger`` combines this arithmetic allowance with the omitted
-    identity-action charge and returns their separately evaluated components.
+    ``_phase_ledger`` combines this arithmetic allowance with the allowance
+    for omitted identity actions and returns their separately evaluated
+    components.
 
     Evaluation. Every elementary operation of the allowance, its input sums
     included, is rounded upward with ``math.nextafter`` (``_add_up``,
@@ -958,17 +967,18 @@ def _compiled_phase_allowance(reconstruction, method, grid, contributions):
     expression, infinite when a denominator has no positive lower bound or
     the evaluation overflows.
 
-    Binary encoding. The ledger contains only the objective constant. Its
-    reference is ``Phi_C = -sum_k dt b_k c``, with the stored binary64
-    duration, weights and normalized constant read as exact inputs, so
-    ``S_P = S_K = 0`` and M counts only the actual constant contributions.
-    Each admitted contribution ``-fl(dt fl(b_k c))`` uses two rounded products, so
-    ``D = (2u + u**2) S_C`` and ``E_arith = D + beta_M (S_C + D)``, zero for
-    an empty ledger. ``binary.compile_binary_steps`` sums the formed angles
+    Binary encoding. The running phase total contains only the objective
+    constant. Its reference is ``Phi_C = -sum_k dt b_k c``, with the stored
+    binary64 duration, weights and normalized constant read as exact inputs,
+    so ``S_P = S_K = 0`` and M counts only the constant's contributions.
+    Each included contribution ``-fl(dt fl(b_k c))`` uses two rounded products, so
+    ``D = (2u + u**2) S_C`` and ``E_arith = D + beta_M (S_C + D)``, zero
+    without contributions. ``binary.compile_binary_steps`` sums the formed angles
     with ``math.fsum``, whose correctly rounded result errs by at most
     ``u |X|``, below ``beta_M`` times their absolute sum. This use of fsum
-    rests on that rounding premise. The diagonals' identity phases stay
-    inside the binary blocks and are not ledger contributions. Their
+    rests on that rounding assumption. The diagonals' identity phases stay
+    inside the binary blocks and are not contributions to the running phase
+    total. Their
     separate formation allowance ``F_W`` (``binary.WalshPhaseTerms``) is
     required on both circuit routes (``_admit_compiled_phase``) and is not
     zero merely because ``S_P = S_K = 0``.
@@ -991,17 +1001,18 @@ def _phase_ledger(reconstruction, method, grid, contributions):
     which uses the total for the decision.
 
     Omitted identities. A projector identity or constant contribution
-    omitted below the normal range enters the ledger as a zero event, so the
-    relative-error terms above, evaluated with the original absolute sums,
-    still bound the admitted contributions' arithmetic. Let O be the sum of
+    omitted below the normal range enters the running phase total as a zero
+    event, so the relative-error terms above, evaluated with the original
+    absolute sums, still bound the included contributions' arithmetic. Let O be the sum of
     the exact omitted identity actions ``2**-s |t b v|`` and ``|dt b c|``,
     where s is the projector support size, t is its occurrence's duration,
     and the other inputs are defined in ``_compiled_phase_allowance``.
     ``_range_omissions`` rounds O upward into
     ``QHDRangeOmissions.identity_charge``. That upper value is added once as
     the component ``omitted_identity``, giving ``up(E_arith + O)``, where up
-    denotes the complete outward evaluation. This addition precedes the native
-    assignment allowances and kept-state admission. An omitted identity
+    denotes the complete outward evaluation. This addition comes before the
+    allowance for the circuit's phase assignments (``_native_phase_allowance``)
+    and the kept-state check (``_admit_compiled_phase``). An omitted identity
     ``exp(-i a I)``, for an omitted phase a and the identity operator I,
     differs from I by at most ``|a|``.
     """
@@ -1058,16 +1069,16 @@ def _count_up(count):
 
 
 def _native_phase_allowance(reconstruction, ledger, walsh=None):
-    """Return an upper allowance, in radians, on the native circuit's global phase for a kept state.
+    """Return an upper allowance, in radians, on the Qiskit circuit's global phase for a kept state.
 
     Let u = 2**-53, lambda = 2**-1074 and tau the binary64 2 pi,
     0x1.921fb54442d18p+2, with ``Delta = 2**-51 >= |tau - 2 pi|``. The
     bound assumes round-to-nearest binary64 arithmetic, gradual underflow,
-    finite native operations and finite exact divisors ``2**s``, and
-    ``ledger`` (``_compiled_phase_allowance``) must already cover the
-    formation and accumulation errors of ``physical_phase``.
+    finite results of the circuit's phase operations and finite exact
+    divisors ``2**s``, and ``ledger`` (``_compiled_phase_allowance``) must
+    already cover the formation and accumulation errors of ``physical_phase``.
 
-    The native builder assigns the circuit's global phase once per stored
+    The circuit construction assigns the circuit's global phase once per stored
     ``number_projector`` block b, adding ``theta_b/2**s_b`` for its angle and
     support size (``subroutines.hamiltonian_evolution.pauli_evolution.append_number_projector_phase``),
     and once more for ``physical_phase`` (``native.construct_qhd``). B counts
@@ -1094,8 +1105,8 @@ def _native_phase_allowance(reconstruction, ledger, walsh=None):
     ``E_rem = Delta`` and its quotient bound is
     ``(tau + |physical_phase| + E_add)/tau + 1``.
 
-    The quotient term ``Delta K`` is the reason this bookkeeping is charged
-    at every assignment. Reducing by the binary64 tau instead of 2 pi errs
+    The quotient term ``Delta K`` is the reason this error is counted at
+    every assignment. Reducing by the binary64 tau instead of 2 pi errs
     by the quotient times ``|tau - 2 pi|``, which grows with the unreduced
     angle, so a large intermediate phase costs accuracy even when the final
     phase is small. With Qiskit 2.6.0 (Python 3.12.14, macOS arm64,
@@ -1118,7 +1129,7 @@ def _native_phase_allowance(reconstruction, ledger, walsh=None):
     ``E_native = E_ledger + 2u (Y + |physical_phase|) + 20u (B + 1)``,
 
     which includes the final assignment and the scaling underflow. It is
-    evaluated upward at every operation, like the ledger. This bounds the
+    evaluated upward at every operation, like ``_phase_ledger``. This bounds the
     scalar phase bookkeeping for the stored block gates. Gate execution,
     state preparation, exponentials and the multiplication of state
     amplitudes need their own error qualifications.
@@ -1129,10 +1140,10 @@ def _native_phase_allowance(reconstruction, ledger, walsh=None):
     Walsh diagonal blocks that ``native.append_diagonal`` applies, kinetic
     blocks, both potential halves and blocks with a zero identity increment
     or no kept rotation included, and ``Y = sum_b |identity_phase_b|`` uses
-    the computed binary64 identity phases of the selected constructions.
-    ``F_W`` charges their formation against the intended identity
+    the computed binary64 identity phases of the constructions that planning
+    chose. ``F_W`` bounds their formation error against the intended identity
     increments, exponent formation included, and the stored identity phases
-    are exact inputs to the consumer part only. Each Walsh block executes
+    are exact inputs only to the assignment term ``2u Y + 20u B``. Each Walsh block executes
     ``circuit.global_phase += identity_phase_b``, so the ``C(v, e)``
     derivation above applies with ``v = |identity_phase_b|`` and ``e = 0``,
     at most ``2u v + 20u`` each, and circular errors add. With formation and
@@ -1165,7 +1176,7 @@ def _projector_assignments(reconstruction):
 
 
 def _circuit_assignments(reconstruction, walsh):
-    """Return ``(Y, B)`` of the per-block circuit phase assignments that ``_native_phase_allowance`` charges.
+    """Return ``(Y, B)`` of the per-block circuit phase assignments that ``_native_phase_allowance`` counts.
 
     A one-hot circuit assigns the scaled angle of each number-projector block
     (``_projector_assignments``) and a binary circuit the identity phase of
@@ -1180,7 +1191,7 @@ def _native_components(reconstruction, components, walsh=None):
     """Return the additive components of ``_native_phase_allowance`` for the rejection message.
 
     ``E_native = E_ledger + 2u (Y + |physical_phase|) + 20u (B + 1)`` splits
-    into the ledger components ``L_C`` and ``L_K`` (``_phase_ledger``), with
+    into the components ``L_C`` and ``L_K`` of ``_phase_ledger``, with
     ``omitted_identity`` when present, the projector component
     ``L_P + 2u Y + 20u B``, which adds the projector
     blocks' own circuit assignments, and the final assignment of
@@ -1189,7 +1200,7 @@ def _native_components(reconstruction, components, walsh=None):
     one Hamiltonian source. Each component is evaluated upward with the
     same Y and B as the allowance.
 
-    For a binary Plan (``walsh``) the ledger holds only ``L_C`` and any
+    For a binary Plan (``walsh``) the components of ``_phase_ledger`` reduce to ``L_C`` and any
     ``omitted_identity`` component, and the allowance adds ``F_W`` and the
     Walsh diagonals' own assignments
     ``2u Y_W + 20u B_W``, which are the components
@@ -1218,33 +1229,33 @@ def _native_components(reconstruction, components, walsh=None):
 
 
 def _admit_compiled_phase(reconstruction, method, grid, contributions, execution, walsh=None):
-    """Raise at planning when a kept native or ``ir_product`` state cannot carry its compiled phase.
+    """Raise at planning when a kept circuit or ``ir_product`` state cannot carry its compiled phase.
 
     A normalized state whose global phase is known within an angle
     allowance E is known within ``2 sin(min(E, pi)/2)`` in the 2-norm, which
     is the maximum value 2 once E reaches pi, so the allowance then gives no
     guarantee on the physical phase. It does not show that the computed
     phase is wrong. The ``ir_product`` reference multiplies its state by
-    ``exp(i physical_phase)``, and its allowance is the ledger's,
-    ``_compiled_phase_allowance``. The native circuit assigns its global
+    ``exp(i physical_phase)``, and its allowance is that of the running phase
+    total, ``_compiled_phase_allowance``. The Qiskit circuit assigns its global
     phase for every projector block and for ``physical_phase``, and its
     allowance is ``_native_phase_allowance``. A Plan with a kept state is
-    admitted only when the upper allowance is finite and below ``math.pi``,
+    accepted only when the upper allowance is finite and below ``math.pi``,
     which lies below the mathematical pi. Passing the check does not certify
     the other errors of the state, and finite phase uncertainty does not
     affect the probabilities, so only a kept state is checked. A rejection
-    names the largest additive component of the allowance, the ledger
-    components of ``_phase_ledger`` and, natively, those of
+    names the largest additive component of the allowance, among the
+    components of ``_phase_ledger`` and, for circuit execution, those of
     ``_native_components``, and advises removing the objective constant only
     when its component is the largest.
 
     For a kept binary state (``walsh``, ``binary.WalshPhaseTerms``) both
-    routes add the Walsh identity formation allowance ``F_W`` to the
-    constant-only ledger. Native execution also charges every Walsh
-    global-phase assignment (``_native_phase_allowance``). ``ir_product``
+    routes add the Walsh identity formation allowance ``F_W`` to the running
+    phase total, which holds only the constant. Circuit execution also counts
+    every Walsh global-phase assignment (``_native_phase_allowance``). ``ir_product``
     instead adds ``R_W``, the reconstruction allowance of
     ``DiagonalConstruction.emitted_phases``, so its allowance is
-    ``E_ledger + F_W + R_W``, whose components are the ledger's,
+    ``E_ledger + F_W + R_W``, whose components are those of ``_phase_ledger``,
     ``walsh_identity_formation`` and ``walsh_phase_reconstruction``. These
     terms are absent from ``theory.binary_product_state_error``, whose
     reference takes the reconstructed phase entries as floating-point
@@ -1294,14 +1305,15 @@ def _admit_compiled_phase(reconstruction, method, grid, contributions, execution
 def _range_omissions(tables, omitted, *, chains, amplitudes):
     """Return the ``QHDRangeOmissions`` record of a Plan from its compilation's omissions and its stored data.
 
-    ``omitted`` holds the counts and exact charges of the compiled route
+    ``omitted`` holds the counts and the exact omitted magnitudes (the
+    ``*_charge`` entries) of the compiled route
     (``compiler.QHDCompiler.metadata``, ``binary.compile_binary_steps``) or
     of the classical constant phase (``_constant_phase``), with
     ``walsh_tables`` empty unless binary tables were compiled. The subnormal
     entries are counted in the stored tables, and ``chains`` selects the
     structured one-hot preparation, whose prefixes come from
     ``initial_state.chain_selection`` of the stored ``amplitudes``. Every
-    charge is rounded upward once.
+    omitted magnitude is rounded upward once.
     """
     from sys import float_info
 
@@ -1387,9 +1399,9 @@ def _array_mean(values, probabilities, valid):
 
 
 def _summarize(plan, weights, invalid, total, window, unavailable=None, shots=None, points=None):
-    """Summarize an observed grid population into the fields of ``QHDAnalysis``.
+    """Summarize the observed weights of the grid points into the fields of ``QHDAnalysis``.
 
-    Summarize the observed valid population in lexicographic grid order.
+    The valid observed points are visited in lexicographic grid order.
     Selection considers positive weights only. The candidate minimizes the
     binary64 objective obtained by ``objective_at``, with the first
     lexicographic tuple winning a tie. The probability maximizer and the
@@ -1399,11 +1411,11 @@ def _summarize(plan, weights, invalid, total, window, unavailable=None, shots=No
     differences if its direct evaluation overflows or leaves the observed
     value interval.
 
-    ``weights`` is the ``(K,)*d`` array of the observed population: float64
+    ``weights`` is the ``(K,)*d`` array of the observed weights, float64
     unconditional probabilities, or integer counts when ``shots``, the total
     returned shots, is given (int64 while the pooled total fits it, Python
     integers in an object array otherwise). With ``points`` the
-    population is sparse: ``points`` holds the observed points' grid-index
+    weights are sparse. ``points`` holds the observed points' grid-index
     tuples as rows, each once and in lexicographic order, and ``weights``
     their 1-D weights, and a point outside ``points`` is unobserved, not a
     measured zero. No flat index of the ``K**d`` grid is formed for it, so
@@ -1429,8 +1441,8 @@ def _summarize(plan, weights, invalid, total, window, unavailable=None, shots=No
     ``tie >= M``, so the positive mask is required. Counts use integer
     ``M - count`` with window zero. The empty positive case returns no
     candidate, no mean, no mode and ``mode_status="unavailable"``. NaNs are
-    not a supported tie case: ``objective_at`` rejects NaN, infinity and
-    every nonzero imaginary part.
+    not a supported tie case, because ``objective_at`` rejects NaN, infinity
+    and every nonzero imaginary part.
 
     The rounded subtraction ``M - weight`` is exact when ``weight >= M/2``
     (Sterbenz's theorem, Higham, *Accuracy and Stability of Numerical
@@ -1438,7 +1450,7 @@ def _summarize(plan, weights, invalid, total, window, unavailable=None, shots=No
     smaller weights its rounding is at most ``u (M - weight)``. Rounding is
     monotone and fixes the stored binary64 window W, so an exact stored
     deficit at most W always rounds to at most W, and a deficit just above W
-    can round down to W and be admitted. The predicate and recorded deficit
+    can round down to W and be accepted. The predicate and recorded deficit
     use that rounded subtraction. Comparing every point with M, not
     neighbors with each other, keeps the tie relation well defined. ``window``
     bounds the error of a computed probability difference on the calling
@@ -1455,10 +1467,10 @@ def _summarize(plan, weights, invalid, total, window, unavailable=None, shots=No
     observed entries. Counts sum as exact integers and are divided once by
     ``shots``. Each marginal entry is the accurately summed unconditional
     weight of its grid slice: ``fsum`` per slice for probabilities, which is
-    not bit parity with sequential additions (the weights
+    not bitwise equal to sequential addition (the weights
     ``(1, 2**-53, 2**-53)`` give 1 by sequential addition and
     ``1 + 2**-52`` by ``fsum``), and exact integer sums divided once for
-    counts. Position moments and refinement rules consume those entries. A
+    counts. Position moments and refinement rules use those entries. A
     change in reduction order can change the final bits and can change a
     decision at a numerical tie or threshold. Candidate objective
     comparisons continue to use the stored support entries combined by
@@ -1595,7 +1607,8 @@ def _pool_counts(histograms, grid, bits, *, exact):
     flat index of the grid is formed, so the readout may be wider than 64
     bits. The pooled counts are int64, or with ``exact``, which the caller
     sets when the returned shots exceed ``execution.MAX_COUNT``, Python
-    integers in an object array. Counts pool in any chunk order. Pooling
+    integers in an object array. Counts pool to the same totals in any
+    histogram order. Pooling
     ``count/shots`` floats instead can split equal totals, for example
     ``3/10 + 0/10 = 0.3`` against ``1/10 + 2/10 = 0.30000000000000004``.
     """
@@ -1628,45 +1641,46 @@ def _pool_counts(histograms, grid, bits, *, exact):
 
 
 def summary_sizes(reconstruction, variables, k, points):
-    """Return ``(work, bytes)`` of one ``_summarize`` call over a population of D grid points, ``points`` of them positive.
+    """Return ``(work, bytes)`` of one ``_summarize`` call over D grid points, ``points`` of them positive.
 
-    Summary admission counts every positive point's stored-table objective
+    The count covers every positive point's stored-table objective
     evaluation, the array selectors and mean passes, and all entries
-    consumed by the marginal reductions. Workspace includes the objective
+    read by the marginal reductions. Workspace includes the objective
     array, positive/tie masks, selection or gather temporaries and one
     marginal result.
 
-    Let D be the full restricted grid population, P<=D the positive observed
-    population, T the support-table count and ``a=sum_t(|S_t|+2)``. One unit
+    Let D be the number of points of the full restricted grid, P<=D the
+    number of positive observed points, T the support-table count and
+    ``a=sum_t(|S_t|+2)``. One unit
     of each table's ``|S_t|+2`` counts its input to ``objective_at``'s
     ``fsum``. The same stored table entries and scalar
     objective evaluation serve every positive point. Array selection is over
     a D-entry value array with unobserved/nonpositive entries excluded by
-    masks. A sufficient logical work law is
+    masks. A sufficient work formula is
     ``W_summary = P(a+2d) + D(d+50) + 2dK``. The P term covers support
     indexing, lookup, accurate objective summation and decoding original
     coordinates. The dD term counts the dK marginal reductions, each
     consuming ``K**(d-1)`` entries. The 50D reserve covers positive/observed
     masks, extrema, ``where`` writes and arg reductions, peak-minus-weight/tie
     comparisons, candidate gathers, mass reductions and up to the three mean
-    passes. It is a declared conservative visit bundle, not an exact FLOP
-    count. One reduction input counts as one visit, including ``fsum``.
+    passes. It is a declared conservative count of entry visits, not an
+    exact FLOP count. One reduction input counts as one visit, including ``fsum``.
 
-    For dense float64 probabilities, the incremental array frontier after
-    decoding is 25D + 8dK. The positive mask and objective array occupy 9D,
+    For dense float64 probabilities, the additional array bytes held after
+    decoding are 25D + 8dK. The positive mask and objective array occupy 9D,
     and two compact float64 mean inputs occupy at most 16D. During decoding,
     the mask, objective and positive-position array occupy at most 17D.
-    For C=min(P,4096), reserve H_decode=64C(d+1)+512(d+1) for the chunk's
-    intp coordinates, Python coordinate and position lists, integer objects
-    and descriptors, or zero when P=0. The integer allowance assumes the
+    Positions are decoded in blocks of C=min(P,4096), and H_decode=64C(d+1)+512(d+1)
+    covers a block's intp coordinates, Python coordinate and position lists,
+    integer objects and descriptors, or is zero when P=0. The integer allowance assumes the
     64-bit intp domain and the qualified CPython object convention. Each
-    chunk's iterator is released before the next chunk is constructed. The
+    block's iterator is released before the next block is built. The
     position array is released before selectors and mean gathers.
     Incremental bytes are H0+max(17D+H_decode,25D+8dK), and the
     returned total adds the borrowed 8D probability array. Other held inputs
     are additional. H0 covers fixed bookkeeping, not a D-dependent reserve.
     These are known-buffer and qualified-object bounds, not process RSS.
-    Sparse-point and object-count routes require their own storage laws.
+    Sparse-point and object-count routes require their own storage formulas.
     Marginals contribute one 8dK result. P=0 skips objective and mean work.
     H0 is ``compiler.H0``. A reference evolution does not use this allowance.
     """
@@ -1686,19 +1700,23 @@ def summary_sizes(reconstruction, variables, k, points):
 
 
 def _admit_observations(plan, observations, *, result=None):
-    """Check that supplied observation chunks belong to this Plan, then return their identities.
+    """Check that supplied observation chunks belong to this Plan, then return their content hashes.
 
-    Every chunk must name this Plan, its realization, the selected
-    observation and bindings, the unconditional population, and register
-    layouts equal to the widths declared by the Plan's Program. A classical
-    Plan also requires one host-kernel chunk whose source, kernel identity,
-    scalar frames, application record and optional stored state match the
-    selected kernel. Duplicate chunks or acquisitions raise. With ``result``,
-    the chunks must also be the population that result analyzed. Nothing is
-    decoded, evaluated or evolved here.
+    Every chunk (``ObservationChunk``, one saved batch of outputs, which can be
+    sampled counts, exact simulator probabilities or amplitudes, or the results of
+    the classical routine) must name this Plan, its built construction, the observation and
+    bindings that planning chose, the unconditional outcome distribution, and
+    register layouts equal to the widths declared by the Plan's Program. A
+    classical Plan also requires one chunk from the classical routine whose
+    source, routine content hash, scalar frames, application record and
+    optional stored state match the routine that planning chose. A repeated
+    chunk or a repeated acquisition key (``ObservationChunk.acquisition_key``,
+    the run, attempt, job and chunk that identify the saved data) raises. With ``result``, the chunks
+    must also be those that the result analyzed. Nothing is decoded,
+    evaluated or evolved here.
 
     Returns:
-        The tuple of chunk content identities, in order.
+        The tuple of chunk content hashes, in order.
     """
     if type(observations) is not ObservationView:
         raise TypeError("QHD requires an ObservationView")
@@ -1767,13 +1785,13 @@ def _admit_observations(plan, observations, *, result=None):
 
 
 def _scalar_names(d, k):
-    """Labels of the host-kernel scalars, in the order the kernel publishes them.
+    """Labels of the scalars that the classical routine returns, in their order.
 
     ``readout_state_error`` is the first-order state budget delta from which
-    the kernel's most-probable tie window was derived (``_execute_theory``).
+    the routine's most-probable tie window was derived (``_execute_theory``).
     ``mode_unresolved`` is 1 when a point other than the tie representative
-    passes the tie test and 0 otherwise (``_summarize``), since a kernel
-    always has a derived window and a positive valid point. There are
+    passes the tie test and 0 otherwise (``_summarize``), since the classical
+    routine always has a derived window and a positive valid point. There are
     ``d K + 3 d + 13`` labels.
     """
     return (
@@ -1798,20 +1816,20 @@ def _scalar_names(d, k):
 
 
 def restricted_sizes(dimension, variables, table_count, block_steps, flavor, generator_norms, start_work):
-    """Return ``(size_units, workspace_bytes)`` of one restricted host evolution of the ``schrodinger`` or one-hot ``ir_product`` flavor.
+    """Return ``(size_units, workspace_bytes)`` of one restricted classical evolution, ``schrodinger`` or one-hot ``ir_product``.
 
-    The ``split_step`` flavor has its own law, ``split_step.sizes``, and the
-    binary ``ir_product`` flavor ``theory.binary_product_sizes``. Neither
-    depends on the generator norms.
+    The ``split_step`` evaluation has its own size formula, ``split_step.sizes``,
+    and the binary ``ir_product`` evaluation ``theory.binary_product_sizes``.
+    Neither depends on the generator norms.
     D is the restricted dimension ``K**d`` and ``block_steps`` are the
-    stored ``QHDBlock`` groups, which only the one-hot ``ir_product`` law
+    stored ``QHDBlock`` groups, which only the one-hot ``ir_product`` formula
     reads. ``start_work`` is the work
     ``W_start`` of forming the start vector once per evolution
     (``initial_state.start_vector_work``), D for the direct uniform fill and
     ``d K + sum_(j=2)^d K**j + D`` for the stored real factors.
 
     One-hot ``ir_product``. The one-hot product reference applies each
-    stored projector phase or two-slice hopping directly. Admission counts
+    stored projector phase or two-slice hopping directly. The count covers
     every block occurrence and the largest slice-copy/expression workspace
     together with the live state. Its one implementation is
     ``theory.onehot_product_sizes``: for B_P projector occurrences with
@@ -1828,15 +1846,15 @@ def restricted_sizes(dimension, variables, table_count, block_steps, flavor, gen
     order and is read once (``_generator_norms``). A call's work and bytes
     ``W_exp,k`` and ``B_exp,k`` are ``_linalg_laws.expm_multiply_requirements``
     for a generator with at most ``r D`` stored entries and shifted 1-norm
-    at most N. ``B_exp,k`` funds SciPy's identity, shifted CSR copy and
+    at most N. ``B_exp,k`` covers SciPy's identity matrix, shifted CSR copy and
     Taylor/norm-estimation work.
 
-    The Schrodinger law separates construction from evolution. Construction
+    The Schrodinger formula separates construction from evolution. Construction
     counts the raw COO slots, their row and column arrays, index conversion
     and the CSR conversion peak. Evolution holds one kinetic CSR pattern, an
     updated complex data array and the diagonal buffers, and adds the
     largest SciPy-call workspace. Duplicate diagonal contributions and the
-    doubled K = 2 periodic link enter the raw-slot count. The byte law
+    doubled K = 2 periodic link enter the raw-slot count. The byte formula
     bounds the named numerical buffers and does not claim to bound process
     RSS.
 
@@ -1862,33 +1880,34 @@ def restricted_sizes(dimension, variables, table_count, block_steps, flavor, gen
     the setup outputs, state and simultaneous real and complex potentials.
     Each fill has peak B_K+16z+72D because the diagonal gather adds 16D
     to the persistent 56D vectors. Execution has B_K+16z+56D+B_exp.
-    Every priced exponential call reserves ``B_exp=64(e+D)+512D>=512D``,
+    Every counted exponential call sets aside ``B_exp=64(e+D)+512D>=512D``,
     where ``e = r D`` is the stored-entry bound supplied to
     ``_linalg_laws.expm_multiply_requirements``,
     so execution covers conversion by at least 504D and fill by at least
     496D. A positive-step QHD schedule supplies at least one such call,
     even for zero norm. No additional maximum term is required for these
     phases. The ``B_K+40D`` term is also dominated. Other Plan and summary
-    payloads are charged at their owners.
+    payloads are counted where they are created.
 
     ``size_units = W_start + W_stencil + (T+2)D + Td + (5z+6D+1)
     + sum_k [2z + 5D + W_exp,k] + D`` for T support tables. The potential is
     one zero fill, T broadcast additions and one complex conversion, and Td
-    prices its support-shape bookkeeping. Setup charges D each for arange,
+    counts its support-shape bookkeeping. Setup counts D each for arange,
     diff, a possible repeat-count cast, count validation/summation and group
     traversal, z repeated outputs and z equality tests. flatnonzero counts
     and scans z Boolean entries and can write z indices in its branchless
     path. The empty CSR initializes D+1 pointers, giving 5z+6D+1.
-    Each fill charges two z multiplications and D each for potential
+    Each fill counts two z multiplications and D each for potential
     multiplication, diagonal gather, addition, scatter-index validation
     and scatter writes. NumPy 2.5.2's get checks indices within its gather,
     while its set checks them in a separate pass. The last D is the final
     phase application when executed.
-    W_stencil=28S+4M+(37d+12)D+40(d+1) is the logical construction
-    charge owned by theory.restricted_kinetic_work. It includes the raw
+    W_stencil=28S+4M+(37d+12)D+40(d+1) is the construction work that
+    theory.restricted_kinetic_work computes. It includes the raw
     row, column and value writes, index/mask passes and the qualified
-    sorted COO-to-CSR conversion. This boundary-free owner supplies the
-    upper counts S=3dD and M=(1+2d)D to that monotone law.
+    sorted COO-to-CSR conversion. This function, which does not see the
+    boundary, supplies the upper counts S=3dD and M=(1+2d)D to that
+    monotone formula.
     """
     from nwqlib._linalg_laws import expm_multiply_requirements
 
@@ -1937,17 +1956,17 @@ def _grid_points(dimension, variables):
 
 
 def _generator_norms(flavor, method, grid, support_values, step_weights):
-    """Yield the shifted norm and row-population bound of each restricted expm call.
+    """Yield the shifted norm and the bound on nonzero entries per row of each restricted expm call.
 
     The Schrodinger pairs come from _schrodinger_step_bounds, including the
     stored kinetic matrix, exact table ranges, broadcast summation error and
     generator-formation error. N bounds the assembled generator after an exact
-    trace shift, and r=1+2*d bounds its row population. The SciPy roundoff model
-    also assumes N bounds its computed shifted matrix. The ordered scalar
-    kinetic calculation uses the constant-diagonal premise of
-    _schrodinger_kinetic_bounds. No kinetic CSR is constructed here.
-    The direct one-hot ir_product kernel makes no expm call and yields no pair.
-    Consumers read the pairs once for work admission or numerical error.
+    trace shift, and r=1+2*d bounds the number of nonzero entries in each of its
+    rows. The SciPy roundoff model also assumes N bounds its computed shifted
+    matrix. The ordered scalar kinetic calculation uses the constant-diagonal
+    assumption of _schrodinger_kinetic_bounds. No kinetic CSR is constructed here.
+    The direct one-hot ir_product routine makes no expm call and yields no pair.
+    Callers read the pairs once, for the work check or for the numerical error.
 
     Raises:
         ValueError: The stored kinetic diagonal overflows, or a step's norm or
@@ -2009,55 +2028,56 @@ def _step_norm_refusal(step, norm, dt, a, b, kinetic, spread):
 
 
 def _host_start_error(plan):
-    """Return the construction error, in units of u, of the classical kernel's initial vector.
+    """Return the construction error, in units of u, of the classical routine's initial vector.
 
     It is ``initial_state.restricted_state_error`` of the Method's initial
-    state on the Plan's grid, the start term of every flavor's state budget
-    (``_host_state_error``), which planning evaluated once and stored
+    state on the Plan's grid, the start term of the state budget of every
+    classical evaluation (``_host_state_error``), which planning evaluated once and stored
     (``QHDReconstruction.initial_state_error``). Nothing is evaluated here.
     """
     return plan.reconstruction.initial_state_error
 
 
 def _host_state_error(method, grid, tables, steps, step_weights, start):
-    """Return the first-order 2-norm error budget delta of the classical kernel's final state.
+    """Return the first-order 2-norm error budget delta of the classical routine's final state.
 
     ``tables``, ``steps`` and ``step_weights`` are the Plan's stored support
     tables, compiled steps and step rows (``QHDReconstruction``), and
     ``start`` the construction error of the start vector
-    (``QHDReconstruction.initial_state_error``). Every flavor starts from the
-    Method's exact initial state, with ``start`` pricing its numerical
-    construction. The ``schrodinger`` kernel uses ``_schrodinger_state_error`` against the
+    (``QHDReconstruction.initial_state_error``). Every classical evaluation
+    starts from the Method's exact initial state, with ``start`` bounding the
+    error of its numerical construction. The ``schrodinger`` evaluation uses
+    ``_schrodinger_state_error`` against the
     exact stored-table sum and stored kinetic matrix. It adds broadcast
     summation and generator-formation perturbations to the conditional
-    first-order ``expm_multiply_state_error`` charge. ``_generator_norms`` uses
-    the same assembled-generator bounds for work admission. One-hot ``ir_product`` uses
-    ``theory.onehot_product_state_error``: the one-hot product reference is
+    first-order error term ``expm_multiply_state_error``. ``_generator_norms`` uses
+    the same assembled-generator bounds for the work check. One-hot ``ir_product`` uses
+    ``theory.onehot_product_state_error``. The one-hot product reference is
     the ordered product of analytic projector and hopping blocks at their
     stored binary64 angles, applied to the exact initial state. Under normal
     round-to-nearest arithmetic and the stated one-ulp elementary-function
-    premise, its first-order state-operation budget is
+    assumption, its first-order state-operation budget is
     ``u*(start+10*B_P+6*B_H+5)``. The counts include every executed
     occurrence and the final term covers the physical-phase application.
-    Parameter formation, native lowering, time splitting and grid errors are
-    outside this budget. The mass and mode windows use the same
-    state-to-probability conversions as the other classical kernels. Binary
+    Parameter formation, construction of the Qiskit circuit, time splitting
+    and grid errors are outside this budget. The mass and mode windows use the same
+    state-to-probability conversions as the other classical evaluations. Binary
     ``ir_product`` uses ``theory.binary_product_state_error`` relative to the
     exact product at its QFT angles and computed diagonal phase arrays. That
-    budget does not price formation of those arrays or their difference from
-    separate native rotations. ``split_step`` uses
+    budget does not include the formation error of those arrays or their
+    difference from separate rotations in the circuit. ``split_step`` uses
     ``split_step.state_error``, which includes transform roundoff and
     phase-angle formation. The Schrodinger and split-step references
     omit the objective constant, whose global phase is applied after
     their probability readout (``_constant_phase``).
 
     Planning evaluates it once for a classical Plan (``_admit_host_windows``)
-    and stores it with the mass window and the ceiling of the tie window
+    and stores it with the mass window and the upper limit of the tie window
     for that reference (``QHDReconstruction.host_state_error``,
     ``host_mass_window`` and ``host_tie_window``), which later stages read.
-    The split-step kernel selects with its smaller observed trajectory
-    budget, capped by this stored value (``split_step.evolve``). No state is
-    evolved here.
+    The split-step evaluation selects the mode with its smaller observed
+    trajectory budget, capped by this stored value (``split_step.evolve``).
+    No state is evolved here.
     """
     flavor = method.theory_flavor
     if flavor == "ir_product" and method.encoding == "binary":
@@ -2078,9 +2098,9 @@ def _host_state_error(method, grid, tables, steps, step_weights, start):
 
 
 def _host_probability_window(plan):
-    """Return the admitted |mass - 1| of the classical kernel's final state.
+    """Return the allowed |mass - 1| of the classical routine's final state.
 
-    It is ``state_mass_window`` of the kernel's state budget
+    It is ``state_mass_window`` of the routine's state budget
     (``_host_state_error``) and the restricted dimension ``K**d``, which adds
     the evaluation and summation of the ``K**d`` probabilities. The same
     budget gives the tie window of ``_host_tie_window``. Planning computed
@@ -2091,7 +2111,7 @@ def _host_probability_window(plan):
 
 
 def _host_window(delta):
-    """Return the tie window of a classical kernel's probabilities whose state lies within delta of its model.
+    """Return the tie window of a classical routine's probabilities whose state lies within delta of its model.
 
     ``_execute_theory`` evaluates each probability as ``np.abs(state)**2``
     (``ABSOLUTE_SQUARE_ROUNDOFF``). For distinct grid points i and j the
@@ -2107,13 +2127,13 @@ def _host_window(delta):
 
 
 def _host_tie_window(plan):
-    """Return the Plan's ceiling on the most-probable tie window of the classical kernel.
+    """Return the Plan's upper limit on the most-probable tie window of the classical routine.
 
     It is ``_host_window`` of ``_host_state_error``, the Plan budget of
     ``_host_probability_window``. The ``schrodinger`` and ``ir_product``
-    kernels select with it. The ``split_step`` kernel selects with the
-    smaller window of the budget it observed on its trajectory
-    (``split_step.evolve``), and this Plan window is the ceiling that the
+    evaluations select the mode with it. The ``split_step`` evaluation selects
+    with the smaller window of the budget it observed on its trajectory
+    (``split_step.evolve``), and this Plan window is the upper limit that the
     recorded window must not exceed (``_executed_host_window``). Planning
     computed it once (``_admit_host_windows``), and this reads the stored
     value ``QHDReconstruction.host_tie_window``. No state is evolved here.
@@ -2124,8 +2144,8 @@ def _host_tie_window(plan):
 def _require_binary64_grid(dimension, variables):
     """Refuse a classical grid of ``dimension = K**d`` points that exceeds the binary64 range, naming its size.
 
-    The classical kernels' size laws and probability windows convert the
-    grid size to binary64.
+    The size formulas and mass windows of the classical routines
+    convert the grid size to binary64.
     """
     try:
         float(dimension)
@@ -2136,25 +2156,25 @@ def _require_binary64_grid(dimension, variables):
 
 
 def _admit_host_windows(method, grid, tables, steps, step_weights, start, dimension):
-    """Return the stored host state budget and windows of a classical Plan, refusing ones beyond the binary64 range.
+    """Return the state budget and windows that a classical Plan stores, refusing ones beyond the binary64 range.
 
     The arguments are the Plan's data that ``_host_state_error`` reads and
     the restricted dimension ``K**d``. The returned mapping holds the state
     budget delta (``_host_state_error``), the mass window
     ``state_mass_window(delta, K**d)`` (``_host_probability_window``) and
-    the tie-window ceiling ``_host_window(delta)`` (``_host_tie_window``),
+    the upper limit of the tie window, ``_host_window(delta)`` (``_host_tie_window``),
     the fields ``host_state_error``, ``host_mass_window`` and
     ``host_tie_window`` of ``QHDReconstruction``. Both windows of every
-    flavor are ``_validation.probability_difference_window`` of delta,
+    classical evaluation are ``_validation.probability_difference_window`` of delta,
     whose ``delta**2`` overflows once delta exceeds about 1.3e154 although
     the evolution itself can finish.
     ``2 delta + delta**2 + e (1 + delta)**2`` increases with delta for
-    ``e >= 0``. The producer uses the Plan budget or an explicitly capped
-    observed budget (the ``split_step`` kernel returns the smaller of its
-    observed budget and ``split_step.state_error``), and readback checks
-    the resulting window against the finite Plan ceiling
-    (``_executed_host_window``), so a finite ceiling cannot admit an
-    infinite window. The check concerns window formation and valid recorded
+    ``e >= 0``. The classical routine uses the Plan budget or an explicitly
+    capped observed budget (the ``split_step`` evaluation returns the smaller
+    of its observed budget and ``split_step.state_error``), and reading the
+    result back checks the resulting window against the finite upper limit
+    of the Plan (``_executed_host_window``), so a finite upper limit cannot
+    accept an infinite window. The check concerns window formation and valid recorded
     evidence. It does not certify every intermediate of an evolution.
     Planning calls this once before the reconstruction is formed. Nothing
     is evolved here.
@@ -2184,15 +2204,16 @@ def _admit_host_windows(method, grid, tables, steps, step_weights, start, dimens
 
 
 def _executed_host_window(delta, ceiling):
-    """Return the tie window of the kernel's recorded state budget after checking it against the Plan ceiling.
+    """Return the tie window of the routine's recorded state budget after checking it against the Plan's upper limit.
 
-    ``delta`` is the kernel's ``readout_state_error`` scalar and ``ceiling``
-    the Plan's window (``_host_tie_window``), which the kernel's application
-    records as ``tie_window_ceiling``. The budget must be a nonnegative
-    number and its window ``_host_window(delta)`` at most the ceiling. The
-    producer uses the Plan budget or an explicitly capped observed budget,
-    and readback checks the resulting window against the finite Plan
-    ceiling. The comparison is of windows, and rounded windows can be equal
+    ``delta`` is the classical routine's ``readout_state_error`` scalar and
+    ``ceiling`` the Plan's window (``_host_tie_window``), which the routine's
+    application record holds as ``tie_window_ceiling``. The budget must be a
+    nonnegative number and its window ``_host_window(delta)`` at most
+    ``ceiling``. The classical routine uses the Plan budget or an explicitly
+    capped observed budget, and reading the result back checks the resulting
+    window against the finite upper limit of the Plan. The comparison is of
+    windows, and rounded windows can be equal
     for distinct budgets, so it does not by itself prove that a recorded
     budget is at most the Plan's. The check does not certify the budget's
     computation, and it reads stored evidence only, with no evolution.
@@ -2208,13 +2229,14 @@ def _executed_host_window(delta, ceiling):
 def _readout_window(chunks, receipts):
     """Return ``(window, reason)`` for the most-probable selection over ``chunks``.
 
-    ``receipts`` maps preparation identities to receipts. The window bounds
+    ``receipts`` maps the content hash of each preparation to its preparation
+    record. The window bounds
     how far the computed difference of two valid-point probabilities can lie
     from the difference of the model that the path evaluates
     (``probability_difference_window``), so points within it of the computed
     maximum are ties:
 
-    - host kernel (one chunk): ``_host_window`` of the kernel's recorded
+    - classical routine (one chunk): ``_host_window`` of the routine's recorded
       ``readout_state_error``, at most the ``tie_window_ceiling`` that its
       application records (``_executed_host_window``).
     - counts: 0, because pooled integer counts are compared exactly.
@@ -2226,8 +2248,8 @@ def _readout_window(chunks, receipts):
       binary decoding maps a basis index to at most one point, so a point has at
       most C contributions and each passes at most C roundings, ``rho_C =
       gamma_C = C u/(1 - C u)``. With one chunk the division by one and the
-      addition to zero are exact, ``rho_1 = 0``. The reference population of
-      several chunks is the mean of their exact native populations. The
+      addition to zero are exact, ``rho_1 = 0``. The reference distribution of
+      several chunks is the mean of their exact circuit output distributions. The
       state term is averaged, not divided by ``sqrt(C)``, because the
       chunks' numerical errors can be correlated. This
       pooling term widens the tie window of the pooled point probabilities.
@@ -2236,29 +2258,31 @@ def _readout_window(chunks, receipts):
     - stored amplitudes (one chunk): ``probability_difference_window(delta,
       5u)`` for the decoder's ``np.abs(z)**2`` (``ABSOLUTE_SQUARE_ROUNDOFF``).
       That decoder bounds its own point probabilities, so it resolves the
-      receipt's ``"amplitude-derived masses"`` exclusion for this use only.
+      preparation record's ``"amplitude-derived masses"`` exclusion for this
+      use only.
 
-    ``delta_c`` is the receipt's ``state_error``, and for stored amplitudes
-    its ``saved_state_error``, which adds the charge of a host phase
-    correction of the saved state. A chunk without a receipt or
-    a receipt outside that derivation returns ``(None, reason)``. The
+    ``delta_c`` is the preparation record's ``state_error``, and for stored
+    amplitudes its ``saved_state_error``, which adds the roundoff of the
+    classical phase correction of the saved state. A chunk without a
+    preparation record or a record outside that derivation returns
+    ``(None, reason)``. The
     selection then compares computed probabilities exactly, which decides a
     tie by roundoff without any guarantee that the selected point is the
     model's most probable one. An excluded instruction, such as the
-    ``unitary`` that Qiskit's state preparation lowers to, is such a case.
+    ``unitary`` into which Qiskit's state preparation is decomposed, is such a case.
     The instruction count does not establish the per-instruction roundoff
-    charge of the receipt's derivation for it. Applying a dense unitary on b
+    allowance of the record's derivation for it. Applying a dense unitary on b
     amplitudes has the normwise rounding bound
     ``sqrt(2) gamma_(2b) sqrt(b) ||x||``, about ``2 sqrt(2) b**1.5 u ||x||``.
     On a register of at most 6 qubits (b <= 64) its coefficient, 181, 512
-    and 1448 at b = 16, 32 and 64, stays below Aer's charge of about 3479 u
+    and 1448 at b = 16, 32 and 64, stays below Aer's allowance of about 3479 u
     per instruction, half of
     ``nwqlib._validation.AER_STATEVECTOR_ROUNDOFF_PER_OPERATION``. There
     the obstacle is the error of the matrix that Qiskit supplies, which the
-    receipt cannot bound. From 7 qubits on, the coefficient, 4096 at
-    b = 128, exceeds that charge before any error of the supplied matrix,
+    preparation record cannot bound. From 7 qubits on, the coefficient, 4096 at
+    b = 128, exceeds that allowance before any error of the supplied matrix,
     which shows that the derivation does not cover the instruction, not
-    that its actual error is that large. The reason names the exclusion, and the
+    that its error is that large. The reason names the exclusion, and the
     Result shows it in ``most_probable_tie_window_unavailable`` and in its
     summary line. Without chunks there is nothing to select and
     ``(None, None)`` is returned.
@@ -2303,20 +2327,20 @@ def _readout_window(chunks, receipts):
 
 
 def _application(plan, source):
-    """Describe one host evolution by its dimension, numerical calls and roundoff windows.
+    """Describe one classical evolution by its dimension, numerical calls and roundoff windows.
 
-    The ``schrodinger`` flavor records its ``expm_multiply`` call count, one
+    The ``schrodinger`` evaluation records its ``expm_multiply`` call count, one
     per step, and ``ir_product``, which applies its blocks directly on both
     encodings, records zero such calls. The
-    ``split_step`` flavor records its steps and its ``2 d`` transforms per
+    ``split_step`` evaluation records its steps and its ``2 d`` transforms per
     step, and its Source names the kinetic model and the coefficient rule.
     The zero objective-evaluation and companion counts state that a classical
     QHD run reads the stored tables and performs no second evolution. The
-    recorded ``probability_window`` is the kernel's counterpart of a circuit
-    receipt's ``probability_window`` and bounds its reported masses. The
-    recorded ``tie_window_ceiling`` (``_host_tie_window``) is the Plan's
-    ceiling on the window of the kernel's most-probable selection, which the
-    kernel derives from its ``readout_state_error`` scalar
+    recorded ``probability_window``, the mass window of the classical routine,
+    is the counterpart of the ``probability_window`` in a circuit's preparation
+    record and bounds the reported masses. The recorded ``tie_window_ceiling`` (``_host_tie_window``)
+    is the Plan's upper limit on the window of the routine's most-probable
+    selection, which the routine derives from its ``readout_state_error`` scalar
     (``_readout_window``). Both depend on the Plan alone, so the record is
     the same for every execution of the Plan.
     """
@@ -2350,19 +2374,20 @@ def _application(plan, source):
 
 
 def _host_summary(plan, values):
-    """Rebuild analysis fields from the host kernel's labeled scalars.
+    """Rebuild analysis fields from the labeled scalars of the classical routine.
 
     The objectives of the candidate, the most probable point and the
     probability maximizer are compared with the Plan's
-    stored support tables, so a host value cannot disagree with the selected
-    objective. Masses use the kernel's derived roundoff window,
-    ``_host_probability_window``. The most-probable tie window is
-    ``_host_window`` of the kernel's ``readout_state_error``, the budget it
-    selected with, checked against the Plan's ceiling ``_host_tie_window``
-    (``_executed_host_window``), and the selected probability and deficit
-    are the kernel's own scalars. The kernel always has a window, so its
+    stored support tables, so a value from the classical routine cannot
+    disagree with the tabulated objective. Masses use the routine's derived
+    roundoff window, ``_host_probability_window``. The most-probable tie window is
+    ``_host_window`` of the routine's ``readout_state_error``, the budget with
+    which it selected the mode, checked against the Plan's upper limit
+    ``_host_tie_window`` (``_executed_host_window``), and the probability and
+    deficit of the selected point are the routine's own scalars. The routine
+    always has a window, so its
     ``mode_unresolved`` scalar, which must be 0 or 1, maps to the
-    ``resolved`` or ``unresolved`` status. The kernel's d K
+    ``resolved`` or ``unresolved`` status. The routine's d K
     ``marginal_{j}_{i}`` scalars fill the (d, K) float64 array
     ``QHDAnalysis.marginals`` in variable and grid order. Nothing is evolved.
     """
@@ -2419,16 +2444,16 @@ def _host_summary(plan, values):
 
 
 def _evolve_restricted(plan, flavor, observed=None):
-    """Return the final state of one host evolution on the K**d valid grid points.
+    """Return the final state of one classical evolution on the K**d valid grid points.
 
     ``observed``, when it is a list, receives the first-order state budget
-    that the ``split_step`` flavor observes on its own trajectory
-    (``split_step.evolve``). The other flavors append nothing, and their
-    budget is the Plan's (``_host_state_error``).
+    that the ``split_step`` evaluation observes on its own trajectory
+    (``split_step.evolve``). The other classical evaluations append nothing,
+    and their budget is the Plan's (``_host_state_error``).
 
     The state has length K**d in lexicographic grid-index order. The
     objective enters through the stored tables or compiled blocks and is
-    not evaluated again. Every flavor starts from the Method's initial state
+    not evaluated again. Every classical evaluation starts from the Method's initial state
     on the valid grid points (``initial_state.restricted_state``). A general
     product state is the tensor product of the per-variable vectors that
     planning stored (``QHDReconstruction.initial_amplitudes``). The uniform
@@ -2453,17 +2478,17 @@ def _evolve_restricted(plan, flavor, observed=None):
     which need not vanish when the Hamiltonians commute. A constant schedule
     removes both time-ordering and coefficient-quadrature errors. The
     numerical exponential action still has its own floating-point and solver
-    error. ``ir_product`` evaluates a numerical reference from the Plan's selected
+    error. ``ir_product`` evaluates a numerical reference from the Plan's compiled
     blocks and restores the physical phase. One-hot blocks apply their
     analytic restricted actions at the stored angles (``theory._run_ir_product``). Binary blocks use
     QFT operations and computed diagonal phase arrays on the whole binary
     register (``theory.run_binary_product``), whose Walsh reconstruction
-    can differ from the separate native rotations. The binary encoding changes the circuit,
-    not the finite model, so the other flavors evolve the same model for both
-    encodings. ``split_step`` applies
+    can differ from the separate rotations of the circuit. The binary encoding
+    changes the circuit, not the finite model, so the other classical
+    evaluations evolve the same model for both encodings. ``split_step`` applies
     ``exp(-i dt b_k V/2) exp(-i dt a_k K) exp(-i dt b_k V/2)`` with the
     kinetic factor diagonal in the kinetic eigenbasis and evaluated
-    numerically by the selected transforms
+    numerically by the transform of the grid
     (``split_step.evolve``), so it adds the Strang splitting error to the
     time error of the coefficient rule.
     """
@@ -2517,17 +2542,18 @@ def _evolve_restricted(plan, flavor, observed=None):
 
 
 def _generator_workspace(kinetic):
-    """Return a CSR generator sharing the kinetic pattern, its diagonal slots and a diagonal buffer.
+    """Return a CSR generator sharing the kinetic pattern, the data positions of its diagonal and a diagonal buffer.
 
     ``kinetic`` is the canonical CSR of ``theory.restricted_kinetic_sparse``,
     with complex128 data and one structural diagonal per row. The generator
     shares its indices and index pointers and owns a separate ``16 z``-byte
     data array for z stored entries, which ``_fill_generator`` overwrites at
-    every step. The row-index array and Boolean test of the slot search are
-    released on return, before the first exponential action.
+    every step. The row-index array and Boolean test of the search for the
+    diagonal positions are released on return, before the first exponential
+    action.
 
     Raises:
-        ValueError: The pattern lacks a diagonal slot in some row.
+        ValueError: The pattern lacks a diagonal entry in some row.
     """
     import numpy as np
     import scipy.sparse
@@ -2554,7 +2580,7 @@ def _fill_generator(generator, kinetic, slots, diagonal, potential, a, b, dt):
     ``h = RN(ka + pv)`` and ``g = RN((-1j*dt)*h)``, the order of the sparse
     expression ``-1j * dt * (a * K + b * diag(V))``. dt is not distributed
     into the coefficients, whose rounding errors per entry, including
-    subnormal products, ``_schrodinger_step_bounds`` prices.
+    subnormal products, ``_schrodinger_step_bounds`` bounds.
     ``potential`` is the complex128 potential diagonal, converted once, so
     no real-to-complex boundary arithmetic enters. Nonzero entries are the same binary64 numbers as the
     sparse addition. A cancelled entry stays a stored zero, which leaves the
@@ -2572,20 +2598,20 @@ def _fill_generator(generator, kinetic, slots, diagonal, potential, a, b, dt):
 
 
 def _execute_theory(plan, kernel):
-    """Run the classical kernel and return its labeled scalars and optional state.
+    """Run the classical routine and return its labeled scalars and optional state.
 
     The restricted state gives the probability of each grid point, which
     ``_summarize`` turns into the candidate, the most probable point, the
     marginals and the masses. The tie window of the most probable point is
     ``_host_window`` of the state budget delta, the budget that the
     ``split_step`` evolution observed on its trajectory
-    (``split_step.evolve``), or for the other flavors the Plan's budget
-    (``_host_state_error``) that planning stored as
-    ``QHDReconstruction.host_state_error``, and the kernel publishes delta as
-    ``readout_state_error``. The probability maximizer is published with
+    (``split_step.evolve``), or for the other classical evaluations the
+    Plan's budget (``_host_state_error``) that planning stored as
+    ``QHDReconstruction.host_state_error``, and the routine returns delta as
+    ``readout_state_error``. The probability maximizer is returned with
     its indices, probability and objective, and the mode status as the
-    Boolean scalar ``mode_unresolved``, since the kernel has no state from
-    which a later analysis could evaluate it. The scalars follow the order of
+    Boolean scalar ``mode_unresolved``, so that later analysis can use it
+    without a kept state (``keep_state=False``). The scalars follow the order of
     ``_scalar_names``. The invalid mass is zero because the restricted basis
     holds only grid points. The ``schrodinger`` and ``split_step``
     probabilities are read before the objective constant's global phase is
@@ -2690,7 +2716,7 @@ def _block_records(raw_steps):
 
 def _error_model(problem, output, construction, *, compact, split, kinetic_model, execution, shots, rule,
                  aqft=False):
-    """Declare every error source of the selected finite model, each with unknown size.
+    """Declare every error source of the finite model, each with unknown size.
 
     The finite grid, the time discretization of the schedule, floating-point
     arithmetic and the gap between the best observed candidate and the
@@ -2703,11 +2729,11 @@ def _error_model(problem, output, construction, *, compact, split, kinetic_model
     ``time_ordering`` instead. The compiled product adds splitting error and
     any rotations removed by the angle threshold, and a truncated binary QFT
     (``aqft``) adds ``aqft_truncation``. The classical
-    ``split_step`` flavor (``split``) adds the Strang splitting error of its
+    ``split_step`` evaluation (``split``) adds the Strang splitting error of its
     potential and kinetic factors, also named ``product_formula``. The
     ``"spectral"`` kinetic model replaces the finite-difference stencil by
     the Fourier symbol of ``-Delta/2``, a model error named
-    ``kinetic_model``. Native execution adds simulator or device error, and
+    ``kinetic_model``. Circuit execution adds simulator or device error, and
     counts add sampling error. NWQLib propagates none of these to the
     objective, so every term is unknown. The dropped-angle total stored in
     the reconstruction is not an objective-gap bound either.
@@ -2770,13 +2796,13 @@ class QHD(Method):
     arXiv:2303.01471v1, Eq. (1), with `a = exp(phi_t)` and `b = exp(chi_t)`, K the
     kinetic operator `-Delta/2` on the grid and V the objective values, one step per
     time step, and reads out grid points. Each step is a product formula on the circuit
-    routes and in the `ir_product` and `split_step` classical evolutions, and a
+    routes and in the `ir_product` and `split_step` classical evaluations, and a
     numerical evaluation of the exponential of the step's Hamiltonian in the default
-    `schrodinger` classical evolution.
+    `schrodinger` classical evaluation.
     The default quadratic schedule is the example of QHDOPT (Kushnir et al.,
     arXiv:2409.03121v1, Sec. 2.1), and the one-hot encoding and the shifted-cubic
-    schedule come from Wu et al., arXiv:2605.12066v1. The rows and notes below say where
-    a setting departs from Leng et al.'s Algorithm 1. Its step 6 measures one grid
+    schedule come from Wu et al., arXiv:2605.12066v1. The attributes and notes below say
+    where a setting departs from Leng et al.'s Algorithm 1. Its step 6 measures one grid
     point, while QHD reports the best observed and the most probable point of the
     observed outcomes. The [QHD guide](../../algorithms/qhd.md) explains the grids,
     schedules, initial states and readout, and its
@@ -2799,7 +2825,7 @@ class QHD(Method):
             encoding: the potential and kinetic phase diagonals, the QFT bit reversal
             and the AQFT cutoff
             ([`BinarySynthesis`][nwqlib.algorithms.qhd.binary.BinarySynthesis]). The
-            one-hot encoding requires the default record.
+            one-hot encoding requires the default `BinarySynthesis()`.
         num_steps: Default `1`. Positive number of evolution steps.
         total_time: Default `1.0`. Positive total evolution time. Each step lasts
             `total_time/num_steps`.
@@ -2814,8 +2840,8 @@ class QHD(Method):
             `"midpoint"`, the point values `a(t)` and `b(t)` at the step midpoint, or
             `"integrated"`, the step averages of their interval integrals. The Product
             formula note below explains both.
-        trotter_order: Default `2`. Product-formula order, 1 or 2, shared by circuit
-            selection and the numerical `ir_product` reference. Classical `split_step`
+        trotter_order: Default `2`. Product-formula order, 1 or 2, shared by the
+            compiled circuit and the numerical `ir_product` reference. Classical `split_step`
             evolution is always symmetric. The Product formula note below gives the factor order.
         boundary: Default `"dirichlet"`, which accepts the default K = 2 with the
             one-hot encoding. Boundary condition of the finite-difference kinetic term,
@@ -2849,24 +2875,28 @@ class QHD(Method):
             `StatePreparation`, and `"none"` selects a resource-only construction, which
             classical execution rejects. The State preparation note below describes
             each.
-        theory_flavor: Default `"schrodinger"`. Classical evolution of the `K**d` grid
-            amplitudes under `execution="classical"`: `"schrodinger"`, the exponential
-            of each step's Hamiltonian, `"ir_product"`, a numerical reference of the
-            compiled product, or `"split_step"`, a symmetric split-step product. The
-            Classical evolutions note below compares them.
+        theory_flavor: Default `"schrodinger"`. Classical evaluation of the model under
+            `execution="classical"`, which evolves the `K**d` grid amplitudes:
+            `"schrodinger"`, the exponential of each step's Hamiltonian, `"ir_product"`,
+            a numerical reference of the compiled product, or `"split_step"`, a
+            symmetric split-step product. The Classical evaluations note below compares
+            them.
         keep_state: Default `False`. Keep the final state array when the output and
-            execution support it. It requires exact readout, without `shots`.
+            execution support it. It requires exact readout, `shots=None`, in which
+            the probabilities or amplitudes are computed without shot sampling.
+            Numerical errors can remain.
         max_bytes: Default 10 GB (decimal, `10_000_000_000` bytes). Positive limit on
             the known bytes of state, grid and numerical workspace that planning counts.
             It does not bound the process memory.
         max_work: Default `1_000_000_000`. Positive limit on the counted work of
             objective tables, products and classical evolution, in planning work units,
             the scalar and array operations that planning declares. A work unit is not a
-            measured CPU operation or a time. Symbolic expansion uses a nominal term
-            charge that bounds term count only for numeric constants, symbols, sums,
-            products and nonnegative integer powers; it does not bound general SymPy
-            rewriting work or coefficient storage. A refusal names the stage and the amount
-            to set ([cost](../../algorithms/qhd.md#cost-and-existing-evidence)).
+            measured CPU operation or a time. Symbolic expansion is counted by a nominal
+            number of terms, which bounds the term count only for numeric constants,
+            symbols, sums, products and nonnegative integer powers. It does not bound
+            general SymPy rewriting work or coefficient storage. A rejection names the stage
+            and the value of `max_work` or `max_bytes` to set
+            ([cost](../../algorithms/qhd.md#cost-and-existing-evidence)).
 
     Encodings:
         `"one_hot"` places variable j on the K qubits `j K` to `j K + K - 1` with one
@@ -2926,7 +2956,7 @@ class QHD(Method):
         Fourier energies: classical `split_step` evolution, or the binary encoding's
         quantum circuit and classical `ir_product` evolution. The one-hot circuit,
         classical one-hot `ir_product` evolution and classical `schrodinger` evolution
-        apply the finite-difference stencil, and planning refuses the spectral model
+        apply the finite-difference stencil, and planning rejects the spectral model
         there. The finite-difference model is the default because every route applies it.
 
     Rotation threshold:
@@ -2940,12 +2970,13 @@ class QHD(Method):
         `pruning_error_bound`.
 
     State preparation:
-        `initial_state_preparation="structured"` emits the library's structured circuit
+        `initial_state_preparation="structured"` builds the library's structured circuit
         for the encoding and initial state, and the Plan records its CX count as a
-        `ResourceLaw`. On the one-hot encoding it is the nonnegative amplitude chain of
+        cost rule (`ResourceLaw`). On the one-hot encoding it is the nonnegative amplitude chain of
         O(dK) gates, which for the uniform state is the linear W-state chain. The chain
-        uses computed rotation parameters and can stop at its lower-range cutoff. The
-        error bound of the omitted links is recorded per register in
+        uses computed rotation parameters and ends before a link whose parameter would
+        fall below the normal binary64 range. The error bound of the omitted links is
+        recorded per register in
         `range_omissions.chains` and included in the `state_preparation` error source.
         On the binary encoding it is one H per qubit, with no CX, which prepares the
         uniform state and the periodic kinetic ground state, the same state. Other
@@ -2956,7 +2987,7 @@ class QHD(Method):
         resource-only construction without preparation. Classical execution prepares no
         circuit and rejects `"none"`.
 
-    Classical evolutions:
+    Classical evaluations:
         `"schrodinger"` numerically evaluates each step's Hamiltonian exponential with
         SciPy's `expm_multiply`, whose work grows with the step's kinetic and potential
         weights and the objective's range. `"ir_product"` evaluates a numerical
@@ -3107,10 +3138,10 @@ class QHD(Method):
         K = 2 is a degenerate cycle, in which both neighbors of a point are the
         same point and the wrap link joins the same two points as link
         ``(0, 1)``. First order and the classical ``schrodinger`` and
-        ``split_step`` flavors need no disjoint layers, but the rule holds
-        for every Method, so that the periodic grids a Method admits do not
+        ``split_step`` evaluations need no disjoint layers, but the rule holds
+        for every Method, so that the periodic grids a Method accepts do not
         depend on ``trotter_order`` or on the execution, and one Method can be
-        planned for native execution and for its classical reference alike.
+        planned for circuit execution and for its classical reference alike.
 
         The binary encoding uses no links. Its kinetic factor applies the
         Fourier energies ``2 sin**2(pi k/K)/h**2`` by a QFT conjugation, and
@@ -3118,9 +3149,9 @@ class QHD(Method):
         a point are the other point, so the periodic stencil
         ``(2I - P - P^dagger)/(2 h**2)`` with ``P = X`` is ``(I - X)/h**2``,
         with energies 0 and ``2/h**2``, which one H conjugation applies
-        exactly. The classical ``schrodinger`` flavor adds the two coinciding
+        exactly. The classical ``schrodinger`` evaluation adds the two coinciding
         links of ``OneHotGrid.links``, ``-1/(2 h**2)`` each, to the same
-        off-diagonal ``-1/h**2``. The binary encoding therefore admits K = 2.
+        off-diagonal ``-1/h**2``. The binary encoding therefore accepts K = 2.
         """
         if self.boundary == "periodic":
             if self.include_boundary_points:
@@ -3169,10 +3200,10 @@ class QHD(Method):
           operators are diagonal in the discrete Fourier basis that the QFT
           applies. The Dirichlet binary kinetic needs a sine transform circuit
           and is not implemented (``docs/ROADMAP.md`` lists it). Any b >= 1
-          is admitted, K = 2 included
+          is accepted, K = 2 included
           (``_periodic_grid``).
         - ``binary_synthesis`` has no effect on a one-hot circuit, so only its
-          default record is accepted there, which keeps equal one-hot Methods
+          default value is accepted there, which keeps equal one-hot Methods
           equal.
         """
         if self.encoding == "binary":
@@ -3188,19 +3219,19 @@ class QHD(Method):
         return self
 
     def _kinetic_route(self, execution):
-        """Reject a kinetic model that the selected route does not apply.
+        """Reject a kinetic model that the route of ``execution`` does not apply.
 
         A route that fell back to another kinetic operator would evolve a
         different finite model from the one the Method names, so the
         refusal comes at planning. The one-hot circuit and the one-hot
-        ``ir_product`` flavor apply the finite-difference links
-        (``kinetic.KineticCompiler``), and the ``schrodinger`` flavor the
+        ``ir_product`` evaluation apply the finite-difference links
+        (``kinetic.KineticCompiler``), and the ``schrodinger`` evaluation the
         finite-difference stencil
         (``theory.restricted_kinetic_sparse``). The classical ``split_step``
-        flavor applies the kinetic operator in its eigenbasis
+        evaluation applies the kinetic operator in its eigenbasis
         (``split_step.kinetic_eigenvalues``), and the binary circuit and the
-        binary ``ir_product`` flavor apply its Fourier energies
-        (``binary.kinetic_table``), so these routes admit the spectral
+        binary ``ir_product`` evaluation apply its Fourier energies
+        (``binary.kinetic_table``), so these routes accept the spectral
         model.
         """
         if self.kinetic_model == "finite_difference":
@@ -3218,10 +3249,10 @@ class QHD(Method):
     descriptor: ClassVar[AlgorithmDescriptor] = DESCRIPTOR
 
     def _admit(self, work, data_bytes, *, stage="QHD selection", lower_bound=False, later=None):
-        """Refuse the named selected operation before it exceeds either declared limit.
+        """Refuse the named operation, before it runs, when its counted work or bytes exceed a declared limit.
 
-        ``later`` maps an exceeded field to the later phases whose populations
-        are not fixed by the dimensions and can need more. The first admission
+        ``later`` maps an exceeded field to the later phases whose sizes
+        are not fixed by the dimensions and can need more. The first check
         of a Plan passes it with the combined known needs of its first phases.
         """
         short, beyond = [], []
@@ -3262,27 +3293,27 @@ class QHD(Method):
         )
 
     def _admit_symbolic_work(self, problem, compact):
-        """Admit a nominal expansion charge, then counted table and block work before it runs.
+        """Check a nominal expansion count, then the counted table and block work, before the work runs.
 
         One running total of work covers the initial state, the step rows,
         the tables and the compiled blocks of a Plan. It starts with the
         initial state's evaluation, ``d K`` units, and the step rows, which
-        ``plan`` admits together before that evaluation runs and which this
-        method admits again before the expansion. The first and the final admission also
+        ``plan`` checks together before that evaluation runs and which this
+        method checks again before the expansion. The first and the final check also
         include the initial state's bytes (``_initial_state_bytes``), its
         evaluation and stored payload, and the step rows' bytes, so they
-        belong to this admission like its work. A
-        layer that bounds a run by the admissions per Plan
+        belong to this check like its work. A
+        layer that bounds a run by the checked amounts per Plan
         (``constrained_records.AugmentedLagrangianRecord.admitted_work_bound``,
         ``refinement_records.BoxRefinementResult.max_plannings``) therefore
-        counts the initial state inside this admission.
+        counts the initial state inside this check.
 
-        The nominal term charge (``objective.expansion_term_charge``) runs on the
+        The nominal term count (``objective.expansion_term_charge``) runs on the
         unexpanded tree of the objective centered as the compiler expands it
-        (``objective.centered_objective``), with an untuned 16-byte charge per
-        term before ``sp.expand``. It bounds formal term count only for the
+        (``objective.centered_objective``), with an untuned allowance of 16 bytes
+        per term before ``sp.expand``. It bounds formal term count only for the
         numeric-constant, symbol, Add, Mul and nonnegative-integer-Pow grammar.
-        General function rewriting, denominator populations, coefficient digits
+        General function rewriting, denominator expansion, coefficient digits
         and symbolic temporaries are outside this resource guarantee. After the expansion,
         each support group S has
         ``K**|S|`` grid tuples. At each of them the compiler forms |S|
@@ -3290,17 +3321,18 @@ class QHD(Method):
         (``ObjectiveDecomposer.support_expressions``), whose tree has ``N_S``
         nodes (``objective.node_count``). The tables therefore need
         ``sum_S K**|S| (N_S + |S|)`` work, one unit per node and per
-        coordinate, admitted before the first evaluation. This remains a
-        conservative logical node/coordinate-visit law for pointwise
+        coordinate, checked before the first evaluation. This remains a
+        conservative count of node and coordinate visits for pointwise
         expression trees. A length-b array operation represents b visits.
         This is not a primitive CPU-operation count. Flattened indexing uses
         several integer operations per coordinate and validation adds passes.
 
-        Table bytes. Admit the eight-byte support entries, their immutable
-        snapshot peak, centered coordinate vectors and the workspace of the
-        selected evaluator. Choose each slab from the remaining byte
+        Table bytes. The check counts the eight-byte support entries, their
+        peak while they are copied into immutable arrays, the centered
+        coordinate vectors and the workspace of the evaluator. Each slab, the
+        block of entries evaluated together, is sized from the remaining byte
         allowance, including expression intermediates and finite-real
-        validation. Planning admits table construction and identity
+        validation. Planning checks table construction and content-hash
         serialization as separate phases against ``max_bytes``, adding each
         phase's live arrays and metadata to its workspace. The serialization
         allowance includes the portable base64 strings, base64 conversion and
@@ -3309,20 +3341,20 @@ class QHD(Method):
         ``_support_table_bytes`` returns ``F_tables = 8E + 8dK + H_tables``,
         the final tables, the centered coordinate vectors and the qualified
         metadata allowance, the construction workspace W_eval, the largest of
-        the coordinate staging, one table's freezing snapshot and its slab
-        charge ``B_slab,S(b) = W_S(b) + (8 |S| + 64) b + H_S`` for a
-        flattened chunk of b entries (``compiler.support_chunk_size``), and
+        the coordinate staging, the copy of one table into its read-only
+        array and its slab allowance ``B_slab,S(b) = W_S(b) + (8 |S| + 64) b + H_S``
+        for a flattened block of b entries (``compiler.support_chunk_size``), and
         the serialization workspace I of the tables and the initial vectors.
-        The two workspaces are successive, so this admission charges
+        The two workspaces are used one after the other, so this check counts
         ``B_held + F_tables + max(W_eval, I)``. The evaluator term
         ``W_S(b) = 8 b (N_S + 2)`` and its headers ``H_S = 256 (N_S + 2) + H0``
         (``compiler.support_workspace``) are an engineering
-        allowance, not a derived bound. Its premise is that the NumPy
+        allowance, not a derived bound. Its assumption is that the NumPy
         printer's evaluation holds at most one slab-sized temporary per
         expression node, plus the output and one broadcast input. Every other
-        population of the admission (the initial state and step rows, the
+        part of the check (the initial state and step rows, the
         compiled blocks, and for the binary encoding its compilation arrays)
-        is reserved first as ``B_held``, and b_S is the largest chunk with
+        is set aside first as ``B_held``, and b_S is the largest block with
         ``B_slab,S(b_S) <= R = max_bytes - B_held - F_tables``.
         A compiled product adds one work unit and the measured
         allowance ``_BLOCK_BYTES`` per block occurrence. With L links per variable
@@ -3331,13 +3363,14 @@ class QHD(Method):
         hopping blocks per variable, because the ``floor(L/2)`` odd-indexed
         links appear in both half layers, and a first-order step emits L.
 
-        Use ``_select_binary_native``'s unit, extended to count each ``nextafter`` once in numerical
-        bounds. Exact Fraction arithmetic counts as arithmetic operations, without pricing integer
-        bit complexity. Float/Fraction representation conversions, comparisons and count bookkeeping
-        are excluded. Logical construction counts one structural unit per block. The bound prices
-        ``BinaryModel`` and ``compile_binary_steps``, after objective evaluation and before either
-        runs. It does not price a native dense wrap, since planning only selects a
-        dense construction and does not lower it.
+        Binary compilation work uses the unit of ``_select_binary_native``, extended to count each
+        ``nextafter`` once in numerical bounds. Exact Fraction arithmetic counts as arithmetic
+        operations, without counting integer bit complexity. Float/Fraction representation
+        conversions, comparisons and count bookkeeping are excluded. The construction counts one
+        structural unit per block. The bound counts the work of ``BinaryModel`` and
+        ``compile_binary_steps``, after objective evaluation and before either runs. It does not count
+        the circuit construction of a dense diagonal, since planning only chooses a dense
+        construction and does not build its circuit.
 
         For a potential table of N entries, ``_scaled_absolute_sum_up`` costs at most ``6N+2``. Its
         ordinary path has N absolute values, at most N-1 sum additions, one upward step and one
@@ -3345,14 +3378,14 @@ class QHD(Method):
         upward step to infinity, N upward divisions and N upward additions. This is at most 6N, so
         ``6N+2`` covers both paths and empty/all-zero shortcuts. The potential identity radius adds
         six operations for ``_gamma_up``, two for multiplication, at most one upward conversion, and
-        two for addition. Thus charge ``6N+13`` per potential table, dense tables included. Add
-        ``(n+4)N`` for its Walsh transform only when the requested potential synthesis can use Walsh
-        coefficients.
+        two for addition. Each potential table therefore counts ``6N+13``, dense tables included,
+        plus ``(n+4)N`` for its Walsh transform only when the requested potential synthesis can use
+        Walsh coefficients.
 
-        For each kinetic table, keep ``C(b)`` (``binary.kinetic_setup_work``) and add 33: at most 27
-        for the spectral identity enclosure, four for its two outward distances, and two for
-        ``BinaryModel.spacings``. The finite-difference enclosure is cheaper. These are setup costs even when the eventual kinetic
-        synthesis is dense.
+        Each kinetic table counts ``C(b)`` (``binary.kinetic_setup_work``) plus 33, which covers at
+        most 27 for the spectral identity enclosure, four for its two outward distances, and two for
+        ``BinaryModel.spacings``. The finite-difference enclosure is cheaper. These are setup costs
+        even when the eventual kinetic synthesis is dense.
 
         For a dense-requested block, the exponent costs one, synthesis costs ``N + r_d + 3``, and
         its two numerical tally additions cost two. With ``r_d<=N``, this is at most ``2N+6`` value
@@ -3365,34 +3398,36 @@ class QHD(Method):
         dense wins, the additional dense products and omissions cost at most ``2N+2``, so this
         branch is at most ``3N+6``, before its structural unit.
 
-        If Walsh wins, partition its N-1 angles into kept r, threshold-dropped P, below-range o, and
-        exact zero entries. The kept half-sum costs at most ``6r+2``, threshold drops ``4P``, and
-        below-range charges ``2o``, plus one final range-charge product. Therefore the variable work
-        is at most ``6(N-1)+3``. The two identity-product operations add two. The fixed ``charge``
-        work is at most 64 operations: identity absolute value 1, exponent-error formation 8, exact
-        phase residual 3, optional omitted-identity sum 1, outward conversion allowance 2,
-        identity-error expression 14, reconstruction admission 18, and reconstruction allowance 17.
-        This deliberately counts the reconstruction admission's scalar bound arithmetic even though
-        it is a range predicate. Finally, the three ``_sum_up`` reductions at the end of compilation
-        cost at most six operations per selected Walsh block. Including the structural unit, these
-        terms are at most ``7N+74``. Use the integer ceiling
+        If Walsh wins, its N-1 angles fall into r kept, P threshold-dropped, o below-range and exact
+        zero entries. The kept half-sum costs at most ``6r+2``, threshold drops ``4P``, and the
+        below-range allowances ``2o``, plus one final product for the below-range allowance. The
+        variable work is therefore at most ``6(N-1)+3``. The two identity-product operations add
+        two. The fixed ``charge`` work is at most 64 operations, namely identity absolute value 1,
+        exponent-error formation 8, exact phase residual 3, optional omitted-identity sum 1, outward
+        conversion allowance 2, identity-error expression 14, reconstruction check 18, and
+        reconstruction allowance 17. The count includes the scalar bound arithmetic of the
+        reconstruction check, although that check is a range predicate. Finally, the three
+        ``_sum_up`` reductions at the end of compilation cost at most six operations per Walsh block
+        that compilation chooses. Including the structural unit, these terms are at most ``7N+74``,
+        and the count uses the integer ceiling
 
         ``L_Walsh-capable(N) = 7N+80``.
 
-        This charge is based on the requested synthesis, before its choice is known. It covers both
-        the selected Walsh branch and a ``min_cx`` trial followed by dense synthesis. No trial is
-        skipped in the accounting.
+        This count is based on the requested synthesis, before the choice of construction is known.
+        It covers both a chosen Walsh construction and a ``min_cx`` trial followed by dense
+        synthesis, and every trial is counted.
 
         Each step costs at most nine further operations: the second-order half duration, constant
-        coefficient and phase formation, the more expensive below-range constant-event charge, and
-        its share of the final phase sum. The mutually exclusive normal and omitted branches must
-        not both be multiplied by the step count. Once per compilation, the QFT angle list and
+        coefficient and phase formation, the below-range allowance of the constant's contribution,
+        which costs more than its normal branch, and its share of the final phase sum. Only one of the
+        mutually exclusive normal and omitted branches is multiplied by the step count. Once per
+        compilation, the QFT angle list and
         inverse cost at most ``b(b-1)``, the AQFT allowance at most ``5b+2``, and dt costs one. Add
         eight for the two final dropped-angle scalings, the pruning sum and outward conversion, and
         fixed scalar formation. The convenient ceiling is ``b**2+4b+16``.
 
         Writing H for the potential support set and f=1 or 2 for first or second order, the added
-        binary compilation charge is
+        binary compilation work is
 
         W_compile = d [C(b)+33]
          + sum_(S in H) [6N_S+13 + 1_(potential can use Walsh) (n_S+4)N_S]
@@ -3403,7 +3438,7 @@ class QHD(Method):
         The symbolic/table/initial-state total is added once. Table arrays and compiled records use
         an untuned 64 bytes per table entry and ``_BLOCK_BYTES`` per block, in addition to the
         initial state and evaluated tables. A binary classical Schrodinger or split-step Plan has
-        ``compact=False``, so it pays none of this compilation charge. Its support-table and
+        ``compact=False``, so none of this compilation work is counted for it. Its support-table and
         initial-state work still apply.
 
         Step rows. Every coefficient rule forms one weight row per step
@@ -3412,27 +3447,27 @@ class QHD(Method):
         ``interval_work`` units, the integrand evaluations and closed forms
         of one step (129 for the cubic schedule's quadrature, 2 otherwise).
         The Plan keeps each row and the rows' share of the records and their
-        identity JSON, charged the measured ``_STEP_BYTES`` per step. Its
+        content-hash JSON, counted at the measured ``_STEP_BYTES`` per step. Its
         measurement also held one Schrodinger generator norm per step, which
         planning does not keep, because ``_generator_norms`` yields the norms
-        one at a time. The rows are admitted
+        one at a time. The rows are checked
         with the initial state before the expansion, so that a large
         ``num_steps`` is refused before any row exists. Planning's later
-        charges (the evolution laws, ``_host_construction``) come after the
+        checks (the evolution formulas, ``_host_construction``) come after the
         rows exist and do not replace this one.
 
         Returns:
             ``(E, decomposer, work, chunks)``, the number of grid tuples
             evaluated across all support tables, the expanded
             ObjectiveDecomposer whose support expressions were counted, for
-            the compiler to evaluate, the admitted work: the nominal term charge
-            plus the final running total of the initial state, the step rows,
-            the tables and the compilation, and the entries per evaluation
-            chunk of each support (``compiler.QHDCompiler``). Automatic slack
-            selection of the augmented-Lagrangian layer compares this work
-            (``constrained._planned_costs``), and the planning of such a
-            candidate reuses that admission (``_ADMITTED_SYMBOLIC``) instead
-            of expanding its objective again.
+            the compiler to evaluate, the checked work, which is the nominal
+            term count plus the final running total of the initial state, the
+            step rows, the tables and the compilation, and the entries per
+            evaluation block of each support (``compiler.QHDCompiler``).
+            Automatic slack selection of the augmented-Lagrangian layer
+            compares this work (``constrained._planned_costs``), and the
+            planning of a representation compared there reuses that check
+            (``_ADMITTED_SYMBOLIC``) instead of expanding its objective again.
         """
         admitted = _ADMITTED_SYMBOLIC.get()
         if admitted is not None and admitted[0] == (self.content_id, problem.content_id, bool(compact)):
@@ -3525,23 +3560,24 @@ class QHD(Method):
         return evaluations, decomposer, monomials + work + occurrences, chunks
 
     def _admit_table_phases(self, work, d, k, held, nodes, stage, *, wrap_entries=0):
-        """Admit the successive support-table, wrapped-phase and identity phases.
+        """Check the successive support-table, wrapped-phase and content-hash phases.
 
-        Each phase shares held plus F_tables. A wrapped-phase owner reserves one
-        scalar cache and its largest miss, 65536+40E bytes for E=2**s, and releases
-        the cache when potential compilation finishes. The admitted scratch is
+        Each phase shares held plus F_tables. The wrapped-phase computation
+        (``wrapped_phase_workspace_bytes``) sets aside one scalar cache and its
+        largest miss, 65536+40E bytes for E=2**s, and releases the cache when
+        potential compilation finishes. The checked scratch is
         max(W_eval, I, B_wrap), with zero B_wrap when this route performs no wrap.
 
         The serialization allowance I includes the portable base64 strings,
         base64 conversion and the complete JSON and UTF-8 encoding buffers
-        (``_support_table_bytes``), and the admission also establishes
+        (``_support_table_bytes``), and the check also establishes
         ``I <= max_bytes - B_held - F_tables`` before any table is formed.
         For a support of size s and K >= 2, ``K**s >= 2**s``. A table's base64
-        length ``q = 4 ceil(8 K**s/3)`` enters the identity length J, so
+        length ``q = 4 ceil(8 K**s/3)`` enters the content-hash length J, so
         ``12J >= 12q >= 128 K**s >= 128 * 2**s``, and I also contains
         H0 = 65536, hence ``I >= 65536 + 128 K**s >= 65536 + 40 * 2**s``
         (``wrapped_phase_workspace_bytes``). The wrap phase therefore does not
-        raise the admitted maximum under the present table law, while the
+        raise the checked maximum under the present table formula, while the
         cache release after step compilation keeps the phases successive.
         """
         from nwqlib.subroutines.hamiltonian_evolution.pauli_evolution import wrapped_phase_workspace_bytes
@@ -3556,11 +3592,11 @@ class QHD(Method):
 
         `nwqlib.plan` and `solve` call it. Planning checks the objective and the operation
         sizes, evaluates each objective support table once, compiles the ordered step blocks
-        when quantum execution or the `ir_product` flavor needs them, and binds either the
-        compact circuit block or the classical kernel. It builds no circuit and evolves no
+        when quantum execution or the `ir_product` evaluation needs them, and binds either the
+        compact circuit block or the classical routine. It builds no circuit and evolves no
         state.
 
-        Binary byte check. Compilation reserves its source records, initial vectors,
+        Binary byte check. Compilation counts the bytes of its source records, initial vectors,
         compiler term lists and model baseline. After compilation releases the model,
         classical `ir_product` planning also checks the run's model phase. For `D = K**d`,
         potential-table sizes E_t and `E_max = max(K, E_1, ..., E_T)`, it requires
@@ -3915,20 +3951,21 @@ class QHD(Method):
         return plan._bind(blocks=blocks)
 
     def _host_construction(self, r, d, source, reference, outputs, size, workspace):
-        """Select the classical kernel that evolves the restricted grid model on the host.
+        """Choose the classical routine that evolves the restricted grid model.
 
         ``size`` and ``workspace`` come from ``restricted_sizes``, or from
-        ``split_step.sizes`` for the ``split_step`` flavor. Admission adds the
+        ``split_step.sizes`` for the ``split_step`` evaluation. The check adds the
         summary of all D = K**d grid points, every one of them possibly
-        positive (``summary_sizes``), whose byte law includes the float64
+        positive (``summary_sizes``), whose byte formula includes the float64
         probability array of ``_execute_theory``, 8 D bytes. The ``d K + 3 d + 13`` returned scalar records
         (``_scalar_names``) add the measured ``_SCALAR_BYTES`` each, and the
         call adds the measured ``_KERNEL_CALL_BYTES`` once for Python objects
-        of bounded total size that no size law counts.
+        of bounded total size that no size formula counts.
 
         Returns:
-            The selected construction, its ``host_scalars`` observation and
-            the selected kernel, which ``plan`` binds once the Plan exists.
+            The chosen construction, its ``host_scalars`` observation and
+            the chosen routine (``SelectedKernel``), which ``plan`` binds once
+            the Plan exists.
         """
         k, dimension = self.num_grid_points, r.restricted_dimension
         summary_work, summary_bytes = summary_sizes(r, d, k, dimension)
@@ -3982,7 +4019,7 @@ class QHD(Method):
         return construction, observation, kernel
 
     def _native_construction(self, problem, r, source, outputs, shots, amplitudes, *, census_held_bytes=0):
-        """Select the compact native block and the Program that allocates, evolves and reads out.
+        """Choose the compact circuit block and the Program that allocates, evolves and reads out.
 
         Without ``shots`` the Program returns exact joint probabilities for all
         ``r.width`` register qubits, ``d*K`` for one-hot and ``d*b`` for binary,
@@ -3992,11 +4029,11 @@ class QHD(Method):
         scale. ``amplitudes`` are the initial state's per-variable vectors,
         which set the chain's emitted links (``_select_native``).
         ``census_held_bytes`` are the caller's buffers live during the
-        one-hot rotation census (``_select_native``).
+        one-hot rotation count (``_select_native``).
 
         Returns:
-            The selected construction, its observation and a one-element
-            tuple holding the bound native block.
+            The chosen construction, its observation and a one-element
+            tuple holding the bound circuit block.
         """
         width = r.width
         _admit_register_basis(width)
@@ -4065,7 +4102,7 @@ class QHD(Method):
         return construction, observation, (block,)
 
     def _select_native(self, problem, r, source, amplitudes, *, census_held_bytes=0):
-        """Bind the compact one-hot construction, its construction work, its CX bound and its rotation law.
+        """Bind the compact one-hot construction, its construction work, its CX bound and its rotation count.
 
         Construction work counts gates to emit. The structured preparation of
         the one-hot encoding, the amplitude chain
@@ -4074,19 +4111,19 @@ class QHD(Method):
         ``L_j`` is the number of links that the chain of variable j emits
         (``initial_state.chain_links``), at most ``K - 1``. Qiskit's
         ``StatePreparation`` receives one ``2**K`` amplitude vector per
-        variable, charged ``d K 2**K`` work and ``16 * 2**K`` bytes for the
+        variable, counted as ``d K 2**K`` work and ``16 * 2**K`` bytes for the
         complex128 vector. A block on s qubits adds ``1 + s`` units plus
         ``2**s`` for a diagonal-synthesis phase table or ``s**2`` for any
         other provider (a multi-controlled phase or the XX+YY gate), with an
         untuned 128-byte allowance per block.
-        The CX law and the arbitrary-rotation law
-        (``resources.rotation_law``) apply only to the structured preparation
-        or no preparation, because the record has no law for Qiskit's generic
-        state preparation.
-        The rotation census admits its wrapped-phase cache and one miss beside
-        its source records (``resources._admitted_onehot_population``), with
-        ``census_held_bytes`` from the planning caller (the compiler's
-        centered coordinates and grouped-term slots) and ``8dK + 120d + 40``
+        The CX count and the arbitrary-rotation count (cost rules, ``ResourceLaw``,
+        ``resources.rotation_law``) are recorded only for the structured
+        preparation or no preparation, because the record has no counting rule
+        for Qiskit's generic state preparation.
+        The rotation count checks the bytes of its wrapped-phase cache and one
+        miss beside its source records (``resources._admitted_onehot_population``),
+        with ``census_held_bytes`` from the planning caller (the compiler's
+        centered coordinates and grouped-term lists) and ``8dK + 120d + 40``
         for the normalized initial arrays.
         """
         d, k = len(problem.variables), self.num_grid_points
@@ -4196,7 +4233,7 @@ class QHD(Method):
         )
 
     def _select_binary_native(self, problem, r, source):
-        """Bind the compact binary construction, its construction work and its CX and rotation laws.
+        """Bind the compact binary construction, its construction work and its CX and rotation counts.
 
         Let ``b = log2(K) >= 1``, ``d`` be the variable count, ``S`` a potential support, and ``n_S
         = b |S|``, ``N_S = 2**n_S``. A block occurrence B has ``n_B = b |B.variables|`` and ``N_B =
@@ -4205,17 +4242,17 @@ class QHD(Method):
 
         One value-operation unit is one scalar or array-element addition, subtraction,
         multiplication, division, absolute value, sign change, square, or elementary-function call.
-        A complex exponential and ``angle`` each count as one call. Numerical omission charges are
-        included. Comparisons, range predicates and the arithmetic used only to decide those
+        A complex exponential and ``angle`` each count as one call. The arithmetic of the numerical
+        omission allowances is included. Comparisons, range predicates and the arithmetic used only to decide those
         predicates, index/count bookkeeping, copies, permutations, record construction, and
         dependency-internal arithmetic are excluded. In particular, ``_dense_nonzero`` is a range
         predicate.
 
-        The complete count follows the actual native call chain ``construct_qhd ->
+        The complete count follows the call chain of the circuit construction, ``construct_qhd ->
         append_binary_steps -> BinaryModel -> PhaseTable.synthesize -> append_diagonal``.
 
         1. A dense synthesis forms N phase products. A Walsh synthesis forms N-1 nonidentity angle
-           products. Price N in either case.
+           products. The count is N in either case.
         2. For a nonzero dense table, ``_multiplexors.append_control_diagonal_phases`` forms
            ``angle(exp(1j * phases))``. Its product, exponential, and argument cost ``3N``.
         3. At the successive dense recursion levels the number of pairs is ``N/2, N/4, ..., 1``.
@@ -4231,31 +4268,32 @@ class QHD(Method):
 
            ``D(n) = 3N + 4(N-1) + 3G(n) = (3n+1)N + 2``.
 
-           An all-zero dense table returns before the wrap and recursion. Charging D for it is conservative.
+           An all-zero dense table returns before the wrap and recursion. Counting D for it is conservative.
         6. A dense block adds three scalar value operations: ``abs(Fraction(exponent))``,
            ``-exponent``, and the product with the largest omitted magnitude. A Walsh block adds
-           six: exponent absolute value, doubling, identity negation and multiplication,
-           range-charge multiplication, and the circuit global-phase addition. Its N-entry allowance
-           has one spare entry, so use ``c_B=3`` for dense and ``c_B=5`` for Walsh.
+           six: exponent absolute value, doubling, identity negation and multiplication, the
+           multiplication of the below-range allowance, and the circuit global-phase addition. Its
+           N-entry allowance has one spare entry, so the count uses ``c_B=3`` for dense and ``c_B=5``
+           for Walsh.
         7. A below-range dense entry adds one exact absolute value. A below-range Walsh angle adds
            an absolute value and one term of an exact sum. The extra work is ``R_d + 2 R_w``, using
            ``r.range_omissions.dense_entries`` and ``.rotations``. Identity range predicates remain
            excluded under the stated unit.
         8. A threshold-dropped Walsh rotation uses absolute value, integer division, multiplication,
-           and addition to the dropped sum. Add ``4P``, where ``P=r.dropped_count`` includes all
+           and addition to the dropped sum. This adds ``4P``, where ``P=r.dropped_count`` includes all
            occurrences.
         9. A support-table Walsh transform has n levels of N additions/subtractions and N
            normalization divisions, ``(n+1)N``. For each coefficient omitted by normalization,
            ``walsh_admission`` additionally forms ``abs(Fraction(s))/N`` and, for a nonidentity
-           coefficient, adds its loss. At most ``3N`` extra operations suffice. Charge ``(n+4)N``
-           per transformed potential table. Dense-requested potential tables have no transform.
+           coefficient, adds its loss. At most ``3N`` extra operations suffice. Each transformed
+           potential table counts ``(n+4)N``. Dense-requested potential tables have no transform.
         10. The kinetic setup has the bound ``C(b)=10K+2bK+b**2+6b+16`` (``binary.kinetic_setup_work``).
            The source's model-specific counts are at most ``16+8K+(4b-3)K/2`` for finite differences and
            ``9K+b**2+5b+12`` for the spectral model. Their slack below C is respectively
            ``7K/2+b**2+6b`` and ``(2b+1)K+b+4``. For b>=1 and d>=1 this also covers the model's
            extra two spacing operations per variable, at most ``b(b-1)`` forward/inverse QFT-angle
-           operations once per model, and the final physical-phase addition. There is no unpriced
-           per-step QFT-angle construction.
+           operations once per model, and the final physical-phase addition. No QFT-angle
+           construction per step is left uncounted.
 
         The resulting bound is
 
@@ -4265,30 +4303,30 @@ class QHD(Method):
          + sum_(B dense) D(n_B) + R_d + 2 R_w + 4P.
 
 
-        ``W_prep`` is ``db`` for the structured H layer, ``dbK`` for the selected Qiskit preparation
-        allowance, and zero for resource-only preparation. These remain declared construction
-        allowances rather than SDK runtime bounds.
+        ``W_prep`` is ``db`` for the structured H layer, ``dbK`` for the allowance of the Qiskit
+        preparation when it is chosen, and zero for resource-only preparation. These remain declared
+        construction allowances rather than SDK runtime bounds.
 
-        Planning admits the native constructor's complete known resident and workspace phase,
+        Planning checks the complete known resident and workspace bytes of the circuit construction,
         including source records, the binary model, the growing circuit's stored definitions and
         parameters, and one block's temporary construction storage (``native._binary_native_bytes``,
-        ``_binary_source_reservation``, ``binary._model_reservation``). A resource-only selection
+        ``_binary_source_reservation``, ``binary._model_reservation``). A resource-only construction
         has no circuit-construction byte phase.
 
-        The CX law is the sum of the recorded block counts
+        The CX count is the sum of the recorded block counts
         (``binary.compile_binary_steps``), which each block's construction
         reproduces (``native.append_binary_steps``), plus zero for the
         H layer. It is the count of the emitted circuit transpiled to
         CX and single-qubit gates at optimization level 0, before routing,
-        and an upper bound for any further optimization. The rotation law
+        and an upper bound for any further optimization. The rotation count
         sums the recorded rotations, an upper bound on the arbitrary-angle
         rotations because angle-specific Clifford or T replacement and
         omitted zero multiplexor angles only lower it. Its basis is
-        ``selected_logical``, the basis of the one-hot rotation law
+        ``selected_logical``, the basis of the one-hot rotation count
         (``resources.rotation_law``), so the default resource estimate reports
         both encodings' rotation counts, the binary one as an upper bound
         (``resources.circuit_resources`` classifies its angles exactly).
-        Neither law is recorded with Qiskit's generic state preparation, whose
+        Neither count is recorded with Qiskit's generic state preparation, whose
         synthesis count this record does not bound.
         """
         from .binary import kinetic_setup_work
@@ -4433,20 +4471,21 @@ class QHD(Method):
         return verify(plan, result, checks=checks)
 
     def analyze(self, plan, data, *, settings):
-        """Decode the observations into grid-point populations, the best observed candidate and the most probable point.
+        """Decode the observations into grid-point weights, the best observed point (the candidate) and the most probable point.
 
-        Host-kernel scalars are read back by ``_host_summary``. A stored
-        native state or measured bins are decoded and summarized by
-        ``_summarize``, with invalid one-hot outcomes kept in the
-        unconditional population as invalid mass. Counts are pooled as
-        integers over all chunks, per decoded grid point and for the invalid
+        The scalars of the classical routine are read back by ``_host_summary``.
+        A stored circuit state or measured bins are decoded and summarized by
+        ``_summarize``, with invalid one-hot outcomes counted in the
+        unconditional distribution as invalid mass. Counts are pooled as
+        integers over all observation chunks, per decoded grid point and for the invalid
         outcomes, and divided by the total returned shots only after the
         most probable point is chosen from the integers (a count tie is
         equality of observed counts, not of the underlying probabilities).
         The Result keeps the pooled integer sum of the valid counts and the
         total returned shots as ``valid_count`` and ``returned_shots``.
         Exact probabilities are averaged over chunks. ``_readout_window``
-        gives each path's tie window from its receipts or host application.
+        gives each path's tie window from its preparation records or from the
+        application record of the classical routine.
         """
         observations, trace = data.observations, data.trace
         artifacts = data

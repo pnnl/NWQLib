@@ -1,4 +1,4 @@
-"""Signed Chebyshev moments from one selected input and shared Program.
+"""Signed Chebyshev moments of the Plan's input operator from one shared Program.
 
 Write H=center*I+alpha*K, where the spectrum of K lies in [-1,1], and recover
 physical Ritz values as center+alpha*x (the shift and rescaling of Oumarou et
@@ -25,7 +25,7 @@ odd degree, or one trajectory point, measures the whole of U, and each shot
 returns one signed outcome. Kirby's Section 3.1, step 3 instead measures one
 term, or one group of compatible Pauli bases, per setting. Both estimate the
 same <U>. The cost is the label-controlled basis change, whose table-size
-contract is in ENGINEERING_CONSTANTS "Chebyshev Lanczos defaults".
+limit is in ENGINEERING_CONSTANTS "Chebyshev Lanczos defaults".
 """
 
 from nwqlib._limits import DEFAULT_MAX_BYTES
@@ -118,7 +118,7 @@ MAX_READOUT_ENTRY_BITS = 20
 
 
 class ChebyshevSubspace(Record):
-    """Content identity of one selected trial space span{T_k(K)|psi>, k<m}.
+    """Record whose content hash identifies one trial space span{T_k(K)|psi>, k<m}.
 
     The operator, reference state, dimension m, affine frame (center, alpha)
     and operator access identify the space and its Chebyshev coordinates. A
@@ -150,7 +150,7 @@ class SensitivitySampling(Record):
     choices, described in the [Lanczos guide](../../algorithms/lanczos.md).
     The allocation is an empirical rule, not a proven optimum. Because the
     main stage allocates its shots from the pilot,
-    `prepare(plan, settings="all")` is refused, and `prepare(plan)` prepares
+    `prepare(plan, settings="all")` is rejected, and `prepare(plan)` prepares
     the next setting.
 
     Attributes:
@@ -177,14 +177,14 @@ def centered_operator_bytes(table, readout):
     """Return (caller, ingestion) bytes of the SELECT/K helper beyond the supplied table and readout.
 
     With q qubits, W = ceil(q/64) words per mask and J = len(readout.rows)
-    selected rows, the four caller-owned buffers are the physical
-    coefficients (8J), the selected x and z words (8JW each) and the
+    used rows, the four buffers that the caller allocates are the physical
+    coefficients (8J), the x and z words of the used rows (8JW each) and the
     complex128 coefficient copy (16J), J*(16*W+24) data bytes, plus a
-    256-byte fixed allowance each. The ingester's logical envelope beyond
-    its caller-owned arrays is J*(4*(16*W+16)+S(q))+(q+8)//8 with
-    S(q) = _pauli_identity_bytes(q): the input snapshot and the later
-    coalescing/output populations of _coalesced_input, and the identity
-    serialization share. Integer products stay Python integers.
+    256-byte fixed allowance each. The logical size bound of the ingestion
+    beyond the caller's arrays is J*(4*(16*W+16)+S(q))+(q+8)//8 with
+    S(q) = _pauli_identity_bytes(q). It covers the input copy, the later
+    merged and output term arrays of _coalesced_input, and the share of the
+    content-hash serialization. Integer products stay Python integers.
     """
     q = table.num_qubits
     W = table.x.shape[1]
@@ -202,25 +202,27 @@ def _centered_operator(table, readout, *, scaled, max_bytes):
     signed SELECT) or c_j/alpha (scaled=True, the classical K). Source term
     order is kept, no term is pruned and the identity is left out.
 
-    The complete SELECT/K helper admits the caller's selected mask and
-    coefficient copies together with the mask-ingestion envelope before
-    allocating them. With J selected rows and W words per mask, the four
-    caller-owned arrays contain J*(16*W+24) data bytes and receive a
-    256-byte fixed allowance each. They remain live throughout ingestion,
-    whose existing charge is beyond caller-owned arrays. A further
-    65,536-byte allowance covers the phase's other fixed bookkeeping. The
-    supplied table and readout are outside this additional-helper charge.
-    The allowances describe the qualified native stack and do not bound
-    process RSS or every dependency-internal allocation.
+    This function checks the caller's copies of the used masks and
+    coefficients, together with the size bound of the mask ingestion,
+    against max_bytes before allocating them. With J used rows and W words
+    per mask, the four arrays of the caller contain J*(16*W+24) data bytes
+    and receive a 256-byte fixed allowance each. They remain in memory
+    throughout ingestion, whose own byte count excludes the caller's arrays.
+    A further 65,536-byte allowance covers the phase's other fixed
+    bookkeeping. The supplied table and readout are outside this additional
+    count. The allowances describe the qualified software stack, checked by
+    measurement, and do not bound the resident memory of the process or
+    every allocation inside a dependency.
 
     The one check B_centered = caller + ingestion + H0
     = J*(80*W+88+S(q)) + (q+8)//8 + 1024 + 65536 bytes runs before
     ``physical`` is allocated. The ingester then receives
-    max_bytes - caller - H0 as its own limit, which keeps its "beyond
-    caller-owned arrays" contract without reserving the copies twice.
-    Separate checks of the copies and of ingestion against max_bytes would
-    never establish their sum. The scaled branch keeps ``physical`` live
-    although it is unused, so the four-buffer envelope covers both branches.
+    max_bytes - caller - H0 as its own limit, which keeps its rule of
+    counting only bytes beyond the caller's arrays without counting the
+    copies twice. Separate checks of the copies and of ingestion against
+    max_bytes would never establish their sum. The scaled branch keeps
+    ``physical`` in memory although it is unused, so the four-buffer bound
+    covers both branches.
     """
     caller, ingestion = centered_operator_bytes(table, readout)
     _check_bytes(caller+ingestion+H0, max_bytes, "Lanczos SELECT/K and mask ingestion")
@@ -236,11 +238,11 @@ def _centered_operator(table, readout, *, scaled, max_bytes):
 
 
 def _plan_readout(operator, reconstruction, *, max_bytes):
-    """Derive the readout table of a bound Pauli-input Plan from its selected operator.
+    """Derive the readout table of a bound Pauli-input Plan from its operator.
 
     Returns None for matrix input. The operator must be the one the Plan
-    names, and the census of its table must reproduce the stored frame and
-    index width. Raises ValueError otherwise.
+    names, and the frame and index width computed from its table must equal
+    the recorded ones. Raises ValueError otherwise.
     """
     if reconstruction.enclosure_source != "pauli_l1":
         return None
@@ -260,8 +262,8 @@ def _selected_blocks(reference, select_operator, *, a, degrees, trajectory, max_
     Eq. (6)). A single term has no index register, so R is the identity and
     the walk is U alone. An exact trajectory with odd degrees also selects
     the adjoint of the odd readout, which undoes it before the walk
-    continues. It is the transform of the same selected readout block, so it
-    reverses and adjoints that block's actual operation sequence.
+    continues. It is the transform of the same readout block, so it reverses
+    that block's operation sequence and takes the adjoint of each operation.
     """
     state = select_preparation("reference", reference)
     select = select_signed_pauli("select", select_operator, max_bytes=max_bytes)
@@ -289,13 +291,13 @@ _READOUT_PADDING = "unused SELECT labels contribute zero; all returned observati
 def _moment_program(reference, select_operator, *, m, n, a, degrees, acquisition, shots, sampling, max_bytes):
     """Build the quantum Program that reads the requested moments.
 
-    Record requested even and odd moments along the exact selected walk.
-    After j applications of RU, the positive reflection gives mu_(2j) and
-    the signed SELECT readout gives mu_(2j+1), by Kirby et al.,
-    arXiv:2208.00567v4, Eq. (26). Readout snapshots leave the continuation
-    state unchanged. The signed decoder assigns zero to unused SELECT
-    addresses and does not renormalize probability mass. Sampled settings
-    use independent preparations.
+    Record requested even and odd moments along the exact walk. After j
+    applications of RU, the positive reflection gives mu_(2j) and the signed
+    SELECT readout gives mu_(2j+1), by Kirby et al., arXiv:2208.00567v4,
+    Eq. (26). The readout views leave the continuation state unchanged. The
+    signed decoder assigns zero to unused SELECT addresses and does not
+    renormalize probability mass. Sampled settings use independent
+    preparations.
 
     Exact probabilities build one trajectory experiment
     (_trajectory_program). Counts build one MeasurementBatch per degree
@@ -305,10 +307,10 @@ def _moment_program(reference, select_operator, *, m, n, a, degrees, acquisition
     Section 3.1, step 1, p. 6). An even k then applies PREP^dagger and reads
     the index register (step 2). An odd k applies NWQLib's coherent SELECT
     readout and reads the index and system registers, in place of Kirby's
-    per-term step 3. With counts, each required moment setting needs fresh
-    state preparation: the exact continuation does not furnish a way to
-    measure both noncommuting observables nondestructively on one hardware
-    sample.
+    per-term step 3. With counts, each required moment setting needs a fresh
+    state preparation, because the exact continuation does not furnish a way
+    to measure both noncommuting observables nondestructively on one
+    hardware sample.
 
     Args:
         reference: Reference StateInput, zero-padded to 2**n coordinates.
@@ -317,7 +319,7 @@ def _moment_program(reference, select_operator, *, m, n, a, degrees, acquisition
         m: Trial dimension. Walk steps range over 0..m-1.
         n: System qubits.
         a: Index qubits, ceil(log2(number of terms)), zero for a single term.
-        degrees: Nonempty sorted moment degrees to acquire.
+        degrees: Nonempty sorted moment degrees to measure.
         acquisition: ``counts`` or ``probabilities``.
         shots: Shots per setting for counts, 2 under SensitivitySampling, or None.
         sampling: SensitivitySampling, or None for scalar shots and exact
@@ -325,8 +327,8 @@ def _moment_program(reference, select_operator, *, m, n, a, degrees, acquisition
         max_bytes: Byte limit passed to block selection.
 
     Returns:
-        (program, blocks, settings, experiments): the Program, its selected
-        blocks, one MomentSetting per degree, and one Experiment per degree
+        (program, blocks, settings, experiments): the Program, its blocks,
+        one MomentSetting per degree, and one Experiment per degree
         for counts or the one trajectory Experiment for exact probabilities.
     """
     if acquisition == "probabilities":
@@ -525,29 +527,29 @@ def _trajectory_program(reference, select_operator, *, n, a, degrees, max_bytes)
     Views at one boundary each start from the restored continuation state,
     and the final observation needs no inverse when nothing follows it. The
     odd view's inverse is the adjoint of the forward table, target by target
-    (``qiskit_compat.inverse_realized_gate``): the multiplexer of the
-    adjoint matrices, or the adjoint matrix unitary for a target without
-    controls, so the forward tail and its inverse have the same native
-    realization. For the
-    represented pair write E = B_inv B - I and eps_B >= ||E||_2, the
-    operator norm on all a+n wires including padded addresses. With x the
+    (``qiskit_compat.inverse_realized_gate``), represented as the
+    multiplexer of the adjoint matrices, or as the adjoint matrix unitary
+    for a target without controls. A backend that decomposes these instructions further needs a
+    separate error analysis. For the represented pair write
+    E = B_inv B - I and eps_B >= ||E||_2, the operator norm on all a+n
+    wires including padded addresses. With x the
     state before the tail, e_f the error made while applying B and e_b the
     error while applying B_inv, the restored computed state satisfies
     x_after = B_inv(B x + e_f) + e_b = (I + E) x + B_inv e_f + e_b and
     ||x_after - x||_2 <= eps_B ||x||_2 + ||B_inv||_2 ||e_f||_2 + ||e_b||_2.
-    The inverse norm factor is necessary when the stored inverse matrices
+    The inverse norm factor is necessary when the binary64 inverse matrices
     are not exactly unitary, and saving the marginal contributes no term.
-    For the native adjoint table the remaining represented residual is the
-    stored table's Gram defect. With h = fl(1/fl(sqrt(2))) and s = 2 h^2,
-    the two-step computation of ``_semantic.pauli_readout_basis``, the
-    stored matrices H and H S^dagger have Gram matrix s I and the identity
+    For the adjoint table built this way, the remaining represented residual
+    is the Gram defect of the binary64 table. With h = fl(1/fl(sqrt(2))) and
+    s = 2 h^2, the two-step computation of ``_semantic.pauli_readout_basis``,
+    the binary64 matrices H and H S^dagger have Gram matrix s I and the identity
     has Gram matrix I, so an address whose label has p_c X/Y factors has
     B_c^dagger B_c = s^(p_c) I and
     ||B^dagger B - I||_2 = max_c |s^(p_c) - 1| = 1 - s^(p_max), since s < 1,
     with ||B|| <= 1 and p_c = 0 on padding. These terms bound the
     represented matrices, not Aer's state-vector execution.
 
-    Relative to the same selected walk with the readout excursions removed,
+    Relative to the same walk with the readout excursions removed,
     with intervening ideal steps of norm at most one and a reference state
     of norm at most one, the construction-only difference b obeys
     b_(i+1) <= (1 + eps_i) b_i + eps_i, b_0 = 0, so
@@ -557,7 +559,7 @@ def _trajectory_program(reference, select_operator, *, n, a, degrees, max_bytes)
     Other nonidentity readout pairs, including any nonzero represented
     even-pair residual, enter the same product. For the full degree
     schedule |O(k)| = floor(k/2), and a subset schedule counts the views
-    that actually precede the save. The diagonal signed score D_k of either
+    that precede the save. The diagonal signed score D_k of either
     view has ||D_k|| <= 1, so for a unit-norm or contractive reference state
     psi and state error v the saved moment changes by at most
     2 ||v||_2 + ||v||_2^2, and the construction-only contribution of the
@@ -566,16 +568,17 @@ def _trajectory_program(reference, select_operator, *, n, a, degrees, max_bytes)
     the comparison with separately prepared moments.
 
     When both execute, a tail with d native operations and an inverse with
-    the same count add 2d operations to the receipt's native operation count G
-    (``PreparedArtifact.probability_window``), and
+    the same count add 2d operations to the native operation count G of the
+    preparation record (``PreparedArtifact.probability_window``), and
     ``d_forward + d_inverse`` when their respective native operation counts
     ``d_forward`` and ``d_inverse`` differ.
 
     Each point's position is the number of bound logical operations before
-    it, one operation per bound call (the lowering convention of
+    it, one operation per bound call (the circuit-construction convention of
     PreparedArtifact.body_length). The body has no measurement register,
-    and the trajectory declares zero shots. Planning admits the whole
-    declared schedule with readout_shape before block selection, and each
+    and the trajectory declares zero shots. Planning checks the whole
+    declared schedule against the limits with readout_shape before the
+    blocks are chosen, and each
     point's marginal is one exact probability marginal capped by
     MAX_READOUT_ENTRY_BITS. An over-budget schedule is rejected, never
     replaced by fewer points or another route. A backend without trajectory
@@ -716,17 +719,22 @@ class Lanczos(Method):
             shot allocation. It conflicts with `shots=` and with classical
             execution.
         max_bytes: Default 10 GB (decimal, `10_000_000_000` bytes). Limit on
-            the known bytes of input, moments and projected numerical
-            workspace.
+            the bytes, known in advance, of the input, the moments and the
+            projected numerical workspace.
         max_analysis_work: Default `1e8`. Limit on the work of the projected
             analysis, including matrix assembly and solve. Planning checks it
             before any moment is obtained.
-        max_classical_products: Default `1e8`. Limit on the counted
-            classical Chebyshev operator applications.
-        input_conversion: Default `"auto"`, which keeps the accepted input
-            access. `"dense_pauli"` permits explicit dense-to-Pauli
-            conversion, which quantum execution needs for sparse input and
-            for dense input of dimension above 16.
+        max_classical_products: Default `1e8`. Limit on the counted scalar
+            work of the classical preparation of the reference state and of
+            the Chebyshev recurrence, including the operator actions and the
+            vector operations.
+        input_conversion: Default `"auto"`, which keeps Pauli access and,
+            for quantum execution, converts explicit dense matrices of
+            original dimension at most 16 to Pauli access. Classical
+            execution keeps the supplied matrix representation.
+            `"dense_pauli"` permits explicit dense-to-Pauli conversion, which
+            quantum execution needs for sparse input and for dense input of
+            dimension above 16.
         max_conversion_work: Default `1e8`. Limit on the work of operator
             conversion, counted as ``q*D²`` transform work. For original
             operator dimension d, ``q = max(1, ceil(log2(d)))`` is the
@@ -736,7 +744,9 @@ class Lanczos(Method):
     Examples:
         `H = ZZ + 0.5*(XI + IX)` on two qubits has lowest eigenvalue
         `-sqrt(2) = -1.4142135623...`, which a three-dimensional trial
-        space built from `|00>` recovers on Aer with exact readout:
+        space built from `|00>` recovers on Aer with exact readout, in which
+        the simulator computes probabilities without shot sampling, subject
+        to numerical rounding:
 
         >>> from qiskit.quantum_info import SparsePauliOp
         >>> from nwqlib import Eigenproblem, solve
@@ -774,8 +784,8 @@ class Lanczos(Method):
         non-identity coefficients (`"pauli_l1"`), which gives K the unit L1
         norm of the encoding of Kirby et al., arXiv:2208.00567v4,
         Section 2.1, after the identity term is removed. For Pauli input,
-        Lanczos uses the accepted packed Pauli table to define its centered
-        operator and SELECT address order. The stored reconstruction keeps
+        Lanczos uses the checked packed Pauli table to define its centered
+        operator and SELECT address order. The reconstruction record keeps
         the scalar frame and the table's content hash. Readout signs, support
         masks and normalized coefficients come from that same table, so the
         classical action and the quantum decoder use one term order. Dense,
@@ -788,7 +798,7 @@ class Lanczos(Method):
         The requested even and odd moments are read along one walk. After j
         applications of `RU`, the positive reflection gives `mu_(2j)` and
         the signed SELECT readout gives `mu_(2j+1)` (Kirby et al.,
-        arXiv:2208.00567v4, Eq. (26)). Readout snapshots leave the state that
+        arXiv:2208.00567v4, Eq. (26)). The readout views leave the state that
         the walk continues from unchanged. The signed decoder assigns zero to
         unused SELECT addresses and does not renormalize probability mass.
         Sampled settings use independent preparations.
@@ -802,7 +812,7 @@ class Lanczos(Method):
         `floor(k/2)` walk steps, then applies `PREP^dagger` and reads the
         index register (even k), or applies the coherent SELECT readout and
         reads the index and system registers (odd k). Classical execution
-        uses one recurrence kernel instead.
+        uses one classical recurrence routine instead.
 
         `shots` is the count per setting, or None for exact probabilities,
         and must be None with `SensitivitySampling` or classical execution.
@@ -1008,14 +1018,15 @@ class Lanczos(Method):
         return plan._bind(blocks=blocks, operator=operator, reference=reference, readout=readout)
 
     def _host_blocks(self, plan, operator, reference, readout):
-        """Bind the classical recurrence kernel to the selected frame.
+        """Bind the classical recurrence routine to the Plan's frame.
 
         Pauli input is rescaled term by term to K=(H-center*I)/alpha, so the
-        kernel runs with center 0 and alpha 1. K is ingested from the x/z
+        routine runs with center 0 and alpha 1. K is ingested from the x/z
         words of the Plan's readout table and its scaled coefficients, in
         SELECT address order, without label strings. Matrix input keeps its
-        original storage and chebyshev_moments applies the affine map. Byte and product
-        caps are checked when the kernel is invoked, before any recurrence.
+        original storage and chebyshev_moments applies the affine map. Byte
+        and product caps are checked when the routine is invoked, before any
+        recurrence.
         """
         from nwqlib.blocks.kernels import BoundKernel, KernelOutput
         from nwqlib.execution import ScalarValue
@@ -1030,12 +1041,14 @@ class Lanczos(Method):
         (kernel,) = plan.construction.kernels
 
         def invoke():
-            """Run the recurrence once and return the acquired moments as scalars.
+            """Run the recurrence once and return the computed moments as scalars.
 
-            The Run calls this for the one host acquisition. It admits the
-            byte and product totals before materializing the reference, then
-            returns one unit-frame ScalarValue ``moment_k`` per acquired
-            degree, together with the reference's physical scale.
+            The Run calls this once, for the one classical evaluation. It
+            checks the byte and product totals against the limits before
+            building the reference vector, then returns one ScalarValue
+            ``moment_k`` with frame ``unit`` for each requested degree not
+            known algebraically, together with the reference's physical
+            scale.
             """
             required_bytes, required_work = self._classical_requirements(operator, reference, rec)
             _check_bytes(
@@ -1085,7 +1098,7 @@ class Lanczos(Method):
         return required_bytes + prep_bytes, work + (prep_work if prep_work is not None else 0)
 
     def prepare_all_refusal(self):
-        """SensitivitySampling refuses ``settings="all"``, because the main stage allocates its shots from the pilot."""
+        """SensitivitySampling rejects ``settings="all"``, because the main stage allocates its shots from the pilot."""
         if self.sampling:
             return (
                 "Lanczos with SensitivitySampling cannot prepare every setting in advance, because "
@@ -1097,10 +1110,10 @@ class Lanczos(Method):
         return super().prepare_all_refusal()
 
     def prepare(self, plan, *, run, settings="first"):
-        """Prepare the controller's next pilot or main setting under SensitivitySampling, else use the static path.
+        """Prepare the next pilot or main setting under SensitivitySampling, else the static path.
 
         Under SensitivitySampling, ``settings`` is always ``"first"``, because
-        ``prepare_all_refusal`` refuses ``"all"`` before a Run exists, so
+        ``prepare_all_refusal`` rejects ``"all"`` before a Run exists, so
         ``prepare_sensitivity`` does not take it.
         """
         if self.sampling:
@@ -1110,7 +1123,7 @@ class Lanczos(Method):
         return super().prepare(plan, run=run, settings=settings)
 
     def execute(self, plan, *, run):
-        """Run the two-stage controller of workflow.py under SensitivitySampling, else the static path."""
+        """Run the two-stage iteration of workflow.py under SensitivitySampling, else the static path."""
         if self.sampling:
             from .workflow import execute_sensitivity
 
@@ -1124,22 +1137,22 @@ class Lanczos(Method):
         return recover_sensitivity_analysis(plan, run=run)
 
     def statistics(self, plan, data, *, stage=None):
-        """Aggregate actual moment populations, optionally restricting them to one sampling stage.
+        """Aggregate the obtained moment data, optionally restricted to one sampling stage.
 
         Count chunks of one degree are pooled with weights equal to their
-        returned shots. Exact-probability point chunks and host chunks count
-        once each. An exact moment is associated with its setting by the
-        chunk's experiment and trajectory point ID, never by the chunk's
-        order, so a missing point leaves only its own degree unacquired and
+        returned shots. Exact-probability point chunks and classical chunks
+        count once each. An exact moment is associated with its setting by
+        the chunk's experiment and trajectory point ID, never by the chunk's
+        order, so a missing point leaves only its own degree without data and
         the result partial. Analysis, re-analysis and loading read the
-        supplied chunks and never acquire. stage selects the pilot (0) or
+        supplied chunks and never obtain new data. stage selects the pilot (0) or
         main (1) SensitivitySampling stage.
         A quantum chunk's histogram is decoded by readout.decode_histogram
-        with the bound Plan's LanczosReadout, which keeps the result by chunk
-        and setting identity, so a pilot, an analysis and a re-analysis of
-        the same chunk decode it once.
+        with the bound Plan's LanczosReadout, which caches the result by chunk
+        and setting, so a pilot, an analysis and a re-analysis of the same
+        chunk decode it once.
         The return value is (statistics by degree, contributing chunk ids,
-        their selected construction ids).
+        their construction ids).
         """
         from nwqlib.algorithms._eigen_support import matched_chunks
 
@@ -1188,7 +1201,7 @@ class Lanczos(Method):
         return result, tuple(ids), tuple(construction_ids)
 
     def analyze(self, plan, data, *, settings):
-        """Solve the Chebyshev projected problem from acquired moments and the chosen overlap cutoff.
+        """Solve the Chebyshev projected problem from obtained moments and the chosen overlap cutoff.
 
         settings may override overlap_cutoff, overlap_cutoff_policy,
         overlap_noise_multiplier and overlap_failure_probability for this
@@ -1262,7 +1275,7 @@ class Lanczos(Method):
         """Run one explicit check.
 
         EnergyShiftOptions compares two saved results, and
-        ProjectedVerificationOptions read the stored projected diagnostics.
+        ProjectedVerificationOptions read the saved projected diagnostics.
         Any other options type raises TypeError in verify_projected.
         """
         from nwqlib.evidence.energy_shift import EnergyShiftOptions, verify_energy_shift

@@ -1,11 +1,11 @@
-"""RWPE feedback loop over the shared Run, with interruption-safe checkpoints.
+"""RWPE feedback loop over the shared Run, with checkpoints of its iteration state.
 
 One RWPE step (Granade and Wiebe, arXiv:2208.04526v1, Algorithm 1):
 
 1. _pending computes (time, feedback) from the current mean and width
    (numerical.rwpe_choose), draws a backend seed and saves all three in a
    Checkpoint before any preparation.
-2. _prepare and submit_experiment acquire one observation. Quantum
+2. _prepare and submit_experiment obtain one observation. Quantum
    execution returns one shot, the Bernoulli datum. Classical execution
    returns the nominal ancilla mean, and run_rwpe samples the datum from it
    with the saved seed.
@@ -16,11 +16,11 @@ The width needs no storage because Eq. (7b) makes it a function of the
 processed-step count (numerical.rwpe_scale). A restart reads the checkpoint
 and resumes at the saved step with the saved point and seed. It never
 replays earlier observations or reconstructs the trajectory, and a
-completed acquisition updates the mean exactly once. Starting the controller
-adds 2 work units. Choosing a point and applying an update each add 32
-controller work units to Checkpoint.work, which is admitted against
-Method.max_work before the step runs. The controller state is admitted at
-256 bytes.
+completed observation updates the mean exactly once. Creating the
+iteration state adds 2 work units. Choosing a point and applying an update
+each add 32 work units to Checkpoint.work, which is checked against
+Method.max_work before the step runs. The iteration state counts as 256
+bytes against Method.max_bytes.
 
 The loop has no consistency checks or unwinding, which the paper adds in
 Algorithm 2. numerical.rwpe_estimate states what that omission means for
@@ -47,7 +47,7 @@ class Pending(Record):
     """The saved next RWPE query, written before its preparation.
 
     Attributes:
-        checkpoint_sequence: Run checkpoint that owns this intent and its preparation.
+        checkpoint_sequence: Run checkpoint of this pending step and its preparation.
         experiment: Name of the continuous-time query in the Plan.
         power: Predetermined relative evolution time for this step.
         feedback: Ancilla feedback angle in radians.
@@ -62,15 +62,15 @@ class Pending(Record):
 
 
 class Checkpoint(Record):
-    """Gaussian state and its once-only acquisition association.
+    """RWPE iteration state between steps, with the last observation it used.
 
     Attributes:
-        plan_id: Original selected Plan, including the prior and time schedule.
+        plan_id: Content hash of the original Plan, which fixes the prior and time schedule.
         mean: Gaussian mean in unwrapped phase radians.
         processed: Number of observations already incorporated in the mean.
-        work: Cumulative scalar controller work charged to this Plan.
+        work: Cumulative work units of the iteration loop counted against this Plan.
         pending: Saved next experiment, feedback and backend seed, if any.
-        last_attempt: Last incorporated acquisition identity, preventing a second update.
+        last_attempt: Identifier of the last observation incorporated, so it cannot update twice.
     """
 
     plan_id: ContentID
@@ -89,7 +89,7 @@ class Checkpoint(Record):
 
 
 def _state(plan, run):
-    """Load or initialize the controller state and check it against the Plan.
+    """Load or initialize the iteration state and check it against the Plan.
 
     A new Run saves the Gaussian prior before any work. A Run that has events
     but no checkpoint is rejected, because reconstructing the adaptive path
@@ -142,7 +142,7 @@ def _checkpoint(run, state):
 def _pending(plan, run, state):
     """Choose and save the next query unless one is pending or all steps are done.
 
-    The work charge is saved before the choice is computed, and the chosen
+    The work count is saved before the choice is computed, and the chosen
     power, feedback and backend seed are saved before preparation, so a
     restart reuses the same point and seed. The time 1/sigma_k must equal the
     planned query power, which planned_power_schedule fixed from the same
@@ -179,10 +179,10 @@ def _prepare(plan, run, state):
     """Prepare the pending query, or return the preparation already recorded for it.
 
     A restored preparation must match the saved feedback and seed. A local
-    preparation that was interrupted before its artifact was stored raises
-    instead of building a replacement, since a replacement would be a
-    different acquisition under the same intent. A remote preparation is
-    refreshed through its original locator.
+    preparation that was interrupted before its prepared circuit was saved
+    raises an error instead of building a replacement, since a replacement
+    would be a different observation for the same pending step. A remote
+    preparation is refreshed through its original locator at the provider.
     """
     pending = state.pending
     point = plan.resolve(
@@ -221,7 +221,7 @@ def prepare_rwpe(plan, *, run):
 
 
 def run_rwpe(plan, *, run):
-    """Advance completed one-bit updates exactly once. Unresolved intent stays pending.
+    """Apply each completed one-bit update exactly once, and leave an unresolved step pending.
 
     Planning/reporting never replays the update history. Per-step Gaussian
     work is counted before it runs and survives an interrupted update. The

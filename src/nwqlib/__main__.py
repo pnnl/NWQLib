@@ -1,4 +1,4 @@
-"""Run the same public CLI as the installed console entry."""
+"""Run the same command-line interface as the installed `nwqlib` command."""
 
 from nwqlib.cli import main
 

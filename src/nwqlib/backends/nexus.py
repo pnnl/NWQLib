@@ -1,8 +1,8 @@
-"""Quantinuum Nexus H2 lifecycle using public qnexus operations.
+"""Upload, compilation, execution and retrieval of H2 jobs on Quantinuum Nexus through public qnexus operations.
 
-Remote preparation steps are deliberately separate. The execution owner
-(``nwqlib._remote_preparation``) commits an intent before upload or compile and
-its acknowledgement before the next step. No method retries a create
+Remote preparation steps are deliberately separate. The remote-preparation
+code (``nwqlib._remote_preparation``) saves an intent before upload or compile
+and its acknowledgement before the next step. No method retries a create
 operation or waits through the provider queue. Each remote resource is named
 ``nwqlib:<stage>:<identity>``, and each compile or execute job carries a
 description of its programs, shots and target. Reconciliation finds the
@@ -29,7 +29,7 @@ from nwqlib.operators.access import Count
 
 
 class NexusPreparationData(BaseModel):
-    """Selected local circuit data before any Nexus upload.
+    """Local data of one prepared circuit before any Nexus upload.
 
     circuit_json is pytket's own Circuit.to_dict format, not a gate schema.
     bits lists (register, index) in increasing original global classical position.
@@ -76,13 +76,13 @@ class NexusBackend(Record):
     user's existing qnexus configuration.
 
     Preparation uploads and compiles each circuit as separate remote steps, and
-    execution sends one job per batch. The Run bounds the data it stores, not HTTP
+    execution sends one job per batch. The Run bounds the data it saves, not HTTP
     buffering, billing or SDK memory. `Run.resume` does not wait in the
     provider queue, but qnexus 0.49 has no public per-request timeout, so one
     HTTP request can still block indefinitely. NWQLib has tested this backend only
     offline, with SDK and converter checks, and has not tested live compilation
-    or execution. The [Nexus guide](../nexus.md) gives the preparation
-    boundary, costs and the qnexus dependency conflict.
+    or execution. The [Nexus guide](../nexus.md) gives the upload and
+    compilation steps, costs and the qnexus dependency conflict.
 
     Attributes:
         kind: Fixed `"nexus"`, the backend type.
@@ -143,7 +143,7 @@ class NexusBackend(Record):
         return optional_import("qnexus", extra="nexus")
 
     def _remote_sdk(self):
-        """Admit local auth presence without login, refresh, or token inspection."""
+        """Check that local authentication is present, without login, refresh or token inspection."""
         sdk = self._sdk()
         if sdk.client.utils.is_managed_token_environment():
             return sdk
@@ -193,10 +193,10 @@ class NexusBackend(Record):
             attempt_batching=False)
 
     def _association(self, programs, shots, run):
-        """Encode the job description that binds a remote job to its programs, shots and target.
+        """Encode the job description that ties a remote job to its programs, shots and target.
 
         The same text is compared during reconciliation and refresh, so a job
-        with the right name but another program or shot inventory is rejected.
+        with the right name but other programs or shot counts is rejected.
         """
         return self._encode(dict(programs=programs, shots=shots, project=self.project,
             backend_config=self._config().model_dump(mode="json"),
@@ -230,11 +230,11 @@ class NexusBackend(Record):
 
     def prepare_local(self, circuit, *, observation, runtime, position,
                       source_definitions, run, snapshot):
-        """Convert one selected circuit to pytket JSON locally, before any remote request.
+        """Convert one circuit to pytket JSON locally, before any remote request.
 
         Every classical bit must belong to exactly one named register, because
         pytket names bits by (register, index) and the decoder requests results
-        in that order. The Plan's runtime seed selects the u/cx lowering.
+        in that order. The Plan's runtime seed is the seed of the translation to u and cx.
         """
         # target_for refuses a readout other than counts, including a trajectory,
         # and a shot count outside the per-program range before the optional
@@ -308,12 +308,12 @@ class NexusBackend(Record):
             raise ValueError("Nexus returned a foreign project/program type")
 
     def _locator(self, job):
-        """Locator that records the job with its project, credential name and region."""
+        """Job locator that records the job with its project, credential name and region."""
         return JobLocator(provider=self.kind, job_id=str(job.id), project=self.project,
                           account=self.credential_name, region=self.target_region)
 
     def start_compile(self, input_ref_json, *, preparation_id, run, acknowledge):
-        """Start one remote compile job for the acknowledged upload and acknowledge its locator."""
+        """Start one remote compile job for the acknowledged upload and acknowledge its job locator."""
         ref = self._program(input_ref_json, run)
         association = self._association([str(ref.id)], [], run)
 
@@ -333,7 +333,7 @@ class NexusBackend(Record):
             raise ValueError("Nexus job differs from the original project/type/target configuration")
 
     def _job(self, locator, kind):
-        """Fetch the original job after checking that the locator matches this configuration."""
+        """Fetch the original job after checking that the job locator matches this configuration."""
         if (locator.provider != self.kind or locator.project != self.project
                 or locator.account != self.credential_name or locator.region != self.target_region):
             raise ValueError("Nexus job locator differs from the original project/credential")
@@ -396,13 +396,13 @@ class NexusBackend(Record):
         return self._encode(ref.model_dump(mode="json"), run) if stage == "upload" else self._locator(ref)
 
     def refresh_compile(self, locator, input_ref_json, load_data, *, run):
-        """Refresh the original compile job and admit only its associated input/output program
-        reference.
+        """Refresh the original compile job and accept only its associated input and output
+        program references.
 
         ``load_data`` reads the saved local circuit data only after a completed
         compilation has been matched to its input, so queued refreshes read no
-        payload. The compiled reference is opaque, so the receipt reports no
-        native gate inventory or physical layout.
+        saved circuit data. The compiled reference is opaque, so the preparation
+        record reports no list of native gates or physical layout.
         """
         job = self._job(locator, "compile")
 
@@ -443,7 +443,7 @@ class NexusBackend(Record):
             probability_window_exclusions=("optimization_level",) if self.optimization_level != 1 else None)
 
     def restore_native(self, record, payload=None, *, run):
-        """Restore the compiled program reference and bit order from the saved receipt alone."""
+        """Restore the compiled program reference and bit order from the saved preparation record alone."""
         text = record.provider_options_json
         run.check_data(4 * len(text))
         options = json.loads(text)
@@ -453,7 +453,7 @@ class NexusBackend(Record):
                              record.classical_layout, dict(readout_population=record.population))
 
     def admit_batch(self, natives):
-        """Admit at most 300 distinct Nexus items with 1 to 10,000 shots each.
+        """Accept at most 300 distinct Nexus items with 1 to 10,000 shots each.
 
         Nexus defines an execute job as a list of program items, each with
         its own n_shots and max_cost. The 300-program limit is the documented
@@ -474,7 +474,7 @@ class NexusBackend(Record):
             raise ValueError("Nexus batch requires distinct compiled program references")
 
     def launch(self, natives, *, submission_id, run):
-        """Start one execute job with one HQC cap per program and return its locator.
+        """Start one execute job with one HQC cap per program and return its job locator.
 
         ``max_cost_hqc`` is repeated for each program because the Nexus API
         takes one cap per submitted program, not one total for the job.
@@ -523,8 +523,8 @@ class NexusBackend(Record):
 
         Each result is joined to its item by its input program reference, not
         by list position. Items still running are skipped because their shot
-        sets can still grow. A result ID already saved for a consumed item is
-        skipped before any download, and a changed result ID for a known item
+        sets can still grow. A result ID already saved for an item whose result
+        is saved is skipped before any download, and a changed result ID for a known item
         is rejected.
         """
         self.admit_batch(natives)

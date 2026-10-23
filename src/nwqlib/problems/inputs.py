@@ -1,4 +1,7 @@
-"""Bounded physical state inputs and an explicit selected Qiskit preparation seam."""
+"""State inputs with their physical norm, and the Qiskit circuits that prepare them.
+
+Each input is converted within a byte limit.
+"""
 
 from dataclasses import dataclass, field
 from math import frexp, ldexp
@@ -106,13 +109,13 @@ class PhysicalScale(Record):
 
 
 def compose_recovery(*factors):
-    """Compose positive binary recovery without a full reciprocal or quotient.
+    """Multiply positive recovery factors as a binary mantissa and exponent, without forming a full reciprocal or quotient.
 
     Each factor is a PhysicalScale, a positive finite real scalar, or a pair
     (numerator, denominator) whose operands must each be positive and finite.
     A binary mantissa/exponent pair is represented only by PhysicalScale.
-    Callers pass a short bounded list. This is scalar arithmetic, not a
-    persisted expression evaluator or a certified error bound.
+    Callers pass a short list. This is scalar arithmetic, not a saved
+    expression evaluator or a certified error bound.
     """
     # (0.5, 1) is the empty product 1. Each factor multiplies the mantissas
     # and adds the exponents, and frexp returns the mantissa to [0.5, 1). The
@@ -229,7 +232,7 @@ class StateInput:
     direction that a preparation uses. Pass it wherever a state is accepted,
     for example `LinearSystem(b=state)`.
 
-    The data methods raise `ValueError` for a handle rebuilt by
+    The data methods raise `ValueError` for an object rebuilt by
     `from_record`, which holds metadata only. The fields below are
     read-only.
 
@@ -270,7 +273,7 @@ class StateInput:
         return self.manifest.reference
 
     def to_record(self):
-        """Return a JSON-ready description of this handle without its numerical data.
+        """Return a JSON-ready description of this input object without its numerical data.
 
         Returns:
             record (dict): The keys `format`, `manifest` and `preparation`.
@@ -282,7 +285,7 @@ class StateInput:
 
     @classmethod
     def from_record(cls, record):
-        """Rebuild a metadata-only handle from a `to_record()` description.
+        """Rebuild, from a `to_record()` description, an input object that holds metadata only.
 
         Its data methods raise `ValueError`, and no circuit can be prepared
         from it. Saved Results and Runs restore their numerical inputs
@@ -292,7 +295,8 @@ class StateInput:
             record (dict): A description returned by `to_record()`.
 
         Returns:
-            handle (StateInput): A handle without numerical data.
+            handle (StateInput): The rebuilt input object, named `handle`
+                here, which holds no numerical data.
 
         Raises:
             ValueError: If `record` is not such a description, or its
@@ -689,7 +693,7 @@ def state_input(value, *, max_bytes=DEFAULT_INPUT_BYTES) -> StateInput:
             10 GB (decimal, `10_000_000_000`).
 
     Returns:
-        state (StateInput): The accepted state.
+        state (StateInput): The state, ready to use in a Problem.
 
     Raises:
         TypeError: If `value` has none of the types above, or a dispatched

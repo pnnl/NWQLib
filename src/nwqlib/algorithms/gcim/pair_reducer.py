@@ -4,38 +4,38 @@ The reducer is registered when this module is imported, and
 ``core.planning.BUILTIN_REDUCER_MODULES`` lists this module so that the name
 resolves in a process that has not imported it.
 
-Exact pair acquisition publishes the offset-free Hamiltonian entry and overlap
-entry. An off-diagonal pair uses the two branches of one phase-faithful joint
-preparation. The reducer applies the selected H0 once to the right branch with
-the grouped Pauli kernel, then contracts with the left branch. It computes
+An exact pair computation returns the offset-free Hamiltonian entry and the
+overlap entry. An off-diagonal pair uses the two branches of one phase-faithful
+joint preparation. The reducer applies H0 once to the right branch with the
+grouped Pauli routine, then contracts with the left branch. It computes
 overlap directly from the two branches. The Hamiltonian entry's error combines
 preparation error, grouped-action rounding and complex-dot rounding. The overlap
 entry has only preparation and dot error. A diagonal pair uses one system
-preparation and returns its raw squared norm as the acquired overlap. Pencil
+preparation and returns its raw squared norm as the obtained overlap. Pencil
 assembly uses unit diagonal overlap under the normalized-basis convention,
-while the raw acquired scalars and selected padded coordinates remain
-associated with the acquisition.
+while the raw obtained scalars and the chosen padded coordinates remain
+recorded with the computation that produced them.
 
 Joint state (Zheng et al., Phys. Rev. Research 5, 023200 (2023), Eqs. (14)-(15)
 in the numbering of arXiv:2212.09205v1, with a phase-faithful controlled
 preparation): starting from ``|0>|0>``, H on
 the ancilla, X on the ancilla, controlled ``U_i``, X on the ancilla and
 controlled ``U_j`` give ``|chi_ij> = (|0>|phi_i> + |1>|phi_j>)/sqrt(2)``. The
-ancilla is native bit 0, so the two branches are the strided views
+ancilla is bit 0 of the saved state, so the two branches are the strided views
 ``joint[0::2]`` and ``joint[1::2]``, and ``2*vdot(x_left, P x_right) =
-<phi_i|P|phi_j>`` with the actual preparation phases: for
+<phi_i|P|phi_j>`` with the preparation phases included. For
 ``U_k = exp(i theta_k) V_k`` the target is
 ``exp(i(theta_j - theta_i)) <0|V_i^dagger P V_j|0>``. The saved state's one
 common global phase cancels in both returned values.
 
-Declaration: the reduction parameters name the layout (ancilla at native bit 0
-with strided branches, or the diagonal system state with the ancilla in
-``|0>``, or the system register alone for a shared full-chain query), the
-pair ``(left, right)`` in the requested public orientation, the
-system width, the content identity of the stored Pauli table and its term and
+Declaration. The reduction parameters name the layout (ancilla at bit 0 with
+strided branches, or the diagonal system state with the ancilla in ``|0>``,
+or the system register alone for the shared ADAPT query on the full product
+state), the pair ``(left, right)`` in the requested public orientation, the
+system width, the content hash of the stored Pauli table and its term and
 flip-group counts, and the reduction version. The output is two complex128
 scalars ``(H0_ij, S_ij)`` for every pair, diagonal included. Reanalysis
-consumes these scalars without native execution.
+uses these scalars without running the circuits again.
 """
 
 from __future__ import annotations
@@ -78,9 +78,9 @@ class PairTable:
 def bind_table(identity, table):
     """Return the registered table of ``identity``, registering ``table()`` when no live Plan holds one.
 
-    The identity is the admitted content identity of the operator, so an
-    equal identity names equal table contents, and later Plans share the
-    live holder instead of replacing it.
+    The identity is the content hash of the processed operator, so equal
+    hashes name equal table contents, and later Plans share the table already
+    held instead of replacing it.
     """
     holder = _TABLES.get(identity)
     if holder is None:
@@ -90,10 +90,10 @@ def bind_table(identity, table):
 
 
 def pair_parameters(*, left, right, qubits, identity, terms, flips, c1, ancilla=True):
-    """Return the reduction parameters of one pair acquisition.
+    """Return the reduction parameters of one pair computation.
 
     ``terms`` and ``flips`` are L and the flip-group upper bound
-    ``g = min(L, N)``, and ``c1`` is the outward coefficient mass
+    ``g = min(L, N)``, and ``c1`` is the outward coefficient 1-norm
     ``sum |c_t|`` as a hexadecimal float, the input C of the entry bounds.
     """
     return {
@@ -110,9 +110,9 @@ def pair_parameters(*, left, right, qubits, identity, terms, flips, c1, ancilla=
 
 
 def pair_work(parameters, width=None):
-    """Return the host work of one pair reduction.
+    """Return the classical work of one pair reduction.
 
-    In the kernel/pass convention, the attempted group pass plus ordered
+    Counting routine calls and array passes, the attempted group pass plus ordered
     retry and two dots cost ``W_pair = (L+F) + N(L+F+1) + N(1+L) + 2N``, and
     Pauli group construction before the first coordinate tile adds its 3L
     AND, popcount and rotation visits. For L = 0 the action and the H0 dot
@@ -127,17 +127,17 @@ def pair_work(parameters, width=None):
 
 
 def pair_bytes(parameters):
-    """Return the private reduction workspace ``B_pair`` beyond the saved state, admitted before acquisition.
+    """Return the private reduction workspace ``B_pair`` beyond the saved state, checked before the computation.
 
     With ``N = 2**parameters["qubits"]``, ``L = parameters["terms"]``,
     ``F = parameters["flips"]`` the flip-group bound, and
     ``t = min(N, TILE)``, where ``TILE = 1024``, the logical group metadata is
-    ``B_groups = 24L + 16F + 8``. For L > 0 the numerical reducer byte law is
+    ``B_groups = 24L + 16F + 8``. For L > 0 the numerical reducer byte formula is
     ``B_pair = 17N + max(9L, 96t) + B_groups + H0``.
-    The 17N covers one action output and a finite mask. Group
-    construction's 9L frontier shares a maximum with the 96t tile scratch.
+    The 17N covers one action output and a finite mask. The 9L peak of group
+    construction and the 96t tile scratch enter as one maximum.
     The strided branches are views, and ``np.vdot`` reduces them without a
-    contiguous copy. The saved input is admitted by the trajectory memory
+    contiguous copy. The saved input is counted by the trajectory memory
     check, and the operator table is resident in the Plan, so neither is
     counted again here. ``H0 = 65536`` is the fixed heap allowance.
     For L = 0 the action and Hamiltonian contraction are skipped, and
@@ -156,10 +156,10 @@ def pair_bytes(parameters):
 def _pair_execute(state, parameters, bindings):
     """Return ``(H0_ij, S_ij)`` as one complex128 array of shape (2,).
 
-    Inputs, coefficient domain, resource admission and fallback finiteness
-    checks belong to the kernel's integration contract. It returns the two raw
-    acquired scalars, with diagonal normalization applied only by the pencil
-    assembler. The action output is complex128, as the binary64 entry bound
+    The checks of the inputs, the coefficient domain, the resource limits and
+    the finiteness of the fallback are made by the framework code that calls
+    this routine. It returns the two raw computed scalars, with diagonal
+    normalization applied only by the pencil assembler. The action output is complex128, as the binary64 entry bound
     requires.
     """
     from nwqlib.operators._pauli import apply_terms
@@ -234,24 +234,26 @@ def entry_bounds(delta, c1, n, terms, *, diagonal=False):
 
     The action constants (e, U_A) come from
     ``nwqlib._quantum_readout.ordered_action_constants``. Its docstring
-    gives the common envelope for the ordered and grouped action paths.
+    gives the common error bound for the ordered and grouped action paths.
     The entry allowance includes gradual underflow and both complex
-    contractions. An unavailable state receipt leaves it unavailable.
+    contractions. An unavailable state-error bound in the preparation record
+    leaves it unavailable.
     Exact rational arithmetic evaluates the expanded products using
     dyadic square-root upper bounds. Final nonnegative bounds round
     upward to binary64, so a strictly positive rational below half a
-    subnormal publishes as the minimum positive subnormal.
+    subnormal is reported as the minimum positive subnormal.
 
     For a preparation synthesized from a supplied matrix, the comparison uses
     the exact-to-rounding construction convention of subroutines._dense_synthesis.
-    The native receipt and this host reduction do not supply an independent
-    synthesis-residual bound relative to an arbitrary input matrix. A finite
-    entry allowance is conditional on that convention and on the producing
-    receipt's operation and parameter premises.
+    The preparation record and this classical reduction do not supply an
+    independent synthesis-residual bound relative to an arbitrary input
+    matrix. A finite entry allowance is conditional on that convention and on
+    the operation and parameter assumptions of the preparation record that
+    produced the state.
 
-    The receipt's first-order model and its exclusions
-    still apply: outward evaluation cannot convert a first-order receipt
-    premise into an all-orders guarantee.
+    The first-order model of the preparation record and its exclusions still
+    apply, because outward evaluation cannot turn a first-order assumption of
+    the record into an all-orders guarantee.
     """
     if delta is None:
         return None
@@ -270,7 +272,7 @@ def entry_bounds(delta, c1, n, terms, *, diagonal=False):
 
 
 def pooled_bound(values, bounds, populations):
-    """Return the outward bound of a pooled complex estimate of m acquisitions, or None.
+    """Return the outward bound of a pooled complex estimate of m computations, or None.
 
     With exact rational weights ``w_a = n_a/sum n_a``,
 

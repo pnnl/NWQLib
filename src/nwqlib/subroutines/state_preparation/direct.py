@@ -1,8 +1,8 @@
-"""Direct state-preparation helpers.
+"""Exact preparation of a state vector by direct circuit construction.
 
 Exact basis, full-uniform, and supported prefix-uniform states use exact fast paths. General vectors use conditional magnitude rotations and a phase diagonal without synthesis cutoffs.
 
-The general path follows Mottonen et al., quant-ph/0407010v1, Sec. III. It applies a binary tree of uniformly controlled RY rotations with the angles of their Eq. (8) and then the phases. The paper interleaves phase-equalizing RZ multiplexors (Eqs. (4) and (5)) with the RY levels and cancels one CX per level, which reaches ``2**(n+1) - 2n - 2`` CX when one end is a basis state (half of the general ``2**(n+2) - 4n - 4`` stated on p. 4). Here all phases form one diagonal after the magnitude tree. Tree and diagonal cost ``2**n - 2`` CX each, ``2 * (2**n - 2)`` in total for a complex state, and a nonnegative vector, such as an LCU coefficient state, omits the diagonal entirely.
+The general path follows Mottonen et al., quant-ph/0407010v1, Sec. III. It applies a binary tree of uniformly controlled RY rotations with the angles of their Eq. (8) and then the phases. The paper interleaves phase-equalizing RZ multiplexors (Eqs. (4) and (5)) with the RY levels and cancels one CX from each multiplexor, two at each of the ``n - 1`` levels with at least one control, which reaches ``2**(n+1) - 2n - 2`` CX when one end is a basis state (half of the general ``2**(n+2) - 4n - 4`` stated on p. 4). Here all phases form one diagonal after the magnitude tree. Tree and diagonal cost ``2**n - 2`` CX each, ``2 * (2**n - 2)`` in total for a complex state, and a nonnegative vector, such as an LCU coefficient state, omits the diagonal entirely.
 """
 
 from __future__ import annotations
@@ -68,7 +68,7 @@ class DirectStatePreparation:
 def build_qiskit_state_preparation(vector: Any) -> DirectStatePreparation:
     """Build a circuit that prepares a state vector exactly from `|0...0>`.
 
-    Basis states, uniform states and uniform prefixes use exact fast paths. General vectors use a binary magnitude tree and a phase diagonal. Pairwise hypot reductions avoid squared-magnitude underflow. The construction uses `O(n * 2**n)` classical arithmetic and `O(2**n)` live numerical storage, without a target unitary or state simulation.
+    Basis states, uniform states and uniform prefixes use exact fast paths. General vectors use a binary magnitude tree and a phase diagonal. Pairwise hypot reductions avoid squared-magnitude underflow. The construction uses `O(n * 2**n)` classical arithmetic and `O(2**n)` numerical storage in memory, without a target unitary or state simulation.
 
     Args:
         vector (array_like): Complex state amplitudes of power-of-two

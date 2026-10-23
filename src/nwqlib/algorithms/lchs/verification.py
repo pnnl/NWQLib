@@ -1,4 +1,4 @@
-"""Explicit physical-vector reference comparisons for the actual LCHS Result."""
+"""Explicit physical-vector reference comparisons for an LCHS Result."""
 
 from nwqlib._limits import DEFAULT_MAX_BYTES
 
@@ -26,11 +26,12 @@ class LCHSVerification(Record):
     Build it with keyword arguments and pass it to
     `result.verify(checks=...)`, for example
     `result.verify(checks=LCHSVerification(reference="expm"))`. `reference`
-    is the only required argument. The call returns `(receipt, facts)`: a
-    `VerificationReceipt` that records the check, its raw values and the
-    numerical calls it made, and a tuple of `FramedFact` records that cite
-    the receipt. `facts[0].fact.value.value` is the discrepancy between the
-    Result's physical solution u and the reference `u_ref`. The check is named `name`, and
+    is the only required argument. The call returns `(receipt, facts)`,
+    where `receipt` is a `VerificationReceipt` that records the check, its
+    raw values and the numerical calls it made, and `facts` is a tuple of
+    `FramedFact` records that cite the receipt. `facts[0].fact.value.value`
+    is the discrepancy between the Result's physical solution u and the
+    reference `u_ref`. The check is named `name`, and
     `"ivp_closed_form"` adds `name + ".reference_consistency"`.
     `Certificate.with_verification` turns `facts` into PASS when the value
     is at most `threshold`, FAIL when it is larger, and INCONCLUSIVE when
@@ -83,7 +84,7 @@ class LCHSVerification(Record):
             limit on the known arrays of this call.
         max_dense_work: Default `1e8` (`100_000_000`). Upper limit on the
             counted dense work of this call. For `"selected_grid"` it also
-            covers reading the stored product-formula node table and the
+            covers reading the saved product-formula node table and the
             node actions.
         max_node_evaluations: Default `4096`. Upper limit on the number of
             k nodes times operator applications evaluated.
@@ -152,8 +153,8 @@ class LCHSVerification(Record):
     def verification_checks(self, result):
         """Declare the discrepancy check, and for ivp_closed_form also the consistency check.
 
-        Each CheckSpec carries these options' identity, so its facts answer
-        only this reference, metric and threshold.
+        Each CheckSpec carries the content hash of these options, so its facts
+        apply only to this reference, metric and threshold.
         """
         _validate_result(result.plan, result)
         return self._check_specs(result.plan)
@@ -240,10 +241,10 @@ def _consistency_frame(plan):
 
 
 def _admit_publication(checks, frames, arguments):
-    """Admit the bytes of the facts and receipt this check will publish.
+    """Check the bytes of the facts and record that this check returns against max_bytes.
 
-    The admission runs before any reference work, so an oversized publication
-    is refused without spending that work.
+    The check runs before any reference work, so an oversized output is
+    refused before that work is spent.
     """
     from nwqlib._run_journal import _json_bound
     # Reserve 16 times the inputs' JSON byte bound for two fact copies,
@@ -256,10 +257,10 @@ def _admit_publication(checks, frames, arguments):
 
 def _publish(plan, result, checks, manifest, metrics, arguments, *, invocation_id, specs,
              witnessed_names=None, ideal_bounds=()):
-    """Publish actual scalars, counts and source identity without numerical work.
+    """Return the computed scalars, call counts and reference source as a record and facts, without numerical work.
 
     ``specs`` are the CheckSpecs the caller declared for the Result it
-    validated at entry, so publication does not validate it again.
+    validated at entry, so this step does not validate it again.
     """
     source = checks.source
     raw = []
@@ -346,12 +347,12 @@ def _arguments(checks, elapsed, dimension, counts, *, reference_dimension):
 
 
 def verify(plan, result, *, checks):
-    """Run one explicitly selected bounded reference comparison in the original physical solution frame.
+    """Run one explicitly requested reference comparison, within its limits, in the original physical coordinates.
 
     The target is the Result's own phase-faithful physical vector, traced to
-    its producing acquisition, so the comparison can never use a vector from
-    another Plan or realization. Domain checks and the publication size
-    admission run before the reference is computed. The reference is never
+    the execution that produced it, so the comparison can never use a vector
+    from another Plan or built circuit. Domain checks and the output-size
+    check run before the reference is computed. The reference is never
     part of planning or ordinary analysis. A reference whose matrix
     exponential is unavailable (references._exponential) or an
     unrepresentable selected-grid reference is reported as unknown, and a

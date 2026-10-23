@@ -1,7 +1,7 @@
 """Qiskit circuit builders for compact Pauli-evolution blocks.
 
 A block with generator ``G = sum_j c_j P_j`` and ``time_step`` dt approximates
-``exp(-i*dt*G)`` by Qiskit's PauliEvolutionGate with the selected Lie-Trotter or
+``exp(-i*dt*G)`` by Qiskit's PauliEvolutionGate with the chosen Lie-Trotter or
 Suzuki synthesis, applied in term order. The result is exact when the terms
 commute. Two block kinds have exact special forms. A
 ``number_projector`` block applies ``exp(-i*angle*(prod_q n_q - I/2**s))`` on
@@ -101,7 +101,7 @@ def structured_number_projector_provider(support_size: int) -> dict[str, Any]:
     s = 4 to 6 (14 against 20 CX at s = 4), and MCPhase is cheaper from
     s = 7 (122 against 126 CX), because its count grows quadratically in s
     while the diagonal's grows as ``2**s``. QHD omits exact-zero projector
-    blocks before routing and resource pricing. The diagonal provider emits
+    blocks before routing and resource counting. The diagonal provider adds
     no gate when its angle is exactly zero.
     """
 
@@ -203,7 +203,7 @@ def append_number_projector_phase(
     The explicit global phase ``angle / 2**s`` removes the identity component
     ``I/2**s`` of the projector's Pauli expansion. The QHD circuit compiler
     records the omitted physical identity contribution separately. When the
-    phase-diagonal synthesis is used, an exact-zero angle emits no gate, and
+    phase-diagonal synthesis is used, an exact-zero angle adds no gate, and
     QHD omits zero-angle blocks before calling this function or counting
     their cost.
 
@@ -241,7 +241,7 @@ def _matched_xx_yy(block: PauliEvolutionBlock) -> tuple[int, int, float] | None:
 
     Only this exact form may use XXPlusYYGate. Coefficients must be equal
     after an imaginary residue of at most 1e-12 is discarded, the same
-    admission as the Trotter bound path. Any other block returns None and
+    acceptance rule as the Trotter bound path. Any other block returns None and
     uses the general PauliEvolutionGate.
     """
     if block.kind != "kinetic" or len(block.terms) != 2:

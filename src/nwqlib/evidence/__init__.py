@@ -1,14 +1,14 @@
-"""SDK-free scientific facts and evidence provenance.
+"""Error evidence of a Result: what is known about its quantities and on what basis.
 
-This package records what is known about a Result's quantity and on what
-basis. It never acquires data, reruns a Method or computes a reference. A
-Fact keeps its availability separate from its evidence kind, and a
-FramedFact binds it to one scientific frame and parameter point. A Method's
-ErrorModel lists the error sources its output must cover. ClaimAssessment
-applies a post-run criterion by the triangle inequality over those sources
-and a union bound over their failure probabilities. CheckSpec selects one
-explicit scalar check, and Certificate attaches completed checks to an
-assessment.
+This package imports no quantum SDK. It never runs circuits, reruns a Method
+or computes a reference. A Fact keeps its availability separate from its
+evidence kind, and a FramedFact binds it to one error frame (the quantity,
+metric, unit, scope and conditions the value refers to) and one parameter
+point. A Method's ErrorModel lists the error sources its output must cover.
+ClaimAssessment tests an accuracy criterion after the run by the triangle
+inequality over those sources and a union bound over their failure
+probabilities. CheckSpec defines one explicit scalar check, and Certificate
+attaches completed checks to an assessment.
 
 Three rules keep a claim from becoming stronger than its evidence. A
 component bound, such as the sampling radius, never covers total error,
@@ -16,8 +16,8 @@ which needs every required source. An accuracy claim passes only on
 witnessed proved or certified evidence without open assumptions, so a
 numerical estimate or an assertion stays listed as unverified. A
 verification fact answers only the options record and CheckSpec that
-produced it. docs/error_evidence.md and docs/verification.md define these
-contracts.
+produced it. docs/error_evidence.md and docs/verification.md state these
+rules.
 """
 
 from typing import TYPE_CHECKING

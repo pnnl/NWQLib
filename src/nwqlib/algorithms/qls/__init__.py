@@ -1,4 +1,4 @@
-"""Configured original-coordinate QLS and explicit independent verification."""
+"""QLS method on the original A and b, and its explicit verification against an independent reference."""
 
 from importlib import import_module
 

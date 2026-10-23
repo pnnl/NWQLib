@@ -1,4 +1,4 @@
-"""One explicit QDK counts-model projection of a stored Clifford+T compilation.
+"""Projection, on request, of a saved Clifford+T compilation to physical resources with one QDK counts model.
 
 The physical model is the one implemented by the pinned QDK 1.32.3 modules.
 ``qdk.qre.models.qubits.GateBased`` supplies gate and measurement errors and
@@ -35,7 +35,7 @@ QDK's own modeling choice:
   surface-code cycle, and the fit uses p_th = 0.57% for that paper's circuits
   and error model. Its footnote 14 says logical Z errors occur at about the
   same rate. QDK keeps the 0.03 prefactor, uses p_th = 0.01 instead and
-  charges the result per lattice-surgery step of d cycles.
+  applies the result per lattice-surgery step of d cycles.
 - Threshold 0.01. arXiv:1009.3686v1 reports thresholds of 1.1% to 1.4%
   depending on the error model (abstract, and 1.1% for its standard model on
   p. 3). QDK's 0.01 lies below that range. The paper gives no threshold of
@@ -67,8 +67,8 @@ from .nwqec import LogicalCompilation, Positive
 class PhysicalProjectionEntry(Record):
     """One feasible modeled configuration returned by the fixed QDK query.
 
-    configuration_json records its actual code/factory instruction provenance,
-    factory copies/runs and dependency properties. Runtime is seconds, not the
+    configuration_json records the code and factory instructions it came from,
+    the factory copies and runs, and the dependency properties. Runtime is seconds, not the
     nanoseconds used by the underlying model. Error excludes synthesis fidelity.
     """
 
@@ -79,7 +79,7 @@ class PhysicalProjectionEntry(Record):
 
 
 class PhysicalProjection(Record):
-    """Stored conditional projection, never actual hardware execution evidence."""
+    """A saved conditional projection, never evidence of execution on hardware."""
 
     compilation_id: ContentID
     qdk_version: Literal["1.32.3"]
@@ -98,7 +98,7 @@ class PhysicalProjection(Record):
     limitations: tuple[Text, ...]
 
     def save(self, path, *, max_bytes=DEFAULT_MAX_BYTES):
-        """Store the existing projection using bounded archive JSON."""
+        """Save this projection with the library's byte-limited JSON writer."""
         from nwqlib._choice_archive import ArchiveFiles
 
         path = Path(path)
@@ -106,7 +106,7 @@ class PhysicalProjection(Record):
 
     @classmethod
     def load(cls, path, *, max_bytes=DEFAULT_MAX_BYTES):
-        """Read current-format projection data without importing QDK."""
+        """Read saved projection data in the current format without importing QDK."""
         from nwqlib._choice_archive import ArchiveFiles
 
         path = Path(path)
@@ -141,11 +141,11 @@ def estimate_physical(
 
     An unmeasured body requires an explicit terminal measurement assumption.
     The query uses distances 3, 5 and 7 and the finite published Litinski19
-    table. It never broadens an empty result set or changes the selected
+    table. It never broadens an empty result set or changes the given
     compilation.
 
     The logical counts are width, T count (T plus TDG) and measurement count.
-    Rotation, CCZ and CCiX counts are zero because the admitted gate set
+    Rotation, CCZ and CCiX counts are zero because the accepted gate set
     contains none of them, not because missing quantities are treated as zero.
 
     Args:

@@ -1,6 +1,7 @@
-"""Small immutable interchange records.
+"""Small immutable records shared by the whole library.
 
-They hold no payload access and run no scientific computation.
+They are the Record base, units, scopes, sources, scalars and limits. They
+give no access to numerical data and run no scientific computation.
 """
 
 from __future__ import annotations
@@ -41,7 +42,7 @@ def _finite_zero(value: float) -> float:
     """Reject nonfinite reals and map -0.0 to 0.0.
 
     Both zeros compare equal but serialize differently, so without this one
-    physical value could carry two content identities.
+    physical value could carry two content hashes.
     """
     if not math.isfinite(value):
         raise ValueError("numbers must be finite")
@@ -69,21 +70,21 @@ class FrozenArray:
 
     Public construction from a NumPy array copies it once, in C order and
     little-endian byte order. Construction from a FrozenArray shares its
-    read-only storage. Internal producers can transfer a private canonical
-    buffer through ``_from_owned_canonical_array`` under that method's
-    ownership and validation preconditions. Float64 elements must be finite
+    read-only storage. Library code can hand over a private canonical
+    buffer through ``_from_owned_canonical_array``, under that method's
+    conditions on ownership and validation. Float64 elements must be finite
     and negative zero is canonicalized to positive zero, so equal values
-    have equal bytes and one content identity. Equality and hashing compare
+    have equal bytes and one content hash. Equality and hashing compare
     dtype, shape and elements.
 
-    The JSON form, which the identity encoding of a Record hashes, is an
+    The JSON form, which the content hash of a Record covers, is an
     object with three keys: ``dtype`` (``"<f8"`` or ``"<i8"``), ``shape`` (a
     list of nonnegative integers) and ``data`` (standard base64 of the
     little-endian C-order element bytes). Validation accepts that object, a
     FrozenArray or a NumPy array of one of the two dtypes. Other dtypes are
-    rejected, not cast. The JSON text grows with the array, so a
-    record that stores a problem-sized array names the admission that bounds
-    it, as for other growing record JSON.
+    rejected, not cast. The JSON text grows with the array, so a record
+    that holds a problem-sized array names the size check that bounds it,
+    as other records whose JSON grows with the problem do.
 
     Attributes:
         array: The read-only NumPy array.
@@ -125,13 +126,14 @@ class FrozenArray:
 
     @classmethod
     def _from_owned_canonical_array(cls, values):
-        """Adopt a private array whose producer has validated its values.
+        """Take over a private array whose creator has validated its values.
 
-        The producer must own the only writable reference, have filled every
+        The creator must hold the only writable reference, have filled every
         element, checked float64 finiteness, and changed negative zero to
-        positive zero. Ownership passes to the result. The caller must
-        discard its array reference and must not have published any writable
-        view. This path allocates no element buffer or full-array mask.
+        positive zero. The result then holds the array alone. The caller must
+        discard its array reference and must not have handed out any
+        writable view. This path allocates no element buffer or full-array
+        mask.
         """
         import numpy as np
 
@@ -328,8 +330,8 @@ class Record(BaseModel):
     def __get_pydantic_core_schema__(cls, source, handler):
         """Wrap each Record type's validator with ``_admit_record``.
 
-        The wrapper reuses exact-type instances and clears the identity cache
-        after validating new field data. Recursive references reach the same
+        The wrapper reuses exact-type instances and clears the cached content
+        hash after validating new field data. Recursive references reach the same
         wrapper, which is installed once for each concrete type.
         """
         schema = handler(source)
@@ -686,7 +688,7 @@ class Limit(Record):
 
     @model_validator(mode="after")
     def _metric_unit(self):
-        """Require the one (unit dimension, unit symbol, kind) triple each metric admits, as listed in the class docstring.
+        """Require the one (unit dimension, unit symbol, kind) triple that each metric accepts, as listed in the class docstring.
 
         A currency limit accepts any currency symbol, and byte and count
         values must be exact integers.

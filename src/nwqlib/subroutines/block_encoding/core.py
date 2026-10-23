@@ -1,6 +1,6 @@
-"""Block-encoding record, selection slot, and dense constructions.
+"""Block-encoding records, the choice of construction, and the dense constructions.
 
-Contract (Gilyen, Su, Low, and Wiebe, arXiv:1806.01838v1, Definition 43):
+Definition (Gilyen, Su, Low, and Wiebe, arXiv:1806.01838v1, Definition 43):
 a unitary ``U`` on ``a + n`` qubits is an
 ``(alpha, a, eps)`` block encoding of an ``n``-qubit operator ``A`` when
 ``|| A - alpha * (<0^a| (x) I) U (|0^a> (x) I) || <= eps``. The all-zero
@@ -23,9 +23,10 @@ Implementations, each with ``A / alpha`` in the all-zero ancilla block:
 * ``dense_dilation`` uses one ancilla and the smallest zero-error
   ``alpha = ||A||_2``. The completed unitary on ``n + 1`` qubits is
   synthesized as one dense gate, whose cost grows as ``4**(n + 1)``, so it
-  serves small validation instances. Routing prices it with the CX count of
-  Shende, Bullock, and Markov, quant-ph/0406176v5, Table 1 (p. 14) and
-  Eq. (19) (p. 16) (``_dense_dilation_predicted_cx``).
+  serves small validation instances. The automatic choice estimates its
+  cost with the CX count of Shende, Bullock, and Markov,
+  quant-ph/0406176v5, Table 1 (p. 14) and Eq. (19) (p. 16)
+  (``_dense_dilation_predicted_cx``).
 
 Register convention:
     Ancilla registers are placed before the system register, following the
@@ -202,7 +203,7 @@ class BlockEncodingPlan:
             comparison it holds the SELECT gate counts (term count, padded
             table size, per-qubit effective control counts, the per-qubit
             projected address supports and CX counts), the predicted
-            per-query CX of both candidates, the Pauli alpha and, when it
+            per-query CX of both constructions, the Pauli alpha and, when it
             was computed, the dense-dilation alpha, and the reason for the
             choice. For banded it holds the band count, how the bands were
             detected and the gate counts. It is empty when dense dilation
@@ -309,7 +310,7 @@ def _base_metadata(
     preprocessing_note: str,
     register_order: tuple[str, str],
 ) -> dict[str, Any]:
-    """Return shared block-encoding construction provenance."""
+    """Return the part of the construction record that all block encodings share."""
 
     return {
         "requested_block_encoding_implementation": requested,
@@ -334,7 +335,7 @@ _DENSE_ALPHA_RELATIVE_SLACK = 1.0e-12
 
 
 def _require_alpha_covers(alpha: float, magnitude: float, name: str) -> None:
-    """Refuse a dense-dilation ``alpha`` that lies below ``magnitude`` by more than rounding.
+    """Reject a dense-dilation ``alpha`` that lies below ``magnitude`` by more than rounding.
 
     ``magnitude`` is a computed value that is at most ``||A||_2`` in exact
     arithmetic, either the largest entry magnitude or the largest singular
@@ -344,10 +345,10 @@ def _require_alpha_covers(alpha: float, magnitude: float, name: str) -> None:
     inequality each computed singular value lies within ``||E||_2`` of the
     exact one. A norm computed that way, and an alpha taken from it, can
     therefore fall a few units in the last place below an entry magnitude
-    or below the exact norm. The test admits an alpha within
+    or below the exact norm. The test accepts an alpha within
     ``_DENSE_ALPHA_RELATIVE_SLACK`` times alpha of ``magnitude``, about 9000
     unit roundoffs, which covers that error at the dimensions a dense
-    dilation serves, and refuses a larger deficit. The message keeps both
+    dilation serves, and rejects a larger deficit. The message keeps both
     raw values.
     """
     if alpha + _DENSE_ALPHA_RELATIVE_SLACK * alpha < magnitude:
@@ -375,22 +376,22 @@ def _pauli_dependency_supports(decomposition: Any) -> list[list[int]]:
 
 
 def _pauli_plan_detail(decomposition: Any) -> dict[str, Any]:
-    """Return the dependency-projected Pauli SELECT structural census.
+    """Return the gate counts of the dependency-projected Pauli SELECT.
 
-    The census predicts what ``_pauli_lcu_encoding`` builds without building
-    it. Each system qubit gets one UCG over the projected address support of
+    These counts predict what ``_pauli_lcu_encoding`` builds without
+    building it. Each system qubit gets one UCG over the projected address support of
     its local Pauli factors (``projected_unitary_resource_law``). Nonzero
     coefficient phases add one diagonal on the a-qubit padded address
     register, ``2**a - 2`` CX by the Theorem 7 recursion of Shende et al.,
-    quant-ph/0406176v5, the diagonal law of ``multiplexor_resource_law``
+    quant-ph/0406176v5, the diagonal count of ``multiplexor_resource_law``,
     written inline here. The PREP pair is two
     positive-amplitude magnitude trees of ``2**a - 2`` CX each
     (``direct_preparation_cx_bound``).
 
     ``_pauli_dependency_supports`` computes the projected address support of
     each system qubit, which is the support that
-    ``project_unitary_table_dependencies`` defines, and the plan stores it as
-    ``dependency_supports``. The builder reads it from the plan and appends
+    ``project_unitary_table_dependencies`` defines, and the plan records it
+    as ``dependency_supports``. The builder reads it from the plan and appends
     the projected tables it determines (``project_local_pauli_table``).
     Coefficient phases stay in their separate diagonal.
     """
@@ -542,16 +543,16 @@ def _dense_dilation_encoding(
 
     The dilation is ``U = [[A/alpha, K], [K, -A/alpha]]`` with
     ``K = W sqrt(I - S^2) V^dagger`` from the SVD ``A = W (alpha S) V^dagger``.
-    ``U`` is exactly unitary because ``K`` shares the singular frames of
-    ``A/alpha``: in those frames each 2x2 block row is
-    ``[s_i, sqrt(1 - s_i^2)]`` and its partner, which are orthonormal. The
+    ``K`` shares the singular vectors of ``A/alpha``, and in that basis each
+    2x2 block row is ``[s_i, sqrt(1 - s_i^2)]`` and its partner, which are
+    orthonormal, so ``U`` is exactly unitary. The
     ``error_bound`` bounds the normalization residual ``A - alpha * (A / alpha)``
     in the supplied operator's units. The separate unitarity check tests the
     completed dilation and does not certify circuit-synthesis roundoff.
 
     The caller that supplies the factors is responsible for their being an
     SVD of this matrix. QLS, for example, extends the SVD of its unpadded
-    matrix with identity frames and singular value ``alpha`` on the padding
+    matrix with identity singular vectors and singular value ``alpha`` on the padding
     coordinates, so the singular values are not sorted. This constructor
     never recomputes supplied factors.
 
@@ -652,15 +653,16 @@ def _stored_dense_is_hermitian(array):
 
 
 def _dense_dilation_predicted_cx(system_qubits: int) -> float:
-    """Return the paper's QSD CX count at block-encoding routing width, the estimate that routing compares.
+    """Return the paper's QSD CX count of the dense dilation, the estimate that the automatic choice compares.
 
     The count is ``(23/48) 4**m - (3/2) 2**m + 4/3`` at width ``m = n + 1``,
     which includes the dilation ancilla. It is Eq. (19) (p. 16) and the row
     "QSD (l = 2, optimized)" of Table 1 (p. 14) in Shende et al.,
     quant-ph/0406176v5. That count comes from the quantum Shannon
-    decomposition (Theorem 13) recursed down to two-qubit blocks with the
-    optimizations of their Appendix A. Routing uses this paper count for the
-    dense candidate. A lowered dilation is synthesized by
+    decomposition (QSD, Theorem 13) recursed down to two-qubit blocks with the
+    optimizations of their Appendix A. The automatic choice uses this paper
+    count for the dense construction. A dilation compiled to gates is
+    synthesized by
     ``_dense_synthesis.dense_unitary_circuit``, which usually takes fewer CX
     and can take more (``backends.resources.dense_unitary_cx_qsd_upper_bound``).
     """
@@ -727,7 +729,7 @@ def _normalization_error_bound(
 
 
 def _pauli_predicted_cx(detail: Mapping[str, Any]) -> float:
-    """Return the per-query CX count of the Pauli encoding from its ``_pauli_plan_detail`` census.
+    """Return the per-query CX count of the Pauli encoding from its ``_pauli_plan_detail`` gate counts.
 
     It sums the UCG cores and their completing diagonals over the system
     qubits, the coefficient-phase diagonal and the PREP pair.
@@ -748,7 +750,7 @@ def _shift_pauli_trace_sum(
     flip_mask: int,
     phase_mask: int,
 ) -> int:
-    """Sum Pauli phases over a cyclic shift using a two-carry-state bit DP.
+    """Sum Pauli phases over a cyclic shift by a dynamic program over the bits with two carry states.
 
     Returns the sum over ``x`` with ``x XOR f == (x + b) mod 2**n`` of
     ``(-1)**popcount(z & ((x + b) mod 2**n))``, for flip mask ``f``, phase
@@ -788,8 +790,8 @@ def _detect_banded_pauli_structure(
     and ``sum_P |c_P(C)|**2 = sum_f |beta_f|**2``. The squared mismatch on
     supplied labels plus the candidate mass on absent labels is therefore
     ``||A - C||_F**2 / 2**n``, and the returned error evaluates
-    ``||A - C||_F``, which bounds the operator-norm difference. Automatic
-    routing accepts only a zero error.
+    ``||A - C||_F``, which bounds the operator-norm difference. The
+    automatic choice accepts only a zero error.
     """
 
     from nwqlib.subroutines.block_encoding.banded import BandSpecification
@@ -920,12 +922,12 @@ def _detect_banded_pauli_structure(
 
 
 def _admit_dense_input(operator, *, max_bytes, max_work, construction=False, selected_svd=False):
-    """Check the dense byte and work laws before any conversion, SVD or completion.
+    """Check the dense byte and work formulas against the limits before any conversion, SVD or completion.
 
     Only the shape, or the row lengths of a nested sequence, is read first,
     so an input above the caller's limits fails before any array is formed.
     The ``DEFAULT_MAX_BLOCK_WORK`` row in docs/ENGINEERING_CONSTANTS.md
-    registers these laws.
+    registers these formulas.
 
     With ``construction=True`` the 384 bytes per entry of the d-square
     matrix count the main arrays of ``_dense_dilation_encoding`` as if they
@@ -940,7 +942,7 @@ def _admit_dense_input(operator, *, max_bytes, max_work, construction=False, sel
     magnitudes of the difference, are smaller than the arrays freed before
     them. The QLS padded completion
     (``algorithms/qls/quantum.py``) uses the margin for the unpadded
-    singular frames it keeps beside the padded ones. The ``32 d`` bytes are
+    singular vectors it keeps beside the padded ones. The ``32 d`` bytes are
     four float64 vectors: the singular values, ``s/alpha`` and two
     temporaries of ``sqrt(1 - s**2)``.
 
@@ -983,7 +985,7 @@ def _admit_dense_input(operator, *, max_bytes, max_work, construction=False, sel
 
 
 def _circulant_classification_work(q, terms, bands):
-    """Logical-visit charge C(q, m, b) of one circulant classification of m kept terms.
+    """Return the work C(q, m, b), in logical visits, of one circulant classification of m kept terms.
 
     The classifier path is ``_detect_circulant`` -> ``_detect_banded_pauli_structure``
     -> ``_shift_pauli_trace_sum``. It parses each label into flip and phase
@@ -1010,7 +1012,7 @@ def _circulant_classification_work(q, terms, bands):
     visit. A carry-transition visit and a rational arithmetic visit are
     counted separately. Fractions can have thousands of bits, so one
     rational visit is not a constant CPU-time operation. These units are
-    admission proxies, not timings or equal-cost CPU operations.
+    proxies for the limit check, not timings or equal-cost CPU operations.
     """
     if terms == 0:
         return 0
@@ -1021,35 +1023,37 @@ def _circulant_classification_work(q, terms, bands):
 
 
 def _admit_pauli_plan(decomposition, *, held_bytes, max_bytes, max_work, classify):
-    r"""Admit the Pauli SELECT tables and optional circulant check before work.
+    r"""Check the Pauli SELECT tables and the optional circulant check against the limits before the work.
 
     With P padded addresses, n system qubits and m terms, the SELECT tables
-    are charged ``64 P (n + 16)`` bytes, 64 bytes (one 2x2 complex128
-    factor) per address and system qubit plus an untuned 16 such slots per
-    address, and ``32*P*max(1,n)**2`` work. ``_build_block_encoding_from_plan``
-    maps both terms to the tables the builder holds and the operations it
-    performs, and the banded plan uses the same law.
+    are counted at ``64 P (n + 16)`` bytes, 64 bytes (one 2x2 complex128
+    factor) per address and system qubit plus an untuned 16 such matrices
+    per address, and ``32*P*max(1,n)**2`` work.
+    ``_build_block_encoding_from_plan`` maps both terms to the tables the
+    builder holds and the operations it performs, and the banded plan uses
+    the same formula.
 
-    ``held_bytes`` is B_held, the caller's already admitted payloads that
-    stay live in this phase, each counted once under its owner's law: each
-    distinct live dense matrix at 16D^2, the decomposition's labels and
-    coefficient records, and completed child plans or tables that remain
-    live. Passing the original max_bytes independently to two children is
-    not total-memory admission.
+    ``held_bytes`` is B_held, the bytes of the data that the caller has
+    already checked and that stay in memory during this phase, each counted
+    once by the formula of the code that holds it: each distinct dense
+    matrix in memory at 16D^2, the decomposition's labels and coefficient
+    records, and completed child plans or tables still in memory. Passing
+    the original max_bytes independently to two child plans does not limit
+    their total memory.
 
     SELECT construction adds ``64P(n+16)``, and an active circulant
     classifier adds the allowance ``C_B`` given below, including its fixed
     bookkeeping allowance. With ``classify=False``, or with an empty skipped
-    classifier, the classifier allowance is zero. These charges follow the
-    stated logical payload conventions and do not bound process RSS.
+    classifier, the classifier allowance is zero. These counts follow the
+    stated conventions for logical data sizes and do not bound process RSS.
 
-    With ``classify``, the circulant classification is admitted before
-    candidate bands are known with b = min(m, 2**n). Its work is
-    ``_circulant_classification_work(n, m, b)``. Admit the active
-    classifier's linear parsed, band and exact-integer workspace together
-    with the SELECT tables and all other live payloads. Sequential
-    classifiers share workspace capacity, while completed child outputs
-    remain charged. For a supplied decomposition,
+    With ``classify``, the circulant classification is checked before the
+    candidate bands are known, with b = min(m, 2**n). Its work is
+    ``_circulant_classification_work(n, m, b)``. The linear workspace of the
+    active classifier (parsed terms, bands and exact integers) is checked
+    together with the SELECT tables and all other data in memory.
+    Classifiers run one after another share workspace capacity, while
+    completed child outputs remain counted. For a supplied decomposition,
 
         \[B_{\rm held}=m(n+16),\qquad B_{\rm inner}=m(n+16)+64P(n+16)+\mathbf1_{\{\mathrm{classify}\land m>0\}}C_B.\]
 
@@ -1074,17 +1078,17 @@ def _admit_pauli_plan(decomposition, *, held_bytes, max_bytes, max_work, classif
     components below (b+1)*2**1024, so their squared masses over m terms and
     b bands fit a numerator width of 4196 + 2n + 2 ceil(log2(b+1)) +
     ceil(log2(m+b+1)) plus a small fixed allowance, and J supplies twelve
-    extra bits. The factor 128 bounds the simultaneous integer population
+    extra bits. The factor 128 bounds the number of integers held at once
     per V, L(2J) covers each integer's temporary product width and object
     representation, and 512V covers parsed tuples and list slots, Fraction
     wrappers, dictionary entries and floating complex values. The m(n+16)
-    label and complex-coefficient population is charged only when it is
-    materialized independently. The decomposition these callers classify is
-    already in B_held, so it is not charged twice here. ``classify=False``
+    bytes of labels and complex coefficients are counted only when they are
+    formed separately. The decomposition these callers classify is already
+    in B_held, so it is not counted twice here. ``classify=False``
     omits the classifier storage and work.
 
     Returns:
-        The admitted work, so the caller can add later stages to it.
+        The checked work, so the caller can add later stages to it.
         It is ``32*P*max(1,n)**2`` plus
         ``_circulant_classification_work(n,m,b)`` for an active classifier,
         with P, n, m and b as defined above.
@@ -1121,13 +1125,13 @@ def plan_block_encoding(
     detected with zero error, goes to `banded` first. Otherwise `"auto"`
     compares the per-query CX counts of multiplexed Pauli SELECT and dense
     dilation and selects the smaller. A tie selects the smaller alpha, with
-    dense dilation winning when both alpha values are equal. Automatic
-    routing never introduces an approximate structure. An explicit
+    dense dilation winning when both alpha values are equal. The automatic
+    choice never introduces an approximate structure. An explicit
     `"banded"` request keeps the detector tolerance and records the
     resulting bound as `error_bound`.
     [`build_block_encoding_from_plan`][nwqlib.subroutines.block_encoding.build_block_encoding_from_plan]
-    builds the returned plan's construction without comparing candidates
-    again. Pass it the same `max_bytes` and `max_work`.
+    builds the returned plan's construction without comparing the
+    constructions again. Pass it the same `max_bytes` and `max_work`.
 
     A supplied `normalization` becomes `alpha` only when the plan uses
     dense dilation. Without one, dense dilation uses the optimal spectral
@@ -1136,9 +1140,11 @@ def plan_block_encoding(
     than selecting another encoding without the required bound. For a
     `PauliDecomposition`, the target operator is its kept terms. The
     encoding bound does not include loss from an earlier decomposition, so
-    its caller must carry any original-to-kept approximation separately.
-    The plan computes the normalization without keeping the singular
-    vectors, so building it later computes its own SVD for the synthesis.
+    the caller must account separately for the error between the original
+    operator and its kept terms.
+    A dense-dilation plan computes the normalization without keeping the
+    singular vectors, so building it later computes its own SVD for the
+    completion.
 
     Args:
         operator (array_like | PauliDecomposition | BandSpecification): The
@@ -1222,14 +1228,14 @@ def _detect_circulant(operator, implementation):
 
 def _banded_plan(specification, *, implementation, detection, detection_error,
                  max_bytes, max_work):
-    """Admit and describe the shift-LCU encoding of a circulant ``specification``.
+    """Check against the limits and describe the shift-LCU encoding of a circulant ``specification``.
 
     ``alpha`` is the band-coefficient 1-norm and the address register has
     ``ceil(log2 B)`` qubits for B bands. ``periodic_gate_counts`` records the
-    census of ``build_banded_block_encoding``: one QFT pair, one UCRZ table
+    gate counts of ``build_banded_block_encoding``: one QFT pair, one UCRZ table
     per system qubit (``2**a`` CX each for a >= 1 address qubits), an
     address diagonal of ``2**a - 2`` CX when any of its phases is nonzero,
-    and a PREP pair of positive-amplitude trees. The table admission uses the
+    and a PREP pair of positive-amplitude trees. The table check uses the
     same SELECT-table byte and work allowances as ``_admit_pauli_plan``.
     """
     from nwqlib.subroutines.block_encoding.banded import _validate_band_specification
@@ -1296,9 +1302,9 @@ def _dense_norm_work(dimension, full_svd):
     """Return the work of the spectral norm that ``_plan_block_encoding`` computes.
 
     A ``dense_norm`` from the caller computes a full SVD of the d-square
-    matrix, whose frames the dense completion reuses, charged ``8 d**3``
-    like every full SVD of the dense laws. The default
-    ``np.linalg.norm(A, 2)`` computes the singular values alone, charged
+    matrix, whose singular vectors the dense completion reuses, counted at
+    ``8 d**3`` like every full SVD in the dense work formulas. The default
+    ``np.linalg.norm(A, 2)`` computes the singular values alone, counted at
     ``_linalg_laws.singular_values_work``.
     """
     return 8 * dimension**3 if full_svd else singular_values_work(dimension)
@@ -1309,7 +1315,7 @@ def _explicit_dense_dilation_plan(array, *, implementation, normalization, dense
     """Plan the dense dilation that the caller requested explicitly for a dense matrix.
 
     Without a supplied ``normalization``, ``alpha = ||A||_2`` from
-    ``dense_norm``, charged ``_dense_norm_work(d, full_svd)``. The entrywise
+    ``dense_norm``, counted as ``_dense_norm_work(d, full_svd)``. The entrywise
     test ``max|A_ij| <= alpha``, with the rounding slack of
     ``_require_alpha_covers``, rejects some alphas below the spectral norm
     before any construction, since every entry magnitude is at most
@@ -1346,7 +1352,7 @@ def _plan_block_encoding(operator, *, implementation, normalization=None,
     ``_banded_plan``). An explicit dense dilation of a dense matrix is
     planned by ``_explicit_dense_dilation_plan``. Otherwise a dense matrix is
     first Pauli-decomposed with exact-zero removal only, and ``auto``
-    compares the Pauli and dense-dilation CX laws. ``build_block_encoding``
+    compares the Pauli and dense-dilation CX formulas. ``build_block_encoding``
     passes ``dense_norm`` so that the SVD computing ``||A||_2`` is kept for
     the completion. Without it the norm comes from ``np.linalg.norm(A, 2)``.
     """
@@ -1542,8 +1548,12 @@ def build_block_encoding(
 
     The function chooses the construction as
     [`plan_block_encoding`][nwqlib.subroutines.block_encoding.plan_block_encoding]
-    does and builds it. It computes one dense SVD and uses it for the
-    normalization, an equal-cost comparison and the completion. The
+    does and builds it. It computes one dense SVD only when it needs the
+    dense normalization, that is, when the dense dilation is requested or,
+    under `"auto"`, costs no more than the Pauli construction, and it uses
+    that SVD for the normalization, the equal-cost comparison and the
+    completion. A banded plan and a strictly cheaper Pauli plan need no
+    dense SVD. The
     [constructions table](block_encoding.md#constructions)
     lists what each construction encodes, its `alpha` and its ancillas.
 
@@ -1644,26 +1654,26 @@ def build_block_encoding_from_plan(plan: BlockEncodingPlan, *, max_bytes=DEFAULT
 
 
 def _build_block_encoding_from_plan(plan, *, max_bytes, max_work, selected_svd=None):
-    """Check the plan's byte and work laws, then build ``plan.implementation`` as planned.
+    """Check the plan's byte and work formulas, then build ``plan.implementation`` as planned.
 
-    Dense dilation is checked with the completion law of
+    Dense dilation is checked with the completion formula of
     ``_admit_dense_input``. A plan that also keeps a Pauli decomposition of
     L terms keeps it alive during the completion, so the completion bytes
     are checked together with the ``64 L (n + 16)`` bytes that
-    ``_plan_block_encoding`` charges for the kept term table.
+    ``_plan_block_encoding`` counts for the kept term table.
 
-    Multiplexed Pauli and banded plans are checked with the table law of
+    Multiplexed Pauli and banded plans are checked with the table formula of
     ``_admit_pauli_plan`` for ``P = 2**num_ancillas`` padded addresses and n
     system qubits. For each system qubit the Pauli builder reads the
-    address support that ``_pauli_plan_detail`` stored in the plan, builds
+    address support that ``_pauli_plan_detail`` recorded in the plan, builds
     the projected table of at most P local 2x2
     factors as complex128 matrices (64 bytes each) from the labels, and
     pads it for the ``UCGate``, whose at most P matrices stay in the
     circuit. The n kept
     tables give the ``64 P n`` bytes of matrix data, and the transient
-    copies of one qubit's table fit in the untuned 16 extra slots per
-    address. This table charge excludes the NumPy object headers of the
-    2x2 arrays. The circulant-classification charge in ``_admit_pauli_plan``
+    copies of one qubit's table fit in the untuned 16 extra matrices per
+    address. This table count excludes the NumPy object headers of the
+    2x2 arrays. The circulant-classification count in ``_admit_pauli_plan``
     includes its integer objects, parsed tuples, Fraction wrappers,
     dictionary entries and fixed bookkeeping allowance. ``_admit_lcu``
     checks the PREP arrays separately. The banded builder's per-qubit tables
@@ -1672,7 +1682,7 @@ def _build_block_encoding_from_plan(plan, *, max_bytes, max_work, selected_svd=N
     equality test per address bit (on the packed letter codes, at
     planning), the padding, the projection, the label lookups
     and the ``UCGate`` unitarity check of each 2x2 matrix. The
-    untuned ``32 P n`` per qubit of the ``32 P n**2`` law grows at least as
+    untuned ``32 P n`` per qubit of the ``32 P n**2`` formula grows at least as
     fast when ``a <= 2n``, which holds for distinct Pauli words. A
     decomposition with repeated words can exceed it.
 

@@ -1,4 +1,4 @@
-"""Select LCHS numerical data once before any circuit or host evolution."""
+"""Choose LCHS numerical data once, before any circuit or classical evolution."""
 
 from dataclasses import dataclass, replace
 from types import MappingProxyType
@@ -14,13 +14,14 @@ from .providers import _homogeneous_coefficient_plan
 
 @dataclass(frozen=True)
 class LCHSData:
-    """Numerical products consumed by the chosen native/host realization.
+    """Numerical data that the chosen circuit or classical construction uses.
 
-    One instance is shared by every native leaf, host kernel, archive and
-    explicit check of a Plan. Its content hash (parameters.selected_identity)
-    binds it to the selected SELECT record or host kernel. Vectors and
-    matrices are zero-padded to the power-of-two encoded dimension (A ⊕ 0).
-    The encoded A is not kept: readers take shapes from the prepared L,
+    One instance is shared by every circuit block, classical routine, saved
+    archive and explicit check of a Plan. Its content hash
+    (parameters.selected_identity) ties it to the planned SELECT record or
+    classical routine. Vectors and matrices are zero-padded to the
+    power-of-two encoded dimension (A ⊕ 0). The encoded A is not kept.
+    Readers take shapes from the prepared L,
     test for a zero generator with ``np.any(l_part) or np.any(h_part)`` and
     form the shifted matrix ``l_part + 1j*h_part`` where they need it.
 
@@ -34,17 +35,17 @@ class LCHSData:
         coefficient_plan: Homogeneous LCHSCoefficientPlan whose coefficients
             include the exp(shift*T) compensation, divided by a power of two
             that the recovery carries when the factor exceeds binary64.
-        method: LCHS Method that selected these products.
+        method: LCHS Method that chose these data.
         select_data: Frozen product-formula SELECT data, or None.
-        select_records: Per-slot product-formula records of a constant-source
-            layout, in slot order.
+        select_records: Per-address-slot product-formula records of a
+            constant-source layout, in address-slot order.
         source_layout: SourceBranchLayout for a constant source, or None.
-        qsp_plan: Frozen joint-generator QSP selection, or None.
-        initial_mps: Selected MPS decomposition of the initial direction, or None.
-        coefficient_mps: Selected MPS decomposition of the coefficient PREP, or None.
+        qsp_plan: Frozen joint-generator QSP plan, or None.
+        initial_mps: MPS decomposition of the initial direction chosen at planning, or None.
+        coefficient_mps: MPS decomposition of the coefficient PREP chosen at planning, or None.
         selected_select: Resolved SELECT implementation or identity route.
-        host_actions: Selected classical Pauli actions for host execution, or None:
-            a mapping with ``nodes`` (the stored node table,
+        host_actions: Planned classical Pauli actions for classical execution, or
+            None. It is a mapping with ``nodes`` (the saved node table,
             time_independent_terms.LCHSProductFormulaNodes) and ``applications``
             (per application its start, weight, source role and per-position
             step record and route).
@@ -87,7 +88,7 @@ def select_dense(method, problem):
 
     Only supplied dense A and explicit vectors are accepted, so no compact
     input is densified implicitly. Missing vector data is rejected before the
-    eigensolve and quadrature selection, and the byte cap is checked before
+    eigensolve and quadrature selection, and the byte limit is checked before
     the Cartesian arrays are formed. A non-power-of-two dimension is encoded
     as A ⊕ 0 with zero-padded inputs. The analytic zero endpoint of the dummy
     block joins the PSD decision without a second eigensolve.
@@ -132,12 +133,12 @@ def select_dense(method, problem):
 
 
 def plan_lchs(method, problem, *, output, execution, shots, rng):
-    """Route one LinearDynamics to its single LCHS planning owner.
+    """Send one LinearDynamics to the one LCHS planning function that handles it.
 
     Zero elapsed time, or a zero initial vector with no nonzero source, uses
-    the initial-condition identity with no evolution. PeriodicStencil A uses the compact quantum
-    Strang route. Dense A selects its numerical products once and hands them
-    to the classical or quantum owner. Input scales, observable coordinates
+    the initial-condition identity with no evolution. PeriodicStencil A uses
+    the compact quantum Strang route. Dense A has its numerical data chosen
+    once and passed to classical or quantum planning. Input scales, observable coordinates
     and supported PREP choices are checked before any spectral or quadrature
     work, so an unsupported request never spends that work.
     """

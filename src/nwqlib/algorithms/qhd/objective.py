@@ -1,4 +1,4 @@
-"""Objective preprocessing for the QHD one-hot compiler."""
+"""Symbolic objective preprocessing for QHD with one-hot or binary encoding."""
 
 from __future__ import annotations
 
@@ -61,7 +61,7 @@ def uncentered_objective(expression: sp.Expr, variables, centers) -> sp.Expr:
 
 
 def expansion_term_charge(node: sp.Expr, admit) -> int:
-    """Return the nominal expansion-term charge, admitting every partial count.
+    """Return the nominal expansion-term count, checking every partial count with ``admit``.
 
     For the grammar of numeric constants, symbols, Add, Mul and nonnegative
     integer Pow, this bounds the formal expanded term count by induction.
@@ -72,20 +72,21 @@ def expansion_term_charge(node: sp.Expr, admit) -> int:
     binomial with j = min(n-1, m) and an exact integer running product.
 
     Outside this grammar, the current rational/exponent-sum/negative-power
-    rules are early-refusal heuristics. In b**e, r is the sum of rational
-    exponent terms and the charge uses m = ceil(abs(r)). A negative r
-    returns one after admitting its denominator's partial counts. Other
+    rules are early-rejection heuristics. In b**e, r is the sum of rational
+    exponent terms and the count uses m = ceil(abs(r)). A negative r
+    returns one after checking its denominator's partial counts. Other
     nodes return one after visiting their arguments. These rules do not
-    account for new additions or powers from function rewriting, combined
-    denominator populations, or all constructor evaluation during sp.expand.
-    Even the polynomial term-count bound does not bound coefficient digits,
-    temporary copies, all symbolic work or process memory.
+    account for new additions or powers from function rewriting, the terms
+    of combined denominators, or all constructor evaluation during
+    sp.expand. Even the polynomial term-count bound does not bound
+    coefficient digits, temporary copies, all symbolic work or process
+    memory.
 
-    ``admit(count)`` can refuse each reached partial count before traversal
-    continues. QHD assigns an untuned nominal 16-byte charge per term
-    (``method.QHD._admit_symbolic_work``); the augmented-Lagrangian layer
-    adds the term charge to its counted preprocessing work
-    (``constrained._setup``). Neither charge bounds arbitrary SymPy expansion.
+    ``admit(count)`` can reject each partial count reached before traversal
+    continues. QHD counts an untuned nominal 16 bytes per term
+    (``method.QHD._admit_symbolic_work``), and the augmented-Lagrangian layer
+    adds the term count to its counted preprocessing work
+    (``constrained._setup``). Neither count bounds arbitrary SymPy expansion.
     """
     values = [expansion_term_charge(child, admit) for child in node.args]
     if isinstance(node, sp.Add):
@@ -116,7 +117,7 @@ def node_count(expression: sp.Expr, limit: int) -> int:
     times counts once per occurrence, because the code that ``sp.lambdify``
     prints evaluates it at every occurrence, and the expansion can repeat a
     denominator in every term. Stopping after ``limit + 1`` nodes keeps the
-    count itself within the work that the caller admits.
+    count itself within the work limit that the caller checks.
     """
     count = 0
     for count, _node in enumerate(sp.preorder_traversal(expression), 1):
@@ -130,8 +131,10 @@ class ObjectiveDecomposer:
 
     After expansion, each additive term is keyed by the sorted indices of the
     variables it contains. A support S is later evaluated on only ``K**|S|``
-    grid tuples and becomes a sum of products of ``|S|`` one-hot number
-    operators, instead of a table over all ``K**d`` grid points. Terms with
+    grid tuples, instead of a table over all ``K**d`` grid points. On the
+    one-hot encoding it becomes a sum of products of ``|S|`` number
+    operators, and on the binary encoding a real diagonal operator on the
+    ``|S| b`` qubits of its variables (``binary`` module). Terms with
     empty support are a constant objective, which contributes only a global
     phase to the evolution.
 
@@ -166,7 +169,7 @@ class ObjectiveDecomposer:
         """Return the expression that each support table evaluates, keyed by sorted variable indices.
 
         Each is the expanded sum of its group's terms, formed once and shared
-        by the QHD admission, which counts its nodes, and the compiler, which
+        by the QHD limit check, which counts its nodes, and the compiler, which
         evaluates it. ``sp.Add`` flattens the terms in one pass. Python's
         ``sum`` would rebuild and sort the partial sum after every term, work
         quadratic in the group size.

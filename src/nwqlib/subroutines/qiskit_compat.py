@@ -1,4 +1,4 @@
-"""Qiskit compatibility seam for controlled and inverted gates.
+"""Qiskit compatibility layer for controlled and inverted gates.
 
 Every controlled-gate construction in the library calls :func:`controlled`,
 so the next Qiskit signature change is a one-line fix here instead of a
@@ -13,7 +13,8 @@ unitaries of a whole circuit before a backend compiles it.
 :func:`inverse_realized_gate` inverts a gate by reversing the circuit it
 was built from, because Qiskit's own ``inverse`` of a controlled
 ``UnitaryGate`` synthesizes the gate again. A complete, unsimplified
-``UCGate`` can keep its adjoint matrix table for native execution.
+``UCGate`` can keep its adjoint matrix table for execution as a
+``multiplexer`` instruction.
 Callers that will control or decompose the inverse select the reversed
 forward definition with ``native_ucg=False``.
 """
@@ -33,7 +34,7 @@ def controlled(gate: Any, num_ctrl_qubits: int, *, ctrl_state: int | str | None 
     A ``UnitaryGate`` becomes a ``ControlledGate`` named ``c_dense_unitary``
     whose definition is ``_dense_synthesis.controlled_unitary_circuit``,
     the exact synthesis of the whole controlled matrix. A base matrix that
-    is not unitary to rounding is realized as its unitary polar factor
+    is not unitary to rounding is synthesized as its unitary polar factor
     (``controlled_unitary_circuit``). Qiskit 2.6.0's own
     ``UnitaryGate.control`` synthesizes the same matrix by quantum Shannon
     decomposition, keeps the result when ``numpy.allclose`` with
@@ -62,8 +63,8 @@ def controlled(gate: Any, num_ctrl_qubits: int, *, ctrl_state: int | str | None 
     (the ``_dense_synthesis`` module docstring gives the mechanism). This
     function first replaces each such unitary, at any depth, by a gate whose
     definition is ``_dense_synthesis.dense_unitary_circuit``. The
-    constructions that call this function charge each synthesis before
-    construction with
+    constructions that call this function count the work of each synthesis
+    against their limits before construction with
     ``_dense_synthesis.dense_synthesis_size``, one for each distinct unitary
     that :func:`dense_synthesis_widths` finds in the gate, and Qiskit's
     control of the synthesized gates with
@@ -84,7 +85,7 @@ def controlled(gate: Any, num_ctrl_qubits: int, *, ctrl_state: int | str | None 
     inside a composite keeps Qiskit's exact definition and its control on
     both routes. :func:`dense_control_charges`
     lists the syntheses that either route makes, and it chooses the route by
-    the same test (``_whole_matrix_definition``), so the charged syntheses
+    the same test (``_whole_matrix_definition``), so the counted syntheses
     are the ones this function makes. The LCHS ``dense_exact`` SELECT, the
     controlled QLS query of a dense dilation and the joint generator of
     ``build_control_diagonal_generator_encoding`` choose the route from
@@ -274,12 +275,12 @@ def exact_dense_unitaries(circuit: Any, *, charge: Any = None,
                           cache: dict[Any, QuantumCircuit] | None = None) -> Any:
     """Return ``circuit`` with every dense ``UnitaryGate``, at any depth, synthesized exactly.
 
-    Aer applies a ``UnitaryGate`` as its matrix, but a backend that lowers a
-    circuit to a gate basis would synthesize it with Qiskit's own inexact
+    Aer applies a ``UnitaryGate`` as its matrix, but a backend that compiles
+    a circuit to a gate basis would synthesize it with Qiskit's own inexact
     synthesis (the ``_dense_synthesis`` module docstring gives the
     mechanism). The NWQ-Sim and Nexus preparations, IonQ with its QIS
     gateset and IBM at optimization levels 0 and 1 therefore call this
-    function before they compile, and so does Aer lowering when a noise
+    function before they compile, and so does Aer compilation when a noise
     model's gate basis omits the unitary instruction. The circuit comes back
     unchanged when it contains no ``UnitaryGate`` on two or more qubits.
     Control-flow blocks and annotated operations are not rewritten.
@@ -292,9 +293,9 @@ def exact_dense_unitaries(circuit: Any, *, charge: Any = None,
 
     ``cache`` maps the content of a dense matrix (:func:`dense_matrix_key`)
     to its synthesized circuit. A matrix found there is not synthesized or
-    charged again, and each gate receives a copy of the stored circuit, so
+    counted again, and each gate receives a copy of the stored circuit, so
     a caller that edits a definition leaves the cache unchanged. The call
-    charges and synthesizes each distinct matrix that the cache lacks once
+    counts and synthesizes once each distinct matrix that the cache lacks,
     and stores its circuit. ``dense_unitary_circuit`` is deterministic, so
     a stored circuit equals a new synthesis of the same matrix. The
     backends reach this function through ``Run._exact_dense_unitaries``,
@@ -338,7 +339,7 @@ def dense_synthesis_widths(operation: Any) -> tuple[int, ...]:
     control-flow blocks count nothing. A ``UnitaryGate`` that
     :func:`controlled` receives directly is outside this count, because it
     goes through ``_dense_synthesis.controlled_unitary_circuit``, whose size
-    law is ``controlled_synthesis_size``. Reading a definition can make
+    formula is ``controlled_synthesis_size``. Reading a definition can make
     Qiskit build it, as the rewrite itself would.
     """
     return tuple(_dense_unitary_widths(operation, cached=False).values())
@@ -530,7 +531,7 @@ def inverse_realized_gate(gate: Gate, *, native_ucg: bool = True) -> Gate:
     built for it, also in copies made from that built definition. A copy
     made before Qiskit built the definition synthesizes on its own. Keeping
     the adjoint table of a complete UCG avoids synthesis only while later
-    steps leave that UCG as a native instruction.
+    steps leave that UCG as a ``multiplexer`` instruction.
 
     With ``native_ucg=True``, a complete, unsimplified ``UCGate`` becomes
     the UCG of its adjoint table, or a ``UnitaryGate`` for zero controls.
@@ -539,15 +540,16 @@ def inverse_realized_gate(gate: Gate, *, native_ucg: bool = True) -> Gate:
     ``M(U)^dagger = M(U^dagger)`` for arbitrary stored matrices,
     where ``M(U) = sum_c |c><c| (x) U_c``.
     For finite binary64 entries, conjugate transposition is exact, and the
-    represented native pair has defect ``max_c ||U_c^dagger U_c - I||_2``.
+    represented forward and adjoint pair has defect
+    ``max_c ||U_c^dagger U_c - I||_2``.
     This is an inverse identity only for unitary table blocks. Aer executes
-    it as a native multiplexer only if later transformations leave the
-    complete table intact and the target accepts that instruction.
+    it as its ``multiplexer`` instruction only if later transformations
+    leave the complete table intact and the target accepts that instruction.
     Aer 0.18.0 applies each control address's block of the supplied table
     directly (``QubitVector::apply_multiplexer``,
     https://github.com/Qiskit/qiskit-aer/blob/0.18.0/src/simulators/statevector/qubitvector.hpp#L1305-L1340),
-    so the table reaches Aer as its native ``multiplexer``. A backend that
-    decomposes the gate needs a check of its actual realization. This
+    so the table reaches Aer as its ``multiplexer`` instruction. A backend
+    that decomposes the gate needs a check of the circuit it builds. This
     costs one two-by-two conjugate transpose and copy per table entry,
     plus the constructor's existing validation, and forms no dense
     operator. Qiskit's ``UCGate`` accepts only one target qubit, so the
@@ -562,7 +564,7 @@ def inverse_realized_gate(gate: Gate, *, native_ucg: bool = True) -> Gate:
     synthesis error, phase-rounding error or backend execution error.
 
     A ``UnitaryGate`` uses its stored matrix's conjugate transpose without
-    another unitarity check. Standard gates use their native inverses.
+    another unitarity check. Standard gates use their own Qiskit inverses.
     Other definitions are reversed recursively, with their global phases
     negated. Open controlled gates use the closed definition and restore
     the control state once. Reversing a controlled definition avoids
@@ -570,8 +572,9 @@ def inverse_realized_gate(gate: Gate, *, native_ucg: bool = True) -> Gate:
     no definition falls back to its own inverse.
 
     Args:
-        gate: Gate whose table or realized definition is adjointed.
-        native_ucg: Preserve eligible UCG tables for native execution. Pass
+        gate: Gate whose table or built definition is adjointed.
+        native_ucg: Preserve eligible UCG tables for execution as a
+            ``multiplexer`` instruction. Pass
             False when the caller knows the result will be controlled or
             decomposed. This option does not inspect a backend target.
     """

@@ -1,4 +1,4 @@
-"""QLS normalization, spectral-premise and verification constants."""
+"""QLS normalization, spectral-assumption and verification constants."""
 
 # Rescale margin over the rigorous Chebyshev norming bound. The phase solver
 # demands max|target| <= 1, and dividing a selected polynomial by its norming
