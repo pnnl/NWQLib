@@ -117,6 +117,9 @@ def runtime_api(monkeypatch):
     service._channel = "ibm_quantum_platform"
     service._api_clients = {instance: api}
     service._active_api_client = api
+    # IBMQuantumComputeService.__init__ starts with this value. From qiskit-ibm-runtime 0.51
+    # on, decoding a job looks its backend up here, and an empty list gives is_mock=False.
+    service._backend_instance_groups = []
     service._check_instance_usage = lambda: None
     backend = IBMBackend(configuration, service=service, api_client=api, instance=instance)
     backend._target, backend._properties = (fake.target, fake.properties())
@@ -322,7 +325,14 @@ def test_actual_http_transport_preserves_one_accepted_job_and_reconciles_origina
     from urllib.parse import parse_qs, urlsplit
     from qiskit_ibm_runtime import RuntimeDecoder
     from qiskit.primitives.containers.sampler_pub import SamplerPub
-    from qiskit_ibm_runtime.api.clients.runtime import RuntimeClient
+    try:
+        from qiskit_ibm_runtime.api.client import RuntimeClient
+    except ModuleNotFoundError as missing:
+        # qiskit-ibm-runtime 0.49 has the same client in api.clients.runtime. Any
+        # other missing module is a real failure.
+        if missing.name != "qiskit_ibm_runtime.api.client":
+            raise
+        from qiskit_ibm_runtime.api.clients.runtime import RuntimeClient
     from qiskit_ibm_runtime.exceptions import IBMRuntimeError
 
     api = runtime_api.api

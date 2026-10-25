@@ -191,6 +191,9 @@ def ibm_runtime_spy(monkeypatch):
     service._channel = "ibm_quantum_platform"
     service._api_clients = {instance: api}
     service._active_api_client = api
+    # IBMQuantumComputeService.__init__ starts with this value. From qiskit-ibm-runtime 0.51
+    # on, decoding a job looks its backend up here, and an empty list gives is_mock=False.
+    service._backend_instance_groups = []
     service._check_instance_usage = lambda: None
     backend = IBMBackend(configuration, service=service, api_client=api, instance=instance)
     backend._target, backend._properties = (fake.target, fake.properties())
