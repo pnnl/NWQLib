@@ -15,7 +15,7 @@ from nwqlib.backends import (
     export_qasm,
 )
 import nwqlib.backends.qiskit_aer as qiskit_aer_backend
-from nwqlib.execution import ExecutionMode
+from nwqlib.execution import ExecutionLimits, ExecutionMode
 
 
 def _bell_circuit(*, measured: bool = False) -> QuantumCircuit:
@@ -29,7 +29,8 @@ def _bell_circuit(*, measured: bool = False) -> QuantumCircuit:
 
 def _execute(target, circuit, *, seed=7, shots=None, **readout):
     """Prepare and submit one circuit through the shared Aer owners."""
-    prepared = qiskit_aer_backend._prepare_aer_execution(target, circuit, shots=shots, seed=seed, **readout)
+    prepared = qiskit_aer_backend._prepare_aer_execution(target, circuit, shots=shots, seed=seed,
+        simulator_memory_mb=ExecutionLimits().simulator_memory_mb, **readout)
     return qiskit_aer_backend._submit_aer_execution(prepared)
 
 

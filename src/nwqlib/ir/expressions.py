@@ -58,8 +58,10 @@ class AdmissionLimits(Record):
             signatures together. This limit covers a sampled FixedGCIM
             plan with three basis states and a 20-qubit, 8,083-term molecular
             Hamiltonian in 1,285 measurement groups, with 11,565 circuits and 25,731
-            declarations. It has over sixfold margin over the 161,691 declarations
-            of singleton grouping (the Program inventory row of
+            declarations when both the real and imaginary parts are measured,
+            and real-only measurement needs fewer. It has over sixfold margin
+            over the 161,691 declarations of singleton grouping (the Program
+            inventory row of
             [Engineering constants](../ENGINEERING_CONSTANTS.md)). Stored-field and
             checking-work limits apply independently, and no space is reserved from
             this limit alone.

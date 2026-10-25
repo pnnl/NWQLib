@@ -36,16 +36,23 @@ def test_tiny_actual_adapt_consumer_keeps_native_generator_basis_and_sampled_pro
         assert -2 <= gradients[2] <= 2
         assert len(result.pencil.hamiltonian) == 2
         pairs = [c for c in result.data.observations.chunks if c.experiment == "pair"]
+        diagonals = [c for c in result.data.observations.chunks if c.experiment == "diagonal"]
         screens = [c for c in result.data.observations.chunks if c.experiment == "screen"]
         # Exact: the diagonals come from the two shared full-chain queries, each
         # with a diagonal-reduction point and a screen point, and one pair remains.
-        assert len(pairs) == (1 if shots is None else 6) and len(screens) == (4 if shots is None else 2)
+        # Sampled: a supplied reference circuit has no real proof, so the grouped
+        # pencil of b = 2 states and G = 1 group takes b**2 G = 4 settings, the
+        # real and imaginary pair settings and one diagonal setting per state.
+        acquisition = plan.reconstruction.acquisition
+        assert (acquisition.quadratures, acquisition.real_proof) == (("complex", "unknown") if shots else (None, None))
+        assert len(pairs) == (1 if shots is None else 2) and len(screens) == (4 if shots is None else 2)
+        assert len(diagonals) == (0 if shots is None else 2)
         if shots is None:
             assert result.eigenvalue == pytest.approx(-1.0, rel=0.0, abs=1e-12)
         else:
             assert all(c.returned_shots == 32 for c in screens)
-            assert all(sum(v.count for v in c.values) == 32 for c in pairs)
-            assert all(c.returned_shots == 32 for c in pairs)
+            assert all(sum(v.count for v in c.values) == 32 for c in pairs + diagonals)
+            assert all(c.returned_shots == 32 for c in pairs + diagonals)
             assert set(i for row in result.history for i in row.contribution_ids) <= set(
                 result.contribution_ids
             )

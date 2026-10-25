@@ -103,6 +103,81 @@ class CountsSampling(Record):
         return self
 
 
+class NativeDepth(Record):
+    """The native two-qubit depth of one prepared circuit on its backend target, or the reason it is unavailable.
+
+    `nwqlib.backends.inspection.inspect_native_depth` computes it from a
+    prepared circuit and the instruction support of the backend's target, and
+    the preparation record of that circuit keeps the backend's result
+    (`PreparedArtifact.native_depth`). A recorded depth is qualified only when
+    the backend also establishes that the provider executes the submitted
+    circuit without changing it. A provider change can keep the circuit's
+    unitary and still change its depth: gate folding turns one CX, of
+    two-qubit depth 1, into three consecutive CX gates on the same qubits,
+    whose product is the same CX but whose depth is 3, and twirling and
+    dynamical decoupling change gates. IBM Runtime qualifies the depth of counts
+    (SamplerV2) only when dynamical decoupling, gate twirling and measurement
+    twirling are off and qiskit-ibm-runtime 0.49.0, the version checked for
+    this, is installed, and never that of a provider estimate (EstimatorV2),
+    whose observable is measured with circuits that the provider builds. A
+    qualified depth describes only that one prepared circuit, not other
+    settings of the same Plan, and only the operations inside it. The
+    provider's qubit initialization before each shot and the delay between
+    shots are outside the circuit. The depth leaves them out and says nothing
+    about their duration or cost.
+
+    The native two-qubit depth is the largest sum of weights along a
+    dependency path of the circuit: weight 1 for each native two-qubit gate
+    and 0 for every other operation. Every operation, barriers and
+    measurements included, orders the qubits and classical bits it touches,
+    so a later gate cannot run in parallel with an earlier one across a
+    barrier or a shared classical bit. The depth counts gates. It gives no
+    duration, waiting time or decoherence.
+
+    Attributes:
+        qualified: Whether the depth values below describe the circuit that
+            executes. They do only when every operation of the circuit is a
+            gate of the target on one or two qubits that the target supports
+            on those physical qubits, a single-qubit measurement, a reset, a
+            delay with a numeric duration or a barrier, and the circuit has no
+            unbound parameters, control flow, classical stores or classical
+            variables. In a preparation record, the backend must also have
+            established that the provider executes the circuit unchanged.
+        reason: Why the depth is not qualified, or `None` when it is.
+        native_two_qubit_depth: The native two-qubit depth, `0` for a
+            circuit without two-qubit gates. `None` when not qualified. A
+            requested depth limit compares this value.
+        total_native_depth: The depth with weight 1 for every native one- or
+            two-qubit gate, measurement, reset and delay, and weight 0 for a
+            barrier, whose ordering of its qubits is kept. It is reported
+            only, and no limit uses it. `None` when not qualified.
+        native_two_qubit_gates: The number of native two-qubit gates. It can
+            exceed `native_two_qubit_depth`, because gates on disjoint qubits
+            can run in parallel. `None` when not qualified.
+        width: The number of qubits of the circuit that executes
+            (`num_qubits`), idle qubit positions of the device included and
+            classical bits excluded. It is not the logical system width plus
+            ancillas. It is recorded also when the depth is not qualified, and
+            it is reported only.
+    """
+
+    qualified: StrictBool
+    reason: Text | None = None
+    native_two_qubit_depth: Count | None = None
+    total_native_depth: Count | None = None
+    native_two_qubit_gates: Count | None = None
+    width: Count
+
+    @model_validator(mode="after")
+    def _qualified_values(self):
+        """Keep a reason and the depth values exclusive, so an unqualified record carries no depth."""
+        values = (self.native_two_qubit_depth, self.total_native_depth, self.native_two_qubit_gates)
+        if (self.reason is None) != self.qualified or any((value is None) == self.qualified for value in values):
+            raise ValueError("a qualified native depth has its three values and no reason, "
+                             "and an unqualified one has a reason and no values")
+        return self
+
+
 # Derived per-instruction roundoff constant of each exact statevector target,
 # keyed by PreparedArtifact.target.name (_validation.py derives both).
 _ROUNDOFF_PER_OPERATION = {
@@ -124,7 +199,7 @@ class PreparedArtifact(Record):
     record loads no circuit data. The fields below are read-only.
 
     Attributes:
-        schema_version: Fixed `8`. Version of the saved record format.
+        schema_version: Fixed `9`. Version of the saved record format.
         execution: `"quantum_circuit"` or `"host_kernel"`, the kind of
             preparation.
         plan_id: Content hash of the Plan.
@@ -190,7 +265,10 @@ class PreparedArtifact(Record):
         counts_sampling: How the counts are sampled (`CountsSampling`), or
             None for other readouts.
         provider_options_json: The provider settings in effect, saved without
-            credentials.
+            credentials. For IBM Runtime it is the request of
+            `IBMRuntimeBackend.options_json` with the defaults that preparation
+            writes in, and every job of the preparation is sent with these
+            settings, also after the Run is reopened.
         probability_window_exclusions: Labels of the backend operations,
             readout path, simulator version or non-default compiler
             optimization level whose effect the derivation of
@@ -216,9 +294,20 @@ class PreparedArtifact(Record):
             including no product or multiplication by the represented
             factor ``(1.0, ±0.0)`` under the classical arithmetic model.
             ``None`` means the classical correction was not assessed.
+        native_depth: The native two-qubit depth of the prepared circuit on
+            the backend's target (`NativeDepth`), computed once at preparation
+            and kept unchanged after the Run is reopened. `None` means the
+            backend did not compute it. IBM Runtime records it for its compiled
+            circuit, qualified only for counts that keep the provider's dynamical
+            decoupling and twirling off (`IBMRuntimeBackend.options_json`)
+            under qiskit-ibm-runtime 0.49.0. The other backends record `None`.
+            A requested native-depth limit refuses a circuit before submission
+            when its depth is not qualified, or when a package version in
+            `environment` differs from the installed one
+            (`nwqlib.backends.inspection.check_native_depth_cap`).
     """
 
-    schema_version: Literal[8] = 8
+    schema_version: Literal[9] = 9
     execution: Literal["quantum_circuit", "host_kernel"] = "quantum_circuit"
     plan_id: ContentID
     realization_id: ContentID
@@ -252,6 +341,7 @@ class PreparedArtifact(Record):
     body_length: Count | None = None
     boundaries: tuple[Count, ...] = ()
     statevector_roundoff: tuple[Nonnegative, Nonnegative] | None = None
+    native_depth: NativeDepth | None = None
 
     @property
     def probability_window(self) -> float:
@@ -362,7 +452,7 @@ class PreparedArtifact(Record):
                     or self.population != "unconditional" or self.payload is not None
                     or self.native_quantum_layout or self.native_classical_layout or self.logical_to_native
                     or self.backend_configuration_id is not None or self.provider_options_json is not None
-                    or self.probability_window_exclusions is not None):
+                    or self.probability_window_exclusions is not None or self.native_depth is not None):
                 raise ValueError("host preparation cannot fabricate quantum lowering or population")
         elif (self.logical is None or self.selected_kernel_id is not None
               or self.host_preparation_work_reserved or self.observation.kind == "host_scalars"):
@@ -1623,9 +1713,13 @@ class ExecutionLimits(Record):
         max_simulation_qubits: Default `20`. Largest circuit width that a
             local simulator (Aer or the local NWQ-Sim backend) accepts. A
             20-qubit complex128 statevector needs 16 MiB.
-        simulator_memory_mb: Default `1024` (MiB). Memory allowance of the
-            local simulator for the quantum state and its known working
-            arrays. Aer receives it as `max_memory_mb`.
+        simulator_memory_mb: Default `8192` (MiB, 8 GiB). Memory allowance of
+            the local simulator for the quantum state and its known working
+            arrays. Aer receives it as `max_memory_mb`. It is an upper limit
+            that the memory needs of a simulation are checked against, not
+            memory set aside in advance, and it does not bound the memory of
+            the Python process. Raising it does not raise
+            `max_simulation_qubits`.
         max_total_circuits: Default `512`. Largest number of circuit
             preparations, and separately of circuit execution attempts.
         max_total_shots: Default `1_000_000`. Largest total of shots reserved
@@ -1671,11 +1765,15 @@ class ExecutionLimits(Record):
     # metadata). A 20-qubit complex128 statevector needs 16 MiB. The qubit cap
     # applies to Aer and the local NWQ-Sim backend. Aer receives
     # simulator_memory_mb as max_memory_mb, its cap on quantum-state storage.
+    # Its 8 GiB default is a ceiling sized so that common research workloads
+    # need no memory override, not an estimate of their need. Aer documents
+    # max_memory_mb as the largest quantum-state storage it accepts, raising an
+    # error when a state needs more, so the value allocates nothing itself.
     # The synthesis work of 10**9 units, 0.65 to 1.1 s on one core, admits the
     # synthesis of one dense unitary on 8 qubits (5.2 * 10**8 units) in a Run
     # and refuses one on 9 qubits (4.0 * 10**9 units).
     max_simulation_qubits: PositiveInt = 20
-    simulator_memory_mb: PositiveInt = 1024
+    simulator_memory_mb: PositiveInt = 8192
     max_total_circuits: PositiveInt = 512
     max_total_shots: PositiveInt = 1_000_000
     max_data_bytes: PositiveInt = DEFAULT_MAX_BYTES
@@ -2190,7 +2288,7 @@ class RunFailed(RuntimeError):
 
 
 __all__ += [
-    "RegisterMap", "LogicalPreparationReceipt", "PreparedArtifact", "PauliValue", "CountBin", "ProbabilityArrays",
+    "RegisterMap", "LogicalPreparationReceipt", "NativeDepth", "PreparedArtifact", "PauliValue", "CountBin", "ProbabilityArrays",
     "PayloadRef", "CountsSampling", "EstimateValue", "ReducedValues",
     "Histogram", "ObservationChunk", "ObservationView", "ConsumptionEvent", "ExecutionTrace", "TimingObservation", "ExecutionLimits", "LimitAmendment",
     "JobLocator", "SubmissionItem", "SubmissionRecord", "RunFailed",

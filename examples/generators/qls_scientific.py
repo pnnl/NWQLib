@@ -216,7 +216,7 @@ limits = result.data.trace.limits
 show_table([
     ("Simulated qubits", rec.width, f"{limits.max_simulation_qubits} (local simulator default)"),
     ("Polynomial degree", rec.degree, f"{selected.method.max_degree} (max_degree)"),
-    ("Simulator memory", "Not predicted for this route", f"{limits.simulator_memory_mb:,} MB (simulator_memory_mb)"),
+    ("Simulator memory", "Not predicted for this route", f"{limits.simulator_memory_mb:,} MiB (simulator_memory_mb)"),
 ], headers=("Limit", "This history", "Default cap"))
 
 # %% [markdown]

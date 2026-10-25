@@ -81,6 +81,9 @@ class Method(Record):
       that chooses later circuits from earlier results overrides them.
     - `prepare_all_refusal`: why `settings="all"` cannot be served, asked before
       a Run exists.
+    - `query_catalog_reason`: why the Plan's experiments are templates of
+      queries whose parameter values the iteration chooses, asked by the
+      resource estimate of a whole Plan.
     - `error_model`: the known and unavailable error sources of a Plan.
     - `verify` and `recover_analysis`: explicit extra operations, unavailable by
       default.
@@ -160,6 +163,37 @@ class Method(Record):
         inherited preparation would prepare, and count against the Run's limits,
         every setting of the Plan, including ones the Method never submits. The
         default returns `None`.
+
+        Returns:
+            reason (str | None): The reason, or `None`.
+        """
+        return None
+
+    def query_catalog_reason(self):
+        """Return why the experiments of this Method's Plans are templates of queries rather than the workload of a Run, or None.
+
+        A Method overrides it when one experiment of its Plan can serve any
+        number of queries whose parameter values its iteration chooses from
+        earlier outcomes, so that the counts of the Plan's construction are
+        not the totals of a Run. The reason says why and how to estimate one
+        query. By returning a reason, the Method asserts that every query it
+        runs is a point of one experiment of the Plan, bound by
+        `Plan.resolve`, and that the construction of that point keeps the
+        experiment's measurement batch, observation kind and repetitions.
+        The resource estimate of a whole Plan, from `nwqlib.estimate(plan)`
+        with or without a profile, `compare` or `scan`, then passes the
+        reason to [`nwqlib.resources.estimate`][nwqlib.resources.fold.estimate]
+        as `catalog`. That estimate reports a count as zero only when no
+        query can contribute to it. It leaves the other counts unavailable
+        with the reason, except `root_setting_declarations` and
+        `root_repetitions`, the setting declarations and body repetitions of
+        a `MeasurementBatch` at the root of the Program, which keep their
+        values. It labels each width
+        and byte peak as a footprint of the templates. The forecast of one
+        point with every parameter value
+        bound estimates that point's construction without the reason. The
+        default returns `None`, and the resource estimate of a Plan adds up
+        its construction as the workload of a Run.
 
         Returns:
             reason (str | None): The reason, or `None`.

@@ -533,9 +533,10 @@ class ArchiveFiles:
     def write_operator(self, name, operator):
         """Save an operator in its own representation, never a converted one, and return its description.
 
-        Dense, CSR, CSC, Pauli and periodic-stencil inputs keep their arrays or
-        parameters, so saving never turns a sparse or Pauli operator into a
-        dense matrix. A declaration without data is saved as a declaration.
+        Dense, CSR, CSC, Pauli, ordered fermionic and periodic-stencil inputs
+        keep their arrays or parameters, so saving never turns a sparse, Pauli
+        or fermionic operator into a dense matrix. A declaration without data
+        is saved as a declaration.
 
         Args:
             name (str): Prefix of the file names.
@@ -565,6 +566,11 @@ class ArchiveFiles:
                 x=self.write_array(name + ".x.npy", terms.x),
                 z=self.write_array(name + ".z.npy", terms.z),
                 coefficients=self.write_array(name + ".coefficients.npy", terms.coefficients))
+        elif representation == "fermion":
+            terms = operator.fermion_terms()
+            data.update(num_modes=terms.num_modes, **{
+                field: self.write_array(name + "." + field + ".npy", getattr(terms, field))
+                for field in ("offsets", "modes", "actions", "coefficients")})
         else:
             raise ValueError(f"execution archive has no saved operator format for {representation}")
         return data
@@ -577,8 +583,12 @@ class ArchiveFiles:
         32 or 64-bit indices of the same length and ``D + 1`` index pointers with
         ``indptr[0] == 0`` and ``indptr[-1]`` equal to the value count. Pauli needs
         ``uint64`` x and z masks of ``ceil(n/64)`` words per term and complex128
-        coefficients. A periodic stencil restores its parameters and checks its
-        declared width. In every case the payload bytes must equal the declared size.
+        coefficients. Ordered fermionic terms need, for M strings on q modes
+        with ``D = 2**q``, M + 1 int64 offsets with ``offsets[0] == 0`` and
+        ``offsets[-1]`` equal to the entry count P, P int64 modes, P uint8
+        actions and M complex128 coefficients. A periodic stencil restores its
+        parameters and checks its declared width. In every case the payload
+        bytes must equal the declared size.
         Individual sparse indices and coefficient values are not scanned. The
         restored object wraps the memory-mapped arrays without copying them. A
         sparse matrix is built empty with the declared shape, and its three
@@ -652,6 +662,27 @@ class ArchiveFiles:
             object.__setattr__(native, "num_qubits", qubits)
             for name in ("x", "z", "coefficients"):
                 object.__setattr__(native, name, arrays[name])
+        elif representation == "fermion":
+            from nwqlib.operators._fermion import FermionTerms
+            modes = data["num_modes"]
+            if (type(modes) is not int or modes < 0 or dimension.bit_length() - 1 != modes
+                    or dimension & (dimension - 1) or manifest.shape is None or len(manifest.shape) != 1
+                    or manifest.dtype != "int64[offsets,modes]+uint8[actions]+complex128"):
+                raise ValueError("saved fermion width or encoding differs from its declaration")
+            arrays = {name: self.read_array(data[name]) for name in ("offsets", "modes", "actions", "coefficients")}
+            offsets = arrays["offsets"]
+            _array_layout(offsets, (manifest.shape[0] + 1,), "int64", manifest.byte_order)
+            _array_layout(arrays["coefficients"], manifest.shape, "complex128", manifest.byte_order)
+            if offsets[0] != 0:
+                raise ValueError("saved fermion offsets differ from their declaration")
+            for name, dtype in (("modes", "int64"), ("actions", "uint8")):
+                _array_layout(arrays[name], (int(offsets[-1]),), dtype, manifest.byte_order)
+            if sum(a.nbytes for a in arrays.values()) != manifest.payload_bytes:
+                raise ValueError("saved fermion storage size differs from its declaration")
+            native = object.__new__(FermionTerms)
+            object.__setattr__(native, "num_modes", modes)
+            for name, array in arrays.items():
+                object.__setattr__(native, name, array)
         else:
             raise ValueError(f"execution archive has no saved operator format for {representation}")
         return OperatorInput._from_admitted(manifest, data["structure"], native)

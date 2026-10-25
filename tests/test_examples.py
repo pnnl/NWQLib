@@ -34,6 +34,54 @@ assert max(abs(my_lanczos.eigenvalue - my_exact), abs(my_adapt.eigenvalue - my_e
 assert abs(h2_circuits.eigenvalue - h2_exact.eigenvalue) < 1e-10
 assert len({chunk.attempt for chunk in h2_circuits.data.observations.chunks}) == 3
 """,
+    "gcim_qfd_shallow_workflows": """
+# FCI references: PySCF's CASCI over all orbitals against the lowest eigenvalue of the dense qubit Hamiltonian.
+assert abs(E_FCI - np.linalg.eigvalsh(h2.hamiltonian.to_matrix())[0]) < 1e-10
+assert abs(E4_FCI - np.linalg.eigvalsh(h4.hamiltonian.to_matrix())[0]) < 1e-10
+# The QFD powers 0, 1, 2 and the determinants |1100>, |0011> span the H2 ground state, so exact readout reaches FCI
+# with either pair preparation, and the Pauli-sum template reaches the eigvalsh value of my_H.
+assert max(abs(run.eigenvalue - E_FCI) for run in (result, controlled, fixed_exact)) < 1e-10
+assert abs(my_qfd.eigenvalue - my_exact) < 1e-10
+# Prefix preparation: diagonal pairs are uncontrolled and equal, no pair costs more CX than its controlled form,
+# and the pair (1, 2) applies V without control and one controlled V, the circuits of pairs (1, 1) and (0, 1).
+cx = dict(zip(pair_names, cx_prefix))
+assert all(p <= c for p, c in zip(cx_prefix, cx_controlled)) and sum(cx_prefix) < sum(cx_controlled)
+assert all(cx[name] == c for name, c in zip(pair_names, cx_controlled) if name in ("pair_1_1", "pair_2_2"))
+assert cx["pair_1_2"] == cx["pair_1_1"] + cx["pair_0_1"]
+# Every nonidentity H2 term is diagonal in some group basis. With G groups, b = 2 states have b(b+1)G/2 settings
+# real-only and b**2 G with both parts, and M = 3 QFD powers M**2 G, each with 4096 shots.
+G = len(groups)
+labels = [label for label, _ in h2.hamiltonian.to_list() if set(label) != {"I"}]
+assert all(any(all(p in ("I", b) for p, b in zip(label, basis)) for basis in groups) for label in labels)
+assert [len(planned.experiments) for planned, _ in measured.values()] == [3 * G, 4 * G, 9 * G]
+assert [amount(estimate(planned), "shots") for planned, _ in measured.values()] == [4096 * k * G for k in (3, 4, 9)]
+# H4 with exact matrix elements: Rayleigh-Ritz values lie at or above FCI up to rounding, bounded chains respect
+# max_chain_length, a QFD basis that contains another gives no higher value, and the default and L = 2 bases reach FCI.
+values = [run.eigenvalue for run in (*adapt_runs.values(), *qfd_runs.values())]
+assert all(value >= E4_FCI - 1e-9 for value in values)
+for label, run in adapt_runs.items():
+    if run.plan.method.basis_growth is not None:
+        assert all(len(chain) <= run.plan.method.basis_growth.max_chain_length for chain in run.basis)
+three, five = qfd_runs.values()
+assert five.eigenvalue <= three.eigenvalue + 1e-12
+assert abs(adapt_runs["default growth, 8 iterations"].eigenvalue - E4_FCI) < 1e-8
+assert abs(adapt_runs["BoundedRitzGrowth(max_chain_length=2), 15 rounds"].eigenvalue - E4_FCI) < 1e-8
+# 26 qubits, planning only. G = 2 groups: FixedGCIM b(b+1)G/2 = 12 real-only settings, QFD M**2 G = 18. CX per shot:
+# FixedGCIM controls both occupation states of each off-diagonal setting, one CX per occupied qubit, 3 pairs x G
+# settings. QFD with one order-2 substep applies each word of weight w twice, 4(w-1) CX without control and 4w with
+# control, so V costs C_U = 4(sum w - L) and controlled V C_C = 4 sum w for the L = 64 words, and the prefix pairs
+# (0,0), (0,1), (0,2), (1,1), (1,2), (2,2) use 0, C_C, 2C_C, C_U, C_U + C_C and 2C_U over 2, 4, 4, 2, 4 and 2 settings.
+fixed_large, qfd_large = large_costs.values()
+weights = [sum(p != "I" for p in label) for label, _ in chain_terms]
+C_U, C_C = 4 * (sum(weights) - len(weights)), 4 * sum(weights)
+ones = [sum(bits) for bits in occupations]
+assert [len(planned.experiments) for planned in large_plans.values()] == [12, 18]
+assert [amount(cost, "shots") for cost in large_costs.values()] == [8192 * 12, 8192 * 18]
+assert {amount(cost, "logical_width", "logical_device") for cost in large_costs.values()} == {27}
+assert amount(fixed_large, "cx") == 8192 * 2 * sum(ones[i] + ones[j] for i in range(3) for j in range(i + 1, 3))
+assert amount(qfd_large, "cx") == 8192 * (2 * (C_U + 2 * C_U) + 4 * (C_C + 2 * C_C + C_U + C_C))
+assert large_peak < 2**26
+""",
     "qls_linear_system_intro": """
 assert np.linalg.norm(x - reference) / np.linalg.norm(reference) < 2 * EPSILON
 assert 0 < result.algorithm_success_mass <= 1
@@ -365,28 +413,32 @@ assert all(ref <= Fraction(value) <= ref * (1 + 32*u_qhd) for ref, value in qhd_
 assert qhd_ledgers[32, "one_hot"].evolution.evolution == 2
 
 # GCiM, Section 5, owner algorithms/gcim/fixed_basis.py. For m = 2 normalized trial states and G = 2
-# qubit-wise-commuting groups (Z...Z and X...X) the grouped plan has 2(M - D)max(1, G) + DG = m**2 G = 8 settings
+# qubit-wise-commuting groups (Z...Z and X...X) the real Hamiltonian -Z^q - 0.7 X^q and the real product states
+# resolve real parts only, so the grouped plan has (M - D)max(1, G) + DG = m(m+1)G/2 = 6 settings
 # (fixed_basis.sampled_settings) and 1024 shots each (Appendix A). The preparation laws give 8q CX per
-# off-diagonal setting and zero per diagonal setting, hence 32q*1024 for all eight settings. Exact integers.
-from nwqlib.algorithms.gcim.fixed_basis import sampled_settings
+# off-diagonal setting and zero per diagonal setting, hence 16q*1024 for the two off-diagonal settings. Exact
+# integers.
+from nwqlib.algorithms.gcim.fixed_basis import pencil_pairs, sampled_settings
 assert set(gcim) == set(SIZES)
 for q, folded in gcim_cx.items():
-    settings = [s[0] for s in sampled_settings(2, gcim[q].reconstruction.groups)]
-    assert [g.basis for g in gcim[q].reconstruction.groups] == ["X" * q, "Z" * q]
-    assert number(folded.quantity("settings")) == len(gcim[q].experiments) == len(settings) == 2**2 * 2
+    rec = gcim[q].reconstruction
+    assert (rec.acquisition.quadratures, rec.acquisition.real_proof) == ("real", "proved")
+    settings = [s[0] for s in sampled_settings(pencil_pairs(2), len(rec.groups), rec.acquisition.quadratures)]
+    assert [g.basis for g in rec.groups] == ["X" * q, "Z" * q]
+    assert number(folded.quantity("settings")) == len(gcim[q].experiments) == len(settings) == 2 * 3 // 2 * 2
     assert [e.name for e in gcim[q].experiments] == settings
     assert number(folded.quantity("shots")) == 1024 * len(settings)
     assert number(folded.quantity("logical_width", location="logical_device")) == q + 1
     assert folded.quantity("cx").interpretation == "upper_bound"
-    assert number(folded.quantity("cx")) == 32 * q * 1024
-# The three-qubit plan's eight prepared circuits, compiled at optimization level 0 and weighted by their shots, stay
-# within the bound that estimate reports. Only the four off-diagonal settings compile to CX gates. The text states
+    assert number(folded.quantity("cx")) == 16 * q * 1024
+# The three-qubit plan's six prepared circuits, compiled at optimization level 0 and weighted by their shots, stay
+# within the bound that estimate reports. Only the two off-diagonal settings compile to CX gates. The text states
 # the ratio R = 2 of the bound to this compiled count.
-assert gcim_compiled["circuits"] == 8 and sum(cx > 0 for cx in gcim_small_cx) == 4
-assert gcim_small_cx == [0, 0, 12, 12, 12, 12, 0, 0]
-assert sum(gcim_small_cx) == 16 * 3 == 48
-assert gcim_compiled["law"] == 32 * 3 * 1024 == 98304
-assert gcim_compiled["compiled"] == 1024 * sum(gcim_small_cx) == 49152
+assert gcim_compiled["circuits"] == 6 and sum(cx > 0 for cx in gcim_small_cx) == 2
+assert gcim_small_cx == [0, 0, 12, 12, 0, 0]
+assert sum(gcim_small_cx) == 8 * 3 == 24
+assert gcim_compiled["law"] == 16 * 3 * 1024 == 49152
+assert gcim_compiled["compiled"] == 1024 * sum(gcim_small_cx) == 24576
 assert gcim_compiled["interpretation"] == "upper_bound" and gcim_compiled["law"] == 2 * gcim_compiled["compiled"]
 """,
 }
@@ -586,6 +638,55 @@ assert _np.linalg.norm(x - _x) / _np.linalg.norm(_x) <= 0.01 + 1e-9
 # Machine precision: kappa_be is alpha divided by the smallest singular value of A.
 _sigma_min = _np.linalg.svd(_A, compute_uv=False)[-1]
 assert abs(selected.reconstruction.kappa_be - selected.reconstruction.alpha / _sigma_min) <= 1e-12
+"""),
+    ),
+    "docs/algorithms/qfd.md": (
+        ("print(result)", """
+import numpy as _np
+_P = {"I": _np.eye(2), "X": _np.array([[0., 1.], [1., 0.]]), "Z": _np.diag([1., -1.])}
+_A = sum(_c * _np.kron(_P[_l[0]], _P[_l[1]]) for _l, _c in terms)
+_ground = _np.linalg.eigvalsh(_A)[0]
+# Machine precision: the reference energy is the diagonal entry of A at |00>, and with exact H and S the Ritz value
+# lies between the ground energy of the 4x4 matrix and the reference energy. The page prints the ground energy to
+# 7 decimals and the gap to 2 significant digits.
+assert abs(result.reference_energy - _A[0, 0]) <= 1e-12
+assert _ground - 1e-12 <= result.eigenvalue <= result.reference_energy + 1e-12
+assert abs(_ground + 1.2769679) <= 5e-8 and 0.00905 <= result.eigenvalue - _ground < 0.00915
+"""),
+        ("shots=1000, seed=7)", """
+# Exact: M = 3 powers and the G = 3 qubit-wise commuting groups that the page names give M**2 G settings of 1000
+# shots, and the members of each group commute qubit-wise.
+_labels = [[sampled.reconstruction.pencil.nonidentity_terms[_k][0] for _k in _g.indices]
+           for _g in sampled.reconstruction.pencil.groups]
+assert sorted(map(sorted, _labels)) == [["IZ", "XI"], ["XX"], ["ZI", "ZZ"]]
+assert all(_a == _b or "I" in (_a, _b) for _g in _labels for _u in _g for _v in _g for _a, _b in zip(_u, _v))
+assert len(sampled.experiments) == 3**2 * 3
+assert nwqlib.estimate(sampled).quantity("shots").fact.value.numerator == 27 * 1000
+"""),
+        ("analyze(overlap_cutoff=1e-3)", """
+import numpy as _np
+_H = _np.array([[complex(_z.real, _z.imag) for _z in _row] for _row in again.pencil.hamiltonian])
+_S = _np.array([[complex(_z.real, _z.imag) for _z in _row] for _row in again.pencil.overlap])
+_s, _Q = _np.linalg.eigh(_S)
+_kept = _s > 1e-3
+_X = _Q[:, _kept] / _np.sqrt(_s[_kept])
+# Machine precision: NumPy's spectrum of the saved S matches the recorded one, the cutoff 1e-3 keeps the two
+# directions above it, and canonical orthogonalization on them gives the reported Ritz value. The kept overlap
+# eigenvalues are at least 0.028, so rounding stays far below 1e-10.
+assert _np.allclose(sorted(loaded.pencil.overlap_eigenvalues), _s, rtol=0, atol=1e-12)
+assert again.pencil.kept_rank == int(_kept.sum()) == 2
+assert abs(again.eigenvalue - _np.linalg.eigvalsh(_X.conj().T @ _H @ _X)[0]) <= 1e-10
+"""),
+        ("chemistry_evolution_terms(data)", """
+import numpy as _np
+_ground = _np.linalg.eigvalsh(data.hamiltonian.to_matrix())[0]
+# Machine precision: the reference energy of the RHF occupation is PySCF's RHF energy, and with exact H and S the
+# Ritz value lies between the ground energy of A, from Qiskit's dense matrix, and the reference energy. This checks
+# only the page's bound claim for H2, not the printed Ritz value. tests/test_qfd.py checks the fermionic blocks and V
+# against independent references.
+assert abs(chem.reference_energy - data.rhf_energy) <= 1e-10
+assert _ground - 1e-10 <= chem.eigenvalue <= chem.reference_energy + 1e-10
+assert "particle-number sector N = 2" in chem.plan.assumptions[2]
 """),
     ),
     "docs/algorithms/qhd.md": (("analysis = result.analyze()", """

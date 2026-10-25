@@ -29,6 +29,19 @@ from .records import (CLIFFORD_ANGLES, COUNTS, DEPTHS, FOLD_WORK_PER_ADMISSION_S
 
 FOLD_SOURCE = Source(name="selected_resource_fold", version="2", domain="selected logical construction",
                      reference="nwqlib.resources.fold; serial sum, explicit parallel max, lifetime peaks")
+# Population of a width or byte peak under ``estimate(catalog=...)``: the peak
+# of the declared query templates at their supplied or symbolic parameter
+# values, not a peak over the queries of a Run, whose bound register widths
+# can differ.
+_CATALOG_FOOTPRINT = "declared footprint of the query templates at supplied or symbolic parameter values"
+# Node kinds that perform a quantum operation or acquisition. A catalog whose
+# Program declares none of them contributes nothing to any quantum count.
+_QUANTUM_NODES = frozenset(("block_call", "measure", "reset", "measurement_batch"))
+# Quantum counts, each zero for every query of a catalog whose Program declares
+# no quantum node. Classical work, construction work, adaptive rounds and
+# expected operations are not among them.
+_QUANTUM_COUNTS = GATES + ("calls", "measurements", "resets", "settings", "unique_settings",
+                           "preparation_components", "shots", "exact_evaluations")
 
 
 @dataclass(frozen=True)
@@ -139,9 +152,11 @@ class _Fold:
         fold_evidence: The fold's own proved-relation Evidence record.
         fold_id: Content hash of ``fold_evidence``, attached to counts taken
             from gate decompositions.
+        catalog: The reason that the Program is a catalog of query templates
+            (``estimate``), or None.
     """
 
-    def __init__(self, construction, context):
+    def __init__(self, construction, context, catalog=None):
         """Check the Program, set the fold's work limit and create empty tables.
 
         The full Program admission runs first, and its measured work sets
@@ -153,6 +168,7 @@ class _Fold:
         """
         self.construction = construction
         self.context = context
+        self.catalog = catalog
         self.admission = _Admission(construction.program)
         self.readiness = self.admission.admitted()
         # The fold work limit is proportional to the admission work just measured,
@@ -961,14 +977,18 @@ class _Fold:
         specification and certified bound follow in that order, and a value
         derived only from exact gate decompositions is a proved relation. An unknown value
         becomes an unavailable Fact carrying its reasons. A peak that needs a
-        serial schedule is conditional unless the context declares one.
+        serial schedule is conditional unless the context declares one, and
+        outside a query catalog it is a peak of the whole workload. A catalog
+        peak keeps the catalog population, because the catalog's templates
+        are not the whole workload of a run.
         """
         self.admission.tick(1 + len(value.sources) + len(value.derived_from) + len(value.assumptions) + len(value.reasons))
         unit = Unit(symbol="byte", dimension="bytes") if metric.endswith("bytes") or metric in {"memory", "known_memory"} else Unit(symbol="count", dimension="count")
         required_schedule = "serial_acquisitions" if value.requires_serial else None
         assumptions = value.assumptions
         if required_schedule is not None:
-            population = "whole-workload peak under serial independent acquisitions"
+            if self.catalog is None:
+                population = "whole-workload peak under serial independent acquisitions"
             assumptions = assumptions | {"independent acquisitions share workspace only under the required serial schedule"}
         args = dict(quantity=metric, unit=unit, scope=Scope(domain=population),
                     assumptions=tuple(sorted(assumptions)))
@@ -1003,11 +1023,67 @@ class _Fold:
             sources=tuple(sorted(value.sources)),
             derivation_sources=tuple(sorted(value.derived_from)), required_schedule=required_schedule)
 
+    def catalog_zeros(self):
+        """Return, as exact zeros, the counts to which no query of a query catalog can contribute.
+
+        The proof reads the declared definitions (``admission.nodes``), not
+        the nodes that the walk from the root reaches. A batch query selects
+        a subset of the declared IDs (``ir.selection.select_experiment``).
+        Its root batch is a copy with restricted settings, cleared axes and
+        a reset ``parent_id``, and every selected ID keeps its kind,
+        children, observation kind and repetitions, so each selected batch
+        keeps its terminal status (``admission.contains_batch``). A direct
+        classical host query keeps the declared definitions unchanged except
+        for its bindings. A batch under a zero-count ``Repeat`` or
+        ``AdaptiveLoop`` that the root never runs therefore stays in the
+        proof.
+
+        A count is zero for every query bound from the catalog's templates,
+        and so for any run, only when each declared contribution to it is
+        identically zero. With no declared block call, measurement, reset or
+        measurement batch, every quantum count of ``_QUANTUM_COUNTS`` is
+        zero, and classical work is not among them. When the declared
+        terminal batches are nonempty and all have exact-statistic kinds,
+        shots are zero. When they are nonempty and all have ``counts``,
+        exact evaluations are zero. An undeclared kind, provider-managed
+        sampling (``estimated_observable``), a mix of sampled and exact
+        kinds, or quantum nodes without a declared terminal batch give no
+        zero. A declaration that no experiment selects may prevent a zero
+        proof but never produces a false zero. A folded zero of a template
+        is never kept, because a count such as the Clifford count can change
+        with the angles that a query binds. The one pass over the declared
+        definitions is charged before it runs.
+        """
+        nodes = self.admission.nodes
+        self.admission.tick(len(nodes))
+        quantum, kinds = False, set()
+        for node in nodes.values():
+            quantum = quantum or node.kind in _QUANTUM_NODES
+            if isinstance(node, MeasurementBatch) and not self.admission.contains_batch[node.body]:
+                kinds.add(node.observation_kind)
+        if not quantum:
+            zero = _Value(0, assumptions=frozenset((
+                "the Program declares no quantum operation or measurement batch",)))
+            return dict.fromkeys(_QUANTUM_COUNTS, zero)
+        if kinds and not kinds & {"counts", "estimated_observable", None}:
+            return {"shots": _Value(0, assumptions=frozenset((
+                "every terminal measurement batch that the Program declares returns exact statistics",)))}
+        if kinds == {"counts"}:
+            return {"exact_evaluations": _Value(0, assumptions=frozenset((
+                "every terminal measurement batch that the Program declares samples counts",)))}
+        return {}
+
     def run(self):
         """Fold the root once and return the WorkloadEstimate.
 
         It holds the workload totals, the live-memory peaks and the
-        construction work of the reached definitions.
+        construction work of the reached definitions. For a query catalog
+        (``catalog``) the totals of the templates are not the totals of the
+        queries a run binds from them. Each count is then the zero of
+        ``catalog_zeros``, the literal root declaration of a root batch, or
+        unavailable with the catalog's reason, and the construction work is
+        unavailable with that reason. Each peak keeps its value, evidence and
+        schedule condition as a declared footprint of the catalog.
         """
         bindings = {item.parameter: number(item.value) for item in self.program.bindings}
         costs, peaks, _, _ = self.visit(self.program.root, bindings)
@@ -1025,6 +1101,12 @@ class _Fold:
                              assumptions=frozenset(("potential terminal point union over unresolved control/repetition",)))
         costs["unique_settings"] = unique
         costs.update(self.root_populations)
+        if self.catalog is not None:
+            zeros = self.catalog_zeros()
+            self.admission.tick(len(costs))
+            costs = {metric: zeros[metric] if metric in zeros
+                     else value if metric in self.root_populations else _unknown(self.catalog)
+                     for metric, value in costs.items()}
         populations = {
             "shots": "terminal MeasurementBatch sampled shots",
             "exact_evaluations": "terminal MeasurementBatch exact-statistic evaluations",
@@ -1036,27 +1118,32 @@ class _Fold:
         quantities = [self.quantity(metric, value,
                        population=populations.get(metric, "workload schedule envelope" if metric in DEPTHS and value.interpretation == "upper_bound" else "dynamic workload"))
                       for metric, value in costs.items()]
-        quantities += [self.quantity(metric, value, location=location, population="simultaneous live footprint")
+        footprint = "simultaneous live footprint" if self.catalog is None else _CATALOG_FOOTPRINT
+        quantities += [self.quantity(metric, value, location=location, population=footprint)
                        for (metric, location), value in sorted(peaks.items())]
-        work = _Value()
-        for selected in self.construction.selections:
-            if self.identities[selected.signature.name] in self.defined:
-                work = self.combine(work, _Value(selected.construction_work, "upper_bound") if selected.construction_work is not None
-                                    else _unknown("selected native definition construction work unavailable"))
-        for kernel in self.construction.kernels:
-            if kernel.content_id in self.defined:
-                work = self.combine(work, _Value(kernel.construction_work, "upper_bound"))
+        if self.catalog is not None:
+            work = _unknown(self.catalog)
+        else:
+            work = _Value()
+            for selected in self.construction.selections:
+                if self.identities[selected.signature.name] in self.defined:
+                    work = self.combine(work, _Value(selected.construction_work, "upper_bound") if selected.construction_work is not None
+                                        else _unknown("selected native definition construction work unavailable"))
+            for kernel in self.construction.kernels:
+                if kernel.content_id in self.defined:
+                    work = self.combine(work, _Value(kernel.construction_work, "upper_bound"))
         quantities.append(self.quantity("construction_work", work, population="potential unique selected definitions and host bindings; excludes dynamic replay and numerical host execution"))
         self.admission.tick(len(self.expr) + len(self.evidence) + len(quantities) + len(self.defined))
         return WorkloadEstimate(construction_id=self.construction.content_id, context=self.context,
             quantities=quantities, expressions=tuple(self.expr.values()), parameters=self.program.parameters,
             sources=tuple(self.evidence.values()), defined_selections=tuple(sorted(self.defined)),
             work_units=self.admission.steps, evaluated_contexts=len(self.memo) + len(self.leaves), limits=self.program.limits,
-            assumptions=self.program.premises + self.readiness.blockers + ("logical dependency schedule; no physical QEC/routing/factory projection",))
+            assumptions=self.program.premises + self.readiness.blockers + ("logical dependency schedule; no physical QEC/routing/factory projection",)
+            + (() if self.catalog is None else (self.catalog,)))
 
 
 def estimate(construction: SelectedConstruction, *, context: ResourceContext | None = None,
-             memo: dict | None = None) -> WorkloadEstimate:
+             memo: dict | None = None, catalog: str | None = None) -> WorkloadEstimate:
     """Estimate the resources of a planned circuit description without building or running it.
 
     Most callers use [`nwqlib.estimate(plan)`][nwqlib.scientist.estimate],
@@ -1069,12 +1156,12 @@ def estimate(construction: SelectedConstruction, *, context: ResourceContext | N
     `construction.program.limits` ([engineering
     constants](../ENGINEERING_CONSTANTS.md#shared-program-admission-limits)).
 
-    The result depends only on the construction and the context. A caller
-    that estimates several points of one Plan can pass one `memo`
-    dictionary for the duration of its operation, and an equal pair of
-    construction and context then returns the estimate already computed.
-    The `memo` dictionary belongs to that caller, and there is no
-    process-wide cache.
+    The result depends only on the construction, the context and `catalog`.
+    A caller that estimates several points of one Plan can pass one `memo`
+    dictionary for the duration of its operation, and an equal construction,
+    context and `catalog` then return the estimate already computed. The
+    `memo` dictionary belongs to that caller, and there is no process-wide
+    cache.
 
     Args:
         construction (SelectedConstruction): The planned circuit description,
@@ -1084,8 +1171,35 @@ def estimate(construction: SelectedConstruction, *, context: ResourceContext | N
             default, means `ResourceContext()`: the `"selected_logical"`
             basis, no resident data and an unspecified schedule.
         memo (dict | None): Optional dictionary owned by the caller, mapping
-            `(construction.content_id, context.content_id)` to the estimate
-            already computed for that pair.
+            `(construction.content_id, context.content_id, catalog)` to the
+            estimate already computed for that triple.
+        catalog (str | None): Default `None`, which estimates `construction`
+            as the workload it describes. Otherwise the reason that the
+            experiments of `construction` are templates of queries whose
+            parameter values a Run chooses one query at a time, as
+            [`Method.query_catalog_reason`][nwqlib.algorithms.protocol.Method.query_catalog_reason]
+            returns it for `nwqlib.estimate(plan)`. The counts of the
+            templates are then not the totals of a Run, and a count is
+            exactly zero only when no query bound from the templates can
+            contribute to it. The conditions for a zero read every
+            definition that the Program declares, including one that the
+            root never runs, because a query can select it. When no block
+            call, measurement, reset or measurement batch is declared, the
+            gate, depth, call, measurement, reset, setting, unique-setting,
+            preparation-component, shot and exact-evaluation counts are
+            zero. `shots` is zero when the Program declares at least one
+            terminal measurement batch and all of them return exact
+            statistics, and `exact_evaluations` is zero when it declares at
+            least one and all of them sample counts. A declaration that no
+            experiment selects may prevent a zero but never produces a false
+            one. Every other count and the construction work are unavailable
+            with this reason, except the setting and repetition declarations
+            of a root measurement batch, which keep their values. Each width
+            and byte peak keeps its value, evidence and schedule condition,
+            and its `population` and `fact.scope` name it a declared
+            footprint of the templates at their supplied or symbolic
+            parameter values, not a peak over a Run. The reason is added to
+            `assumptions`.
 
     Returns:
         workload (WorkloadEstimate): One quantity per metric and location.
@@ -1104,8 +1218,8 @@ def estimate(construction: SelectedConstruction, *, context: ResourceContext | N
     """
     context = ResourceContext() if context is None else context
     if memo is None:
-        return _Fold(construction, context).run()
-    key = (construction.content_id, context.content_id)
+        return _Fold(construction, context, catalog).run()
+    key = (construction.content_id, context.content_id, catalog)
     if key not in memo:
-        memo[key] = _Fold(construction, context).run()
+        memo[key] = _Fold(construction, context, catalog).run()
     return memo[key]

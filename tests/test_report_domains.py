@@ -70,6 +70,7 @@ def pencil(plan, *, value=3.0):
         overlap=((z(1.0),),),
         overlap_eigenvalues=(1.0,),
         eigenvalues=(value,),
+        offset_free_eigenvalues=(value,),
         coordinate_vectors=((z(1.0),),),
         kept_rank=1,
         overlap_cutoff=plan.method.overlap_cutoff,

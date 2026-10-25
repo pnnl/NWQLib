@@ -491,9 +491,15 @@ def verify(plan, result, *, options):
         raise ValueError("verification requires a completed projected value")
     checks = options.verification_checks(result)
     selected = tuple(zip(result.value_selected, result.value_theta, strict=True))
+    basis = basis_chains(selected)
     state_checks = bool(set(options.comparisons) & {"residual", "sector"})
+    if state_checks and plan.method.basis_growth is not None:
+        # The state frontier and work counts below follow the default basis
+        # of selected generators, its singles and products.
+        raise ValueError("residual and sector checks rebuild the default ADAPT basis and do not apply to a "
+                         "BoundedRitzGrowth basis; supplied_reference_energy and ProjectedVerificationOptions do")
     if state_checks and (
-        result.pencil is None or len(result.pencil.coefficients) != len(basis_chains(selected))
+        result.pencil is None or len(result.pencil.coefficients) != len(basis)
     ):
         raise ValueError(
             "state verification needs the actual completed pencil and basis coordinates"
@@ -576,7 +582,7 @@ def verify(plan, result, *, options):
         # zero fill, then a scaling and an addition for each basis state (2l
         # of them, or the reference alone when l = 0) and nine
         # renormalization passes.
-        work = d * (2 * len(basis_chains(selected)) + 10)
+        work = d * (2 * len(basis) + 10)
         lowered = None
         if plan.execution == "classical":
             # The reference preparation and one generator exponential per
@@ -616,7 +622,7 @@ def verify(plan, result, *, options):
             evolution = {key: _statevector_evolution_work(c, d) for key, c in lowered.items()}
             largest_gate = max(_largest_evolved_gate(c) for c in lowered.values())
             prefixes = {
-                chain[:end] for chain in basis_chains(selected) for end in range(1, len(chain) + 1)
+                chain[:end] for chain in basis for end in range(1, len(chain) + 1)
             }
             work += d + evolution[()] + sum(evolution[prefix[-1]] for prefix in prefixes)
         # A residual adds one H action and 3d for the scaling by E, the
@@ -673,7 +679,7 @@ def verify(plan, result, *, options):
                 counts["native_suffix_evolutions"] += 1
                 return np.asarray(Statevector(previous).evolve(lowered[items[-1]]).data)
         reuses = {}
-        state = _ritz_state(selected, coefficients, reference_at, evolve, reuses)
+        state = _ritz_state(basis, coefficients, reference_at, evolve, reuses)
         counts["ritz_combinations"] += 1
         if lowered is not None:
             counts["native_prefix_reuses"] += reuses.get("reuses", 0)

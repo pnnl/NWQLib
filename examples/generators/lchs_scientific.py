@@ -352,7 +352,7 @@ show_table([
 limits = trace.limits
 show_table([
     ("Qubits the local simulator accepts", limits.max_simulation_qubits, f"Default. This rod uses {total_qubits}"),
-    ("Simulator memory cap", f"{limits.simulator_memory_mb:,} MB", "Default simulator_memory_mb"),
+    ("Simulator memory cap", f"{limits.simulator_memory_mb:,} MiB", "Default simulator_memory_mb"),
     ("Address qubits", len(rec.success_bits), f"{rec.physical_branches} weighted branches in {rec.padded_branches} address slots"),
 ], headers=("Limit or use", "Value", "Meaning"))
 

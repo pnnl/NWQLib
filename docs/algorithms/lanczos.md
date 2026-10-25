@@ -119,6 +119,8 @@ For a noise-free illustration, take 32 eigenvalues $\lambda_j=-.95+1.9j/31$ with
 
 `Lanczos(sampling=SensitivitySampling(total_shots=1400, pilot_fraction=.2))` explicitly selects a pilot stage followed by a main stage. Both fields are required, and a scalar `shots` or `execution="classical"` conflicts with this choice. Every setting needs at least two shots per stage. The energy derivative includes the rotation of the kept Gram subspace ([Proposition 10](../mathematics.md#r10)). If an assumption of the allocation fails, the method falls back to uniform allocation without another pilot. The pilot and main observations and the analysis attempts are saved with the Run's iteration state. `run.resume(reanalyze=True)` explicitly retries an interrupted analysis and never resubmits measurements. Completed results use `result.analyze(...)`.
 
+For `SensitivitySampling`, `nwqlib.estimate(plan)` counts the settings declared in the Plan, without accounting for their use in both the pilot and main stages. Its setting and shot counts must therefore not be read as totals for the two-stage run, even when a count is labelled `exact`. The requested shot budget is `SensitivitySampling.total_shots`, while the Run records the work actually performed.
+
 For independent moment estimates with per-shot variances $v_k$, local energy derivatives $g_k$ and shot counts $n_k$, the linearized energy variance at fixed total shots $N$ satisfies
 
 ```math

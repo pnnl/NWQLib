@@ -792,12 +792,13 @@ def scan(
                     base_folds += 1
                 requested += len(estimate.assessments)
             else:
-                fold_key = selected.construction.content_id
+                catalog = selected.method.query_catalog_reason()
+                fold_key = (selected.construction.content_id, catalog)
                 if fold_key in folds:
                     estimate = folds[fold_key]
                     reused_folds += 1
                 else:
-                    estimate = fold(selected.construction, context=context)
+                    estimate = fold(selected.construction, context=context, catalog=catalog)
                     folds[fold_key] = estimate
                     base_folds += 1
             rows.append(

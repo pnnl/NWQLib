@@ -37,6 +37,9 @@ class _GeneralizedEigenResult:
 
     Attributes:
         eigenvalues: Ascending Ritz values, shape (r,), in the units of H.
+        offset_free_eigenvalues: The lowest min(2, r) Ritz values as eigh
+            computed them, before c_I is added, so that a tie or gap of the
+            unshifted pencil survives the rounding of E0 + c_I.
         eigenvectors: S-normalized coefficient vectors as columns, shape (m, r).
         ground_state_coefficients: First column of eigenvectors, the lowest Ritz vector.
         overlap_eigenvalues: Ascending eigenvalues of S before thresholding, shape (m,).
@@ -48,6 +51,7 @@ class _GeneralizedEigenResult:
     """
 
     eigenvalues: np.ndarray
+    offset_free_eigenvalues: tuple[float, ...]
     eigenvectors: np.ndarray
     ground_state_coefficients: np.ndarray
     overlap_eigenvalues: np.ndarray
@@ -353,6 +357,7 @@ def _solve_projected_pencil(
     processed_effective_hamiltonian = _hermitian_part(effective_hamiltonian)
     eigenvalues, reduced_eigenvectors = np.linalg.eigh(processed_effective_hamiltonian)
     del processed_effective_hamiltonian
+    offset_free_eigenvalues = tuple(float(value) for value in eigenvalues[:2])
     coefficient_vectors = orthogonalizer @ reduced_eigenvectors
     overlap_magnitudes = np.abs(normalization_overlap.real) + np.abs(normalization_overlap.imag)
     # Expanding both complex contractions into real dot products gives a
@@ -398,6 +403,7 @@ def _solve_projected_pencil(
     overlap_normalization_error = float(abs(overlap_norm - 1.0))
     result = _GeneralizedEigenResult(
         eigenvalues=np.real_if_close(eigenvalues),
+        offset_free_eigenvalues=offset_free_eigenvalues,
         eigenvectors=coefficient_vectors,
         ground_state_coefficients=ground_coefficients,
         overlap_eigenvalues=np.real_if_close(overlap_eigenvalues),

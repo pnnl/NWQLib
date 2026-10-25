@@ -321,7 +321,8 @@ def select_preparation(name: str, state: StateInput, *,
             the per-qubit ports.
 
     Raises:
-        ValueError: If the state's preparation has no circuit constructor, `choice` is unknown,
+        ValueError: If the state's preparation has no circuit constructor, the state was
+            rebuilt by `StateInput.from_record` and holds no data, `choice` is unknown,
             or `"hzh"` is used for an input that is not an occupation.
         TypeError: If `per_bit` is not a bool.
     """
@@ -330,6 +331,7 @@ def select_preparation(name: str, state: StateInput, *,
         raise ValueError(spec.blocker)
     if spec.implementation not in {"qiskit.direct", "qiskit.product", "qiskit.occupation", "qiskit.supplied"}:
         raise ValueError("this StateInput preparation has no native constructor and cost law at select_preparation")
+    state._require_data()
     if choice not in ("native", "hzh"):
         raise ValueError("known preparation choices are native and hzh")
     if choice == "hzh" and spec.implementation != "qiskit.occupation":

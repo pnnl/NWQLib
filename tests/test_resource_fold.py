@@ -342,6 +342,27 @@ def test_branch_adaptive_and_shot_populations_remain_conditional():
     batch = c.revise(program=original.revise(root="batch", definitions=definitions))
     result = estimate(batch, context=context)
     assert (scalar(result, "settings"), scalar(result, "shots"), scalar(result, "t")) == (2, 6, 36)
+    # Under Repeat(count=0) the root never runs the batch, but the batch stays a
+    # declared experiment that a query can select, so a catalog of query
+    # templates proves no zero for its settings, shots or measurements. Its
+    # counts kind still makes exact evaluations zero. One caller memo serves
+    # the raw, catalog and raw requests in turn and returns each its own
+    # estimate.
+    never = batch.revise(program=batch.program.revise(root="never", definitions=batch.program.definitions + (
+        Definition(id="never", node=Repeat(body="batch", count=0)),)))
+    memo = {}
+    raw = estimate(never, context=context, memo=memo)
+    assert (scalar(raw, "settings"), scalar(raw, "shots")) == (0, 0)
+    assert raw.quantity("settings").interpretation == raw.quantity("shots").interpretation == "exact"
+    templates = estimate(never, context=context, catalog="query templates", memo=memo)
+    for metric in ("shots", "settings", "measurements"):
+        quantity = templates.quantity(metric)
+        assert quantity.fact.availability == "unknown" and quantity.fact.reason == "query templates", str(quantity)
+    assert scalar(templates, "exact_evaluations") == 0
+    assert templates.quantity("exact_evaluations").interpretation == "exact"
+    raw = estimate(never, context=context, memo=memo)
+    assert (scalar(raw, "settings"), scalar(raw, "shots")) == (0, 0)
+    assert raw.quantity("settings").interpretation == raw.quantity("shots").interpretation == "exact"
     definitions = tuple(d.revise(node=d.node.revise(repetitions=None)) if d.id == "batch" else d for d in definitions)
     unknown = estimate(batch.revise(program=batch.program.revise(definitions=definitions)), context=context)
     assert scalar(unknown, "settings") == 2

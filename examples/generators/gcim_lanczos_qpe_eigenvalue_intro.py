@@ -3,7 +3,7 @@
 #
 # Four hydrogen atoms in a row, 2 Å apart, form a strongly correlated molecule, whose ground-state energy is the smallest eigenvalue of an 8-qubit Pauli-sum Hamiltonian. ADAPT-GCiM, the adaptive generator-coordinate-inspired method, computes it in a small basis of many-electron states without optimizing any angle, and the notebook compares it with the exact energy.
 #
-# Install with `python -m pip install "nwqlib[aer,notebook,chemistry]"`. To work on NWQLib itself, run `python -m pip install -e ".[aer,notebook,chemistry]"` in a clone of the repository instead. The notebook simulates circuits of at most 8 qubits and runs in about 7 s on an Apple M3 Max with 36 GiB of memory (Python 3.12.14, Qiskit 2.6.0, Aer 0.18.0).
+# Install with `python -m pip install "nwqlib[aer,notebook,chemistry]"`. To work on NWQLib itself, run `python -m pip install -e ".[aer,notebook,chemistry]"` in a clone of the repository instead. The notebook simulates circuits of at most 9 qubits and runs in about 15 s on an Apple M3 Max with 36 GiB of memory (Python 3.12.14, Qiskit 2.6.0, Aer 0.18.0).
 #
 # > **How to read this notebook.** The next cells compute the energy and show it with its cost.
 # >
@@ -98,9 +98,16 @@ def pair_circuits(basis_states):
     return basis_states * (basis_states + 1) // 2
 
 
+def grouped_settings(basis_states, groups):
+    """Measurement settings of all overlap and Hamiltonian matrix elements of a run with finite shots, under the
+    default grouped real-only measurement (Appendix A)."""
+    return basis_states * (basis_states + 1) // 2 * groups
+
+
 def hadamard_tests(basis_states, terms):
-    """Hadamard tests of all overlap and Hamiltonian matrix elements of a run with finite shots (Appendix A)."""
-    return basis_states * terms + basis_states * (basis_states - 1) // 2 * (2 * terms + 2)
+    """Hadamard tests of all overlap and Hamiltonian matrix elements of a termwise real-only run with finite shots
+    (Appendix A)."""
+    return basis_states * terms + basis_states * (basis_states - 1) // 2 * (terms + 1)
 
 
 def excitation(result, index):
@@ -156,9 +163,9 @@ def show_card(result, exact, references, molecule, host_cost, circuit_cost, seco
         f"the energy in hartree.</p>"
         f"<p><strong>Cost.</strong> Quantum, if run as circuits: {molecule.num_qubits + 1} qubits per circuit, "
         f"{pair_circuits(len(result.pencil.overlap))} circuits with exact readout and no shots, "
-        f"{'CX gates not predicted (no gate-count formula for these circuits)' if cx is None else f'{cx:,} CX gates'}. "
-        f"Classical: peak memory {format_bytes(amount(host_cost, 'known_memory', 'host'))} of known buffers, stated "
-        f"before the run, classical work {result.data.trace.host_work_reserved:,} units (a planning quantity, not "
+        f"{'CX gates not given before the run (ADAPT chooses each circuit from earlier results)' if cx is None else f'{cx:,} CX gates'}. "
+        f"Classical: {format_bytes(amount(host_cost, 'known_memory', 'host'))} of known buffers declared for one "
+        f"evaluation (Section 2), classical work {result.data.trace.host_work_reserved:,} units (a planning quantity, not "
         f"seconds), {seconds:.1f} s on this computer, chemistry setup included.</p>"))
     fig, ax = plt.subplots(figsize=(8, 3.8), layout="constrained")
     iterations = [step.iteration for step in result.history]
@@ -189,7 +196,7 @@ from nwqlib import estimate, plan
 
 references = {name: molecule.reference_panel[key] for name, key in
               (("Hartree–Fock", "e_hf"), ("MP2", "e_mp2"), ("CCSD", "e_ccsd"))}  # classical methods, for comparison
-host_cost = estimate(result.plan)  # the classical cost of this run, stated before it ran
+host_cost = estimate(result.plan)  # memory footprint of one evaluation, no run totals for ADAPT (Section 2)
 circuit_plan = plan(problem, method=molecule.adapt_method(pool=POOL, theta=THETA, max_iterations=MAX_ITERATIONS),
                     execution="quantum", seed=7)  # planned as circuits, not run
 circuit_cost = estimate(circuit_plan)
@@ -243,25 +250,33 @@ show_table([
 #
 # ## 2. What it costs
 #
-# **As circuits, the quantum cost is circuits, qubits and shots. The classical cost is memory, work and time on this computer.** No gate-count formula covers these circuits, so CX gates, depth and T gates are not predicted.
+# **As circuits, the quantum cost is circuits, qubits and shots. The classical cost is memory, work and time on this computer.** `estimate` leaves the circuit and gate counts of ADAPT unavailable, so the circuit count comes from the pair rule of Appendix A, and the count of finite-shot settings from its grouped rule.
 #
 # The card cell planned the chain as circuits without running them. Counts marked exact readout assume that the simulator evaluates the matrix elements directly from the complex state amplitudes, without shot sampling. These calculations still use floating-point arithmetic.
 #
-# `estimate` predicts the first iteration, because ADAPT chooses later circuits from earlier results. The pair rule of Appendix A, one circuit for each pair of basis states, counts the whole run, and Go deeper B checks it against executed circuits on H₂.
+# ADAPT chooses the generators, and with them the circuits, from earlier results, while every angle stays fixed at `THETA`. The number of circuits also depends on those results. `estimate` therefore treats each kind of evaluation of the plan, such as the gradient screening, the matrix elements of a pair of basis states or an energy, as a template that the iteration fills in. It leaves the circuit, gate and work counts unavailable, and it reports zero only where no evaluation can contribute, such as the shots with exact readout.
+#
+# Qubits and memory are the footprint of these templates, given at the parameter values that the plan declares. They are neither measured peaks nor the peak over the evaluations of a run. The pair rule, one circuit for each pair of basis states, counts the whole run, and Go deeper B checks it against executed circuits on H₂.
 
 # %%
 basis_states = len(result.pencil.overlap)
 pauli_terms = sum(1 for label, _ in molecule.hamiltonian.to_list() if set(label) != {"I"})
+sampled_plan = plan(problem, method=molecule.adapt_method(pool=POOL, theta=THETA, max_iterations=MAX_ITERATIONS),
+                    shots=1000, seed=7)  # planned with finite shots, not run
+energy_groups = len(sampled_plan.reconstruction.energy_groups)  # qubit-wise commuting groups of the Pauli terms
 show_table([
-    ("System qubits", amount(circuit_cost, "system", "logical_device"), "Predicted by estimate"),
+    ("System qubits", amount(circuit_cost, "system", "logical_device"), "Footprint from estimate"),
     ("Qubits per pair circuit", molecule.num_qubits + 1, "System qubits and one ancilla"),
-    ("Circuits of the first iteration, exact readout", amount(circuit_cost, "settings"), "Predicted by estimate"),
     ("Circuits of the whole run, exact readout", pair_circuits(basis_states),
      f"Pair rule, {basis_states} basis states. The gradients reuse these circuits"),
-    ("Shots, exact readout", amount(circuit_cost, "shots"), "Predicted by estimate"),
-    ("Circuits with finite shots", hadamard_tests(basis_states, pauli_terms),
-     f"Hadamard tests of the matrix elements, {pauli_terms} Pauli terms. The gradients add more"),
-    *[(label, "not predicted", "No gate-count formula for these circuits")
+    ("Shots, exact readout", amount(circuit_cost, "shots"), "Zero in estimate, because exact readout samples no shots"),
+    ("Settings with finite shots", grouped_settings(basis_states, energy_groups),
+     f"Grouped rule, {energy_groups} groups of qubit-wise commuting Pauli terms, real parts only. "
+     "The gradient screening adds more"),
+    ("Settings with finite shots, termwise", hadamard_tests(basis_states, pauli_terms),
+     f'Hadamard tests, one per Pauli term of each pair and one per off-diagonal overlap, {pauli_terms} Pauli '
+     'terms, matrix_measurement="termwise", real parts only'),
+    *[(label, "not available", "Not given by estimate, because ADAPT chooses each circuit from earlier results")
       for label, metric in (("CX gates", "cx"), ("Depth", "logical_depth"), ("T gates", "t"))
       if amount(circuit_cost, metric) is None],
 ], headers=("Quantum cost, the chain as circuits", "Count", "Source"))
@@ -269,18 +284,18 @@ show_table([
 # %%
 trace = result.data.trace
 show_table([
-    ("Peak memory", format_bytes(amount(host_cost, "known_memory", "host")), "Not measured"),
-    ("Work [units, a planning quantity, not seconds]",
-     f"{amount(host_cost, 'construction_work'):,} for construction, upper bound. The evaluation is checked one "
-     f"query at a time", f"{trace.host_work_reserved:,} counted for the evaluation"),
+    ("Memory of known buffers, one evaluation", format_bytes(amount(host_cost, "known_memory", "host")),
+     "Not measured"),
+    ("Work [units, a planning quantity, not seconds]", "Not predicted",
+     f"{trace.host_work_reserved:,} counted for the evaluation"),
     ("Stored run data", "Not predicted", format_bytes(trace.data_bytes)),
     ("Time on this computer", "Not predicted", f"{seconds:.1f} s for the chemistry setup and the solve, "
      f"{sum(event.timing.seconds for event in trace.events):.2f} s of it in its {len(trace.events)} classical evaluations"),
 ], headers=("Classical cost", "Before the run", "Recorded by the run"))
 
 # %% [markdown]
-# - **Peak memory** counts the known buffers of the evaluation: the cached state vectors, the action tables and the Hamiltonian. Python, PySCF and the rest of the process add to it.
-# - **Work.** Each evaluation is checked against `max_products` before it starts, because ADAPT chooses the next queries from earlier results. No total is therefore stated before the run.
+# - **Memory** is the footprint that `estimate` gives for one classical evaluation. It counts the known buffers of the cached state vectors, the action tables and the Hamiltonian, sized for the largest basis that `max_iterations` allows. Python, PySCF and the rest of the process add to it.
+# - **Work.** Each evaluation is checked against `max_products` before it starts, because ADAPT chooses the next evaluations from earlier results. No total is therefore stated before the run.
 # - **Not estimated:** physical qubits, error correction, run time on hardware and price.
 #
 # ## 3. How accurate?
@@ -316,9 +331,9 @@ show_table([(step.iteration, "Hartree–Fock state" if step.iteration == 0 else 
 #
 # ## 4. How large can I go?
 #
-# **The local simulator, the circuit limit and the work caps set the size. Beyond them, `plan` and `estimate` still give the cost.** The table lists the limits this run had and the chain's use of them.
+# **The local simulator, the circuit limit and the work caps set the size. For ADAPT, `plan` and `estimate` give only the footprint of one evaluation, because ADAPT chooses its circuits from earlier results.** The table lists the limits this run had and the chain's use of them.
 #
-# [Planning at scale](resource_estimation_at_scale.ipynb) plans a fixed GCiM trial basis at 80 to 100 qubits, sizes no simulator holds.
+# [Planning at scale](resource_estimation_at_scale.ipynb) plans a fixed GCiM trial basis at 80 to 100 qubits, sizes no simulator holds, and there `estimate` gives the total settings, shots and CX gates.
 
 # %%
 limits = trace.limits
@@ -330,8 +345,8 @@ show_table([
     ("Basis states", method.max_basis_size, f"Default max_basis_size, two per iteration. This run uses {basis_states}"),
     ("Scalar products per evaluation", method.max_products,
      "Default max_products. It also covers planning the chain as circuits"),
-    ("Exact evaluation: peak memory", format_bytes(amount(host_cost, "known_memory", "host")),
-     "Known buffers, stated by estimate before the run"),
+    ("Exact evaluation: memory of known buffers", format_bytes(amount(host_cost, "known_memory", "host")),
+     "Footprint of one evaluation from estimate, not measured"),
 ], headers=("Limit or cost", "Value", "Meaning"))
 
 # %% [markdown]
@@ -385,7 +400,8 @@ print(f"exact diagonalization {my_exact:.6f} Ha, error of Lanczos {my_lanczos.ei
 #
 # - **Planning beyond simulation.** `plan` and `estimate` work at sizes no simulator holds ([Planning at scale](resource_estimation_at_scale.ipynb)).
 # - **The formula behind every number.** The circuit counts follow the pair rule of Appendix A, which Go deeper B checks against executed circuits. [Mathematics](../docs/mathematics.md) gives the resource formulas, and the resource notebook compares them with compiled circuits at small sizes.
-# - **One argument switches the method.** `method=Lanczos(...)` or `method=QCELS(...)` in the same `solve` call replaces ADAPT-GCiM (Go deeper D).
+# - **One argument switches the method.** `method=Lanczos(...)`, `method=QCELS(...)` or `method=QFD(...)` in the same `solve` call replaces ADAPT-GCiM (Go deeper D).
+# - **Measurement and basis options.** `acquisition=PencilAcquisition(...)` changes only how the matrix elements are measured, and `basis_growth=BoundedRitzGrowth(...)` grows a basis of short generator products. The [GCiM guide](../docs/algorithms/gcim.md#choose-the-measurement-and-the-basis) says which to choose for common inputs, and the [shallow-circuit notebook](gcim_qfd_shallow_workflows.ipynb) compares them on H₂ and this chain.
 # - **Reanalysis without new evaluation.** The result keeps every matrix element, so `result.analyze` solves again with another overlap cutoff (Go deeper C).
 # - **Saved and reloaded.** A saved result reloads with its matrix elements, and its numbers can be recomputed (Appendix B).
 #
@@ -446,11 +462,11 @@ show_table([
 #
 # A diagonal element needs only the system state $\psi_i$. The circuit of the current full product state also returns the commutator gradients that the selection step uses, so that step adds no circuit.
 #
-# <details><summary>Hadamard tests for finite shots</summary>
+# <details><summary>Measurement settings for finite shots</summary>
 #
-# With finite shots each matrix element is measured with Hadamard tests, one circuit with a single ancilla qubit for every Pauli term of $H$ and for the real and imaginary parts.
+# With finite shots the default `PencilAcquisition()` measures the same joint state in several settings. Each setting measures one group of qubit-wise commuting Pauli terms of $H$ in their common eigenbasis, together with the ancilla in the X basis, and the counts give the real parts of $\langle\psi_i|P_k|\psi_j\rangle$ for every term $P_k$ of the group and of the overlap. The molecular Hamiltonian, the Hartree–Fock state and the spin-adapted generators are real, so the library proves that $H$ and $S$ are real and leaves out the ancilla Y settings of the imaginary parts ([GCiM guide](../docs/algorithms/gcim.md#how-matrix-elements-are-obtained)).
 #
-# Their ancilla outcome probabilities are $\tfrac12\pm\tfrac12\,\mathrm{Re}\langle\psi_i|P_k|\psi_j\rangle$ (arXiv:2312.07691v3, Appendix G, Eqs. (G4)–(G5)), and a phase gate $S^\dagger$ on the ancilla gives the imaginary part.
+# `PencilAcquisition(matrix_measurement="termwise", pair_preparation="controlled")` instead measures one Hadamard test per Pauli term, whose ancilla outcome probabilities are $\tfrac12\pm\tfrac12\,\mathrm{Re}\langle\psi_i|P_k|\psi_j\rangle$ (arXiv:2312.07691v3, Appendix G, Eqs. (G4)–(G5)).
 #
 # </details>
 
@@ -481,9 +497,9 @@ show_table([
 # %% [markdown]
 # The two runs agree to rounding and select the same generator. For H₂ one iteration is exact, because the ground state lies in the span of the Hartree–Fock state and the doubly excited state that the first generator adds. This run checks the circuits, not the convergence.
 #
-# The chain as circuits fits the default `max_products`, and its 136 circuits fit the default `ExecutionLimits(max_total_circuits=512)`. With `shots=1000` the matrix elements are measured with Hadamard tests (Appendix A), and the gradients need one circuit per group of commuting Pauli terms.
+# The chain as circuits fits the default `max_products`, and its 136 circuits fit the default `ExecutionLimits(max_total_circuits=512)`. With `shots=1000` the matrix elements are measured in the grouped settings of Appendix A, and each gradient screening needs one setting per group of qubit-wise commuting terms of its commutators.
 #
-# Under the default limits, `solve` then refuses the first matrix evaluation before any of its circuits runs, and the message names the limit to raise. `limits=ExecutionLimits(max_total_circuits=..., max_total_shots=...)`, with `ExecutionLimits` from `nwqlib.execution`, must cover the larger totals.
+# Under the default limits, such a run reaches the limit of 512 circuits before it ends, and `solve` refuses the circuit that would exceed it with a message that names the limit to raise. `limits=ExecutionLimits(max_total_circuits=..., max_total_shots=...)`, with `ExecutionLimits` from `nwqlib.execution`, must cover the larger totals.
 #
 # ### C. When the energy becomes exact, and another overlap cutoff
 #
@@ -533,11 +549,13 @@ show_table(rows, headers=("Overlap cutoff", "Kept directions", "Overlap conditio
 #
 # ### D. Other eigenvalue methods on the chain
 #
-# **How do Chebyshev Lanczos and QCELS, started from the same Hartree–Fock state, compare with ADAPT-GCiM on H₄?** The cell makes ten solves with exact evaluation, about 1 s, and plans each method's quantum circuit without running it.
+# **How do Chebyshev Lanczos, QCELS and QFD, started from the same Hartree–Fock state, compare with ADAPT-GCiM on H₄?** The cell makes ten solves with exact evaluation, about 1 s, and one QFD solve as six 9-qubit circuits with exact readout, a few seconds, and plans the Lanczos and QCELS circuits without running them.
 #
 # **Chebyshev Lanczos** (Kirby, Motta and Mezzacapo, [*Quantum* **7**, 1018 (2023)](https://doi.org/10.22331/q-2023-05-23-1018), arXiv:2208.00567v4) builds a Krylov space from Chebyshev polynomials of $H$ applied to the initial state. Each extra Krylov dimension adds higher polynomial moments, measured through a block encoding of $H$.
 #
 # **QCELS** (Ding and Lin, [*PRX Quantum* **4**, 020331 (2023)](https://doi.org/10.1103/PRXQuantum.4.020331), arXiv:2211.11973v2) measures the signal $\langle\phi_0|e^{-iHt}|\phi_0\rangle$ at times up to `max_time` and fits one complex exponential to it, whose frequency is the energy estimate.
+#
+# **QFD**, quantum filter diagonalization (Parrish and McMahon, arXiv:1909.08925v1, Sec. II.C), projects $H$ onto the states $V^p|\phi_0\rangle$ for a few integer powers $p$ of one fixed product-formula step $V$, here built from the number-conserving fermionic blocks of the same integrals ([QFD guide](../docs/algorithms/qfd.md)). It runs as circuits only.
 #
 # Two quantities decide how well QCELS works. The squared overlap $p_0$ of the initial state with the ground state sets how strongly the ground-state frequency dominates the signal. `max_time` sets the longest coherent evolution, and with it the circuit depth.
 #
@@ -571,6 +589,8 @@ show_table(rows, headers=("Overlap cutoff", "Kept directions", "Overlap conditio
 
 # %%
 from nwqlib.algorithms import QCELS, Lanczos
+from nwqlib.algorithms import QFD
+from nwqlib.algorithms.qfd import chemistry_evolution_terms
 from nwqlib.problems import ingest_occupation
 
 initial_state = ingest_occupation(molecule.reference_occupations, num_qubits=molecule.num_qubits)  # Hartree–Fock
@@ -600,19 +620,27 @@ for ax, values, errors, xlabel, title in (
     ax.legend(fontsize=8)
 plt.show()
 
+qfd_terms, qfd_diagnostics = chemistry_evolution_terms(molecule)  # fermionic generator of V, from the same integrals
+qfd_run = solve(problem, method=QFD(initial_state=initial_state, time_step=0.5, powers=(0, 1, 2),
+                                    evolution="fermionic_blocks", evolution_terms=qfd_terms,
+                                    evolution_diagnostics=qfd_diagnostics),
+                seed=7, progress=False)  # six pair circuits on Aer, exact readout
+
 lanczos_plan = plan(problem, method=Lanczos(initial_state=initial_state, krylov_dimension=krylov_dimensions[2]),
                     execution="quantum", seed=7)
 qcels_plan = plan(problem, method=QCELS(initial_state=initial_state), execution="quantum", seed=7)
 show_table([
     ("ADAPT-GCiM", f"{result.history[-1].iteration} iterations", MILLIHARTREE * (result.eigenvalue - E_FCI),
      molecule.num_qubits + 1, "Pair circuits of fixed-angle excitations. The circuit count grows with the basis size."),
+    ("QFD", "powers 0, 1, 2 of one step of 0.5/Ha", MILLIHARTREE * (qfd_run.eigenvalue - E_FCI),
+     molecule.num_qubits + 1, "Pair circuits of controlled powers of one product-formula step V."),
     ("Lanczos", f"Krylov dimension {krylov_dimensions[2]}", lanczos_errors[2],
      amount(estimate(lanczos_plan), "logical_width", "logical_device"),
      "Repeated applications of a block encoding of H. Extra qubits address the Pauli terms."),
     ("QCELS", f"longest time {longest_times[-1]:g}/Ha", qcels_errors[-1],
      amount(estimate(qcels_plan), "logical_width", "logical_device"),
      f"Controlled time evolution up to t = {longest_times[-1]:g}/Ha, that is {qcels_selection.powers[-1].power} steps of τ."),
-], headers=("Method", "Setting", "Error [mHa], exact evaluation", "Qubits of the planned circuit",
+], headers=("Method", "Setting", "Error [mHa], exact matrix elements", "Qubits of the planned circuit",
             "What the circuits contain"))
 display(HTML(f"<p>Squared overlap p<sub>0</sub> of the Hartree–Fock state with the exact ground state: {overlap:.2f}. "
              f"QCELS time step τ = {qcels_selection.tau:.3g}/Ha, from the row-sum bound R = "
@@ -628,6 +656,8 @@ display(HTML(f"<p>Squared overlap p<sub>0</sub> of the Hartree–Fock state with
 # At longest times between the plotted ones the error can rise again, for example to 12 mHa at 35/Ha against 3 mHa at 30/Ha. The excited states that the Hartree–Fock state contains shift the fitted frequency by an amount that varies with the longest time.
 #
 # `QCELS(max_time=...)` sets the circuit depth, and in this example a longer time lowers the error on the whole but not at every step. The Krylov dimension of Lanczos sets the number of measured moments.
+#
+# QFD with three powers lies a few mHa above FCI with 9-qubit circuits, from six pair circuits with exact readout. Its basis comes from the time evolution of the reference, with no generator pool, and more powers or another time step change that basis. The [shallow-circuit notebook](gcim_qfd_shallow_workflows.ipynb) compares three and five powers on this chain.
 
 # %% [markdown]
 # ## Appendix
@@ -640,17 +670,22 @@ display(HTML(f"<p>Squared overlap p<sub>0</sub> of the Hartree–Fock state with
 #
 # $$N_{\rm exact}(b)=\frac{b(b+1)}{2},$$
 #
-# for any number of Pauli terms. With finite shots and $P$ non-identity Pauli terms, each diagonal element $H_{ii}$ needs $P$ Hadamard tests for its real part, and $S_{ii}=1$ needs none. Each off-diagonal pair $i<j$ needs the real and imaginary parts of $S_{ij}$ and of every Pauli term of $H_{ij}$, so
+# for any number of Pauli terms. With finite shots, $G$ groups of qubit-wise commuting non-identity Pauli terms and real-only measurement, the default grouped measurement uses $G$ settings for each pair, diagonal or not, so
 #
-# $$N_{\rm Hadamard}(b)=bP+\frac{b(b-1)}{2}\,(2P+2),$$
+# $$N_{\rm grouped}(b)=\frac{b(b+1)}{2}\,G.$$
 #
-# and the gradients add one circuit per group of commuting Pauli terms at each selection step. Circuits from earlier iterations are reused, so both are cumulative counts. The helper cell after the first code cell implements both, and the table evaluates them for the basis sizes of this run.
+# Measuring both the real and imaginary parts doubles the settings of each off-diagonal pair. Termwise real-only measurement with $P$ non-identity Pauli terms needs $P$ Hadamard tests for each diagonal element $H_{ii}$, since $S_{ii}=1$ needs none, and the real parts of $S_{ij}$ and of every Pauli term of $H_{ij}$ for each off-diagonal pair $i<j$, so
+#
+# $$N_{\rm termwise}(b)=bP+\frac{b(b-1)}{2}\,(P+1).$$
+#
+# The gradients add one setting per group of commuting terms of their commutators at each selection step. Circuits from earlier iterations are reused, so these are cumulative counts. The helper cell after the first code cell implements them, and the table evaluates them for the basis sizes of this run.
 
 # %%
 show_table([(step.iteration, 2 * step.iteration, pair_circuits(2 * step.iteration),
-             hadamard_tests(2 * step.iteration, pauli_terms))
+             grouped_settings(2 * step.iteration, energy_groups), hadamard_tests(2 * step.iteration, pauli_terms))
             for step in result.history[1:]],
-           headers=("Iteration", "Basis states", "Exact circuits", "Hadamard tests (shots)"))
+           headers=("Iteration", "Basis states", "Exact circuits", "Grouped settings (shots)",
+                    "Termwise Hadamard tests (shots)"))
 print(f"H2 check: the pair rule gives {pair_circuits(len(h2_circuits.pencil.overlap))} circuits, "
       f"and Go deeper B executed {h2_executed}.")
 

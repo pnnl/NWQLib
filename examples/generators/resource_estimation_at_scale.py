@@ -400,7 +400,7 @@ compile_seconds = perf_counter() - started
 show_accuracy_summary(compiled_checks, compile_seconds)
 
 # %% [markdown]
-# The GCiM CX bound is twice the compiled count of its eight circuits on 3 system qubits, $R=2$ (Appendix E). It is an upper bound on the CX gates of the planned controlled product preparations, not an exact count.
+# The GCiM CX bound is twice the compiled count of its six circuits on 3 system qubits, $R=2$ (Appendix E). It is an upper bound on the CX gates of the planned controlled product preparations, not an exact count.
 #
 # **Optimization.** Section 4 estimates the cost of one step of quantum Hamiltonian descent (QHD) in the one-hot and binary encodings, up to 96 qubits.
 #
@@ -858,19 +858,19 @@ show_qhd_table(QHD_GRID_POINTS, {key: value.quantity("logical_width", location="
 # %% [markdown]
 # ## 5. Eigenvalues with GCiM: a fixed trial basis for a parity Hamiltonian
 #
-# A fixed GCiM trial basis of two product states needs eight measurement settings at every size from 80 to 100 qubits. The generator-coordinate-inspired method (GCiM, Zheng et al., arXiv:2312.07691v3) approximates eigenvalues of a Hamiltonian $A$ by projecting it onto the span of a few trial states $\phi_i$.
+# A fixed GCiM trial basis of two product states needs six measurement settings at every size from 80 to 100 qubits. The generator-coordinate-inspired method (GCiM, Zheng et al., arXiv:2312.07691v3) approximates eigenvalues of a Hamiltonian $A$ by projecting it onto the span of a few trial states $\phi_i$.
 #
 # With $H_{ij}=\langle\phi_i|A|\phi_j\rangle$ and $S_{ij}=\langle\phi_i|\phi_j\rangle$ it solves the generalized eigenproblem $Hc=ESc$, whose size is the number $m$ of trial states, not $2^q$. `FixedGCIM` takes the trial states from the user.
 #
 # <details><summary>How the matrix entries are measured</summary>
 #
-# With finite shots it prepares each off-diagonal pair of trial states as one joint state of an ancilla qubit and the system, and measures the ancilla in X or Y together with one qubit-wise-commuting group of Pauli terms per setting, while each diagonal entry measures its trial state once per group.
+# With finite shots it prepares each off-diagonal pair of trial states as one joint state of an ancilla qubit and the system, and measures the ancilla in X or Y together with one qubit-wise-commuting group of Pauli terms per setting, while each diagonal entry measures its trial state once per group. Here $A$ and both trial states are real, so the default `quadratures="auto"` proves from the inputs that $H$ and $S$ are real and leaves out the Y settings, which measure imaginary parts ([real-only measurement](../docs/algorithms/gcim.md#how-matrix-elements-are-obtained)).
 #
 # </details>
 #
 # The example is the parity Hamiltonian $A=-Z^{\otimes q}-0.7\,X^{\otimes q}$, in which every system qubit participates, with the two product trial states $(\cos\theta\,|0\rangle+\sin\theta\,|1\rangle)^{\otimes q}$ at $\theta=\pi/8$ and $3\pi/8$.
 #
-# The workload has $m=2$ trial states, $L=2$ nonidentity Pauli terms and 1024 shots per setting (`SHOTS`), measured one after another. Normalized trial states fix $S_{ii}=1$. The two terms act with different letters on every qubit, so they form $G=2$ qubit-wise-commuting groups, and the plan has $m^2G$ measurement settings (Appendix A).
+# The workload has $m=2$ trial states, $L=2$ nonidentity Pauli terms and 1024 shots per setting (`SHOTS`), measured one after another. Normalized trial states fix $S_{ii}=1$. The two terms act with different letters on every qubit, so they form $G=2$ qubit-wise-commuting groups, and the real-only plan has $m(m+1)G/2$ measurement settings (Appendix A).
 
 # %%
 show_table([(q, number(gcim_cx[q].quantity("logical_width", location="logical_device")),
@@ -880,17 +880,17 @@ show_table([(q, number(gcim_cx[q].quantity("logical_width", location="logical_de
                     "CX upper bound, all shots", "plan, s", "estimate, s"))
 
 # %% [markdown]
-# The four off-diagonal settings cost at most $32q$ CX per execution of all settings, or $32q\times1024$ over all shots. The four diagonal settings and the one-qubit readout rotations contribute zero CX. These counts precede hardware routing.
+# The two off-diagonal settings cost at most $16q$ CX per execution of all settings, or $16q\times1024$ over all shots. The four diagonal settings and the one-qubit readout rotations contribute zero CX. These counts precede hardware routing.
 #
 # <details><summary>Where the bound comes from, and how tight it is</summary>
 #
-# Each off-diagonal setting contains two controlled product preparations, each bounded by $4q$ CX under the one-qubit preparation formula of the plan. Appendix E compiles the three-qubit plan to 48 CX per complete execution, half its 96-CX bound, because these real product states use one two-CX controlled RY per site. T gates and physical resources are unavailable because these formulas do not supply them.
+# Each off-diagonal setting contains two controlled product preparations, each bounded by $4q$ CX under the one-qubit preparation formula of the plan. Appendix E compiles the three-qubit plan to 24 CX per complete execution, half its 48-CX bound, because these real product states use one two-CX controlled RY per site. T gates and physical resources are unavailable because these formulas do not supply them.
 #
 # </details>
 #
 # These are measurement costs, and they certify no energy. Shot noise, the conditioning of the overlap matrix $S$, the error of the two-state trial space and whether the lowest projected eigenvalue identifies the full-space ground state remain unresolved.
 #
-# With the same two trial states, the open Ising chain $-\sum_jZ_jZ_{j+1}-0.7\sum_jX_j$ on 80 qubits has 159 Pauli terms, but its $ZZ$ terms and its $X$ terms form two qubit-wise-commuting groups, so its plan also has eight settings.
+# With the same two trial states, the open Ising chain $-\sum_jZ_jZ_{j+1}-0.7\sum_jX_j$ on 80 qubits has 159 Pauli terms, but its $ZZ$ terms and its $X$ terms form two qubit-wise-commuting groups, so its plan also has six settings.
 
 # %% [markdown]
 # ## Summary
@@ -1282,16 +1282,17 @@ show_table([(name, *(cell for encoding in QHD_ENCODINGS for cell in (
            details="QHD error sources of the 32-point plans")
 
 # %% [markdown]
-# **GCiM counts.** For $M$ required upper-triangle pairs, including $D$ diagonal pairs, and $G>0$ qubit-wise-commuting groups, FixedGCIM has $N=2(M-D)G+DG$ settings and $sN$ shots for $s$ shots per setting. A diagonal setting applies one uncontrolled trial preparation. Each off-diagonal setting applies two controlled preparations and measures the ancilla in X or Y together with the group's local basis.
+# **GCiM counts.** For $M$ required upper-triangle pairs, including $D$ diagonal pairs, and $G>0$ qubit-wise-commuting groups, FixedGCIM has $N=Q(M-D)G+DG$ settings and $sN$ shots for $s$ shots per setting, where $Q=2$ when both the real and imaginary parts are measured and $Q=1$ under real-only measurement. A diagonal setting applies one uncontrolled trial preparation. Each off-diagonal setting applies two controlled preparations and measures the ancilla in X, or in Y for an imaginary part, together with the group's local basis.
 #
-# For the product states used here, each controlled preparation has a $4q$ CX upper bound, and uncontrolled preparations and readout rotations have zero CX. The CX upper bound is therefore $16q(M-D)G$ per execution of all settings, or $8q m(m-1)G$ for a complete pencil of $m$ trial states.
+# For the product states used here, each controlled preparation has a $4q$ CX upper bound, and uncontrolled preparations and readout rotations have zero CX. The CX upper bound is therefore $8qQ(M-D)G$ per execution of all settings, or $4qQm(m-1)G$ for a complete pencil of $m$ trial states.
 #
-# With $m=2$, $G=2$ and $s=1024$, this gives 8 settings, 8192 shots and $32q\times1024$ CX. The real product states compile to $16q$ CX per complete execution under the Appendix E settings, giving an upper-bound-to-compiled ratio of two.
+# These real inputs use real-only measurement, $Q=1$. With $m=2$, $G=2$ and $s=1024$, this gives 6 settings, 6,144 shots and $16q\times1024$ CX. The real product states compile to $8q$ CX per complete execution under the Appendix E settings, giving an upper-bound-to-compiled ratio of two.
 
 # %%
 def gcim_count_formulas(q, trial_states=2, groups=2, shots=SHOTS):
-    """Width, settings and shots of Appendix A for a fixed GCiM basis measured in qubit-wise-commuting groups."""
-    settings = trial_states**2 * groups
+    """Width, settings and shots of Appendix A for a fixed GCiM basis measured in qubit-wise-commuting groups,
+    with real-only measurement."""
+    settings = trial_states * (trial_states + 1) // 2 * groups
     return q + 1, settings, shots * settings
 
 
@@ -1520,7 +1521,7 @@ print("The stored potential tables and constant equal the quadratic at every gri
 # The $K=4$ binary circuit selects Walsh rotations for its kinetic tables and has no dense diagonal, so its `diagonal_wrap` source is `not_applicable`, while the $K=8$ circuit has dense diagonals and an `unavailable` wrap error.
 
 # %% [markdown]
-# **GCiM circuits.** The next cell plans the Section 5 problem on three system qubits, prepares all eight circuits with `prepare(plan, settings="all")` without submitting them, compiles each at optimization level 0 with the settings above and weights it by the shots of its setting. Nothing is simulated.
+# **GCiM circuits.** The next cell plans the Section 5 problem on three system qubits, prepares all six circuits with `prepare(plan, settings="all")` without submitting them, compiles each at optimization level 0 with the settings above and weights it by the shots of its setting. Nothing is simulated.
 
 # %%
 gcim_small = plan(Eigenproblem(A=ingest_pauli([("ZZZ", -1.0), ("XXX", -0.7)], num_qubits=3)), shots=SHOTS, seed=7,
@@ -1542,7 +1543,7 @@ show_table([(3, gcim_compiled["circuits"], gcim_compiled["one_execution"], gcim_
                     "CX formula, all shots", "Label", "Ratio R"))
 
 # %% [markdown]
-# The compiled circuits stay within the GCiM bound, which is $R=2$ times their count. Only the four off-diagonal settings contain CX gates. The bound is an upper bound on the CX gates of the planned controlled preparations, not an exact count, and this construction does not attain it.
+# The compiled circuits stay within the GCiM bound, which is $R=2$ times their count. Only the two off-diagonal settings contain CX gates. The bound is an upper bound on the CX gates of the planned controlled preparations, not an exact count, and this construction does not attain it.
 
 # %% [markdown]
 # ### F. Your own problem

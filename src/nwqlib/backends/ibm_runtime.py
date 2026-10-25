@@ -25,9 +25,21 @@ from typing import Annotated, ClassVar, Literal
 from pydantic import Field, model_validator
 
 from nwqlib.core.records import PositiveInt, Record, Source, Text
-from nwqlib.execution import CountsSampling
+from nwqlib.execution import CountsSampling, NativeDepth
 from nwqlib.operators.access import Count
 from nwqlib.backends._qpy_buffer import QpyBuffer
+
+
+# The only qiskit-ibm-runtime version under which counts can have a qualified
+# native depth (IBMRuntimeBackend._options). For this version the Sampler
+# options were read for the meaning and effective default of
+# dynamical_decoupling.enable, twirling.enable_gates and
+# twirling.enable_measure, for an explicit False being sent to the service
+# rather than dropped like an unset option, and for every other supported
+# Sampler option that transforms the submitted circuit or turns such a
+# transformation on by default. Repeat these three checks before adding
+# another version. That the three fields still parse shows none of them.
+_CHECKED_RUNTIME_VERSION = "0.49.0"
 
 
 def sampler_decode_bytes(widths, shots):
@@ -99,7 +111,11 @@ class _PreparedIBM:
     circuit is None after a result-only restore, when retrieval needs only the
     saved association. classical_layout is the logical register layout that the
     decoder restores. observable is the layout-mapped estimator observable, or
-    None for counts.
+    None for counts. metadata["requested_options_json"] is the JSON of the
+    effective primitive options (IBMRuntimeBackend._options), the request with
+    the frozen counts defaults and the Estimator resilience level written in.
+    It equals PreparedArtifact.provider_options_json, and admit_batch builds
+    the options of a new job from it.
     """
 
     circuit: object
@@ -125,7 +141,20 @@ class IBMRuntimeBackend(Record):
     saved in the configuration or the Run's files.
 
     Preparation compiles each circuit for the device with the Plan's runtime seed
-    and keeps the logical-to-physical layout. The Estimator's resilience level is
+    and keeps the logical-to-physical layout. The preparation record also keeps
+    the native two-qubit depth of the compiled circuit
+    ([`PreparedArtifact.native_depth`][nwqlib.execution.PreparedArtifact]). It
+    is qualified only for counts whose options keep the provider's dynamical
+    decoupling, gate twirling and measurement twirling off (`options_json`),
+    and only with qiskit-ibm-runtime 0.49.0, the version whose Sampler options
+    were checked for this. It is never qualified for a provider estimate,
+    because the Estimator measures the observable with circuits that the
+    provider builds from the compiled one. A requested depth limit also
+    refuses a circuit when the installed nwqlib, Qiskit or qiskit-ibm-runtime
+    version differs from the one recorded at its preparation, as after a Run
+    is reopened in another environment
+    (`nwqlib.backends.inspection.check_native_depth_cap`).
+    The Estimator's resilience level is
     zero unless `options_json` selects another, so no error mitigation runs
     implicitly, and the Plan sets the precision. The Run bounds serialized
     buffers and decoded arrays. SDK HTTP buffering, retries, compilation memory,
@@ -153,9 +182,19 @@ class IBMRuntimeBackend(Record):
         calibration_id: Default `None`. Device calibration ID passed to the IBM
             SDK when the device is opened.
         options_json: Default `"{}"`. JSON object of the requested primitive
-            options. It states the requested options, not the server's defaults.
-            Experimental option overrides are rejected, because they can bypass the
-            requested readout and its uncertainty.
+            options. It states the requested options, not the server's defaults,
+            and the configuration keeps it as given. For counts, preparation
+            sets each of `dynamical_decoupling.enable`, `twirling.enable_gates`
+            and `twirling.enable_measure` that the request leaves unset to
+            `false`, the Sampler default that qiskit-ibm-runtime 0.49.0
+            documents. The preparation record keeps these effective options
+            ([`PreparedArtifact.provider_options_json`][nwqlib.execution.PreparedArtifact]),
+            and every job of the preparation is sent with them, also from a
+            reopened Run with another installed SDK, whose own validation can
+            still reject them. An option set to `true` stays on, and the
+            native depth of that preparation is then unqualified.
+            Experimental option overrides are rejected, because they can
+            bypass the requested readout and its uncertainty.
         optimization_level: Default `1`. Qiskit preset pass-manager level, 0 to 3.
             A level other than 1 adds the
             [roundoff exclusion](../glossary.md#roundoff-exclusion)
@@ -262,14 +301,28 @@ class IBMRuntimeBackend(Record):
         return backend
 
     def _options(self, run, kind):
-        """Build the requested primitive options and their canonical JSON form.
+        """Build the canonical JSON of the effective primitive options and the reason they leave
+        the native depth unqualified.
 
-        The same JSON is compared at launch, so a job is submitted with exactly
-        the options recorded at preparation. Estimator precision belongs to the
-        Plan and cannot be overridden here. Resilience level zero is the default
-        so the wrapper does not start mitigation work unasked
+        The effective options are the request of ``options_json`` with the
+        defaults below written in, validated by the installed SDK. ``prepare``,
+        the only caller, saves their JSON with the preparation, and
+        ``admit_batch`` builds every job's options from that saved JSON
+        without writing in any default again, so a job is sent with the
+        options recorded at preparation, also after the Run is reopened with
+        another SDK. Estimator precision belongs to the Plan and
+        cannot be overridden here. Resilience level zero is the Estimator
+        default so the wrapper does not start mitigation work unasked
         (ENGINEERING_CONSTANTS.md, "IBM primitive preparation").
+
+        For counts, each of ``dynamical_decoupling.enable``,
+        ``twirling.enable_gates`` and ``twirling.enable_measure`` holds its
+        SDK-validated Boolean, with an unset one written as False. The reason
+        is None only for counts with all three False under the checked
+        qiskit-ibm-runtime version (``_CHECKED_RUNTIME_VERSION``). Otherwise it
+        is the text that the preparation records in place of the native depth.
         """
+        from importlib.metadata import version
         from nwqlib._optional import optional_import
         options_module = optional_import("qiskit_ibm_runtime.options", extra="ibm")
         from nwqlib._run_journal import encode
@@ -291,20 +344,73 @@ class IBMRuntimeBackend(Record):
                 # punctuation.
                 run.check_data(6 * len('resilience_level') + 16)
                 values["resilience_level"] = 0
-            options = options_module.EstimatorOptions(**values)
+            # The installed SDK validates the request before it is saved.
+            options_module.EstimatorOptions(**values)
         else:
             options = options_module.SamplerOptions(**values)
-        # The counts decoder reads classified bit strings, so another
-        # measurement type is refused.
-        Unset = optional_import("qiskit_ibm_runtime.options.utils", extra="ibm").Unset
-        if kind == "counts" and options.execution.meas_type not in (Unset, "classified"):
-            raise ValueError("counts require classified IBM measurement results")
+        # The native depth of the ISA circuit describes the execution only when
+        # the provider runs that circuit unchanged. The same unitary is not
+        # enough: gate folding turns one CX, of two-qubit depth 1, into three
+        # consecutive CX gates on the same qubits, whose product is that CX
+        # but whose depth is 3. Dynamical decoupling and gate or measurement
+        # twirling change the gates of the circuit, and even added one-qubit
+        # gates change its total depth.
+        if kind == "estimated_observable":
+            # Even at resilience level 0 the Estimator measures the observable
+            # with circuits that the provider builds from the submitted one.
+            unqualified = ("an IBM Estimator preparation has no qualified native depth, because the provider "
+                           "measures the observable with circuits that it builds from the submitted circuit, and "
+                           "runs mitigation circuits when they are selected, and the Run neither saves nor checks "
+                           "these circuits; counts (SamplerV2) with dynamical decoupling and twirling off can have "
+                           "a qualified depth")
+        else:
+            # The counts decoder reads classified bit strings, so another
+            # measurement type is refused.
+            Unset = optional_import("qiskit_ibm_runtime.options.utils", extra="ibm").Unset
+            if options.execution.meas_type not in (Unset, "classified"):
+                raise ValueError("counts require classified IBM measurement results")
+            # qiskit-ibm-runtime 0.49.0 documents False as the Sampler default
+            # of the three transformations, but an unset option is not sent
+            # (OptionsV2._get_program_inputs drops it) and Unset is falsy, so
+            # the server's default would decide. Each unset option is written
+            # as an explicit False into the options that are saved and sent.
+            # Each option keeps its SDK-validated Boolean, so the saved JSON
+            # holds the values that the job sends, and an option set to True
+            # stays on. The added keys are checked like resilience_level above.
+            run.check_data(sum(6 * len(key) + 16 for key in (
+                "dynamical_decoupling", "enable", "twirling", "enable_gates", "enable_measure")))
+            enabled = []
+            for section, name in (("dynamical_decoupling", "enable"), ("twirling", "enable_gates"),
+                                  ("twirling", "enable_measure")):
+                value = getattr(getattr(options, section), name)
+                value = False if value is Unset else value
+                if type(value) is bool:
+                    values.setdefault(section, {})[name] = value
+                if value is not False:
+                    enabled.append(f"{section}.{name}={value!r}")
+            # The defaults and the sending of an explicit False above were
+            # checked only for _CHECKED_RUNTIME_VERSION. Another version is
+            # unqualified even when the three options parse and are all False.
+            installed, reasons = version("qiskit-ibm-runtime"), []
+            if installed != _CHECKED_RUNTIME_VERSION:
+                reasons.append(
+                    f"qiskit-ibm-runtime {installed} is installed, but the IBM Sampler options were checked "
+                    f"for a qualified native depth only with qiskit-ibm-runtime {_CHECKED_RUNTIME_VERSION}, "
+                    "so it is unknown whether this version sends the requested options unchanged and turns "
+                    "on no other transformation of the submitted circuit")
+            if enabled:
+                reasons.append(
+                    "a qualified native depth needs the IBM Sampler options dynamical_decoupling.enable, "
+                    "twirling.enable_gates and twirling.enable_measure all false, so that the provider runs "
+                    "the submitted circuit without changing its gates, but this request has "
+                    + ", ".join(enabled))
+            unqualified = "; ".join(reasons) or None
         # UTF-8 JSON, the serialization that encode() admitted above and that
         # the Run journal and record identities write, so the stored text never
         # exceeds the admitted size. ASCII escaping could take up to 12 bytes
         # for a character outside the Basic Multilingual Plane.
-        return options, json.dumps(values, sort_keys=True, separators=(",", ":"), allow_nan=False,
-                                   ensure_ascii=False)
+        return json.dumps(values, sort_keys=True, separators=(",", ":"), allow_nan=False,
+                          ensure_ascii=False), unqualified
 
     @staticmethod
     def _observable(estimate, layout, width, run):
@@ -354,6 +460,13 @@ class IBMRuntimeBackend(Record):
         registers must survive compilation unchanged, because the decoder joins
         them per shot and restores the original bit positions. The circuit is
         saved as QPY before submission only when the Run has a folder on disk.
+        The preparation record keeps the effective primitive options
+        (``_options``) and the native two-qubit depth of the ISA circuit on the
+        device target (``inspection.inspect_native_depth``). When those options
+        or the Estimator let the provider change the circuit, or the installed
+        qiskit-ibm-runtime is not the checked version, the record keeps an
+        unqualified depth with the reason instead, and the circuit is not
+        scanned.
         """
         context = run._state["backend_context"]
         from importlib.metadata import version
@@ -361,7 +474,7 @@ class IBMRuntimeBackend(Record):
         from nwqlib.backends.connection import NativePreparation, circuit_layout, environment
 
         self.target_for(observation)
-        _, options_json = self._options(run, observation.kind)
+        options_json, unqualified = self._options(run, observation.kind)
         backend = self._backend(context)
         if backend.name != self.device or circuit.num_qubits > backend.num_qubits:
             raise ValueError("logical circuit differs from the selected IBM device or exceeds its width")
@@ -395,6 +508,20 @@ class IBMRuntimeBackend(Record):
         if {reg.name: len(reg.bits) for reg in classical} != {reg.name: len(reg.bits) for reg in logical_classical}:
             raise ValueError("IBM ISA changed the named logical measurement registers")
         native.metadata = {**(native.metadata or {}), "nwqlib_snapshot": snapshot}
+        # The native depth of this ISA circuit on the device target that
+        # compiled it describes the execution only when the effective options
+        # and the installed SDK let the provider run the circuit unchanged
+        # (_options). Otherwise the record keeps the width and the reason. A
+        # Method's requested depth limit reads it before submission
+        # (inspection.check_native_depth_cap).
+        # ponytail: the scan uses the inspection's default 100,000-operation
+        # limit, and a longer ISA circuit is recorded unqualified, so a depth
+        # limit refuses it; add a backend option if such circuits need a depth.
+        # docs/ENGINEERING_CONSTANTS.md ("Resource forecast and explicit
+        # inspection bounds") registers the limit.
+        from nwqlib.backends.inspection import inspect_native_depth
+        native_depth = (inspect_native_depth(native, backend.target) if unqualified is None
+                        else NativeDepth(qualified=False, reason=unqualified, width=native.num_qubits))
         payload = None
         if context.get("persist_prepared", False):
             from qiskit import qpy
@@ -423,12 +550,13 @@ class IBMRuntimeBackend(Record):
             quantum_layout=circuit_layout(native, native.qregs), classical_layout=classical,
             logical_to_native=layout, operations=len(native.data), population="unconditional",
             transformation=("exact dense-unitary synthesis, then " if self.optimization_level <= 1 else "")
-                + "IBM ISA circuit; original logical/classical mapping and requested primitive options"
+                + "IBM ISA circuit; original logical/classical mapping and effective primitive options"
                 + ("; layout-mapped weighted observable" if observable is not None else ""),
             payload=payload, payload_format="nwqlib.ibm.qpy/1",
             counts_sampling=(CountsSampling(kind="unknown" if backend.configuration().simulator else "fresh")
                              if observation.kind == "counts" else None), provider_options_json=options_json,
-            probability_window_exclusions=("optimization_level",) if self.optimization_level != 1 else None)
+            probability_window_exclusions=("optimization_level",) if self.optimization_level != 1 else None,
+            native_depth=native_depth)
 
     def restore_native(self, record, payload=None, *, run):
         """Rebuild the prepared association from a saved preparation record, loading QPY only when supplied.
@@ -455,27 +583,47 @@ class IBMRuntimeBackend(Record):
                                          requested_options_json=record.provider_options_json), observable)
 
     def admit_batch(self, natives):
-        """Accept PUBs that one primitive job can carry.
+        """Accept the PUBs of one new primitive job and return the SDK options of that job.
 
-        They share one primitive and one option set. Estimator PUBs share one
-        precision, and Sampler PUBs share one positive shot count.
+        They share one primitive and one set of saved effective options.
+        Estimator PUBs share one precision, and Sampler PUBs share one positive
+        shot count. Each PUB has its prepared ISA circuit, which a Run restores
+        from the saved QPY for a new submission. The options are built from the
+        effective options saved at preparation (``_options``) without writing
+        in any default again, so the installed SDK's validation can reject a
+        saved request it does not support, also without a depth limit. The
+        shared execution code calls this before it saves the submission
+        intent, and only for a new submission. Retrieval of a known job does
+        not call it.
         """
 
         if not natives or len({native.metadata["observation"].kind for native in natives}) != 1:
             raise ValueError("one IBM job requires one primitive kind")
         if len({native.metadata["requested_options_json"] for native in natives}) != 1:
             raise ValueError("one IBM job requires matching original primitive options")
-        if natives[0].metadata["observation"].kind == "estimated_observable":
+        kind = natives[0].metadata["observation"].kind
+        if kind == "estimated_observable":
             if len({native.metadata["observation"].estimate.precision for native in natives}) != 1:
                 raise ValueError("current IBM EstimatorV2 jobs require one common requested precision")
         elif len({native.shots for native in natives}) != 1 or any(native.shots < 1 for native in natives):
             raise ValueError("IBM sampled acquisitions require positive shots")
+        if any(native.circuit is None for native in natives):
+            raise ValueError("new IBM submission requires the original native payloads")
+        from nwqlib._optional import optional_import
+        options_module = optional_import("qiskit_ibm_runtime.options", extra="ibm")
+        # The saved text belongs to the preparation record, which passed the
+        # Run's data limit when it was written (Run._write), so it is parsed
+        # here without another check.
+        values = json.loads(natives[0].metadata["requested_options_json"])
+        return (options_module.EstimatorOptions if kind == "estimated_observable"
+                else options_module.SamplerOptions)(**values)
 
     def launch(self, natives, *, submission_id, run):
         """Submit one primitive job for the accepted PUBs and return its job locator.
 
-        The job is tagged ``nwqlib:<submission_id>`` for ``reconcile``. Options
-        must equal those recorded at preparation. In job mode an ambient
+        The job is sent with the options that ``admit_batch`` builds from the
+        effective options saved at preparation, tagged ``nwqlib:<submission_id>``
+        for ``reconcile``. In job mode an ambient
         Session or Batch context is rejected, since the SDK would otherwise
         attach the job to that container. Batch and Session modes attach only
         to the configured existing container. ``primitive.run`` is called once.
@@ -485,13 +633,8 @@ class IBMRuntimeBackend(Record):
         sdk = optional_import("qiskit_ibm_runtime", extra="ibm")
         Batch, EstimatorV2, SamplerV2, Session = sdk.Batch, sdk.EstimatorV2, sdk.SamplerV2, sdk.Session
         from nwqlib.execution import JobLocator
-        self.admit_batch(natives)
-        if any(native.circuit is None for native in natives):
-            raise ValueError("new IBM submission requires the original native payloads")
+        options = self.admit_batch(natives)
         kind = natives[0].metadata["observation"].kind
-        options, requested = self._options(run, kind)
-        if requested != natives[0].metadata["requested_options_json"]:
-            raise ValueError("primitive options differ from the original prepared selection")
         tag = "nwqlib:" + submission_id
         options.environment.job_tags = [*(options.environment.job_tags or ()), tag]
         if self.mode == "job":

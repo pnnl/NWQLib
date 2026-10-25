@@ -3,7 +3,7 @@
 from math import cos, pi, sin
 import numpy as np
 import pytest
-from nwqlib.algorithms.gcim import ADAPT, adapt_acquisition as acquisition
+from nwqlib.algorithms.gcim import ADAPT, PencilAcquisition, adapt_acquisition as acquisition
 from nwqlib.core.planning import RandomStreams
 from nwqlib._prepared_execution import Run, prepare_experiment, submit_experiment
 from nwqlib.operators import ingest_pauli
@@ -42,13 +42,20 @@ def plan_for(
 
 @pytest.mark.parametrize("execution", ["quantum", "classical"])
 def test_product_screen_and_tie_survive_exact_ritz_solution(execution):
-    result = Run(plan_for(execution=execution)).wait(timeout=10, poll_interval=0)
+    # The termwise request applies only to shots, so exact quantum readout
+    # still prepares the controlled joint state of each off-diagonal pair of
+    # the four-state value basis ((), a, b, ab), and classical execution none.
+    termwise = PencilAcquisition(matrix_measurement="termwise", pair_preparation="controlled")
+    result = Run(plan_for(execution=execution, acquisition=termwise)).wait(timeout=10, poll_interval=0)
     assert dict(result.history[0].gradients) == pytest.approx({0: 2.0, 1: 2.0}, abs=1e-12, rel=0)
     assert result.history[0].winner == 0
     assert result.history[1].energy == pytest.approx(-1.0, abs=2e-12, rel=0)
     assert dict(result.history[1].gradients)[1] == pytest.approx(np.sqrt(2), abs=1e-12, rel=0)
     assert result.selected == (0, 1)
     assert all(step.residual_norm is None for step in result.history)
+    pairs = [((i, j), "controlled") for i in range(4) for j in range(i + 1, 4)]
+    assert sorted((p.pair, p.route) for p in result.pair_preparations) == (
+        pairs if execution == "quantum" else [])
 
 
 @pytest.mark.parametrize("sign", [-1, 1])

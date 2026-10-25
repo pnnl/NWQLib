@@ -130,3 +130,72 @@ def prepared_stubs(monkeypatch):
     monkeypatch.setattr(aer, "_submit_aer_execution", forbidden)
     state.logical = logical
     return state
+
+
+@pytest.fixture
+def ibm_runtime_spy(monkeypatch):
+    """An IBMRuntimeBackend on the real SDK and the offline FakeManilaV2 target, with only the network replaced.
+
+    Compilation, ISA preparation, the native-depth record, PUB encoding and
+    result decoding are the SDK's and NWQLib's own. The replaced API client
+    gives each job its own identifier, reports every job completed and
+    returns, for each PUB, its requested shots with every classical bit 0.
+    These counts are synthetic, so a test reads acquisition and exposure
+    facts from them, not energies. ``spy.api.requests`` holds every job
+    request.
+    """
+    import json
+    from types import SimpleNamespace
+    from qiskit.primitives.containers import BitArray, DataBin, PrimitiveResult, SamplerPubResult
+    from qiskit_ibm_runtime import IBMBackend, IBMQuantumComputeService, RuntimeEncoder
+    from qiskit_ibm_runtime.fake_provider import FakeManilaV2
+    from nwqlib.backends import IBMRuntimeBackend
+
+    instance = "crn:supplied-instance"
+    fake = FakeManilaV2()
+    configuration = fake.configuration()
+    configuration.backend_name = "ibm_supplied"
+
+    class API:
+        _instance = instance
+
+        def __init__(self):
+            self.jobs, self.requests = {}, []
+
+        def backend_status(self, name):
+            return dict(backend_name=name, backend_version="1", operational=True, pending_jobs=0,
+                        status_msg="active")
+
+        def program_run(self, **kwargs):
+            self.requests.append(kwargs)
+            job = f"job-{len(self.requests)}"
+            self.jobs[job] = (kwargs["program_id"], kwargs["params"]["pubs"], kwargs["job_tags"])
+            return {"id": job, "backend": "ibm_supplied"}
+
+        def job_get(self, job_id, **kwargs):
+            primitive, _, tags = self.jobs[job_id]
+            return dict(id=job_id, backend="ibm_supplied", program={"id": primitive},
+                        state={"status": "COMPLETED"}, tags=tags)
+
+        def job_results(self, job_id):
+            _, pubs, _ = self.jobs[job_id]
+            results = [SamplerPubResult(
+                DataBin(**{register.name: BitArray.from_samples(["0" * register.size] * pub.shots,
+                                                                num_bits=register.size)
+                           for register in pub.circuit.cregs}),
+                metadata={"circuit_metadata": pub.circuit.metadata, "shots": pub.shots}) for pub in pubs]
+            return json.dumps(PrimitiveResult(results, metadata={}), cls=RuntimeEncoder)
+
+    api = API()
+    service = object.__new__(IBMQuantumComputeService)
+    service._channel = "ibm_quantum_platform"
+    service._api_clients = {instance: api}
+    service._active_api_client = api
+    service._check_instance_usage = lambda: None
+    backend = IBMBackend(configuration, service=service, api_client=api, instance=instance)
+    backend._target, backend._properties = (fake.target, fake.properties())
+    service.backend = lambda name, **kwargs: backend
+    service._create_backend_obj = lambda name, **kwargs: backend
+    monkeypatch.setattr(IBMRuntimeBackend, "_new_service", lambda self: service)
+    connection = IBMRuntimeBackend(device=backend.name, instance=instance, max_input_bytes=65536)
+    return SimpleNamespace(connection=connection, api=api)

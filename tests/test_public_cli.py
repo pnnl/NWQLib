@@ -85,6 +85,7 @@ def test_options_and_card_match_each_registered_method_constructor(capsys):
     from nwqlib.algorithms import AlgorithmRegistry
     from nwqlib.cli import main
     from nwqlib.operators import ingest_pauli
+    from nwqlib.problems import ingest_product
 
     registrations = methods()
     registry = AlgorithmRegistry(registrations)
@@ -93,10 +94,11 @@ def test_options_and_card_match_each_registered_method_constructor(capsys):
     assert {(card["source"]["name"], card["source"]["version"]) for card in cards} == {
         (row.source.name, row.source.version) for row in registrations
     }
-    # The required inputs of the documented examples of the three Methods that have any.
+    # The required inputs of the documented examples of the four Methods that have any.
     supplied = {
         "adapt_gcim": dict(initial_state=[1, 1], pool=(ingest_pauli((("Y", 1j),), num_qubits=1),)),
         "fixed_gcim": dict(basis=([1, 1], [1, 1j])),
+        "qfd": dict(initial_state=ingest_product([[2**-0.5, 2**-0.5]]), time_step=0.5, powers=(0, 1)),
         "spe": dict(initial_state=[1, 0], overlap_lower_bound=1.0),
     }
     for row in registrations:

@@ -22,7 +22,7 @@ A Plan from `nwqlib.plan` fixes the output, shot count and randomness, and passi
 
 The method and the backend draw from separate random streams of the Plan. `seed=None` records the entropy it resolved, and an integer seed records a reproducible choice. Fixed Aer seeds can repeat the same samples, so they do not establish independent samples. Reanalysis and reporting draw no new seed.
 
-`ExecutionLimits` applies to local execution. Its default simulator width is 20 qubits and its default simulator memory setting is 1024 MiB. These limits do not constrain planning and are not a bound on process memory. A statevector simulation stores all amplitudes of the state, so its memory grows exponentially with the width even when the output is one scalar or a probability marginal. NWQLib runs the statevector target in double precision, so each amplitude is a 16-byte complex128 number, and leaves the counts target at Aer's default precision. See [Run on a backend](prepared_execution.md) for cumulative limits and continuation.
+`ExecutionLimits` applies to local execution. Its default simulator width is 20 qubits and its default simulator memory setting is 8192 MiB (8 GiB). These limits do not constrain planning and are not a bound on process memory. A statevector simulation stores all amplitudes of the state, so its memory grows exponentially with the width even when the output is one scalar or a probability marginal. NWQLib runs the statevector target in double precision, so each amplitude is a 16-byte complex128 number, and leaves the counts target at Aer's default precision. See [Run on a backend](prepared_execution.md) for cumulative limits and continuation.
 
 ## Run your own circuit
 

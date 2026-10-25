@@ -11,16 +11,11 @@ import json
 from math import fsum, isfinite, pi
 import numpy as np
 from nwqlib._numerics import normalize_state_vector, stable_vector_norm
-from nwqlib._projected_eigensolver import (
-    _sampled_pencil_diagnostics,
-    _solve_projected_pencil,
-    gram_formation_allowance,
-)
+from nwqlib._projected_eigensolver import gram_formation_allowance
 from nwqlib.blocks.kernels import BoundKernel, KernelOutput
 from nwqlib.core.planning import Realization, RuntimeOptions
 from nwqlib.core.analysis import capture_analysis_origin
 from nwqlib.evidence.error_model import exact_readout_sampling
-from nwqlib.core.records import Complex128
 from nwqlib.execution import (
     PauliValue,
     ScalarValue,
@@ -38,6 +33,7 @@ from .adapt_actions import action_sizes, packed_exponential
 from .adapt_records import (
     ADAPTResult,
     AdaptRound,
+    BoundedCandidate,
     active_screen_labels,
     chain,
     commutator_rows,
@@ -45,12 +41,21 @@ from .adapt_records import (
     label_cache,
     screen_labels,
 )
+from . import pencil_workflow
 from .fixed_basis import (
+    GroupMoment,
+    PairPreparation,
     ProjectedPencil,
-    SAMPLED_PENCIL_ENCLOSURE_RTOL,
+    ShotAllocation,
     _exact_overlap_allowance,
+    grouped_pass_requirements,
+    pencil_pairs,
+    pooled_statistics,
     processed_pauli_enclosure,
-    sampled_pencil_fields,
+    reduce_group,
+    sampled_setting_count,
+    sampled_settings,
+    solve_pencil,
 )
 from .pencil import (
     _projected_solve_bytes,
@@ -60,7 +65,6 @@ from .pencil import (
     pair_count,
     assemble_pair_pencil,
     matrix_elements,
-    physical_hamiltonian,
 )
 
 
@@ -79,26 +83,63 @@ class AdaptContext:
             used as a pair's right side.
         preparations: Composed Qiskit preparations keyed by (chain, controlled, inverse).
         gates: Qiskit generator gates keyed by (pool index, angle, controlled, inverse).
+        adjoints: Realized adjoints of uncontrolled forward generator gates,
+            ``inverse_realized_gate(forward, native_ucg=False)`` of the
+            ``(index, angle, False, False)`` entry of ``gates``, keyed by
+            (pool index, angle), for the ``"vacuum_restore"`` construction
+            (``_realized_adjoint``). The ``inverse=True`` entries of ``gates``
+            instead evaluate the generator again at the negated angle. The
+            map is separate so that ``_keep_current`` keeps it only for the
+            current basis and query chains, not for ``pending_items``. It
+            is never saved, and a resumed Run builds each adjoint again from
+            its restored forward gate.
         reference_gates: Qiskit reference preparation variants.
         observations: The observation chunk kept for each resolved query, keyed by its content hash.
         contribution_order: Content hashes of the chunks in the order first collected.
         contribution_seen: Set view of ``contribution_order`` for membership tests.
-        accepted: Current selected chain whose basis the caches must keep.
+        accepted: Current selected chain, whose ``basis_chains`` the caches
+            must keep under the default growth.
+        basis: The current explicit chains under ``BoundedRitzGrowth``,
+            which the caches keep instead, or None under the default growth.
+        pending_items: While a bounded round obtains the rows of its
+            admitted extensions, the ``(pool index, theta)`` last item of
+            each extension still to be evaluated when the rows phase starts
+            or resumes, not refreshed as each row completes, and empty at the
+            start of every other phase. An exit from rows leaves it set. ``_keep_current`` keeps the gates of these items, so a
+            gate that depth screening built is reused by the queries of the
+            same uninterrupted rows phase. The set adds at most
+            ``candidates_per_round`` items, and so at most four times as many
+            gate variants, because ``controlled`` and ``inverse`` are part of
+            the gate key. That counts cache entries, not compiled memory.
+            It does not make a generator's gate built once per run: a gate
+            pruned in an earlier round may be built again later, while its
+            CX count stays in ``depth_weights``. Gates of depth-rejected
+            extensions leave at the next prune, a returned Run can still
+            hold the context, and a resumed rows phase may build a gate once
+            more after the prune that precedes the loop. It is never saved.
         pencil: Latest solved projected pencil.
         pencil_parameters: Chain that produced ``pencil``.
         pencil_attempt: Analysis attempt of the iteration that produced ``pencil``.
         matrix_data: Current ``(H0, S, sampled, allowance)`` workspace between
-            data collection and projection (``_matrix_from_observations``).
-            Result copies and saved archives exclude it and rebuild it from
+            data collection and projection (``_matrix_from_observations``, or
+            ``_grouped_matrices`` in ``analyze_adapt``). Result copies and saved archives exclude it and rebuild it from
             observations.
         pair_values: Values ``_read_values`` returned for each read pencil
             query, with the preparation record of its chunk, keyed by the
             canonical chain pair, term and quadrature (``_matrix_entries``).
+            A grouped setting keeps its canonical ``GroupMoment``, the
+            preparation record and the stored bin count of its chunk, keyed
+            by the canonical chain pair, quadrature and group.
             Later matrix stages reuse them instead of reading the same
             observations again. Result copies and saved archives exclude
             them, and a restored or reanalyzed context rebuilds them from
             observations.
         rules: Resolved shift rule per selected pool index.
+        depth_weights: Under ``BoundedRitzGrowth(basis_depth_limit=...)``,
+            ``(w, reason)`` of ``bounded_growth.generator_cx_weight`` per
+            examined ``(pool index, theta)``, read once from that generator's
+            uncontrolled forward gate and kept for the whole run, because
+            the gate cache keeps only the generators of current chains.
         compiler_plans: The quantum Plan's ``adapt.CompilerPlans`` map once
             ``drive_adapt`` has taken it over, so checkpoints save the compiler
             plans built after the Plan archive was written. Before that, a
@@ -107,20 +148,23 @@ class AdaptContext:
             built entries (``ADAPT.snapshot_result_context``), which
             circuit-level verification uses.
 
-    The Qiskit caches (``gates``, ``preparations``, ``reference_gates``) hold
-    mutable Qiskit objects and stay private to the live Run. Result copies
-    share only the immutable scientific entries.
+    The Qiskit caches (``gates``, ``adjoints``, ``preparations``,
+    ``reference_gates``) hold mutable Qiskit objects and stay private to the
+    live Run. Result copies share only the immutable scientific entries.
     """
 
     vectors: dict = field(default_factory=dict)
     h_columns: dict = field(default_factory=dict)
     preparations: dict = field(default_factory=dict)
     gates: dict = field(default_factory=dict)
+    adjoints: dict = field(default_factory=dict)
     reference_gates: dict = field(default_factory=dict)
     observations: dict = field(default_factory=dict)
     contribution_order: list = field(default_factory=list)
     contribution_seen: set = field(default_factory=set)
     accepted: tuple = ()
+    basis: tuple | None = None
+    pending_items: frozenset = frozenset()
     pencil: ProjectedPencil | None = None
     pencil_parameters: tuple | None = None
     pencil_attempt: int | None = None
@@ -131,6 +175,7 @@ class AdaptContext:
     rules: dict = field(default_factory=dict)
     pair_values: dict = field(default_factory=dict)  # Excluded from snapshots/archives.
     compiler_plans: object = None
+    depth_weights: dict = field(default_factory=dict)
 
 
 def basis_chains(selected):
@@ -153,16 +198,94 @@ def basis_chains(selected):
     return tuple(chains)
 
 
-def _keep_current(context, *queries):
+def current_basis(context):
+    """Return the chains of the current basis: ``context.basis`` under bounded growth, else ``basis_chains(context.accepted)``."""
+    return basis_chains(context.accepted) if context.basis is None else context.basis
+
+
+def _value_chains(state, bounded):
+    """Return the chains of the basis behind the saved value: ``value_basis`` under bounded growth, else ``basis_chains`` of ``value_selected`` and ``value_theta``."""
+    if bounded:
+        return saved_chains(state.get("value_basis", ()))
+    return basis_chains(tuple(zip(state.get("value_selected", ()), state.get("value_theta", ()), strict=True)))
+
+
+def saved_chains(value):
+    """Return chains saved as JSON lists, ``[[[index, theta], ...], ...]``, as tuples of ``(int, float)`` items."""
+    return tuple(tuple((int(index), float(theta)) for index, theta in chain) for chain in value)
+
+
+def saved_cursor(value):
+    """Return a bounded frontier cursor saved as JSON lists, ``[[parent position, next pool index], ...]``, as integer pairs."""
+    return tuple((int(parent), int(index)) for parent, index in value)
+
+
+def common_prefix(left, right):
+    """Return the number of equal leading items of two generator chains.
+
+    Items ``(pool index, theta)`` match only when the index and the binary64
+    angle are equal, so both chains apply the same generator gates to the
+    same reference in the same order. Two chains with the same generator at
+    different angles share no item. Every chain starts from the Plan's one
+    reference preparation, which is therefore always common. No algebraic
+    equivalence is searched.
+    """
+    count = 0
+    for a, b in zip(left, right):
+        if a != b:
+            break
+        count += 1
+    return count
+
+
+def pair_route(left, right, rule):
+    """Return the construction route of the off-diagonal pair of chains ``left`` and ``right`` under the Plan's ``rule``.
+
+    ``"vacuum_reference"`` uses its reference-row construction only for a
+    pair whose left chain is the reference ``()`` and the ``"prefix"``
+    construction for every other pair. Every other rule is its own route,
+    so ``"vacuum_restore"`` covers the reference row too, where the
+    restoration with an empty left chain is the reference-row circuit. The
+    reference sorts first among chains, so it is the left chain of every
+    canonical and every basis-order pair it belongs to.
+    """
+    if rule == "vacuum_reference" and left:
+        return "prefix"
+    return rule
+
+
+def chain_pair_preparation(left, right, rule, pair):
+    """Return the ``PairPreparation`` of the chains ``left``, ``right`` at basis positions ``pair``.
+
+    Under the ``"prefix"`` route the reference and the common leading items
+    run once without control, ``1 + common_prefix(left, right)`` blocks.
+    Under ``"controlled"`` both complete preparations are controlled, and
+    the vacuum routes control only the reference (``pair_route``,
+    ``_append_vacuum_pair``).
+    """
+    route = pair_route(left, right, rule)
+    if route == "prefix":
+        return PairPreparation(pair=pair, route="prefix", shared_blocks=1 + common_prefix(left, right))
+    return PairPreparation(pair=pair, route=route)
+
+
+def _keep_current(context, basis, *queries):
     """Drop cached states, actions and gates that no current basis or query can reuse.
 
-    Only prefixes of the accepted basis chains and of the active queries are
-    kept. Cache memory therefore stays proportional to the current basis
-    instead of growing with the whole trajectory. A dropped entry is
-    recomputed if a later query needs it again.
+    ``basis`` is the tuple of chains of the current basis, and ``queries``
+    are the chains of the active queries. Only prefixes of these chains are
+    kept. The gate cache also keeps the items of
+    ``context.pending_items``, while the state, column, pair-value and
+    preparation caches keep only these prefixes, so the bounded
+    ``2(B + 2L)`` count of the classical caches is unchanged. The realized
+    adjoints keep only the items of these chains, so the pending items add
+    at most their four gate variants each and no adjoint. Cache memory
+    therefore stays proportional to the current basis instead of growing
+    with the whole trajectory. A dropped entry is recomputed if a later
+    query needs it again.
     """
     keep = {()}
-    for items in (*basis_chains(context.accepted), *queries):
+    for items in (*basis, *queries):
         keep.update(items[:i] for i in range(len(items) + 1))
     for cache in (context.vectors, context.h_columns):
         for key in tuple(cache):
@@ -174,10 +297,14 @@ def _keep_current(context, *queries):
     for key in tuple(context.preparations):
         if key[0] not in keep:
             del context.preparations[key]
-    pairs = {item for items in keep for item in items}
+    items = {item for prefix in keep for item in prefix}
+    pairs = items | context.pending_items
     for key in tuple(context.gates):
         if key[:2] not in pairs:
             del context.gates[key]
+    for key in tuple(context.adjoints):
+        if key not in items:
+            del context.adjoints[key]
 
 
 def _native_preparation(
@@ -196,34 +323,17 @@ def _native_preparation(
     limit that the reference preparation was checked against.
     """
     from qiskit import QuantumCircuit
-    from nwqlib.subroutines.qiskit_compat import (
-        controlled as controlled_gate,
-        inverse_realized_gate,
-    )
 
     key = (items, controlled, inverse)
     if key in context.preparations:
         return context.preparations[key]
     q = reference.manifest.basis.dimension.bit_length() - 1
     off = int(controlled)
-    rkey = (controlled, inverse)
-    if rkey not in context.reference_gates:
-        if (False, False) not in context.reference_gates:
-            circuit = prepare_qiskit(
-                reference, max_bytes=policy.max_bytes, max_direct_amplitudes=max_direct_amplitudes
-            ).circuit
-            context.reference_gates[(False, False)] = circuit.to_gate()
-        gate = context.reference_gates[(False, False)]
-        if controlled:
-            if (True, False) not in context.reference_gates:
-                context.reference_gates[(True, False)] = controlled_gate(gate, 1)
-            gate = context.reference_gates[(True, False)]
-        if inverse:
-            gate = inverse_realized_gate(gate)
-        context.reference_gates[rkey] = gate
+    reference_gate = _reference_gate(controlled, inverse, reference=reference, policy=policy, context=context,
+                                     max_direct_amplitudes=max_direct_amplitudes)
     circuit = QuantumCircuit(q + off)
     if not inverse:
-        circuit.append(context.reference_gates[rkey], circuit.qubits, copy=False)
+        circuit.append(reference_gate, circuit.qubits, copy=False)
     # An adjoint reverses the generator order as well as each gate action.
     # The reference inverse must then appear after the reversed product.
     for index, theta in reversed(items) if inverse else items:
@@ -241,10 +351,41 @@ def _native_preparation(
             copy=False,
         )
     if inverse:
-        circuit.append(context.reference_gates[rkey], circuit.qubits, copy=False)
+        circuit.append(reference_gate, circuit.qubits, copy=False)
     gate = circuit.to_gate()
     context.preparations[key] = gate
     return gate
+
+
+def _reference_gate(controlled, inverse, *, reference, policy, context, max_direct_amplitudes):
+    """Return the cached reference preparation gate, controlled on a qubit 0 before the system or inverted as requested.
+
+    The uncontrolled gate comes from ``prepare_qiskit`` with the reference's
+    physical global phase, its controlled form from ``qiskit_compat.controlled``
+    and an inverse from ``inverse_realized_gate`` of the controlled or
+    uncontrolled form. Each variant is built once per Run context.
+    """
+    from nwqlib.subroutines.qiskit_compat import (
+        controlled as controlled_gate,
+        inverse_realized_gate,
+    )
+
+    rkey = (controlled, inverse)
+    if rkey not in context.reference_gates:
+        if (False, False) not in context.reference_gates:
+            circuit = prepare_qiskit(
+                reference, max_bytes=policy.max_bytes, max_direct_amplitudes=max_direct_amplitudes
+            ).circuit
+            context.reference_gates[(False, False)] = circuit.to_gate()
+        gate = context.reference_gates[(False, False)]
+        if controlled:
+            if (True, False) not in context.reference_gates:
+                context.reference_gates[(True, False)] = controlled_gate(gate, 1)
+            gate = context.reference_gates[(True, False)]
+        if inverse:
+            gate = inverse_realized_gate(gate)
+        context.reference_gates[rkey] = gate
+    return context.reference_gates[rkey]
 
 
 def _native_generator(index, theta, *, controlled, inverse, inputs, compiler_plans, context):
@@ -263,35 +404,321 @@ def _native_generator(index, theta, *, controlled, inverse, inputs, compiler_pla
     return context.gates[key]
 
 
+# Rotation instructions of apply_pauli_rotation: one per nonzero nonidentity
+# Pauli row of a commuting generator, in row order.
+_PAULI_ROTATIONS = frozenset(("rx", "ry", "rz", "rxx", "ryy", "rzz"))
+# The largest definition of a multi-controlled RY that _realized_adjoint
+# copies: Qiskit 2.6.0 builds 5, 13, 64 and 96 instructions for 2, 3, 4 and 5
+# controls (docs/ENGINEERING_CONSTANTS.md).
+_CONTROLLED_RY_COPY_LIMIT = 96
+
+
+def _finite_parameters(operation):
+    """Return whether every parameter of ``operation`` is a finite number."""
+    try:
+        return all(isfinite(float(value)) for value in operation.params)
+    except TypeError:
+        return False
+
+
+def _vacuum_phase(index, theta, *, inputs, compiler_plans, context):
+    """Return the vacuum phase components of one occurrence of a generator in a vacuum pair construction.
+
+    The generator's uncontrolled forward gate ``U`` (``_native_generator``)
+    passed the structural vacuum rule of ``adapt._admit_generator_routes``
+    at planning, which gives ``U|vac> = exp(i gamma)|vac>``. ``gamma`` is
+    kept as a tuple of components, whose ancilla phase gates multiply to
+    ``exp(i gamma)`` exactly, without a rounded binary64 sum or a reduction
+    modulo 2 pi:
+
+    - the actual stored global phase g of ``U``'s circuit, which holds the
+      identity rows (``build_generator_circuit``), so ``theta * c_I`` is
+      never added a second time;
+    - for a commuting generator, ``-phi_P / 2`` for each nonidentity word P
+      of only I and Z letters, with ``phi_P`` the emitted angle of P's
+      rotation ``exp(-i phi_P P / 2)``, because ``P|vac> = |vac>``. The
+      rotations are read from the circuit, one per nonzero nonidentity row
+      in row order, and never computed again from theta and the
+      coefficient: for ``theta = 2**1023`` and ``c = 2**-1023`` the
+      constructor's ``-2.0 * theta`` overflows, so the emitted angle is
+      nonfinite although the ideal product is -2.
+
+    A noncommuting default double has no rotation component, since its
+    complete circuit maps the vacuum to itself with phase 0, and exact
+    zeros are left out. The instance qualifies only when g and the
+    parameters of every instruction of ``U``'s circuit, the emitted angles
+    among them, are finite and, for each component, ``h = RN(phi_P / 2)`` is finite
+    with ``2 h == phi_P``, which fails only where the half of ``phi_P`` is
+    not a binary64 number, an odd multiple of the smallest subnormal.
+    Otherwise ``ApplicabilityError`` refuses the query that needs this
+    instance before its acquisition, and the pair is never prepared by
+    another construction. The rule is sufficient, not necessary. The
+    components describe the represented gates in exact arithmetic and say
+    nothing about synthesis or device error.
+    """
+    from nwqlib.algorithms.protocol import ApplicabilityError
+
+    gate = _native_generator(index, theta, controlled=False, inverse=False, inputs=inputs,
+                             compiler_plans=compiler_plans, context=context)
+    definition = gate.definition
+    g = float(definition.global_phase)
+    if not isfinite(g) or not all(_finite_parameters(item.operation) for item in definition.data):
+        raise ApplicabilityError(f"pool generator {index} at angle {theta!r} has a nonfinite emitted angle or "
+                                 "global phase, so its vacuum phase is unknown")
+    components = [g] if g else []
+    if compiler_plans[index].kind != "commuting":
+        return components
+    rows = [label for label, value in inputs.pool[index].pauli_terms
+            if complex(value).imag != 0.0 and set(label) != {"I"}]
+    rotations = [item.operation for item in definition.data if item.operation.name in _PAULI_ROTATIONS]
+    if len(rotations) != len(rows):
+        raise ApplicabilityError(f"pool generator {index} at angle {theta!r} has {len(rotations)} Pauli rotations "
+                                 f"for {len(rows)} nonzero terms, so its vacuum phase is unknown")
+    for label, rotation in zip(rows, rotations):
+        if set(label) <= {"I", "Z"}:
+            phi = float(rotation.params[0])
+            half = phi / 2
+            if rotation.name not in ("rz", "rzz") or not isfinite(half) or 2 * half != phi:
+                raise ApplicabilityError(f"pool generator {index} at angle {theta!r} has a diagonal rotation by "
+                                         f"{phi!r} whose half angle is not a binary64 number, so its vacuum phase "
+                                         "is unknown")
+            if half:
+                components.append(-half)
+    return components
+
+
+def _realized_adjoint(index, theta, *, inputs, compiler_plans, context):
+    """Return the cached adjoint of the realized uncontrolled forward gate of one generator, for ``"vacuum_restore"``.
+
+    The adjoint is ``inverse_realized_gate(forward, native_ucg=False)`` of
+    the cached gate ``forward = _native_generator(index, theta,
+    controlled=False, inverse=False)``. It reverses that realized definition
+    and inverts each instruction, so it is the adjoint of the same rounded
+    gates. ``build_generator_circuit(inverse=True)``, the ``inverse=True``
+    entry of the gate cache, instead evaluates the generator again at
+    ``-theta``, which is only the same ideal operator. The adjoint is built
+    once per ``(index, theta)`` in ``context.adjoints``.
+
+    Before the helper copies anything, the forward gate must have the
+    structure for which it copies only existing definitions and inverts
+    only standard gates: a plain ``Gate`` with a definition, whose finite
+    instructions are standard gates on the helper's standard-inverse
+    branch, a plain ``ucry`` multiplexor whose existing definition holds
+    only RY and CX, or a multi-controlled RY with at least two closed
+    controls and an existing definition of at most 96 standard-gate
+    instructions. That bound is the Qiskit 2.6.0 count for five controls,
+    the largest an uncontrolled generator uses, and it limits the copy work
+    that the ``"vacuum_restore"`` slot law (``adapt._construction``)
+    declares, so a dependency upgrade that enlarges the definition refuses
+    the instance rather than exceeding the law. Any other structure, a
+    definition still to be built, an extra nesting level or a nonfinite
+    parameter makes the instance unavailable: ``ApplicabilityError``
+    refuses the query that needs it before its acquisition, and the pair
+    is never prepared by another construction. A forward gate restored
+    from a Run archive passes the same checks.
+    """
+    from qiskit.circuit import ControlledGate, Gate
+    from qiskit.circuit.library import RYGate
+    from nwqlib.algorithms.protocol import ApplicabilityError
+    from nwqlib.subroutines.qiskit_compat import inverse_realized_gate
+
+    key = (index, theta)
+    if key in context.adjoints:
+        return context.adjoints[key]
+    forward = _native_generator(index, theta, controlled=False, inverse=False, inputs=inputs,
+                                compiler_plans=compiler_plans, context=context)
+
+    def standard(operation):
+        # The branch of inverse_realized_gate that returns operation.inverse() without a definition.
+        return (operation.base_class.inverse.__module__.startswith("qiskit.circuit.library.standard_gates.")
+                and _finite_parameters(operation))
+
+    def supported(operation):
+        if standard(operation):
+            return True
+        # A plain Gate and a generic ControlledGate build no definition when
+        # it is read, so a missing one stays None here.
+        if type(operation) is Gate and operation.name == "ucry":
+            definition = operation.definition
+            return definition is not None and all(item.operation.name in ("ry", "cx") and standard(item.operation)
+                                                  for item in definition.data)
+        if (type(operation) is ControlledGate and type(operation.base_gate) is RYGate
+                and operation.num_ctrl_qubits >= 2
+                and operation.ctrl_state == (1 << operation.num_ctrl_qubits) - 1):
+            definition = operation.definition
+            return (definition is not None and len(definition.data) <= _CONTROLLED_RY_COPY_LIMIT
+                    and _finite_parameters(operation) and all(standard(item.operation) for item in definition.data))
+        return False
+
+    definition = forward.definition if type(forward) is Gate else None
+    if definition is None or not all(supported(item.operation) for item in definition.data):
+        raise ApplicabilityError(f"pool generator {index} at angle {theta!r} has a realized circuit whose adjoint "
+                                 "is not supported by the vacuum_restore construction")
+    context.adjoints[key] = inverse_realized_gate(forward, native_ucg=False)
+    return context.adjoints[key]
+
+
+def _append_joint_state(circuit, left, right, rule, kwargs):
+    """Append the phase-faithful joint state ``(|0>|left> + |1>|right>)/sqrt(2)`` on ancilla qubit 0.
+
+    ``"controlled"``: a Hadamard and an X gate on the ancilla, the complete
+    left preparation controlled on it, a second X and the complete right
+    preparation controlled on it, so the zero branch holds the left state
+    and the one branch the right state. ``"prefix"``: chains
+    ``W_l = V_l C`` and ``W_r = V_r C`` with C the reference and the common
+    leading generators (``common_prefix``) run C once without control, then
+    the Hadamard, X, the controlled left suffix ``V_l``, X and the controlled
+    right suffix ``V_r``. Since C acts on both branches it factors out, which
+    gives the same joint state with each preparation's phase. An empty left
+    suffix needs no X pair, and an empty suffix adds no gate. The
+    reference's global phase is common to both branches in either
+    construction, and each suffix generator keeps its controlled phase.
+    ``rule`` is the Plan's resolved ``pair_preparation``. Under the vacuum
+    rules ``pair_route`` selects ``_append_vacuum_pair`` or the prefix
+    construction. Any other value raises ``ValueError``.
+    """
+    route = pair_route(left, right, rule)
+    if route in ("vacuum_reference", "vacuum_restore"):
+        _append_vacuum_pair(circuit, left, right, kwargs)
+        return
+    rule = route
+    if rule == "controlled":
+        circuit.h(0)
+        circuit.x(0)
+        circuit.append(_native_preparation(left, controlled=True, inverse=False, **kwargs), circuit.qubits,
+                       copy=False)
+        circuit.x(0)
+        circuit.append(_native_preparation(right, controlled=True, inverse=False, **kwargs), circuit.qubits,
+                       copy=False)
+        return
+    if rule != "prefix":
+        raise ValueError(f"ADAPT joint state needs a resolved pair_preparation rule, not {rule!r}")
+    shared = common_prefix(left, right)
+    circuit.append(_native_preparation(left[:shared], controlled=False, inverse=False, **kwargs),
+                   circuit.qubits[1:], copy=False)
+    circuit.h(0)
+    generator = dict(controlled=True, inverse=False, inputs=kwargs["inputs"],
+                     compiler_plans=kwargs["compiler_plans"], context=kwargs["context"])
+    if left[shared:]:
+        circuit.x(0)
+        for index, theta in left[shared:]:
+            circuit.append(_native_generator(index, theta, **generator), circuit.qubits, copy=False)
+        circuit.x(0)
+    for index, theta in right[shared:]:
+        circuit.append(_native_generator(index, theta, **generator), circuit.qubits, copy=False)
+
+
+def _append_vacuum_pair(circuit, left, right, kwargs):
+    """Append ``(|0>|left> + |1>|right>)/sqrt(2)`` by controlling only the reference, for the two vacuum rules.
+
+    Write ``phi_i = U_i B|vac>`` for the reference preparation B, the
+    all-zero state ``|vac>`` and the uncontrolled generator chain ``U_i``,
+    with ``U_i|vac> = exp(i gamma_i)|vac>`` (``_vacuum_phase``). The
+    ancilla is qubit 0, C1 is control on ancilla value 1 and C0 is X, C1,
+    X, B under control is ``context.reference_gates[(True, False)]``, and
+    every generator runs without control on the system. After the Hadamard
+    gate puts the ancilla in ``|+>``, the sequence ``C1(B)``, ``U_j``,
+    ``U_i^dagger``, ``C0(B)``, ``U_i`` takes the two branches through
+
+        (vac, b0) -> (exp(i gamma_j) vac, U_j b0)
+                  -> (exp(i (gamma_j - gamma_i)) vac, U_i^dagger U_j b0)
+                  -> (exp(i (gamma_j - gamma_i)) b0, U_i^dagger U_j b0)
+                  -> (exp(i (gamma_j - gamma_i)) phi_i, phi_j)
+
+    with ``b0 = B|vac>``. ``diag(1, exp(i (gamma_j - gamma_i)))`` on the
+    ancilla, a phase gate P(c) for each component c of ``gamma_j`` and
+    P(-c) for each component of ``gamma_i``, multiplies both branches by the
+    same scalar and leaves the target joint state. An empty left chain is
+    the reference row, H, ``C1(B)``, ``U_j``, ``C0(B)`` and P(c) for
+    ``gamma_j``, through ``(vac, b0) -> (exp(i gamma_j) vac, phi_j) ->
+    (exp(i gamma_j) b0, phi_j)``. The correction precedes every readout
+    rotation, so the real and imaginary quadratures and the exact
+    reduction read the same state as the other constructions (Yoshioka et
+    al., arXiv:2407.14431v3, Fig. 1b and pp. 2-3, for the controlled
+    reference).
+
+    ``U_j`` and ``U_i`` are the cached uncontrolled forward gates in item
+    order and ``U_i^dagger`` their realized adjoints in reversed item order
+    (``_realized_adjoint``), without B. Every component and adjoint is
+    qualified before the first gate is appended, so an unavailable
+    instance refuses the query before its acquisition. The ideal cost is
+    two controlled B, one uncontrolled ``U_j`` and, for a left chain, two
+    uncontrolled ``U_i``, one of them as its adjoint. A smaller compiled
+    depth or error is not implied.
+    """
+    generator = dict(inputs=kwargs["inputs"], compiler_plans=kwargs["compiler_plans"], context=kwargs["context"])
+    corrections = [c for item in right for c in _vacuum_phase(*item, **generator)]
+    corrections += [-c for item in left for c in _vacuum_phase(*item, **generator)]
+    adjoints = [_realized_adjoint(*item, **generator) for item in reversed(left)]
+    reference = _reference_gate(True, False, reference=kwargs["reference"], policy=kwargs["policy"],
+                                context=kwargs["context"], max_direct_amplitudes=kwargs["max_direct_amplitudes"])
+    system = circuit.qubits[1:]
+
+    def forward(items):
+        for index, theta in items:
+            circuit.append(_native_generator(index, theta, controlled=False, inverse=False, **generator), system,
+                           copy=False)
+
+    circuit.h(0)
+    circuit.append(reference, circuit.qubits, copy=False)
+    forward(right)
+    for gate in adjoints:
+        circuit.append(gate, system, copy=False)
+    circuit.x(0)
+    circuit.append(reference, circuit.qubits, copy=False)
+    circuit.x(0)
+    forward(left)
+    for component in corrections:
+        circuit.p(component, 0)
+
+
+def _append_group_rotations(circuit, labels, q, offset):
+    """Rotate system qubit k (circuit qubit ``k + offset``) so each QWC label reads as a Z parity: H for X, S^dagger then H for Y."""
+    for qubit in range(q):
+        axis = next((label[q - 1 - qubit] for label in labels if label[q - 1 - qubit] != "I"), "I")
+        if axis == "Y":
+            circuit.sdg(qubit + offset)
+        if axis in "XY":
+            circuit.h(qubit + offset)
+
+
 def construct_adapt(block, arguments, method_context):
     """Registered circuit builder for the finite ADAPT parameter space.
 
-    Its arguments are scalars that were already checked.
-    An exact ``pair`` prepares the phase-faithful joint state: a Hadamard and an
-    X gate on ancilla qubit 0, the left preparation controlled on it, a second
-    X and the right preparation controlled on it, so the zero branch holds the
-    left state and the one branch the right state. A diagonal exact pair
-    prepares its system state alone. A sampled ``pair`` is a Hadamard test on
-    ancilla qubit 0. It applies a Hadamard gate,
-    the controlled right preparation, the controlled Pauli term (for a
-    Hamiltonian element), the controlled inverse left preparation, an optional
-    S-dagger and a second Hadamard gate. The
-    ancilla Z expectation is then ``Re<psi_L|P|psi_R>``, or the imaginary part
-    with S-dagger. ``screen`` and ``energy`` prepare the right chain on the
-    system register. A sampled query appends the basis rotations of its QWC
-    group so every label in the group is measured as a Z-parity.
+    Its arguments are scalars that were already checked. The block payload
+    carries the Plan's resolved ``pair_preparation``, and the block choice
+    names the resolved measurement: exact, grouped or termwise shots. A
+    ``pair`` query of any other choice, such as a Plan that resolved no
+    measurement, raises ``ValueError``. An exact ``pair``
+    prepares the phase-faithful joint state of its two chains
+    (``_append_joint_state``), so the zero branch holds the left state and
+    the one branch the right state. A diagonal exact pair prepares its system
+    state alone. A grouped sampled ``pair`` prepares the same joint state
+    and rotates the system for its Hamiltonian group and the ancilla for its
+    quadrature, H for the real part and S^dagger then H for the imaginary
+    part, which gives ``<X_a P> = Re z`` and ``<Y_a P> = Im z`` for
+    ``z = <left|P|right>``. With equal chains it prepares the system state
+    of the ``diagonal`` setting and rotates only the system. A termwise
+    sampled ``pair`` is a Hadamard test on ancilla qubit 0. It applies a
+    Hadamard gate, the controlled right preparation, the controlled Pauli
+    term (for a Hamiltonian element), the controlled inverse left
+    preparation, an optional S-dagger and a second Hadamard gate. The
+    ancilla Z expectation is then ``Re<psi_L|P|psi_R>``, or the imaginary
+    part with S-dagger. ``screen`` and ``energy`` prepare the right chain on
+    the system register. A sampled query appends the basis rotations of its
+    QWC group so every label in the group is measured as a Z-parity.
     """
     from qiskit import QuantumCircuit
     from nwqlib.subroutines.hamiltonian_evolution import apply_pauli_rotation, make_pauli_label
 
-    name, inputs, reference, compiler_plans, policy = block._payload
+    name, inputs, reference, compiler_plans, policy, pair_preparation = block._payload
     # drive_adapt saves this cache once per projected analysis and on return.
     context = method_context(AdaptContext, marks_changes=True)
     if type(context) is not AdaptContext:
         raise ValueError("native ADAPT query requires its actual method context")
     values = dict(arguments)
     left, right = chain(values, "l"), chain(values, "r")
-    _keep_current(context, left, right)
+    _keep_current(context, current_basis(context), left, right)
     q = reference.manifest.basis.dimension.bit_length() - 1
     pair = name == "pair"
     circuit = QuantumCircuit(q + int(pair))
@@ -303,11 +730,13 @@ def construct_adapt(block, arguments, method_context):
         context=context,
         max_direct_amplitudes=method_context.max_direct_amplitudes,
     )
-    if pair and block.record.choice.startswith("pair:exact:"):
-        # Exact pair query: the phase-faithful joint state
-        # (|0>|left> + |1>|right>)/sqrt(2) with the ancilla at native bit 0,
-        # or the plain system state of a diagonal pair, reduced at acquisition
-        # by the registered weighted-pencil reduction.
+    choice = block.record.choice
+    if pair and choice.startswith(("pair:exact:", "pair:shots:grouped:")):
+        # Exact pair query or grouped pencil setting: the phase-faithful joint
+        # state (|0>|left> + |1>|right>)/sqrt(2) with the ancilla at native
+        # bit 0, or the plain system state of a diagonal pair. An exact query
+        # is reduced at acquisition by the registered weighted-pencil
+        # reduction, and a grouped setting adds its readout rotations.
         if left == right:
             circuit.append(
                 _native_preparation(left, controlled=False, inverse=False, **kwargs),
@@ -315,20 +744,17 @@ def construct_adapt(block, arguments, method_context):
                 copy=False,
             )
         else:
-            circuit.h(0)
-            circuit.x(0)
-            circuit.append(
-                _native_preparation(left, controlled=True, inverse=False, **kwargs),
-                circuit.qubits,
-                copy=False,
-            )
-            circuit.x(0)
-            circuit.append(
-                _native_preparation(right, controlled=True, inverse=False, **kwargs),
-                circuit.qubits,
-                copy=False,
-            )
-    elif pair:
+            _append_joint_state(circuit, left, right, pair_preparation, kwargs)
+        if choice.startswith("pair:shots:grouped:"):
+            if inputs.energy_groups:
+                ordered = energy_labels((label for label, _ in inputs.nonidentity), inputs.cache)
+                _append_group_rotations(
+                    circuit, tuple(ordered[i] for i in inputs.energy_groups[int(values["group"])]), q, 1)
+            if left != right:
+                if values["quadrature"]:
+                    circuit.sdg(0)
+                circuit.h(0)
+    elif pair and choice.startswith("pair:shots:termwise:"):
         circuit.h(0)
         circuit.append(
             _native_preparation(right, controlled=True, inverse=False, **kwargs),
@@ -352,6 +778,9 @@ def construct_adapt(block, arguments, method_context):
         if values["quadrature"]:
             circuit.sdg(0)
         circuit.h(0)
+    elif pair:
+        raise ValueError("ADAPT pair query needs an exact, grouped or termwise matrix measurement, "
+                         f"not the resolved {':'.join(choice.split(':')[1:3])!r}")
     else:
         position = int(values["insert_position"])
         if position == -1:
@@ -393,14 +822,7 @@ def construct_adapt(block, arguments, method_context):
                 ordered = energy_labels((label for label, _ in inputs.nonidentity), inputs.cache)
                 groups, active = inputs.energy_groups, frozenset(ordered)
             labels = tuple(ordered[i] for i in groups[int(values["group"])] if ordered[i] in active)
-            for qubit in range(q):
-                axis = next(
-                    (label[q - 1 - qubit] for label in labels if label[q - 1 - qubit] != "I"), "I"
-                )
-                if axis == "Y":
-                    circuit.sdg(qubit)
-                if axis in "XY":
-                    circuit.h(qubit)
+            _append_group_rotations(circuit, labels, q, 0)
     return circuit
 
 
@@ -509,16 +931,15 @@ def stream_ritz(basis, coefficients, reference_at, evolve, normalize, counts=Non
     return normalize(total)[0]
 
 
-def _ritz_state(selected, coefficients, reference_at, evolve, counts=None):
-    """Return the normalized Ritz state ``sum_i c_i |b_i>`` of the basis of ``selected``.
+def _ritz_state(basis, coefficients, reference_at, evolve, counts=None):
+    """Return the normalized Ritz state ``sum_i c_i |b_i>`` of the basis chains ``basis``.
 
-    ``|b_i>`` runs over ``basis_chains(selected)`` and ``c_i`` over
+    ``|b_i>`` runs over the chains of ``basis`` and ``c_i`` over
     ``coefficients`` in the same order. The sum is streamed by
     ``stream_ritz`` from the callbacks, which supply the classical or the
     circuit-built states, and normalized by ``normalize_state_vector``. No
     Hamiltonian action is applied.
     """
-    basis = basis_chains(selected)
     if len(coefficients) != len(basis):
         raise ValueError("Ritz coordinates differ from the exact basis order")
     return stream_ritz(basis, coefficients, reference_at, evolve, normalize_state_vector, counts)
@@ -700,7 +1121,7 @@ def _residual_norm(plan, context, counts, right, values):
         for i in range(len(basis))
     ]
     ritz = _ritz_state(
-        right,
+        basis,
         coefficients,
         lambda: _vector((), plan, context, counts),
         lambda _, items: _vector(items, plan, context, counts),
@@ -791,7 +1212,7 @@ def bind_classical(plan, inputs, reference):
     reference constructions and generator exponentials on cache misses, the
     Hamiltonian and generator actions, and the scalar products.
     """
-    from .adapt import HOST
+    from .adapt import HOST, cached_state_vectors
 
     template = plan.construction.kernels[0]
 
@@ -807,7 +1228,7 @@ def bind_classical(plan, inputs, reference):
 
         def invoke():
             """Evaluate one query's scalars and record the work performed."""
-            _keep_current(context, left, right)
+            _keep_current(context, current_basis(context), left, right)
             counts = dict(
                 reference_materializations=0,
                 generator_exponentials=0,
@@ -815,13 +1236,12 @@ def bind_classical(plan, inputs, reference):
                 generator_actions=0,
                 scalar_products=0,
             )
-            # Peak live arrays: 8L + 12 complex128 vectors of 2**q amplitudes,
-            # 16 bytes each, with L = max_selections. After _keep_current both
-            # caches are keyed by the same kept prefixes: the 2k prefixes of the
-            # basis chains of k <= L selected generators, including the
-            # reference, and at most 2L more from the two query chains. The
-            # state cache and the H column cache therefore hold at most 4L
-            # vectors each. The remaining 12 vectors are an allowance for
+            # Peak live arrays: C_cache + 12 complex128 vectors of 2**q
+            # amplitudes, 16 bytes each, with C_cache the vectors that the
+            # state cache and the H column cache can hold after _keep_current
+            # (adapt.cached_state_vectors): 8L for the default growth, with
+            # L = max_selections, and 2(B + 2L) for a bounded basis of at
+            # most B chains. The remaining 12 vectors are an allowance for
             # working arrays such as the query state, H|state>, a generator
             # action, the two Taylor buffers, the Ritz state and its residual,
             # and for a pair query on a dense matrix the state copy and one
@@ -852,8 +1272,8 @@ def bind_classical(plan, inputs, reference):
             d = 1 << rec.num_qubits
             gradient = name == "energy" and int(number(values["insert_position"])) < 0
             k = len(right)
-            outer = (16 * (8 * rec.max_selections + 2 * k + 12) * d + 24 * k
-                     if gradient else 16 * (8 * rec.max_selections + 12) * d)
+            cached = cached_state_vectors(plan.method, rec.max_selections)
+            outer = 16 * (cached + 2 * k + 12) * d + 24 * k if gradient else 16 * (cached + 12) * d
             tables = inputs.cache["action_tables"]
             need = (outer + tables["resident_bytes"]
                     + inputs.hamiltonian.manifest.payload_bytes
@@ -941,6 +1361,8 @@ def _point(
     insertion=None,
     coefficients=(),
     energy=0.0,
+    stage=-1,
+    shots=None,
 ):
     """Resolve one ADAPT query as a canonical point of the Plan's parameter space.
 
@@ -953,7 +1375,10 @@ def _point(
     -1 for pool, term and insertion indices, the experiment's register
     widths for ``control_width`` and ``readout_width``, and 0 otherwise. Equal
     queries therefore resolve to the same parameter point with one content
-    hash and reuse its observation (``adapt._parameters``).
+    hash and reuse its observation (``adapt._parameters``). A
+    ``PencilSampling`` Plan also binds ``stage`` (-1 for selection, 0 pilot,
+    1 main) and ``shots``, the Plan's shots unless given, so a pilot or main
+    point never shares the identity of a selection query.
     """
     from nwqlib.core.records import Float64
 
@@ -996,9 +1421,10 @@ def _point(
             )
     supplied = {item.parameter: item for item in bindings}
     defaults = {p.name: 0 for p in plan.construction.program.parameters}
+    termwise_pair = experiment == "pair" and plan.reconstruction.acquisition.matrix_measurement != "grouped"
     defaults.update(
-        control_width=int(experiment == "pair"),
-        readout_width=1 if experiment == "pair" else plan.reconstruction.num_qubits,
+        control_width=int(experiment in ("pair", "diagonal")),
+        readout_width=1 if termwise_pair else plan.reconstruction.num_qubits,
     )
     defaults.update(
         {
@@ -1007,6 +1433,7 @@ def _point(
             if "_pool_" in p.name or p.name in {"term", "insert_position", "insert_term"}
         }
     )
+    defaults.update(stage=stage, shots=plan.shots if shots is None else shots)
     bindings = tuple(
         supplied.get(p.name)
         or Binding(
@@ -1044,7 +1471,8 @@ def _read_values(plan, point, chunk):
 
     The counts are read once through ``ObservationChunk.histogram()``. Each
     label's support is a bit mask in the Histogram index layout (bit ``p`` is
-    measured qubit ``p``, the rightmost label character), and its parity on
+    measured qubit ``p``, the rightmost label character, or bit ``p + 1``
+    after the unmeasured phase bit of a grouped Plan), and its parity on
     every stored index is one ``np.bitwise_count`` over the index array, or
     over the ``(entries, words)`` packed array for a readout wider than 64
     bits. The estimate is the exact integer ``total - 2 * odd`` divided once
@@ -1096,7 +1524,9 @@ def _read_values(plan, point, chunk):
     else:
         from nwqlib.execution import MAX_COUNT
 
-        width = 1 if point.experiment == "pair" else plan.reconstruction.num_qubits
+        # A grouped Plan puts an unmeasured phase bit before the system bits.
+        offset = int(plan.reconstruction.acquisition.matrix_measurement == "grouped")
+        width = 1 if point.experiment == "pair" else plan.reconstruction.num_qubits + offset
         histogram = chunk.histogram() if chunk.observation.kind == "counts" else None
         if histogram is None or histogram.entries and histogram.width != width:
             raise ValueError("counts must match the actual measured register")
@@ -1107,13 +1537,15 @@ def _read_values(plan, point, chunk):
         if not total:
             raise _PartialData((f"{point.experiment}: empty returned counts",))
         packed = histogram.packed_indices()
+        if offset and np.any(packed[:, 0] & np.uint64(1)):
+            raise ValueError("ADAPT query has a nonzero unmeasured phase bit")
         words = packed.shape[1]
         result = {}
         for label in labels:
             support = (
                 1
                 if point.experiment == "pair"
-                else sum(1 << i for i, axis in enumerate(reversed(label)) if axis != "I")
+                else sum(1 << (i + offset) for i, axis in enumerate(reversed(label)) if axis != "I")
             )
             parity = np.zeros(len(counts), dtype=np.uint8)
             for word in range(words):
@@ -1132,10 +1564,11 @@ def _read_values(plan, point, chunk):
     return result
 
 
-def _matrix_entries(plan, selected, available=()):
-    """Yield ``((i, j), element, key, point)`` for every upper-triangle pencil entry.
+def _matrix_entries(plan, basis, available=(), full=None, *, stage=-1, counts=None):
+    """Yield ``((i, j), element, key, point)`` for every upper-triangle pencil entry of the chains ``basis``.
 
-    Each pair query is bound with its two chains in canonical (sorted) order,
+    ``basis`` is the tuple of basis chains in pencil order. Each pair query
+    is bound with its two chains in canonical (sorted) order,
     so the same unordered pair of states reuses one query and its observation
     across iterations even when their basis positions change. When the canonical
     order reverses (i, j), the matrix assembly conjugates the amplitude by flipping
@@ -1144,14 +1577,40 @@ def _matrix_entries(plan, selected, available=()):
     weighted-pencil reduction per canonical chain pair (a diagonal pair only
     when the Hamiltonian has a nonidentity term), and sampled quantum plans
     have one query per ``MatrixElement``. In an exact quantum plan the
-    diagonal of a chain that is, or was in an earlier round, the full chain
-    comes from that chain's shared query on the full product state
-    (``available`` holds the content hashes of the queries already
-    observed).
+    diagonal of the chain ``full``, the full product of the selected
+    generators, and of a chain that was the full chain in an earlier round
+    comes from that chain's shared query on the full product state, which
+    also serves its screening (``available`` holds the content hashes of the
+    queries already observed). ``full`` matters only before that query is
+    observed, so a pass over complete observations passes None.
     ``key`` is ``(canonical left, canonical right, term, quadrature)``, which
     determines the query within one Plan, and ``point()`` resolves it.
+
+    A grouped sampled Plan instead yields ``((i, j), setting, key, point)``
+    for each ``fixed_basis.sampled_settings`` entry
+    ``(name, i, j, quadrature, group)`` of the current basis, with ``key``
+    ``(canonical left, canonical right, quadrature index, group, stage)``.
+    An off-diagonal setting is a ``pair`` query of the canonical chains, and
+    a diagonal setting a ``diagonal`` query of one chain on both sides.
+    Real-only quadratures omit every imaginary query. ``stage`` is -1 for
+    the selection queries and, under ``PencilSampling``, 0 or 1 for the pilot
+    or main stage of the final pencil, whose k-th setting binds
+    ``counts[k]`` shots. ``point(shots)`` binds other shots. The stage in the
+    key and in the point keeps the moments and observations of one stage from
+    serving another.
     """
-    basis = basis_chains(selected)
+    rec = plan.reconstruction
+    if rec.acquisition.matrix_measurement == "grouped":
+        for k, (name, i, j, quad, g) in enumerate(sampled_settings(
+                pencil_pairs(len(basis)), len(rec.energy_groups), rec.acquisition.quadratures)):
+            left, right = basis[i], basis[j]
+            canonical = (right, left) if right < left else (left, right)
+            quadrature = int(quad == "imag")
+            yield (i, j), (name, i, j, quad, g), (*canonical, quadrature, g, stage), (
+                lambda shots=None if counts is None else counts[k], canonical=canonical, quadrature=quadrature,
+                g=g, diagonal=i == j: _point(plan, "diagonal" if diagonal else "pair", *canonical,
+                                             quadrature=quadrature, group=g, stage=stage, shots=shots))
+        return
     if plan.execution == "classical" or plan.shots is None:
         # Classical host queries and exact pair reductions each return every
         # entry of their canonical chain pair at once.
@@ -1165,7 +1624,7 @@ def _matrix_entries(plan, selected, available=()):
                     # point later screening reuses, or when an earlier round
                     # acquired it as its full chain.
                     shared = _point(plan, "screen", right=left)
-                    if left == tuple(selected) or shared.content_id in available:
+                    if left == full or shared.content_id in available:
                         yield (i, j), None, (left, left, -2, 0), (lambda shared=shared: shared)
                         continue
                 yield (i, j), None, (*canonical, -1, 0), (
@@ -1174,7 +1633,8 @@ def _matrix_entries(plan, selected, available=()):
         terms = plan._native["inputs"].nonidentity if plan._native else tuple(
             (t.label, t.coefficient) for t in plan.reconstruction.nonidentity_terms)
         indices = {p: i for i, (p, _) in enumerate(terms)}
-        for element in matrix_elements(len(basis), terms, plan.reconstruction.num_qubits):
+        for element in matrix_elements(len(basis), terms, plan.reconstruction.num_qubits,
+                                       rec.acquisition.quadratures):
             i, j = element.basis_pair
             left, right = basis[i], basis[j]
             canonical = (right, left) if right < left else (left, right)
@@ -1185,50 +1645,211 @@ def _matrix_entries(plan, selected, available=()):
                     plan, "pair", *canonical, term=term, quadrature=quadrature))
 
 
-def _matrix_points(plan, selected, available=()):
-    """Yield ``((i, j), element, point)`` for every upper-triangle pencil entry (``_matrix_entries``)."""
-    for pair, element, _, point in _matrix_entries(plan, selected, available):
-        yield pair, element, point()
+def _new_pencil_queries(basis, earlier, reconstruction):
+    """Return a lower bound on the quantum pencil queries of the chains ``basis`` that no earlier stage obtained.
 
-
-def _new_pencil_queries(selected, history, terms, *, exact=False):
-    """Return a lower bound on the quantum pencil queries of ``selected`` that no earlier stage obtained.
-
-    A pair query is bound to its two basis chains (``_matrix_points``), and
-    every basis in ``history`` was analyzed, so all of its pair queries were
-    obtained. Only a pair of chains that both appear among the earlier bases
-    can have been obtained. With ``s`` such chains among the ``b`` current
-    ones, at least ``c(b) - c(s)`` queries are new, where ``c`` is
-    ``pencil.pair_count`` for exact pair reductions and
-    ``pencil.matrix_element_count`` for sampled scalar queries, and ``terms``
-    is the number of nonidentity Pauli terms. The bound is exact whenever the
-    earlier chains that the current basis holds all belong to the previous
-    basis, whose pairs were all obtained. That holds without optimization, where each
-    basis contains the one before it, and after an optimization unless an
-    angle returned exactly to its value in an older basis. It costs O(b)
-    per history record and forms no query.
+    A pair query is bound to its two basis chains (``_matrix_entries``).
+    ``earlier`` is the set of chains of the completed earlier bases, every
+    one of which was analyzed, so all of their pair queries were obtained.
+    The bound needs a set of current chains that contains both
+    chains of every query the stage can reuse. When a matrix stage is first
+    entered, before any of its own queries ran (``drive_adapt`` calls this
+    only then), every reusable query belongs to a completed earlier basis,
+    so the chains of the earlier bases form such a set. A resumed, partly
+    acquired stage also reuses its own queries, whose chains can be new, so
+    this shortcut does not apply to it, nor to a pass over a candidate basis
+    outside the selected chain. With ``s`` such chains among the ``b``
+    current ones, at least ``c(b) - c(s)`` queries are new, where ``c(b)`` is the
+    complete b-state population of the Plan's resolved acquisition with L
+    nonidentity Pauli terms and G Hamiltonian groups: ``pencil.pair_count``
+    for exact pair reductions, ``fixed_basis.sampled_setting_count`` for
+    grouped settings, ``b**2 G`` or ``b(b+1)G/2`` real-only, and
+    ``pencil.matrix_element_count`` for termwise queries, ``b**2 L + b(b-1)``
+    or ``bL + b(b-1)(L+1)/2`` real-only. For the legacy growth from two to
+    three selections, b = 6 and s = 4, so ``(36 - 16)G = 20G`` grouped
+    complex settings are new and ``(21 - 10)G = 11G`` real-only. The bound
+    is exact whenever the earlier chains that the current basis holds all
+    belong to the previous basis, whose pairs were all obtained. That holds
+    without optimization, where each basis contains the one before it, and
+    after an optimization unless an angle returned exactly to its value in
+    an older basis, which only makes the bound smaller than the new count.
+    It costs O(b) set lookups and forms no query.
     """
+    terms = len(reconstruction.nonidentity_terms)
+    acquisition = reconstruction.acquisition
+
     def count(size):
-        if exact:
+        if acquisition.matrix_measurement is None:
             return pair_count(size, terms)
-        return matrix_element_count(size * (size + 1) // 2, size, terms)
+        if acquisition.matrix_measurement == "grouped":
+            return sampled_setting_count(size, len(reconstruction.energy_groups), acquisition.quadratures)
+        return matrix_element_count(size * (size + 1) // 2, size, terms, acquisition.quadratures)
 
-    earlier = {
-        item
-        for record in history
-        for item in basis_chains(tuple(zip(record["selected"], record["theta"], strict=True)))
-    }
-    current = basis_chains(selected)
-    return count(len(current)) - count(sum(item in earlier for item in current))
+    return count(len(basis)) - count(sum(item in earlier for item in basis))
 
 
-def _matrix_from_observations(plan, selected, context, *, acquire=None, receipt=None):
-    """Return ``(H0, S, sampled, allowance)`` of the basis of ``selected`` from its pair queries.
+def _missing_queries(plan, basis, position, observations):
+    """Return the number of distinct pencil queries of the chains ``basis`` with an entry in row ``position`` that ``observations`` lacks.
+
+    Bounded growth admits its stages with this exact count of the queries
+    still to run, because a bounded candidate or a chain added to the basis
+    can reuse queries outside every completed earlier basis, where the
+    shortcut of ``_new_pencil_queries`` does not apply. It resolves the
+    points of the b entries of that row, and in exact quantum execution
+    also the shared full-chain point of each diagonal that
+    ``_matrix_entries`` checks.
+    """
+    return len({point().content_id for (i, j), _, _, point in _matrix_entries(plan, basis)
+                if position in (i, j)} - observations.keys())
+
+
+def _group_rows(plan):
+    """Return the nonidentity ``(label, coefficient)`` rows in ``energy_labels`` order, which ``energy_groups`` index."""
+    rec = plan.reconstruction
+    coefficients = {t.label: t.coefficient for t in rec.nonidentity_terms}
+    return tuple((label, coefficients[label])
+                 for label in energy_labels((t.label for t in rec.nonidentity_terms), label_cache(plan)))
+
+
+def _reduce_query(plan, point, chunk, rows):
+    """Return the ``GroupMoment`` of one grouped pencil query in its canonical chain order.
+
+    The chunk must belong to exactly this point and hold unconditional
+    counts. ``fixed_basis.reduce_group`` reads them in its shared layout,
+    the same reduction FixedGCIM uses, with ``rows`` the Plan's group rows
+    (``_group_rows``), which a pass builds once. The moment's pair is
+    ``(0, 1)`` for an off-diagonal query and ``(0, 0)`` for a diagonal one
+    until ``_oriented_moment`` places it in a basis. Empty counts are
+    missing data.
+    """
+    rec = plan.reconstruction
+    if chunk.realization_id != point.content_id or chunk.bindings != point.bindings:
+        raise ValueError("ADAPT observation differs from its exact query")
+    if chunk.population != "unconditional":
+        raise ValueError("ADAPT requires the selected unconditional observation population")
+    values = {b.parameter: b.value for b in point.bindings}
+    group = int(number(values["group"]))
+    diagonal = point.experiment == "diagonal"
+    setting = (point.experiment, 0, 0 if diagonal else 1, "imag" if number(values["quadrature"]) else "real", group)
+    moment = reduce_group(chunk, setting, rows=rows,
+                          members=rec.energy_groups[group] if rec.energy_groups else (),
+                          num_qubits=rec.num_qubits)
+    if moment is None:
+        raise _PartialData((f"{point.experiment}: empty returned counts",))
+    return moment
+
+
+def _oriented_moment(moment, pair, conjugate):
+    """Place a canonical-order group moment at basis positions ``pair``, conjugated when the basis reverses the chains.
+
+    Reversing a pair conjugates its entry, ``<j|P|i> = conj(<i|P|j>)``, so
+    the imaginary setting of the reversed pair has the per-shot values
+    ``(-X, -Y)`` of the measured one, ancilla sign and weighted parity
+    together. Its first moments (``label_means``, ``mean``,
+    ``overlap_mean``) change sign, while ``second``, ``overlap_cross``, the
+    variances and the H0-overlap covariance are invariant under
+    ``(X, Y) -> (-X, -Y)``. A real setting is unchanged. An unavailable
+    field stays None.
+    """
+    fields = {name: getattr(moment, name) for name in type(moment).model_fields if name != "parent_id"}
+    fields["pair"] = pair
+    if conjugate:
+        fields.update(label_means=tuple(-value for value in moment.label_means), mean=-moment.mean,
+                      overlap_mean=None if moment.overlap_mean is None else -moment.overlap_mean)
+    return GroupMoment(**fields)
+
+
+def _grouped_moments(plan, basis, context, acquire=None, *, stage=-1, counts=None):
+    """Return the settings of the grouped pencil of the chains ``basis`` and their moments at basis positions.
+
+    Each setting of the current basis (``_matrix_entries`` at ``stage`` with
+    ``counts``) is one query of its canonical chains, quadrature, group and
+    stage, reused from ``context.pair_values`` when an earlier pass read it.
+    The pass orients every current setting for the pooling that follows
+    (``_grouped_statistics`` or ``pencil_workflow.pilot_decision``), so the
+    whole current population, the chunk of each new query and the chunk
+    behind each cached moment, is admitted by
+    ``fixed_basis.grouped_pass_requirements`` (bytes against ``max_bytes``,
+    work against ``max_products``) with its settings, pairs and oriented
+    view, which charge that pooling too. With ``acquire`` the pass is
+    admitted before the first missing query runs, each table not yet
+    acquired charged its largest possible bin count ``min(N, 2**(n+1))`` for
+    the shots N that its point binds, so a refusal leaves no new
+    acquisition. Once every missing query has its chunk, read from the
+    observations or run by ``acquire``, the pass is admitted again with the
+    stored bins of every chunk before any count is decoded or any current
+    view is formed. Only the new chunks are decoded, and their canonical
+    moments enter ``context.pair_values`` with the stored bin count of their
+    chunk. The moments are then placed at their basis positions, conjugated
+    where the basis reverses the canonical order. Returns
+    ``(settings, moments)`` in setting order.
+    """
+    rec = plan.reconstruction
+    entries = tuple(_matrix_entries(plan, basis, stage=stage, counts=counts))
+    groups = rec.energy_groups or ((),)
+    pending = {}
+    for _, setting, key, point in entries:
+        if key not in context.pair_values and key not in pending:
+            pending[key] = setting, point()
+
+    # Every current setting enters the pass, cache hits included. The
+    # allowance covers this pass only, not other passes or the Run's history
+    # (fixed_basis.grouped_pass_requirements).
+    def admit(bins):
+        """Check the pass of every current setting, with ``bins(key)`` the stored bins of its chunk."""
+        size, work = grouped_pass_requirements(
+            rec.num_qubits, ((len(groups[key[3]]), bins(key)) for _, _, key, _ in entries),
+            len(rec.nonidentity_terms), len(basis), settings=len(entries),
+            pairs=len({pair for pair, _, _, _ in entries}), oriented=True)
+        _check_bytes(size, plan.method.max_bytes, "ADAPT grouped count arrays and scalar payload")
+        _check_products(work, plan.method.max_products)
+
+    if acquire is not None:
+        # The law increases with every bin count, so the largest one bounds a
+        # table not yet acquired: its point's bound shots or the 2**(n+1)
+        # outcomes, never the shots of another stage.
+        largest = {key: min(point.resolved_observation(plan)[1].shots, 1 << (rec.num_qubits + 1))
+                   for key, (_, point) in pending.items()}
+        held = {key: context.observations.get(point.content_id) for key, (_, point) in pending.items()}
+        admit(lambda key: context.pair_values[key][2] if key not in pending else
+              largest[key] if held[key] is None else len(_single_chunk(held[key]).values))
+    new = {}
+    for key, (setting, point) in pending.items():
+        chunk = context.observations.get(point.content_id) if acquire is None else acquire(point)
+        if chunk is None:
+            raise _PartialData((f"matrix {setting[0]}",))
+        new[key] = point, _single_chunk(chunk)
+    admit(lambda key: len(new[key][1].values) if key in new else context.pair_values[key][2])
+    rows = _group_rows(plan)
+    for key, (point, chunk) in new.items():
+        context.pair_values[key] = (_reduce_query(plan, point, chunk, rows), chunk.prepared_id, len(chunk.values))
+    moments = tuple(
+        _oriented_moment(context.pair_values[key][0], (i, j), setting[3] == "imag" and basis[j] < basis[i])
+        for (i, j), setting, key, _ in entries)
+    return tuple(e[1] for e in entries), moments
+
+
+def _grouped_statistics(plan, basis, context, acquire=None, *, stage=-1, counts=None):
+    """Return the group moments, pooled pair entries and pair variances of the grouped pencil of the chains ``basis``.
+
+    The oriented moments of ``_grouped_moments`` are pooled by
+    ``fixed_basis.pooled_statistics``, the same pair reconstruction as
+    FixedGCIM, with real-only imaginary parts as exact zeros. Returns
+    ``(moments, pairs, variances)``.
+    """
+    settings, moments = _grouped_moments(plan, basis, context, acquire, stage=stage, counts=counts)
+    _, _, pairs, variances = pooled_statistics(settings, moments, plan.reconstruction.identity_shift)
+    return moments, pairs, variances
+
+
+def _matrix_from_observations(plan, basis, context, *, acquire=None, receipt=None, full=None):
+    """Return ``(H0, S, sampled, allowance)`` of the basis chains ``basis`` from their pair queries.
 
     ``H0`` and ``S`` are complex ``b``-by-``b`` arrays in basis-chain order,
     completed below the diagonal by conjugation. ``H0`` omits the identity
     term ``cI`` of the Hamiltonian, ``plan.reconstruction.identity_shift``.
-    ``sampled`` is True when any entry came from shot counts. ``allowance``
+    ``sampled`` is True for every quantum Plan with shots, including one
+    whose scalar Hamiltonian leaves no entry to count. ``allowance``
     bounds the error of a deterministic S that the solve's negative-mode
     test allows. It is the Gram formation error of classical inner products
     of length 2**n, or for exact pair reductions the largest row sum of the
@@ -1237,13 +1858,15 @@ def _matrix_from_observations(plan, selected, context, *, acquire=None, receipt=
     zero when a record or its state error is unavailable. With
     ``acquire`` each missing query is run, otherwise only already
     collected observations are used and a missing one raises
-    ``_PartialData``. Each observation is validated by ``_read_values``
-    before it is used, and its values are kept in ``context.pair_values``,
-    so a later stage reads only its new queries. A query bound in swapped
-    canonical order measured ``<j|P|i> = conj(<i|P|j>)``, so it is
-    conjugated (``_matrix_entries``), once per assembly.
+    ``_PartialData``. Each observation is validated by ``_read_values``, or
+    for a grouped setting reduced by ``_grouped_statistics``, before it is
+    used, and its values are kept in ``context.pair_values``, so a later
+    stage reads only its new queries. A query bound in swapped canonical
+    order measured ``<j|P|i> = conj(<i|P|j>)``, so it is conjugated
+    (``_matrix_entries``), once per assembly. ``full`` is the chain whose
+    exact diagonal comes from its shared screening query
+    (``_matrix_entries``).
     """
-    basis = basis_chains(selected)
     b = len(basis)
     _check_bytes(_projected_solve_bytes(b), plan.method.max_bytes, "ADAPT projected analysis")
     _check_products(_projected_solve_work(b), plan.method.max_products)
@@ -1261,7 +1884,7 @@ def _matrix_from_observations(plan, selected, context, *, acquire=None, receipt=
 
     if plan.execution == "classical":
         h, s = np.empty((b, b), dtype=complex), np.empty((b, b), dtype=complex)
-        for (i, j), _, key, point in _matrix_entries(plan, selected):
+        for (i, j), _, key, point in _matrix_entries(plan, basis):
             v = read(key, point, f"matrix pair {i},{j}")[0]
             sign = -1 if basis[j] < basis[i] else 1
             h[i, j], s[i, j] = (
@@ -1285,7 +1908,7 @@ def _matrix_from_observations(plan, selected, context, *, acquire=None, receipt=
         terms = len(rec.nonidentity_terms)
         c1 = _coefficient_mass([t.coefficient for t in rec.nonidentity_terms])
         pairs, bounds = {}, {}
-        for (i, j), _, key, point in _matrix_entries(plan, selected, context.observations):
+        for (i, j), _, key, point in _matrix_entries(plan, basis, context.observations, full):
             v, prepared_id = read(key, point, f"matrix pair {i},{j}")
             h0, overlap = v["h0"], v["overlap"]
             if basis[j] < basis[i]:
@@ -1303,20 +1926,26 @@ def _matrix_from_observations(plan, selected, context, *, acquire=None, receipt=
         # An unavailable allowance admits no input error beyond the solver's
         # own roundoff.
         allowance = 0.0 if allowance is None else allowance
+    elif plan.reconstruction.acquisition.matrix_measurement == "grouped":
+        # The shared grouped reduction, pooling and assembly of FixedGCIM.
+        h, s, sampled, allowance = _grouped_matrices(b, _grouped_statistics(plan, basis, context, acquire)[1])
     else:
-        for (i, j), element, key, point in _matrix_entries(plan, selected):
+        # Termwise settings with shots, or a Plan with shots whose scalar
+        # Hamiltonian resolved no measurement. Both solve with the sampled
+        # policy that ADAPTResult requires of a Plan with shots, also when no
+        # entry is read.
+        sampled = True
+        for (i, j), element, key, point in _matrix_entries(plan, basis):
             read_values = read(key, point, f"matrix {element.name}")[0]
             sign = -1 if element.quadrature == "imag" and basis[j] < basis[i] else 1
             values[element.name] = sign * next(iter(read_values.values()))
-            # _read_values reads counts exactly when a quantum Plan has shots, and it
-            # returned, so the chunk holds at least one count.
-            sampled |= plan.execution == "quantum" and plan.shots is not None
         h, s = assemble_pencil(
             b,
             plan._native["inputs"].nonidentity if plan._native else tuple(
                 (t.label, t.coefficient) for t in plan.reconstruction.nonidentity_terms),
             plan.reconstruction.num_qubits,
             values,
+            plan.reconstruction.acquisition.quadratures,
         )
         # A sampled overlap uses the positive-subspace policy, which admits no
         # deterministic input allowance.
@@ -1324,77 +1953,70 @@ def _matrix_from_observations(plan, selected, context, *, acquire=None, receipt=
     return h, s, sampled, allowance
 
 
-def _pencil_from_observations(plan, selected, context, *, cutoff=None, receipt=None):
-    """Solve the pencil of ``selected`` and return ``(ProjectedPencil, diagnostics)``.
+def _grouped_matrices(b, pairs):
+    """Return ``(H0, S, sampled, allowance)`` of a b-state basis from its pooled grouped pair entries.
 
-    The matrices assembled by the live matrix stage (``context.matrix_data``)
+    A sampled overlap uses the positive-subspace policy, which admits no
+    deterministic input allowance.
+    """
+    h, s = assemble_pair_pencil(b, pairs)
+    return h, s, True, 0.0
+
+
+def _overlap_settings(moments):
+    """Return ``{(i, j): settings}`` of the overlap of every off-diagonal pair from the oriented moments of ``_grouped_statistics``.
+
+    Group zero supplies the overlap. Each setting is ``(contribution_id,
+    shots, overlap_variance)`` of its one moment, because ADAPT measures each
+    setting once, the real part first and the imaginary part second when
+    the Plan measures it (``bounded_growth.sampled_metric``). Orientation
+    leaves the variance unchanged (``_oriented_moment``). The moments are
+    read, never changed.
+    """
+    parts = {(m.pair, m.quadrature): (m.contribution_id, m.shots, m.overlap_variance)
+             for m in moments if m.group == 0 and m.pair[0] != m.pair[1]}
+    return {pair: (setting, *((parts[pair, "imag"],) if (pair, "imag") in parts else ()))
+            for (pair, quadrature), setting in parts.items() if quadrature == "real"}
+
+
+def _pencil_from_observations(plan, basis, context, *, cutoff=None, receipt=None):
+    """Solve the pencil of the basis chains ``basis`` with the shared ``fixed_basis.solve_pencil`` and return the ``ProjectedPencil``.
+
+    The matrices already assembled for ``basis`` (``context.matrix_data``,
+    by the live matrix stage or by the grouped pass of ``analyze_adapt``)
     are used once and released. Otherwise, as after an interruption or for
-    a new ``cutoff``, they are rebuilt from the saved observations, with
-    ``receipt`` as in ``_matrix_from_observations``. The solve uses ``H0``
-    and adds the identity coefficient c to the Ritz values, and the pencil
-    records ``H = H0 + c S``. ``diagnostics`` is the sampled enclosure
-    comparison (``_sampled_pencil_diagnostics``), or None for deterministic
-    data or when an endpoint of the processed Pauli enclosure is not finite.
-    Unlike ``fixed_basis.solve_pencil``, the solve honors the method's
-    ``symmetrize_matrices`` setting.
+    a new ``cutoff`` of a termwise or exact pencil, they are rebuilt from
+    the saved observations, which hold every query of the completed stage,
+    with ``receipt`` as in ``_matrix_from_observations``. The solve uses
+    ``H0`` with the Gram allowance of ``_matrix_from_observations`` and the
+    method's ``symmetrize_matrices`` choice, adds the identity coefficient c
+    to the Ritz values, and records ``H = H0 + c S`` and the lowest one or
+    two Ritz values before c is added (``offset_free_eigenvalues``). With
+    shots the pencil also carries the sampled comparison with the processed
+    Pauli enclosure (``sampled_*`` fields), which is absent when an endpoint
+    of that enclosure is not finite and for deterministic data. A nonfinite
+    enclosure violation is recorded as None.
     """
     cutoff = plan.method.overlap_cutoff if cutoff is None else cutoff
     current = context.matrix_data
     context.matrix_data = None
-    h, s, sampled, allowance = (current[1] if current is not None and current[0] == selected
-                                else _matrix_from_observations(plan, selected, context,
+    h, s, sampled, allowance = (current[1] if current is not None and current[0] == basis
+                                else _matrix_from_observations(plan, basis, context,
                                                                receipt=receipt))
-    shift = plan.reconstruction.identity_shift
-    result, spectrum, failure, _ = _solve_projected_pencil(
-        h,
-        s,
-        overlap_eigenvalue_cutoff=cutoff,
-        symmetrize_matrices=plan.method.symmetrize_matrices,
-        overlap_input_tolerance=allowance,
-        identity_shift=shift,
-        _sampled_overlap=sampled,
-    )
-    kept = [] if spectrum is None else [float(x) for x in spectrum if x > cutoff]
-    condition = max(kept) / min(kept) if kept else None
-    if condition is not None and not isfinite(condition):
-        condition = None
-
-    def matrix_record(array):
-        return tuple(
-            tuple(Complex128(real=float(z.real), imag=float(z.imag)) for z in row) for row in array
-        )
-
-    diagnostics = None
-    enclosure = processed_pauli_enclosure(plan.reconstruction) if sampled else None
-    if enclosure is not None:
-        diagnostics = _sampled_pencil_diagnostics(
-            eigensolver=result,
-            solver_failure_reason=failure,
-            enclosure=enclosure,
-            relative_tolerance=SAMPLED_PENCIL_ENCLOSURE_RTOL,
-        )
-    pencil = ProjectedPencil(
-        hamiltonian=matrix_record(physical_hamiltonian(h, s, shift)),
-        overlap=matrix_record(s),
-        overlap_eigenvalues=() if spectrum is None else tuple(map(float, spectrum)),
-        eigenvalues=() if result is None else tuple(map(float, result.eigenvalues)),
-        coordinate_vectors=() if result is None else matrix_record(result.eigenvectors),
-        kept_rank=0 if result is None else result.kept_overlap_rank,
-        overlap_cutoff=cutoff,
-        overlap_filter="sampled_positive_subspace" if sampled else "deterministic_gram",
-        overlap_condition_number=condition,
-        projected_residual=None if result is None else result.residual_norm,
-        projected_backward_error=None
-        if result is None
-        else result.generalized_eigenpair_backward_error,
-        overlap_normalization_error=None if result is None else result.overlap_normalization_error,
-        failure_reason=failure,
-        **sampled_pencil_fields(diagnostics),
-    )
-    return pencil, diagnostics
+    return solve_pencil(h, s, cutoff=cutoff, sampled=sampled,
+                        enclosure=processed_pauli_enclosure(plan.reconstruction) if sampled else None,
+                        identity_shift=plan.reconstruction.identity_shift,
+                        overlap_input_tolerance=allowance,
+                        symmetrize_matrices=plan.method.symmetrize_matrices)
 
 
-def _new_controller_state(controls):
+# The two values of ``pencil_workflow.new_state`` that the final stages fix
+# once, by their names there, and the top-level checkpoint fields that hold
+# them apart from the stage cursor ``final``.
+_FINAL_FIXED = {"pilot_counts": "pilot_counts", "decision": "shot_allocation"}
+
+
+def _new_controller_state(controls, *, bounded=False):
     """Return the initial checkpoint state of a new ADAPT iteration.
 
     The state is plain JSON so a Run checkpoint can store it. Its keys:
@@ -1402,9 +2024,34 @@ def _new_controller_state(controls):
     - ``kind``, ``controls``: format tag and the Plan identity and optimizer
       resume policy. Resume requires both to be identical.
     - ``selected``, ``theta``: current generator chain, as pool indices and
-      angles in radians.
+      angles in radians. Empty under ``bounded`` growth.
+    - ``basis``, ``value_basis``, ``cursor``: only under ``bounded`` growth,
+      the chains of the basis, the reference ``[]`` first, the chains of the
+      latest projected analysis, and ``[parent position, next pool index]``
+      of each parent of the last examination in cyclic position order
+      ending with the parent of the last examined extension, the anchor
+      after which the next examination starts (``bounded_growth.frontier``).
+      The order is part of the state, so nothing may sort it.
     - ``phase``: next scientific action, one of ``matrix``, ``analysis``,
-      ``residual``, ``decision``, ``screen``, ``optimize`` or ``complete``.
+      ``residual``, ``decision``, ``screen``, ``optimize`` or ``complete``,
+      under ``bounded`` growth ``select`` (examine the extensions of one
+      round) and ``rows`` (obtain and score the admitted ones), and under
+      ``PencilSampling`` ``final`` (the pilot and main stages of the value
+      basis and the analysis of its main stage) once growth has stopped.
+    - ``final``: only from the ``final`` phase on, the stop reason that ended
+      growth (``stop_reason``) and, once the stages start, their cursor: the
+      fields of ``pencil_workflow.new_state`` other than the two fixed
+      values below. Its ``pending``, ``analysis_in_progress`` and
+      ``analysis_attempts`` belong to the stages and are separate from the
+      top-level fields of the same names. Its ``analysis_attempts`` counts
+      the started pilot allocations. Its ``analysis_in_progress`` stays
+      False, because the analysis of the main stage uses the top-level
+      ``analysis_in_progress``.
+    - ``pilot_counts``, ``shot_allocation``: once the stages start, the
+      pilot shots of each setting and the serialized ``ShotAllocation``,
+      None until the decision. ``new_state`` returns them as
+      ``pilot_counts`` and ``decision`` (``_FINAL_FIXED``). Each is a field
+      of its own, so a checkpoint of the cursor does not write it again.
     - ``pending``, ``pending_labels``: records of queries whose external work
       is not complete, and the labels reported as ``ADAPTResult.pending``.
     - ``history``: one dictionary per projected analysis, the future
@@ -1425,11 +2072,15 @@ def _new_controller_state(controls):
       was already counted.
     - ``analysis_attempts``, ``current_analysis_attempt``,
       ``analysis_in_progress``: projected-analysis bookkeeping for
-      ``recover_adapt_analysis``.
+      ``recover_adapt_analysis``, for the analyses of the growth and the
+      analysis of the main stage. ``ADAPTResult.analysis_attempts`` adds the
+      pilot allocations that ``final`` counts.
     - ``stop_reason``: outcome of the iteration, ``running`` until a stop.
     - ``stage_start``: first contribution index of the next history record.
     """
+    extra = dict(basis=[[]], value_basis=[], cursor=[]) if bounded else {}
     return dict(
+        **extra,
         kind="adapt_gcim/3",
         controls=controls,
         selected=[],
@@ -1520,6 +2171,44 @@ def _stopping_reason(state, options, reconstruction, count):
     return None
 
 
+def _bounded_stopping_reason(state, options, reconstruction, size):
+    """Return the stop reason of bounded growth after an analysis of a basis of ``size`` chains, or None.
+
+    The rules are checked in this order: the basis holds ``max_basis_size``
+    chains, ``max_iterations`` rounds have each added a chain, or the flat
+    count is at least ``T = min(t_user, t_auto_fraction * P)``, the rule of
+    ``_stopping_reason`` with the pool size P as a fixed scale in place of
+    the number of unselected generators. P is not a count of remaining
+    extensions. The reference-only analysis never stops on the flat rule. These
+    rules limit the work and say nothing about convergence. None means
+    examine the extensions of the next round.
+    """
+    rounds = size - 1
+    if size >= options.max_basis_size:
+        return "max_basis_size"
+    if rounds >= options.max_iterations:
+        return "max_iterations"
+    if (options.stop_criterion == "flat_counter" and rounds > 0
+            and state["flat_count"] >= min(options.t_user, options.t_auto_fraction * len(reconstruction.pool))):
+        return "flat_counter"
+    return None
+
+
+def _round_stop_reason(labels, exhausted):
+    """Return the stop reason of a bounded round that admitted no extension.
+
+    ``basis_depth_limit`` when every examined extension that does not
+    repeat a basis chain was excluded by the depth limit and there was at
+    least one, ``parent_window_exhausted`` when no parent had a generator
+    left, and ``candidate_scans_exhausted`` when ``max_candidate_scans``
+    ended the examination first.
+    """
+    reasons = {label["reason"] for label in labels} - {"duplicate"}
+    if reasons and reasons <= {"depth_unknown", "above_depth_limit"}:
+        return "basis_depth_limit"
+    return "parent_window_exhausted" if exhausted else "candidate_scans_exhausted"
+
+
 # Stop reasons for unresolved external work, keyed by the provider or
 # preparation status with any ``preparation_`` prefix removed. Any other
 # ``preparation_*`` status is ``pending_preparation`` and any other status is
@@ -1592,7 +2281,22 @@ def drive_adapt(plan, *, run, prepare_only=False):
     generators and append the largest absolute gradient, with equal binary64
     absolute values going to the lowest pool index) and ``optimize`` (optional BFGS every ``optimize_every_m``
     selections). The science follows ADAPT-GCiM, as described in the
-    ``ADAPT`` docstring.
+    ``ADAPT`` docstring. Under ``BoundedRitzGrowth`` the phases ``select``
+    (examine one round's extensions, ``bounded_growth.frontier``) and
+    ``rows`` (obtain each admitted extension's pencil row and its score,
+    with shots only when its sampled eligibility passes, then append the
+    best extension to the explicit basis) take the
+    place of ``screen`` and ``optimize``, and the same ``matrix``,
+    ``analysis`` and ``decision`` phases follow. The extension that is
+    added finds all its entries already obtained, so its matrix stage runs
+    no query. Under ``ADAPT.sampling`` the stop that ends growth leads to the
+    ``final`` phase instead of ``complete``: once, on the value basis, the
+    pilot and main stages of ``pencil_workflow.advance_stages`` with the
+    allocation decided between them by ``pencil_workflow.pilot_decision``,
+    and then the analysis of the main-stage measurements alone, after
+    which the run ends with the stop reason of its growth. Before the first
+    pilot preparation the Run must have room for 2m preparations, 2m
+    circuits and the whole ``total_shots`` for the m settings of that basis.
 
     Invariants that make interruption safe:
 
@@ -1605,13 +2309,27 @@ def drive_adapt(plan, *, run, prepare_only=False):
     - Unresolved external work stops the iteration with a pending or
       uncertain reason instead of retrying, so no preparation, submission or
       shot is duplicated.
+    - A circuit that ``ADAPT.max_native_two_qubit_depth`` refuses before its
+      submission (``NativeDepthCapRefusal`` from ``ADAPT.before_submit``)
+      for its depth, above the limit or unqualified, ends the iteration with
+      ``native_depth_refused``. The saved complete phase returns the Result
+      of the last solved pencil on resume, without preparing or submitting
+      that query again. A refusal for installed package versions other than
+      the recorded ones (``provenance``) is raised with the checkpoint
+      unchanged, so the same Run continues where the recorded versions are
+      installed.
     - A logical energy query is counted against ``optimize_max_evaluations``
       before its circuits run, and an identical point reuses collected
       values without being counted again.
     - SciPy BFGS has no resumable internal state. After resume it restarts
       from the best completed point and records the restart.
-    - An interrupted projected analysis is not repeated automatically. It
-      needs ``run.resume(reanalyze=True)`` (``recover_adapt_analysis``).
+    - An interrupted projected analysis, the analysis of the main stage
+      included, or an interrupted allocation is not repeated
+      automatically. It needs ``run.resume(reanalyze=True)``
+      (``recover_adapt_analysis``).
+    - The final stages checkpoint each pending point with its seed before
+      its preparation and the allocation before the first main
+      preparation, so a resume repeats no selection, pilot or allocation.
 
     Args:
         plan: The ADAPT Plan of ``run``.
@@ -1622,11 +2340,18 @@ def drive_adapt(plan, *, run, prepare_only=False):
         The analyzed ``ADAPTResult``, or None while external work is pending or
         when only preparation was requested.
     """
+    from nwqlib.backends.inspection import NativeDepthCapRefusal
     from .optimization import _EvaluationBudgetExhausted, optimize_product
 
     if run.plan is not plan:
         raise ValueError("ADAPT execution requires the same selected Plan and Run")
     options, reconstruction = plan.method, plan.reconstruction
+    growth = options.basis_growth
+    from .adapt import independence_floor
+    from .bounded_growth import (
+        candidate_score, current_projection, frontier, generator_cx_weight, reference_cx_bound, sampled_eligibility,
+        sampled_metric)
+
     controls = dict(
         plan_id=plan.content_id, optimizer_resume_policy="restart_if_no_official_resume"
     )
@@ -1648,14 +2373,16 @@ def drive_adapt(plan, *, run, prepare_only=False):
     if state is None:
         if run.trace.events:
             raise ValueError("a fresh ADAPT controller requires a run without unrelated attempts")
-        state = _new_controller_state(controls)
+        state = _new_controller_state(controls, bounded=growth is not None)
     elif state.get("kind") != "adapt_gcim/3" or state.get("controls") != controls:
         raise ValueError("resume requires the identical ADAPT Plan/runtime/policy")
     indices, angles = state["selected"], state["theta"]
     context.accepted = tuple(zip(indices, angles, strict=True))
+    context.basis = None if growth is None else saved_chains(state["basis"])
     active = state["active_energy"]
     _keep_current(
-        context, *((tuple(zip(indices, active["theta"], strict=True)),) if active else ())
+        context, current_basis(context),
+        *((tuple(zip(indices, active["theta"], strict=True)),) if active else ())
     )
     # Rebuild only the observation index, preserving original contribution order.
     prior = run.observations
@@ -1667,27 +2394,35 @@ def drive_adapt(plan, *, run, prepare_only=False):
             context.contribution_order.append(chunk.content_id)
 
     # A checkpoint writes only the fields that changed since the previous one.
-    # Fields other than the pencil and the decision history stay small and are
-    # written each time. Each projected analysis replaces the pencil without
-    # editing it, and the history changes only through project_current's
-    # append and update_last, which both raise `revision`, so an identity
-    # check and one integer comparison find their changes. Raw observations
-    # belong to the Run, not to this state.
-    revision = 0
-    saved = None if not restored else dict(pencil=state.get("pencil"), revision=revision)
+    # Fields other than the pencil, the fixed values of the final stages and
+    # the decision history stay small and are written each time. Each
+    # projected analysis replaces the pencil without editing it, the final
+    # stages publish their pilot counts once and their allocation once
+    # (_FINAL_FIXED), and the history changes only through project_current's
+    # append and update_last, which both raise `revision`, so identity checks
+    # and one integer comparison find their changes. A reopened Run records
+    # the identities of the values it read, so it writes none of them again
+    # until it replaces one. Raw observations belong to the Run, not to this
+    # state.
+    revision, absent = 0, object()
+    replaced = ("pencil", *_FINAL_FIXED.values())
+
+    def identities():
+        return dict(revision=revision, **{name: state.get(name, absent) for name in replaced})
+
+    saved = identities() if restored else None
 
     def save():
         """Checkpoint ``state``. After a known previous checkpoint, name the changed fields."""
         nonlocal saved
         changed = None
         if saved is not None:
-            changed = [name for name in state if name not in {"pencil", "history"}]
-            if state.get("pencil") is not saved["pencil"]:
-                changed.append("pencil")
+            changed = [name for name in state
+                       if name != "history" and (name not in replaced or state[name] is not saved[name])]
             if revision != saved["revision"]:
                 changed.append("history")
         sequence = run.checkpoint(state, changed=changed)
-        saved = dict(pencil=state.get("pencil"), revision=revision)
+        saved = identities()
         return sequence
 
     def accept_chunk(point, chunk, *, fresh=False):
@@ -1708,10 +2443,12 @@ def drive_adapt(plan, *, run, prepare_only=False):
         sequence reserved before submission. A found attempt must carry this
         query's exact resolved parameter point, seed and ``PreparedArtifact``, otherwise
         the checkpoint and the Run disagree and ``ValueError`` is raised.
+        A pending pilot or main point of ``pencil_workflow`` saves no attempt
+        identity and is prepared and submitted under its one ``sequence``.
         """
         event = (
             run.attempt_record(pending["attempt"])
-            if pending["attempt"] is not None
+            if pending.get("attempt") is not None
             else run.attempt_for_checkpoint(pending["sequence"])
         )
         if event is not None:
@@ -1737,8 +2474,8 @@ def drive_adapt(plan, *, run, prepare_only=False):
         """
         event = pending_event(pending)
         if event is None:
-            identity = pending["preparation_id"] or run.preparation_for_checkpoint(
-                pending["preparation_sequence"]
+            identity = pending.get("preparation_id") or run.preparation_for_checkpoint(
+                pending.get("preparation_sequence", pending["sequence"])
             )
             preparation = run._state["remote_preparations"].get(identity)
             if preparation is not None:
@@ -1957,8 +2694,11 @@ def drive_adapt(plan, *, run, prepare_only=False):
         return analyzed
 
     def stop(reason):
-        """Record a final outcome of the iteration and checkpoint it."""
-        state.update(stop_reason=reason, phase="complete", pending_labels=[])
+        """Record the outcome that ends growth and checkpoint it, entering the final stages under ``sampling``."""
+        if options.sampling is None:
+            state.update(stop_reason=reason, phase="complete", pending_labels=[])
+        else:
+            state.update(stop_reason="running", phase="final", final=dict(stop_reason=reason), pending_labels=[])
         save()
 
     def receipt(prepared_id):
@@ -1970,15 +2710,15 @@ def drive_adapt(plan, *, run, prepare_only=False):
 
     # Assemble the current H/S pencil from acquired matrix elements and publish
     # one projected-energy decision with the exact basis and observation range.
-    def project_current():
-        """Solve the obtained projected pencil and checkpoint its basis-specific decision."""
+    def project_current(basis):
+        """Solve the obtained projected pencil of the basis chains ``basis`` and checkpoint its basis-specific decision."""
         nonlocal revision
         selected = selected_tuple()
         state["analysis_in_progress"] = True
         state["analysis_attempts"] += 1
         save()
         run.progress("analyze", 0, 1)
-        pencil, diagnostics = _pencil_from_observations(plan, selected, context, receipt=receipt)
+        pencil = _pencil_from_observations(plan, basis, context, receipt=receipt)
         run.progress("analyze", 1, 1)
         state.update(
             analysis_in_progress=False,
@@ -1989,6 +2729,8 @@ def drive_adapt(plan, *, run, prepare_only=False):
             current_analysis_attempt=state["analysis_attempts"],
             pencil=pencil.model_dump(mode="json", exclude_computed_fields=True),
         )
+        if growth is not None:
+            state["value_basis"] = [list(map(list, chain)) for chain in basis]
 
         def publish_pencil():
             context.pencil, context.pencil_parameters = pencil, selected
@@ -1996,7 +2738,8 @@ def drive_adapt(plan, *, run, prepare_only=False):
             # A durable Run refreshes its method cache once per analysis.
             run._state["cache_method_dirty"] = True
 
-        iteration = len(selected)
+        iteration = len(selected) if growth is None else len(basis) - 1
+        previous = state["history"][-1]["energy"] if state["history"] else None
         state["flat_count"], state["previous_energy"] = _flat_counter_update(
             state["flat_count"],
             state["previous_energy"],
@@ -2011,18 +2754,26 @@ def drive_adapt(plan, *, run, prepare_only=False):
         # diagonal pair itself, and an exact quantum run the shared full-chain
         # query, whose screening values the later screen reuses. A sampled
         # diagonal pair has no overlap query (S_ii = 1), so its first
-        # Pauli-term query is used.
+        # Pauli-term query, or its first-group grouped setting, is used. A
+        # bounded basis has no shared full-chain query, so its last chain's
+        # diagonal pair query identifies it.
         exact_quantum = plan.execution == "quantum" and plan.shots is None
+        grouped = reconstruction.acquisition.matrix_measurement == "grouped"
+        full = selected if growth is None else basis[-1]
         basis_point = (
             None
-            if not selected or (exact_quantum and not reconstruction.nonidentity_terms)
-            else _point(plan, "screen", right=selected)
+            if not full or ((exact_quantum or grouped) and not reconstruction.nonidentity_terms)
+            else _point(plan, "screen", right=full)
+            if exact_quantum and growth is None
+            else _point(plan, "pair", full, full)
             if exact_quantum
+            else _point(plan, "diagonal", full, full, group=0)
+            if grouped
             else _point(
                 plan,
                 "pair",
-                selected,
-                selected,
+                full,
+                full,
                 term=0
                 if plan.shots is not None and reconstruction.nonidentity_terms
                 else -1,
@@ -2037,6 +2788,9 @@ def drive_adapt(plan, *, run, prepare_only=False):
             analysis_attempt=state["current_analysis_attempt"],
             basis_realization=None if basis_point is None else basis_point.content_id,
             energy=state["value"],
+            energy_decrease=None if previous is None or state["value"] is None else previous - state["value"],
+            kept_rank=pencil.kept_rank,
+            candidates=[],
             new_start=state["stage_start"],
             new_stop=len(context.contribution_order),
             gradient_norm=None,
@@ -2047,10 +2801,8 @@ def drive_adapt(plan, *, run, prepare_only=False):
             optimizer_attempts=state["optimizer_attempts"],
             optimizer_rounds=state["optimizer_rounds"],
             energy_queries=state["energy_queries"],
-            sampled_failure=None if diagnostics is None else diagnostics["failure_reason"],
-            sampled_enclosure_violation=None
-            if diagnostics is None
-            else diagnostics["enclosure_violation"],
+            sampled_failure=pencil.sampled_failure,
+            sampled_enclosure_violation=pencil.sampled_enclosure_violation,
         )
         if len(state["history"]) != iteration:
             raise ValueError(
@@ -2075,6 +2827,18 @@ def drive_adapt(plan, *, run, prepare_only=False):
         nonlocal revision
         state["history"][-1].update(fields)
         revision += 1
+
+    limited = growth is not None and growth.basis_depth_limit is not None
+    reference_bound = reference_cx_bound(reconstruction.reference, reconstruction.num_qubits)[0] if limited else 0
+
+    def depth_weight(index):
+        """Return the cached CX count bound of generator ``index`` at ``theta``, read once from its uncontrolled forward gate."""
+        key = (index, options.theta)
+        if key not in context.depth_weights:
+            gate = _native_generator(index, options.theta, controlled=False, inverse=False,
+                                     inputs=plan._native["inputs"], compiler_plans=compilers, context=context)
+            context.depth_weights[key] = generator_cx_weight(gate.definition)
+        return context.depth_weights[key]
 
     try:
         pending_completed()
@@ -2110,10 +2874,28 @@ def drive_adapt(plan, *, run, prepare_only=False):
             return result()
         if not restored:
             save()
-        # A matrix stage entered during this call has acquired nothing yet. The
-        # stage that a restored call resumes may be partly acquired, so its
-        # queries are admitted one at a time in acquire.
-        resumed_matrix = restored and state["phase"] == "matrix"
+        def admit_stage(count):
+            """Check ``count`` new pencil queries against the Run's limits, and exact pair reductions against ``max_products``.
+
+            Each new pencil query is one circuit preparation and one
+            acquisition, and each exact pair reduction registers
+            ``pair_work`` host work.
+            """
+            if plan.shots is None:
+                from .fixed_basis import pair_reduction_point
+                from .pair_reducer import pair_work
+
+                point = pair_reduction_point(
+                    reconstruction.processed_hamiltonian.identity,
+                    [t.coefficient for t in reconstruction.nonidentity_terms],
+                    reconstruction.num_qubits, diagonal=False)
+                _check_products(count * pair_work(json.loads(point.parameters)), plan.method.max_products)
+            run.check_capacity(preparations=count, circuits=count, shots=count * (plan.shots or 0))
+
+        # A matrix stage, or bounded rows stage, entered during this call has
+        # acquired nothing yet. The stage that a restored call resumes may be
+        # partly acquired, so its queries are admitted one at a time in acquire.
+        resumed_matrix = restored and state["phase"] in ("matrix", "rows")
         while state["phase"] != "complete":
             if run.cancel_requested is not None:
                 state.update(stop_reason="cancelled", pending_labels=[run.cancel_requested])
@@ -2121,36 +2903,48 @@ def drive_adapt(plan, *, run, prepare_only=False):
                 return result()
             selected = selected_tuple()
             context.accepted = selected
-            _keep_current(context)
+            # The basis of this phase, the legacy basis of the selected chain
+            # or the explicit bounded chains, computed once and passed to
+            # every pencil function.
+            basis = basis_chains(selected) if growth is None else saved_chains(state["basis"])
+            context.basis = None if growth is None else basis
+            # Before this phase's prune, so that the gates that depth
+            # screening built for the extensions still to be evaluated
+            # survive every prune of the rows phase.
+            context.pending_items = frozenset(
+                chain[-1] for chain in saved_chains(
+                    label["chain"] for label in state["history"][-1]["candidates"] if label["reason"] == "candidate")
+            ) if state["phase"] == "rows" else frozenset()
+            _keep_current(context, basis)
             # Advance acquisition, projection, optional residual and stopping in order.
             # Each phase checkpoint records the next scientific action still required.
             if state["phase"] == "matrix":
                 # Admit the whole stage before its first query, so a limit that
-                # the stage would exceed refuses it before any of its work. Each
-                # new pencil query is one circuit preparation and one acquisition.
+                # the stage would exceed refuses it before any of its work.
                 if plan.execution == "quantum" and not resumed_matrix:
-                    count = _new_pencil_queries(
-                        selected, state["history"], len(reconstruction.nonidentity_terms),
-                        exact=plan.shots is None)
-                    if plan.shots is None:
-                        # Each exact pair reduction registers pair_work host work.
-                        # The whole stage is admitted against max_products here.
-                        from .fixed_basis import pair_reduction_point
-                        from .pair_reducer import pair_work
-
-                        point = pair_reduction_point(
-                            reconstruction.processed_hamiltonian.identity,
-                            [t.coefficient for t in reconstruction.nonidentity_terms],
-                            reconstruction.num_qubits, diagonal=False)
-                        _check_products(count * pair_work(json.loads(point.parameters)), plan.method.max_products)
-                    run.check_capacity(preparations=count, circuits=count, shots=count * (plan.shots or 0))
+                    if growth is None:
+                        # Every pair query of an analyzed earlier basis was obtained.
+                        earlier = {
+                            item
+                            for record in state["history"]
+                            for item in basis_chains(tuple(zip(record["selected"], record["theta"], strict=True)))
+                        }
+                        admit_stage(_new_pencil_queries(basis, earlier, reconstruction))
+                    else:
+                        # The earlier basis was analyzed and the added chain's row
+                        # was obtained when it was scored, so normally nothing is new.
+                        admit_stage(_missing_queries(plan, basis, len(basis) - 1, context.observations))
                 resumed_matrix = False
-                context.matrix_data = (selected, _matrix_from_observations(
-                    plan, selected, context, acquire=acquire, receipt=receipt))
+                # The selected chain is the full product. Its exact shared query
+                # gives its diagonal and the values a later screen phase reuses.
+                # A bounded basis has no full product and no shared query.
+                context.matrix_data = (basis, _matrix_from_observations(
+                    plan, basis, context, acquire=acquire, receipt=receipt,
+                    full=selected if growth is None else None))
                 state["phase"] = "analysis"
                 save()
             elif state["phase"] == "analysis":
-                project_current()
+                project_current(basis)
             elif state["phase"] == "residual":
                 coefficients = tuple(complex(*parts) for parts in state["coefficients"])
                 point = _point(
@@ -2165,12 +2959,95 @@ def drive_adapt(plan, *, run, prepare_only=False):
                 state["phase"] = "decision"
                 save()
             elif state["phase"] == "decision":
-                reason = _stopping_reason(state, options, reconstruction, len(selected))
+                reason = (_stopping_reason(state, options, reconstruction, len(selected)) if growth is None
+                          else _bounded_stopping_reason(state, options, reconstruction, len(basis)))
                 if reason is not None:
                     stop(reason)
                 else:
-                    state["phase"] = "screen"
+                    state["phase"] = "screen" if growth is None else "select"
                     save()
+            elif state["phase"] == "select":
+                # Examine this round's extensions. The cursor and the labels
+                # are saved before any of their rows is obtained, so a resume
+                # repeats no examination.
+                labels, cursor, exhausted = frontier(
+                    basis, saved_cursor(state["cursor"]), pool_size=len(reconstruction.pool), theta=options.theta,
+                    growth=growth, weight=depth_weight, reference_bound=reference_bound)
+                state["cursor"] = [list(item) for item in cursor]
+                update_last(candidates=[dict(label, chain=[list(item) for item in label["chain"]])
+                                        for label in labels])
+                if any(label["reason"] == "candidate" for label in labels):
+                    state["phase"] = "rows"
+                    save()
+                else:
+                    update_last(new_stop=len(context.contribution_order))
+                    state["stage_start"] = len(context.contribution_order)
+                    stop(_round_stop_reason(labels, exhausted))
+            elif state["phase"] == "rows":
+                # Each admitted extension's row and diagonal come from the
+                # ordinary pencil path for the current chains plus that one
+                # extension, so its matrix stage later finds them cached. Its
+                # score is saved before the next extension's queries prune
+                # the cache.
+                labels = state["history"][-1]["candidates"]
+                pending_rows = [label for label in labels if label["reason"] == "candidate"]
+                if plan.execution == "quantum" and not resumed_matrix:
+                    admit_stage(sum(_missing_queries(plan, (*basis, saved_chains([label["chain"]])[0]), len(basis),
+                                                     context.observations) for label in pending_rows))
+                resumed_matrix = False
+                pencil = ProjectedPencil.model_validate(state["pencil"])
+                current = metric = None
+                floor = independence_floor(options)
+                for label in pending_rows:
+                    extended = (*basis, saved_chains([label["chain"]])[0])
+                    if plan.shots is None:
+                        h, s, _, _ = _matrix_from_observations(plan, extended, context, acquire=acquire,
+                                                               receipt=receipt)
+                    else:
+                        # ADAPT.plan admits bounded growth with shots only for
+                        # grouped settings, whose overlap moments decide
+                        # whether the extension is scored. Planning already
+                        # checked the projected-solve size of the enlarged
+                        # basis, at most bounded_basis_size states.
+                        moments, pairs, _ = _grouped_statistics(plan, extended, context, acquire)
+                        h, s, _, _ = _grouped_matrices(len(extended), pairs)
+                        entries = _overlap_settings(moments)
+                    if current is None:
+                        coordinates = [[complex(z.real, z.imag) for z in row] for row in pencil.coordinate_vectors]
+                        current = current_projection(h[:-1, :-1], coordinates, pencil.offset_free_eigenvalues[0])
+                        if plan.shots is not None:
+                            metric = sampled_metric(current, {pair: entry for pair, entry in entries.items()
+                                                              if pair[1] < len(basis)},
+                                                    pencil.overlap_eigenvalues[-pencil.kept_rank])
+                    if plan.shots is not None:
+                        label.update(sampled_eligibility(current, metric, s[:-1, -1],
+                                                         [entries[i, len(basis)] for i in range(len(basis))], floor),
+                                     overlap_cutoff=pencil.overlap_cutoff, kept_rank=pencil.kept_rank)
+                    if label["reason"] in ("candidate", None):
+                        label.update(candidate_score(current, h[:-1, -1], s[:-1, -1], h[-1, -1].real, floor))
+                    update_last(candidates=labels)
+                    save()
+                ranked = [k for k, label in enumerate(labels) if label["reason"] == "ranked"]
+                update_last(new_stop=len(context.contribution_order))
+                state["stage_start"] = len(context.contribution_order)
+                if not ranked:
+                    # With shots, a round none of whose evaluated extensions
+                    # passed the sampled eligibility stops as noise-inconclusive
+                    # on the current basis. One that passed it but has no finite
+                    # score stops the round as with exact entries. A passed
+                    # extension cannot fall below independence_cutoff in
+                    # candidate_score, because its shared etahat is at least
+                    # its margin (R >= 0), which exceeds the cutoff.
+                    eligible = any(label["reason"] == "nonfinite_score" for label in labels)
+                    stop("no_admissible_candidate" if plan.shots is None or eligible else "noise_inconclusive")
+                    continue
+                # Largest raw score first, the earliest examined among equal scores.
+                winner = max(ranked, key=lambda k: (labels[k]["score"], -k))
+                labels[winner]["reason"] = "accepted"
+                update_last(candidates=labels)
+                state["basis"].append(labels[winner]["chain"])
+                state["phase"] = "matrix"
+                save()
             # Evaluate unused generators through <[H,A_i]> and select the largest
             # absolute gradient. Pool order resolves only equal binary64 absolute values.
             # Gradients equal in exact arithmetic, for example by symmetry,
@@ -2293,6 +3170,86 @@ def drive_adapt(plan, *, run, prepare_only=False):
                 state["optimizer"] = None
                 state["phase"] = "matrix"
                 save()
+            # Under PencilSampling, measure the value basis afresh once growth
+            # has stopped: a uniform pilot, one allocation and a main stage
+            # (pencil_workflow.advance_stages). Every stage point binds its
+            # stage, so no selection query or moment serves it, and the main
+            # pencil is solved from the main-stage chunks alone.
+            elif state["phase"] == "final":
+                final, chosen = state["final"], _value_chains(state, growth is not None)
+                if prepare_only:
+                    # nwqlib.prepare drives a fresh Run, which reaches this
+                    # phase only when it measures nothing.
+                    raise _PreparedOnly
+                if "stage" not in final:
+                    m = (sampled_setting_count(len(chosen), len(reconstruction.energy_groups),
+                                               reconstruction.acquisition.quadratures)
+                         if reconstruction.acquisition.matrix_measurement == "grouped" else 0)
+                    run.check_capacity(preparations=2 * m, circuits=2 * m,
+                                       shots=options.sampling.total_shots if m else 0)
+                    fields = pencil_workflow.new_state(options.sampling, m)
+                    state.update({field: fields.pop(name) for name, field in _FINAL_FIXED.items()})
+                    final.update(fields)
+                    save()
+                # advance_stages reads and changes the fields of new_state in
+                # one dictionary, which exists only for this call. Each field
+                # that one of its saves names is copied back to the stage
+                # cursor `final` or to its fixed field before the one
+                # checkpoint of that save, so a pending point takes the
+                # sequence that pencil_workflow reserved for it.
+                stages = dict(final, **{name: state[field] for name, field in _FINAL_FIXED.items()})
+
+                def save_stages(*names):
+                    for name in names:
+                        if name in _FINAL_FIXED:
+                            state[_FINAL_FIXED[name]] = stages[name]
+                        else:
+                            final[name] = stages[name]
+                    return save()
+
+                points = {}
+
+                def resolve(stage, index, shots):
+                    """Return the point of the index-th setting of the value basis at ``stage`` with ``shots``."""
+                    if stage not in points:
+                        points[stage] = tuple(point for _, _, _, point in _matrix_entries(plan, chosen, stage=stage))
+                    return points[stage][index](shots)
+
+                def decide():
+                    """Return the allocation that ``pencil_workflow.pilot_decision`` makes from the pilot moments, read and oriented as for the selection pencils."""
+                    settings, moments = _grouped_moments(
+                        plan, chosen, AdaptContext(observations=_observation_index(run.observations.chunks)),
+                        stage=0, counts=stages["pilot_counts"])
+                    return pencil_workflow.pilot_decision(
+                        options.sampling, settings, moments, basis_size=len(chosen),
+                        identity_shift=reconstruction.identity_shift,
+                        enclosure=processed_pauli_enclosure(reconstruction), cutoff=options.overlap_cutoff)
+
+                if not pencil_workflow.advance_stages(run, stages, save=save_stages, resolve=resolve,
+                                                      decide=decide):
+                    if run.cancel_requested is not None:
+                        continue
+                    raise _AcquisitionPending(pending_status(stages["pending"]))
+                counts = stages["decision"]["main_counts"]
+                if counts:
+                    state["analysis_in_progress"] = True
+                    state["analysis_attempts"] += 1
+                    save()
+                    run.progress("analyze", 0, 1)
+                    main = AdaptContext(observations=_observation_index(run.observations.chunks))
+                    main.matrix_data = (chosen, _grouped_matrices(
+                        len(chosen), _grouped_statistics(plan, chosen, main, stage=1, counts=counts)[1]))
+                    pencil = _pencil_from_observations(plan, chosen, main)
+                    run.progress("analyze", 1, 1)
+                    state.update(analysis_in_progress=False,
+                                 value=pencil.eigenvalues[0] if pencil.eigenvalues else None,
+                                 coefficients=[[z.real, z.imag] for z in pencil.coefficients],
+                                 current_analysis_attempt=state["analysis_attempts"],
+                                 pencil=pencil.model_dump(mode="json", exclude_computed_fields=True))
+                    context.pencil, context.pencil_attempt = pencil, state["current_analysis_attempt"]
+                # The main pencil and the end of the iteration share one checkpoint.
+                state.update(stop_reason=final["stop_reason"], phase="complete", pending_labels=[])
+                save()
             else:
                 raise ValueError("unknown saved ADAPT phase")
         return result()
@@ -2304,6 +3261,26 @@ def drive_adapt(plan, *, run, prepare_only=False):
         state.update(stop_reason=_pending_stop_reason(error.status), pending_labels=[error.status])
         save()
         return None
+    # A refusal for installed package versions other than the recorded ones
+    # (provenance) depends on the environment that reads the Run, not on the
+    # query. It reaches the caller with the checkpoint unchanged, as in
+    # FixedGCIM, so the same Run continues where the recorded versions are
+    # installed. A depth above the limit or an unqualified depth would refuse
+    # this query again whenever the Run resumes, so the iteration then ends
+    # on its last solved pencil. The complete phase keeps a resumed drive from
+    # preparing or submitting the refused query. Removing it from the pending
+    # queries lets a resume after a cancellation return the Result, because
+    # the cancellation branch returns None while a query is pending. The
+    # energy request it belongs to, if any, is cleared, and its preparation
+    # record stays in the Run without an attempt.
+    except NativeDepthCapRefusal as error:
+        if error.provenance is not None:
+            raise
+        state["pending"] = [item for item in state["pending"] if item["prepared_id"] != error.prepared_id]
+        state.update(active_energy=None, stop_reason="native_depth_refused", phase="complete",
+                     pending_labels=[str(error)])
+        save()
+        return result()
     except _PartialData as error:
         state.update(
             stop_reason="partial_observation"
@@ -2365,17 +3342,29 @@ def recover_adapt_analysis(plan, *, run):
     retry is recorded in ``analysis_retries``. The next drive then repeats the
     analysis from the same observations. This is the explicit step behind
     ``run.resume(reanalyze=True)`` (docs/run_archives.md).
+
+    In the ``final`` phase of ``ADAPT.sampling`` it clears an interrupted
+    analysis of the main stage, or an interrupted allocation, which
+    ``pencil_workflow.advance_stages`` marks with
+    ``final["allocation_in_progress"]``. Before it clears the marker, it
+    requires no pending stage point and a count table of every setting of
+    the value basis in the interrupted stage, main or pilot, and checkpoints
+    the retry, which names that stage. Nothing is measured or submitted
+    again.
     """
     state = run.checkpoint_state
+    final = state.get("final") if isinstance(state, dict) else None
+    allocation = final is not None and final.get("allocation_in_progress", False)
     if (
         run.plan is not plan
         or not isinstance(state, dict)
         or state.get("kind") != "adapt_gcim/3"
         or state.get("controls", {}).get("plan_id") != plan.content_id
-        or not state.get("analysis_in_progress")
-        or state.get("phase") != "analysis"
+        or not (state.get("analysis_in_progress") or allocation)
+        or state.get("phase") != ("analysis" if final is None else "final")
         or state.get("pending")
         or state.get("active_energy") is not None
+        or final is not None and final.get("pending") is not None
     ):
         raise ValueError(
             "reanalyze requires this ADAPT controller's interrupted projected analysis"
@@ -2383,9 +3372,18 @@ def recover_adapt_analysis(plan, *, run):
     trace = run.trace
     if any(event.status != "completed" for event in trace.events):
         raise ValueError("analysis recovery cannot resolve an uncertain acquisition")
-    selected = tuple(zip(state["selected"], state["theta"], strict=True))
+    bounded = plan.method.basis_growth is not None
+    if final is None:
+        basis = (saved_chains(state["basis"]) if bounded
+                 else basis_chains(tuple(zip(state["selected"], state["theta"], strict=True))))
+        stage, counts = -1, None
+    else:
+        basis = _value_chains(state, bounded)
+        stage, counts = (0, state["pilot_counts"]) if allocation else (1, state["shot_allocation"]["main_counts"])
     observations = _observation_index(run.observations.chunks)
-    for _, _, point in _matrix_points(plan, selected, observations):
+    grouped = plan.reconstruction.acquisition.matrix_measurement == "grouped"
+    for _, _, _, point in _matrix_entries(plan, basis, observations, stage=stage, counts=counts):
+        point = point()
         chunk = observations.get(point.content_id)
         if chunk is None:
             raise ValueError(
@@ -2393,10 +3391,18 @@ def recover_adapt_analysis(plan, *, run):
             )
         for item in _chunks(chunk):
             trace.validate_observation(item)
-        _read_values(plan, point, chunk)
-    retry = dict(previous_attempts=state["analysis_attempts"], sequence=run.checkpoint_sequence + 1)
+        if not grouped:
+            _read_values(plan, point, chunk)
+    if grouped:
+        # One admitted pass reads every grouped chunk, as the retried analysis does.
+        _grouped_statistics(plan, basis, AdaptContext(observations=observations), stage=stage, counts=counts)
+    attempts = final["analysis_attempts"] if allocation else state["analysis_attempts"]
+    retry = dict(previous_attempts=attempts, sequence=run.checkpoint_sequence + 1,
+                 **({} if final is None else dict(stage=stage)))
     state["analysis_retries"] = [*state.get("analysis_retries", ()), retry]
     run.checkpoint(state)
+    if final is not None:
+        final["allocation_in_progress"] = False
     state.update(analysis_in_progress=False, stop_reason="running", pending_labels=[])
     run.checkpoint(state)
 
@@ -2440,9 +3446,17 @@ def analyze_adapt(plan, data, *, settings):
 
     The history, selections and stop reason come from the saved iteration
     state as they were decided. With ``settings={"overlap_cutoff": c}`` the
-    pencil of the value basis (``value_selected``, ``value_theta``) is solved
+    pencil of the value basis (``value_selected`` and ``value_theta``, or the
+    explicit ``value_basis`` chains of bounded growth) is solved
     again from its saved observations at cutoff ``c``. No circuit runs and
-    the history is not rewritten.
+    the history is not rewritten. Under ``ADAPT.sampling`` the
+    ``ShotAllocation`` is read from the saved stage fields as decided, and
+    once the analysis of the main stage has completed, the pencil, the group
+    moments, the pair variances and ``contribution_ids`` are those of the
+    main-stage chunks alone, also at a new cutoff. Otherwise, as after a
+    stop inside a stage, ``contribution_ids`` lists the selection chunks
+    (``stage`` -1) that grew the basis and no pilot or main-stage chunk.
+    Without sampling it lists every chunk.
     """
     from .adapt import METHOD
 
@@ -2458,13 +3472,42 @@ def analyze_adapt(plan, data, *, settings):
     if not isinstance(cutoff, (int, float)) or not 0 < cutoff < float("inf"):
         raise ValueError("overlap_cutoff must be positive and finite")
     # A new overlap cutoff reuses the basis that produced the saved value.
-    # Later selected-but-unprojected coordinates must not replace that basis.
+    # Later selected-but-unprojected coordinates, or a bounded chain added
+    # after the last analysis, must not replace that basis.
+    bounded = plan.method.basis_growth is not None
+    basis = _value_chains(state, bounded)
+    context = AdaptContext(observations=_observation_index(chunks))
+    # The saved pencil is the main stage's once its analysis has ended the
+    # run, which only follows the complete main stage.
+    final, decision = state.get("final"), state.get("shot_allocation")
+    allocation = None if decision is None else ShotAllocation.model_validate(decision)
+    main = (decision["main_counts"] or None
+            if allocation is not None and final["stage"] == 2 and state.get("phase") == "complete" else None)
+    # The value basis's group statistics and pair constructions are read from
+    # the same observations and Plan rule, without new acquisition. One
+    # grouped pass supplies the moments and the matrices a new cutoff solves.
+    # Only exact and grouped queries prepare the joint state that
+    # PairPreparation describes. A termwise Hadamard test places each Pauli
+    # term between the two controlled preparations and prepares no such
+    # state, so it has no record. The resolved choice decides: exact
+    # execution resolves a requested termwise measurement to None.
+    moments = variances = preparations = ()
+    acquisition = plan.reconstruction.acquisition
+    if (
+        raw is not None
+        and acquisition.pair_preparation is not None
+        and acquisition.matrix_measurement != "termwise"
+    ):
+        preparations = tuple(chain_pair_preparation(basis[i], basis[j], acquisition.pair_preparation, (i, j))
+                             for i, j in pencil_pairs(len(basis)) if i < j)
+        if acquisition.matrix_measurement == "grouped":
+            moments, pairs, variances = _grouped_statistics(plan, basis, context, stage=-1 if main is None else 1,
+                                                            counts=main)
+            if "overlap_cutoff" in settings:
+                context.matrix_data = (basis, _grouped_matrices(len(basis), pairs))
     if "overlap_cutoff" in settings and raw is not None:
-        context = AdaptContext(observations=_observation_index(chunks))
-        selected = tuple(zip(state["value_selected"], state["value_theta"], strict=True))
         receipts = {receipt.content_id: receipt for receipt in data.receipts}
-        pencil, _ = _pencil_from_observations(plan, selected, context, cutoff=cutoff,
-                                              receipt=receipts.get)
+        pencil = _pencil_from_observations(plan, basis, context, cutoff=cutoff, receipt=receipts.get)
     history = []
     for item in state.get("history", ()):
         history.append(
@@ -2488,6 +3531,10 @@ def analyze_adapt(plan, data, *, settings):
                 ),
                 sampled_failure=item["sampled_failure"],
                 sampled_enclosure_violation=item["sampled_enclosure_violation"],
+                energy_decrease=item["energy_decrease"],
+                kept_rank=item["kept_rank"],
+                candidates=tuple(BoundedCandidate.model_validate(dict(label, chain=saved_chains([label["chain"]])[0]))
+                                 for label in item["candidates"]),
             )
         )
     value = (
@@ -2495,11 +3542,23 @@ def analyze_adapt(plan, data, *, settings):
         if pencil is not None
         else state.get("value")
     )
+    # The main pencil uses the main-stage chunk behind each of its moments.
+    # Before a completed main analysis, as after a stop inside a stage, the
+    # Result reports the last pencil that the growth solved, so it uses the
+    # whole selection trajectory: the chunks whose `stage` is -1, or every
+    # chunk without PencilSampling, which binds no `stage`. Pilot chunks only
+    # choose the main shots, and main-stage chunks enter the Result only
+    # through a completed main analysis.
+    if main is None:
+        used = {chunk.content_id for chunk in chunks
+                if {item.parameter: item.value for item in chunk.bindings}.get("stage", -1) == -1}
+    else:
+        used = {moment.contribution_id for moment in moments}
     return ADAPTResult(
         plan_id=plan.content_id,
         construction_id=plan.construction.content_id,
         observation_id=data.observations.content_id,
-        contribution_ids=tuple(chunk.content_id for chunk in chunks),
+        contribution_ids=tuple(chunk.content_id for chunk in chunks if chunk.content_id in used),
         eigenvalue=value,
         selected=tuple(state.get("selected", ())),
         theta=tuple(state.get("theta", ())),
@@ -2513,8 +3572,18 @@ def analyze_adapt(plan, data, *, settings):
         optimizer_rounds=state.get("optimizer_rounds", 0),
         optimizer_restarts=tuple(state.get("optimizer_restarts", ())),
         energy_queries=state.get("energy_queries", 0),
-        analysis_attempts=state.get("analysis_attempts", 0),
+        # The selection and main analyses are counted at the top level, the
+        # pilot allocations in the stage cursor, which a final state that
+        # holds only its stop reason does not have yet.
+        analysis_attempts=state.get("analysis_attempts", 0) + (final or {}).get("analysis_attempts", 0),
         analysis_cutoff=cutoff,
+        group_moments=moments,
+        sampled_pair_variances=variances,
+        pair_preparations=preparations,
+        basis=saved_chains(state.get("basis", ())),
+        value_basis=basis if bounded else (),
+        frontier_cursor=saved_cursor(state.get("cursor", ())),
+        shot_allocation=allocation,
         origin=capture_analysis_origin(
             analyzer=METHOD, method_id=plan.method.content_id, dependencies=("numpy", "scipy")
         ),

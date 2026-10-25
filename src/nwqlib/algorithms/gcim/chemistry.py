@@ -158,8 +158,9 @@ def build_gcim_chemistry_problem(
     """Build a closed-shell molecular Hamiltonian for GCiM and ADAPT from a geometry.
 
     PySCF performs RHF and the molecular-orbital integral transforms, NWQLib
-    assembles the spin-orbital fermionic operator, and OpenFermion performs
-    only the Jordan-Wigner transform. It needs the `chemistry` extra,
+    assembles the spin-orbital fermionic operator with OpenFermion's
+    `FermionOperator` addition, and OpenFermion performs the Jordan-Wigner
+    transform. It needs the `chemistry` extra,
     `pip install "nwqlib[chemistry]"`. MP2, CCSD or active-space CASCI
     references run only when `reference_methods` requests them. Integrals
     are in the RHF molecular-orbital basis, with each orbital's first AO coefficient above
@@ -177,9 +178,17 @@ def build_gcim_chemistry_problem(
         spin: `2S`. Only 0, closed-shell RHF, is supported.
         unit: Unit of the coordinates, `"Angstrom"` or `"Bohr"`.
         name: Optional label stored in `metadata`.
-        coefficient_cutoff: Absolute cutoff in Hartree. Fermionic terms and
-            final Pauli coefficients at or below it are dropped, and an
-            imaginary part at or below it is set to zero.
+        coefficient_cutoff: The library's explicit absolute cutoff in
+            Hartree. Fermionic terms and final Pauli coefficients at or below
+            it are dropped, and an imaginary part at or below it is set to
+            zero. The fermionic terms are added with OpenFermion's
+            `FermionOperator` addition, and OpenFermion's Jordan-Wigner
+            transform accumulates the Pauli terms the same way. That addition
+            applies OpenFermion's own tolerance as well. In OpenFermion 1.8.1
+            it deletes a term whenever its running coefficient has absolute
+            value below 1e-8, so a `coefficient_cutoff` below 1e-8 does not
+            keep those terms. A stored Pauli coefficient can therefore differ
+            from the sum of its integral contributions by those deletions.
         active_space: Optional `(n_active_electrons, n_active_orbitals)`.
             For a molecule of N electrons the lowest
             `(N - n_active_electrons)/2` RHF orbitals are frozen as doubly

@@ -1,5 +1,52 @@
 # Release notes
 
+## v1.0.3.post2 (unreleased)
+
+Relative to v1.0.3.post1, this release adds QFD, an eigenvalue method in a basis of time-evolved states, and new measurement, shot-allocation and basis-growth options for GCiM. It changes the default measurement of sampled ADAPT, the default pair preparation and quadratures of FixedGCIM and ADAPT, the default memory limit of the local simulator, the shared Run and Result archive formats and the saving of fermionic operators. It cannot load Run or Result archives written by v1.0.3.post1.
+
+### QFD
+
+`QFD` (`nwqlib.algorithms.QFD`) estimates the smallest eigenvalue of a Hermitian operator $A$ in the basis $V^{p}|\psi\rangle$ of integer powers $p$ of one fixed product-formula step $V$ applied to a reference state $|\psi\rangle$. It solves the Hamiltonian pencil of Parrish and McMahon, arXiv:1909.08925v1, Eqs. (5)–(8), with the measurement and projected solve of FixedGCIM, by exact readout or with grouped shots. You replace $A$, the reference, the time step and the powers. By default $V$ is built from the Pauli terms of $A$, and `evolution="fermionic_blocks"` builds it from complete number-conserving fermionic blocks of a separate generator. `chemistry_evolution_terms` (in `nwqlib.algorithms.qfd`) builds such a generator from the integrals of `build_gcim_chemistry_problem` data. The [QFD guide](algorithms/qfd.md) describes the workflow, its limits and what the result does not establish.
+
+### GCiM measurement and its defaults
+
+`PencilAcquisition`, passed as `acquisition=` to FixedGCIM, ADAPT and QFD, chooses how $H$ and $S$ are measured ([How matrix elements are obtained](algorithms/gcim.md#how-matrix-elements-are-obtained)). Its defaults change what an existing sampled script measures:
+
+- Sampled ADAPT measures grouped joint states by default (`matrix_measurement="grouped"`), with one setting per qubit-wise commuting group and part, as FixedGCIM does. v1.0.3.post1 measured one Hadamard test per Pauli term and part. `PencilAcquisition(matrix_measurement="termwise", pair_preparation="controlled")` keeps that measurement as a comparison.
+- `quadratures="auto"` measures only the real parts of the off-diagonal pairs when a proof from the stored inputs shows that $A$ and every state the method can prepare are real, and records the imaginary parts as exact zeros. Otherwise it measures both parts, which v1.0.3.post1 always did. Real-only measurement does not show that the imaginary parts are zero on a noisy device.
+- `pair_preparation="prefix"` runs the blocks that both preparations of a pair begin with once without control and controls only the rest, with the same joint state. v1.0.3.post1 controlled both complete preparations of every pair, which `"controlled"` still does.
+
+For ADAPT, `pair_preparation="vacuum_reference"` and `"vacuum_restore"` control only the reference preparation, when planning can show from the Pauli terms of every pool generator that its exponential maps the all-zero state to itself up to a phase. FixedGCIM and QFD refuse both values in quantum execution unless the Plan measures nothing.
+
+### Shot allocation from a pilot stage
+
+`sampling=PencilSampling(total_shots=..., pilot_fraction=...)` of FixedGCIM, ADAPT and QFD splits a shot budget into a uniform pilot stage and a main stage whose shots per setting the pilot pencil decides. Only the main-stage measurements form the final $H$ and $S$, the pilot shots count toward the total, and `result.shot_allocation` records the decision ([Pilot and main shot allocation](algorithms/gcim.md#pilot-and-main-shot-allocation)). For ADAPT the two stages measure the basis that growth ended with, with a budget separate from the `shots=` of the growth. Without `sampling`, every setting gets `shots` shots, as before.
+
+### ADAPT basis growth
+
+`ADAPT(basis_growth=BoundedRitzGrowth(max_chain_length=L))` grows a basis of generator chains of at most $L$ generators, one chain per round, chosen by a score from the current Ritz pair, and `basis_depth_limit` bounds the CX count of each chain ([Bounded Ritz growth](algorithms/gcim.md#bounded-ritz-growth)). It changes the trial space, so its energies are those of a different projected problem from the default growth. With shots, an extension is scored only when it passes an empirical eligibility rule on the sampled overlaps, and growth stops with `noise_inconclusive` when none of a round's extensions passes. The default growth, `basis_growth=None`, is unchanged.
+
+### Circuit depth on IBM Runtime
+
+`max_native_two_qubit_depth=D` of FixedGCIM, ADAPT and QFD refuses, before its submission, every circuit whose two-qubit depth after compilation for the device exceeds $D$ or is not qualified ([Native two-qubit depth](ibm.md#native-two-qubit-depth)). Only IBM Runtime computes this depth, and it qualifies it only for counts circuits with dynamical decoupling and twirling off, under qiskit-ibm-runtime 0.49.0. With any other installed version a depth limit refuses every IBM circuit, so after an upgrade of qiskit-ibm-runtime the limit is accepted again only once the re-check in [Maintenance](MAINTENANCE.md#dependency-follow-ups) has qualified the new version. The default `None` sets no limit.
+
+### Other changes
+
+- The default `ExecutionLimits.simulator_memory_mb` is 8192 MiB, raised from 1024. It is an upper limit that the memory needs of a local simulation are checked against.
+- `ProjectedPencil.offset_free_eigenvalues` records the lowest one or two Ritz values before the identity coefficient is added back ([Read the result](algorithms/gcim.md#inspect-numerical-diagnostics-and-error-bounds)).
+- `nwqlib.estimate(plan)` of an ADAPT Plan, and of a FixedGCIM or QFD Plan with `sampling`, reports the counts that depend on the iteration or on the pilot as unavailable, with the reason that the new `Method.query_catalog_reason()` returns ([ADAPT queries](algorithms/gcim.md#adapt-queries)).
+- The shared archive now saves an ordered fermionic operator, such as one from `ingest_fermion`, in its own arrays. v1.0.3.post1 raised `ValueError` when an archive had to save one.
+- The `coefficient_cutoff` documentation of `build_gcim_chemistry_problem` now states that OpenFermion's operator addition, which its Jordan–Wigner transform also uses, applies OpenFermion's own tolerance, in OpenFermion 1.8.1 deleting a term whose running coefficient has absolute value below 1e-8. A stored Pauli coefficient can therefore differ from the sum of its integral contributions by those deletions.
+- The new example notebook `gcim_qfd_shallow_workflows` compares the measurement and basis options of GCiM and QFD on H2 and a stretched H4 chain and plans a 26-qubit model. The eigenvalue notebook adds QFD and the grouped and termwise finite-shot counts, and the resource notebook gives the real-only GCiM settings, shots and CX bound. The stored outputs of every example notebook come from this version, including the 8192 MiB memory default where a notebook prints it.
+
+### Formats
+
+The shared archive formats are `nwqlib.run/22` and `nwqlib.result/15`, and this release cannot load `nwqlib.run/21` or `nwqlib.result/14` archives written by v1.0.3.post1. Keep v1.0.3.post1 available to read those archives or finish their pending runs, or replan and rerun with this release. The Plan and Result content hashes of existing FixedGCIM and ADAPT configurations change, because their records gain the new fields with their defaults, and no reader for the earlier hashes is kept.
+
+The method archives embedded in these files change from `fixed_gcim/6` to `fixed_gcim/7` for FixedGCIM and from `adapt/7` to `adapt/8` for ADAPT. The new QFD method archive uses `qfd/1`.
+
+Package and citation source versions are `1.0.3.post2`.
+
 ## v1.0.3.post1 (2026-10-21)
 
 Relative to v1.0.3, this maintenance release changes the test suite, the documentation, two extension interfaces, the shared Run and Result archive formats, the error for a missing compiler extra, the CX and rotation counts that follow Qiskit's gate definitions, QHD's projector choice at 7 qubits and the minimum Qiskit and qiskit-aer versions. It cannot load Run or Result archives written by v1.0.3. Default option values are unchanged.

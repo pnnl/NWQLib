@@ -284,7 +284,7 @@ host_estimate = estimate(plan(problem, method=LCHS(hamiltonian_evolution_backend
 show_table([
     ("Qubits the local simulator accepts", limits.max_simulation_qubits,
      f"Default. This channel uses {len(rec.success_bits) + len(rec.system_bits)}"),
-    ("Simulator memory cap", f"{limits.simulator_memory_mb:,} MB", "Default simulator_memory_mb"),
+    ("Simulator memory cap", f"{limits.simulator_memory_mb:,} MiB", "Default simulator_memory_mb"),
     ("SELECT construction work cap", selected.method.max_select_work, "Default max_select_work"),
     ("Classical evaluation: memory of its arrays", format_bytes(quantity(host_estimate, "known_memory", location="host")),
      "Stated by plan before it runs"),

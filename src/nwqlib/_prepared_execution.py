@@ -2696,7 +2696,7 @@ def _finish_native_preparation(preparation, *, run, reservation, fields, items, 
         native_operations=preparation.operations, population=preparation.population, transformation=preparation.transformation,
         counts_sampling=preparation.counts_sampling, provider_options_json=preparation.provider_options_json,
         probability_window_exclusions=preparation.probability_window_exclusions,
-        statevector_roundoff=preparation.statevector_roundoff)
+        statevector_roundoff=preparation.statevector_roundoff, native_depth=preparation.native_depth)
     handle = PreparedHandle._make(record, fields["realization"], preparation.native, items, setting, bindings)
     records = [("preparation", reservation.preparation_id, reservation.revise(prepared_id=record.content_id)),
                ("prepared", record.content_id, record)]

@@ -18,7 +18,16 @@ from nwqlib.core.planning import Plan
 from nwqlib.operators.access import Count
 from nwqlib.problems.inputs import StatePreparationSpec
 from nwqlib.ir.expressions import number
-from .fixed_basis import PauliArrays, PauliTerm, ProjectedPencil
+from .fixed_basis import (
+    GroupMoment,
+    PairPreparation,
+    PauliArrays,
+    PauliTerm,
+    ProjectedPencil,
+    ResolvedAcquisition,
+    SampledPairVariance,
+    ShotAllocation,
+)
 
 PROCESSING_SOURCE = Source(
     name="adapt.processed_inputs",
@@ -259,8 +268,9 @@ class AdaptReconstruction(Record):
     It stores the processed Hamiltonian terms, pool members with their
     commutators, measurement groups and work formulas that every later query,
     analysis and verification reads. Report reload uses these records without
-    importing Qiskit or rebuilding the pool. Only quantum Plans store
-    commutators, and only quantum Plans with shots store measurement groups.
+    importing Qiskit or rebuilding the pool. Only quantum Plans of the
+    default growth store commutators, and only quantum Plans with shots
+    store measurement groups.
 
     Attributes:
         schema_version: Record layout version.
@@ -272,7 +282,8 @@ class AdaptReconstruction(Record):
             sparse matrix.
         pool: Checked pool members in pool-index order.
         pool_name: Named pool family, or ``explicit`` for a supplied pool.
-        max_selections: ``min(max_iterations, pool size)``, the longest chain.
+        max_selections: The longest chain: ``min(max_iterations, pool size)``,
+            or ``BoundedRitzGrowth.max_chain_length`` for bounded growth.
         num_qubits: System register width.
         hamiltonian_action_work: Work of one Hamiltonian action from
             ``operators.inputs._matvec_requirements``. Its Pauli case uses
@@ -288,9 +299,10 @@ class AdaptReconstruction(Record):
         groups: QWC measurement groups for sampled screening. Each group is a
             tuple of indices into the sorted distinct commutator labels of the
             pool (``screen_labels``). Empty unless the Plan samples.
-        energy_groups: QWC measurement groups for sampled energy queries, as
-            indices into the sorted nonidentity Hamiltonian labels
-            (``energy_labels``). Empty unless the Plan samples.
+        energy_groups: QWC measurement groups for sampled energy queries and
+            grouped pencil settings, as indices into the sorted nonidentity
+            Hamiltonian labels (``energy_labels``). Empty unless the Plan
+            samples.
         processing: Human-readable processing qualifiers.
         hamiltonian_symmetry: Symmetry evidence of the Hamiltonian.
         processing_source: Versioned source of the processing rules.
@@ -308,9 +320,21 @@ class AdaptReconstruction(Record):
             ``fixed_basis._offset_free_requirements``.
         offset_free_action_bytes: Bytes of the shifted sparse operator and its
             setup scratch, from the same formula.
+        acquisition: The requested and resolved pencil measurement choices
+            (``ResolvedAcquisition``). Its real proof covers the processed
+            Hamiltonian, the reference and every admitted pool generator, so
+            every basis the run can build keeps the resolved quadratures. The
+            proof is exact for ``processed_hamiltonian``, the target that the
+            cutoff recorded in ``processing`` and ``hamiltonian_dropped_l1``
+            defines, and says nothing about the imaginary parts of matrix
+            elements of ``original_hamiltonian``. With a scalar processed
+            Hamiltonian, quantum planning resolves the choices for bounded
+            growth when ``max_basis_size>1``, because evaluating extensions
+            can need overlaps. Default growth and bounded growth with
+            ``max_basis_size=1`` measure nothing and resolve no choice.
     """
 
-    schema_version: Literal[4] = 4
+    schema_version: Literal[5] = 5
     reference: StatePreparationSpec
     original_hamiltonian: InputRef
     processed_hamiltonian: InputRef
@@ -331,6 +355,7 @@ class AdaptReconstruction(Record):
     host_identity_shift: Real = 0.0
     offset_free_action_work: Count = 0
     offset_free_action_bytes: Count = 0
+    acquisition: ResolvedAcquisition
 
     @model_validator(mode="after")
     def _one_identity_source(self):
@@ -460,19 +485,144 @@ def _energy_gradient_work(members, thetas, dimension, hamiltonian_work):
     return work, tuple(steps)
 
 
+class BoundedCandidate(Record):
+    """One extension that a `BoundedRitzGrowth` round examined, with its reason and, when scored, its score.
+
+    `AdaptRound.candidates` holds them in the order the round examined them
+    ([`BoundedRitzGrowth`][nwqlib.algorithms.gcim.adapt.BoundedRitzGrowth]).
+    The energy quantities are in the unit of the `Eigenproblem` and are
+    formed without the identity coefficient c of the processed Hamiltonian
+    `A = cI + A0`, which cancels from them. The fields below are read-only.
+
+    Attributes:
+        chain: The extension's `(pool index, theta)` items in the order they
+            act, its parent chain followed by one generator.
+        reason: `"accepted"` for the extension added to the basis,
+            `"ranked"` for another scored one, `"below_independence_cutoff"`
+            when `eta` was at most the independence cutoff,
+            `"nonfinite_score"` when a score quantity was not finite,
+            `"duplicate"` for a chain already in the basis,
+            `"depth_unknown"` and `"above_depth_limit"` for an extension
+            that `basis_depth_limit` excluded, and `"candidate"` for an
+            extension chosen for scoring whose matrix elements the run had
+            not finished obtaining when it stopped. With shots, an
+            evaluated extension that the sampled eligibility rule of
+            [`BoundedRitzGrowth`][nwqlib.algorithms.gcim.adapt.BoundedRitzGrowth]
+            does not pass has `"screening_noise_unknown"` when an overlap
+            setting has fewer than two shots or no finite nonnegative
+            variance, or when one set of counts serves two different overlap
+            entries, `"screening_metric_unresolved"` when
+            `metric_epsilon` is at least 1/2 or a needed quantity is not
+            finite, and `"screening_independence_unresolved"` when
+            `eta_margin` is at most `independence_cutoff`. The last one
+            does not show that the extension depends on the basis states.
+        depth_bound: Under `basis_depth_limit`, the extension's CX count
+            bound, the reference's count plus that of every generator
+            occurrence, or None when it is unknown, no limit is set or the
+            chain is already in the basis.
+        depth_reason: Why `depth_bound` is unknown, or None.
+        eta: Squared norm of the extension's part outside the kept overlap
+            subspace of the current basis, or None when it was not computed.
+            With shots it is the estimate from the sampled overlaps, which
+            can be negative and is not clipped.
+        coupling: `rho = |<q|A - E|psi>|` for that part q, normalized, and
+            the current lowest Ritz state psi and value E, or None.
+        gap: `delta = <q|A|q> - E`, formed from `A0` and the offset-free Ritz
+            value, or None.
+        score: `(sqrt(delta**2 + 4 rho**2) - delta)/2`, a lower bound on the
+            energy decrease that adding q to the kept subspace gives, or
+            None. It is not a prediction of the next solve's energy. With
+            shots it is computed from sampled matrix elements, and the
+            sampled eligibility rule does not control the noise of the
+            Hamiltonian elements or of the Ritz pair, so it is a raw
+            estimate, not a validated energy decrease.
+        independence_cutoff: With shots, the floor that `eta_margin` must
+            exceed, which is `BoundedRitzGrowth.independence_cutoff` or, when
+            that is None, ADAPT's `overlap_cutoff`. Without shots it is None,
+            as are the fields below.
+        multiplier: With shots, the fixed multiplier k = 3 of the sampled
+            eligibility rule.
+        metric_beta: With shots, `beta_S = k sqrt(nu_S)`, where `nu_S` is
+            the largest sum over one row of the current overlap matrix of
+            the variance proxies of its off-diagonal entries. Each measured
+            real or imaginary part contributes the larger of its sample-mean
+            variance and `1/(N + 1)**2` for its N shots. The diagonal and
+            an imaginary part that real-only measurement leaves out
+            contribute nothing.
+        metric_epsilon: With shots, `beta_S` divided by the smallest overlap
+            eigenvalue that the current solve kept. The extension is scored
+            only when it is below 1/2.
+        eta_sigma: With shots, the first-order spread proxy of `eta` from
+            the variance proxies of the current overlap entries and of the
+            extension's overlaps.
+        extension_noise: With shots, `b_s`, the sum over the extension's
+            overlaps of their real and imaginary variance proxies, each
+            weighted by the squared norm of the matching row of T, the matrix
+            that maps coordinates in the kept subspace of the current solve
+            to the basis with `T^dagger S T = I`.
+        eta_resolution: With shots, `R = k eta_sigma + (d + metric_epsilon
+            x)**2/(1 - metric_epsilon)` with `d = k sqrt(extension_noise)`
+            and x the norm of the extension's coordinates in the kept
+            subspace. The second term bounds the change of `eta` beyond
+            first order when the norm conditions in the GCiM guide hold, and
+            its inputs here are variance proxies. It is a conditional
+            empirical resolution, not a confidence bound.
+        eta_margin: With shots, `eta - eta_resolution`. The extension is
+            scored only when it exceeds `independence_cutoff`.
+        overlap_cutoff: With shots, the overlap cutoff of the current solve.
+        kept_rank: With shots, the number of overlap directions that the
+            current solve kept.
+    """
+
+    chain: tuple[tuple[Count, Real], ...]
+    reason: Literal["accepted", "ranked", "below_independence_cutoff", "nonfinite_score", "duplicate",
+                    "depth_unknown", "above_depth_limit", "candidate", "screening_noise_unknown",
+                    "screening_metric_unresolved", "screening_independence_unresolved"]
+    depth_bound: Count | None = None
+    depth_reason: Text | None = None
+    eta: Real | None = None
+    coupling: Annotated[Real, Field(ge=0)] | None = None
+    gap: Real | None = None
+    score: Annotated[Real, Field(ge=0)] | None = None
+    independence_cutoff: Annotated[Real, Field(gt=0, lt=1)] | None = None
+    multiplier: PositiveInt | None = None
+    metric_beta: Annotated[Real, Field(ge=0)] | None = None
+    metric_epsilon: Annotated[Real, Field(ge=0)] | None = None
+    eta_sigma: Annotated[Real, Field(ge=0)] | None = None
+    extension_noise: Annotated[Real, Field(ge=0)] | None = None
+    eta_resolution: Annotated[Real, Field(ge=0)] | None = None
+    eta_margin: Real | None = None
+    overlap_cutoff: Annotated[Real, Field(gt=0)] | None = None
+    kept_rank: PositiveInt | None = None
+
+
 class AdaptRound(Record):
     """One projected analysis of an `ADAPT` run and the selection that followed it.
 
     `ADAPTResult.history` holds one per completed projected analysis. A round
     keeps the values that drove its decision, so a later reanalysis of the
-    Result at another cutoff does not change it. The fields below are
-    read-only.
+    Result at another cutoff does not change it. With `BoundedRitzGrowth`
+    a round's basis is the reference and the chains that earlier rounds
+    added (`ADAPTResult.basis`), `selected`, `theta` and `gradients` are
+    empty and `winner` is None, and `candidates` records the extensions the
+    round examined. The fields below are read-only.
 
     Attributes:
-        iteration: Number of selected generators in the basis of this round.
+        iteration: Number of selected generators in the basis of this
+            round, or with `BoundedRitzGrowth` the number of chains added
+            before it.
         selected: Pool indices of those generators in selection order.
         theta: Their angles at this analysis, in radians.
         energy: Lowest projected Ritz value of this round, or None.
+        energy_decrease: The previous round's `energy` minus this one, or
+            None for the first round or when either is unavailable, in both
+            growth modes. It is the actual change of the solved value,
+            negative when the energy rose, for example because the overlap
+            cutoff kept other directions of the enlarged basis or sampling
+            noise moved the estimate.
+        kept_rank: Number of overlap directions that this round's solve
+            kept above the overlap cutoff, the rank of its projected
+            problem, in both growth modes, and 0 when the solve kept none.
         gradient_norm: Euclidean norm of the screened product-state
             gradients, or None when no screening followed.
         gradients: `(pool_index, <[H, A_i]>)` pairs for the unselected
@@ -490,12 +640,15 @@ class AdaptRound(Record):
             product state of this round's basis, or None. It is the shared
             query on the full product state in an exact quantum run, whose
             screening values the next screening reuses, the diagonal pair
-            query in a classical run, or the query of the first nonidentity
-            Pauli term of the diagonal pair in a sampled run. The matrix stage
-            of the round, which obtains every matrix element of the current
-            basis, must contain this query. The value is None before any
-            generator is selected and in an exact quantum run whose
-            Hamiltonian has no nonidentity term.
+            query in a classical run, the first-group diagonal setting of the
+            full product in a grouped sampled run, or the query of the first
+            nonidentity Pauli term of the diagonal pair in a termwise sampled
+            run. With `BoundedRitzGrowth` it is the diagonal pair query of
+            the chain added last. The matrix stage of the round, which
+            obtains every matrix element of the current basis, must contain
+            this query. The value is None before any generator is selected
+            and in an exact quantum run whose Hamiltonian has no nonidentity
+            term.
         analysis_attempt: Analysis attempt of the run that produced this round.
         optimizer_attempts: Cumulative optimizer invocations at this round.
         optimizer_rounds: Cumulative completed BFGS iterations at this round.
@@ -505,6 +658,11 @@ class AdaptRound(Record):
             or None.
         sampled_enclosure_violation: Distance of the sampled Ritz value
             outside the Pauli L1 enclosure of the processed operator, or None.
+        candidates: With `BoundedRitzGrowth`, the
+            [`BoundedCandidate`][nwqlib.algorithms.gcim.adapt_records.BoundedCandidate]
+            extensions that the round after this analysis examined, in
+            examination order, the added one marked `"accepted"`. Empty
+            otherwise.
     """
 
     schema_version: Literal[2] = 2
@@ -512,6 +670,8 @@ class AdaptRound(Record):
     selected: tuple[Count, ...]
     theta: tuple[Real, ...]
     energy: Real | None
+    energy_decrease: Real | None = None
+    kept_rank: Count
     gradient_norm: Real | None = None
     gradients: tuple[tuple[Count, Real], ...] = ()
     winner: Count | None = None
@@ -525,6 +685,7 @@ class AdaptRound(Record):
     energy_queries: Count = 0
     sampled_failure: Text | None = None
     sampled_enclosure_violation: Real | None = None
+    candidates: tuple[BoundedCandidate, ...] = ()
 
 
 class ADAPTResult(Result):
@@ -541,6 +702,9 @@ class ADAPTResult(Result):
     `value_selected` and `value_theta` describe the basis behind `eigenvalue`
     and `pencil`. They differ when a generator was selected or optimized
     after the last projection, and reanalysis always uses the value basis.
+    With [`BoundedRitzGrowth`][nwqlib.algorithms.gcim.adapt.BoundedRitzGrowth]
+    the explicit chains `basis` and `value_basis` take their place, and
+    `selected`, `theta`, `value_selected` and `value_theta` are empty.
     `print(result)` shows the value, its scope and the stop reason. The
     fields below are read-only. The fields of
     [`Result`][nwqlib.core.analysis.Result] are present too.
@@ -562,14 +726,31 @@ class ADAPTResult(Result):
             `pool_exhausted`, `max_iterations`,
             `optimization_evaluation_budget_exhausted`,
             `no_usable_overlap_subspace` and `invalid_sampled_evidence`.
+            With `BoundedRitzGrowth` the scientific stops are
+            `max_basis_size`, `max_iterations`, `flat_counter`,
+            `basis_depth_limit`, `parent_window_exhausted`,
+            `candidate_scans_exhausted`, `no_admissible_candidate`,
+            `noise_inconclusive` (with shots, no evaluated extension of the
+            last round passed the sampled eligibility rule, so the growth
+            ends on its current basis), `no_usable_overlap_subspace` without
+            shots and `invalid_sampled_evidence` with shots, all operational
+            limits rather than evidence of convergence. When a round finds
+            no extension to evaluate, `basis_depth_limit` takes precedence over
+            `parent_window_exhausted`, and that over
+            `candidate_scans_exhausted`, each describing only the examined
+            extensions ([`BoundedRitzGrowth`][nwqlib.algorithms.gcim.adapt.BoundedRitzGrowth]).
             Execution states are `running`, `cancelled`, `not_started`,
             `partial_observation` (data that a decision needs are missing or
             unusable), `pending_preparation` and `pending_acquisition` (a
             circuit preparation or a backend job has not finished),
             `uncertain_preparation` (an upload or compilation may or may not
             have completed), `uncertain_native_intent` (a recorded backend
-            submission may or may not have reached the backend) and
-            `backend_failed`.
+            submission may or may not have reached the backend),
+            `backend_failed` and `native_depth_refused` (the next circuit's
+            native two-qubit depth exceeds `ADAPT.max_native_two_qubit_depth`
+            or is unavailable, so it was not submitted, and `pending` holds
+            the refusal, which names the circuit's experiment and preparation
+            record, the limit and the depth or why it is unavailable).
         pending: Labels of queries or statuses that blocked further progress.
         optimizer_attempts: Number of optimizer invocations started.
         optimizer_rounds: Completed BFGS iterations over all invocations.
@@ -577,8 +758,72 @@ class ADAPTResult(Result):
             point after the run was resumed.
         energy_queries: Energy queries counted against
             `optimize_max_evaluations`.
-        analysis_attempts: Projected analyses started by the run.
+        analysis_attempts: Projected analyses started by the run, the pilot
+            analysis of `ADAPT.sampling` included.
         analysis_cutoff: Overlap-eigenvalue cutoff of this analysis.
+        group_moments: For a grouped run with shots, the moments of every
+            count measurement of the value basis's pencil
+            ([`GroupMoment`][nwqlib.algorithms.gcim.fixed_basis.GroupMoment]),
+            at the positions of that basis, as in `FixedGCIMResult`. The
+            first group's overlap moments and their covariance with H0
+            belong to the same counts. Empty otherwise.
+        sampled_pair_variances: For a grouped run with shots, the pooled
+            sample-mean variances and overlap–H0 covariance of each pair of
+            the value basis
+            ([`SampledPairVariance`][nwqlib.algorithms.gcim.fixed_basis.SampledPairVariance]).
+            Empty otherwise.
+        pair_preparations: For a value basis whose pencil entries come from
+            joint states, computed exactly by quantum execution without shots
+            or measured with grouped shots, the construction of the joint
+            state of each off-diagonal pair
+            ([`PairPreparation`][nwqlib.algorithms.gcim.fixed_basis.PairPreparation]).
+            Under `pair_preparation="vacuum_reference"` the pairs of the
+            reference have the route `"vacuum_reference"` and every other
+            pair the `"prefix"` route with its shared blocks. Under
+            `"vacuum_restore"` every pair, those of the reference included,
+            has the route `"vacuum_restore"`, whose circuit for the
+            reference is that of `"vacuum_reference"`. Each pair's vacuum
+            phase correction is determined by its recorded route, the pair's
+            generator chains and the Plan's pool, through the generator
+            circuits built for those chains or, after the Run is reopened,
+            the generator circuits restored with it.
+            Exact execution prepares joint states also when
+            `matrix_measurement="termwise"` is requested, because that choice
+            applies only to shots. Termwise measurement with shots prepares
+            no joint state, because its Hadamard tests place each Pauli term
+            between the two controlled preparations, so the field is then
+            empty. It is also empty for classical execution, for a Plan that
+            measures nothing and when `pencil` is None. A one-state value
+            basis has no off-diagonal pair.
+        basis: With `BoundedRitzGrowth`, the chains of the basis so far in
+            basis order, the reference `()` first. Each chain is a tuple of
+            `(pool index, theta)` items in the order they act. Empty
+            otherwise.
+        value_basis: With `BoundedRitzGrowth`, the chains of the basis
+            behind `eigenvalue` and `pencil`, the first chains of `basis`.
+            Empty otherwise.
+        frontier_cursor: With `BoundedRitzGrowth`, `(parent position, next
+            pool index)` of each parent chain of the last examination, with
+            positions in `basis`. The pairs are in cyclic position order
+            ending with the parent of the last examined extension, after
+            which a later round continues the rotation. Empty otherwise.
+        shot_allocation: With `ADAPT.sampling`, the
+            [`ShotAllocation`][nwqlib.algorithms.gcim.fixed_basis.ShotAllocation]
+            of the pilot and main stages that measure the value basis again
+            after its growth has stopped, decided once before the first
+            main-stage measurement, with the shots of every grouped setting
+            of that basis in its setting order, by pair, quadrature and
+            group. When that basis has no setting to measure, both stages
+            have zero shots, the per-setting lists are empty and
+            `effective_fraction` is `"not_applicable"`, while the shots of
+            the growth stay spent. Once the main stage has been analyzed,
+            `eigenvalue`, `pencil`, `group_moments`,
+            `sampled_pair_variances` and `contribution_ids` come from the
+            main-stage measurements alone, `group_moments` in the setting
+            order of the decision, while `history` keeps the analyses that
+            grew the basis. Loading the Result and
+            `result.analyze(...)` read the decision as saved. None without
+            `sampling` and before the decision.
         target_identification: Fixed statement of what the value does not establish.
     """
 
@@ -597,6 +842,13 @@ class ADAPTResult(Result):
     energy_queries: Count = 0
     analysis_attempts: Count = 0
     analysis_cutoff: Real
+    group_moments: tuple[GroupMoment, ...] = ()
+    sampled_pair_variances: tuple[SampledPairVariance, ...] = ()
+    pair_preparations: tuple[PairPreparation, ...] = ()
+    basis: tuple[tuple[tuple[Count, Real], ...], ...] = ()
+    value_basis: tuple[tuple[tuple[Count, Real], ...], ...] = ()
+    frontier_cursor: tuple[tuple[Count, Count], ...] = ()
+    shot_allocation: ShotAllocation | None = None
     target_identification: Text = (
         "processed-input projected estimate; ground identity and adaptive coverage not established"
     )
@@ -605,7 +857,8 @@ class ADAPTResult(Result):
         lines = [
             f"Ritz eigenvalue: {self._scalar_text(self.eigenvalue)}{self._unit_text()}",
             self.target_identification,
-            f"ADAPT stop: {self.stop_reason}; {len(self.selected)} selected generators",
+            f"ADAPT stop: {self.stop_reason}; "
+            + (f"{len(self.basis)} basis chains" if self.basis else f"{len(self.selected)} selected generators"),
         ]
         if self.pending:
             lines.append(f"Partial data: {len(self.pending)} pending queries")
@@ -640,10 +893,32 @@ class ADAPTResult(Result):
             self.pencil.eigenvalues[0] if self.pencil.eigenvalues else None
         ):
             raise ValueError("ADAPT value differs from its actual projected pencil")
+        acquisition = plan.reconstruction.acquisition
+        if (self.group_moments or self.sampled_pair_variances) and acquisition.matrix_measurement != "grouped":
+            raise ValueError("ADAPT group statistics belong only to a grouped Plan with shots")
+        if self.pair_preparations and (
+            acquisition.pair_preparation is None or acquisition.matrix_measurement == "termwise"
+        ):
+            raise ValueError("ADAPT pair preparations belong only to the joint states of exact "
+                             "or grouped quantum measurement")
+        if self.shot_allocation is not None and self.shot_allocation.sampling != plan.method.sampling:
+            raise ValueError("ADAPT shot allocation belongs to another Plan's PencilSampling")
+        growth = plan.method.basis_growth
+        if growth is not None:
+            # A bounded basis is the explicit chain list, not a function of
+            # one selected chain, and the value basis is its first chains.
+            if (self.selected or self.value_selected or not self.basis or self.basis[0] != ()
+                    or self.value_basis != self.basis[:len(self.value_basis)]
+                    or any(len(chain) > growth.max_chain_length or index >= len(plan.reconstruction.pool)
+                           for chain in self.basis for index, _ in chain)):
+                raise ValueError("ADAPT bounded basis differs from its admitted pool and chain limit")
+        elif self.basis or self.value_basis or self.frontier_cursor:
+            raise ValueError("ADAPT explicit chains belong only to BoundedRitzGrowth")
         if self.pencil is not None:
             from .adapt_acquisition import basis_chains
 
-            size = len(basis_chains(tuple(zip(self.value_selected, self.value_theta, strict=True))))
+            size = (len(self.value_basis) if growth is not None
+                    else len(basis_chains(tuple(zip(self.value_selected, self.value_theta, strict=True)))))
             # An empty admitted overlap subspace has no Ritz vector. Its H/S
             # matrices still describe the complete attempted basis.
             coefficient_count = size if self.pencil.eigenvalues else 0

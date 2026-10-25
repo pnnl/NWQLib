@@ -687,10 +687,12 @@ def prepare_adapt_inputs(hamiltonian, reference, method, *, execution, shots,
     fermion terms. A Hamiltonian with Pauli access, which every quantum plan
     has, must have exactly real Pauli coefficients. Coefficients at or below
     ``pauli_coefficient_cutoff`` are removed, and the sum of their absolute
-    values is recorded. Only a quantum plan forms each ``[H, A_i]``, whose
-    labels its screening queries measure, and only a quantum plan with
-    ``shots`` forms the QWC measurement groups. A classical plan screens with generator actions on the
-    state and forms neither. A classical plan with
+    values is recorded. Only a quantum plan of the default growth forms each
+    ``[H, A_i]``, whose labels its screening queries measure, and only a
+    quantum plan with ``shots`` forms the QWC measurement groups. A
+    classical plan screens with generator actions on the state and forms
+    neither, and ``BoundedRitzGrowth`` screens no gradient and forms no
+    commutator. A classical plan with
     dense or sparse access keeps the original matrix and forms no Pauli
     decomposition. Its pair queries then remove the mean diagonal
     ``c = trace(H)/d`` from the matrix before they project, as classical
@@ -702,6 +704,7 @@ def prepare_adapt_inputs(hamiltonian, reference, method, *, execution, shots,
     """
     q = reference.basis.dimension.bit_length() - 1
     pool = method.pool
+    growth = method.basis_growth
     # Bound built-in pool enumeration before expanding orbital-index combinations.
     if isinstance(pool, str):
         n = method.n_spatial_orbitals
@@ -840,6 +843,9 @@ def prepare_adapt_inputs(hamiltonian, reference, method, *, execution, shots,
     # bytes and the reconstruction and table records' own fields as fixed JSON
     # (_reconstruction_fixed_json and _commutator_record_fixed_json), each table before its
     # record is built.
+    # The longest chain, which also bounds the active screening cache.
+    selections = min(method.max_iterations, len(generators)) if growth is None else growth.max_chain_length
+
     def reconstruction_json(processed, term_count, work, dropped, notes, symmetry,
                             *, shift=0.0, offset=(0, 0)):
         return _reconstruction_fixed_json(
@@ -848,7 +854,7 @@ def prepare_adapt_inputs(hamiltonian, reference, method, *, execution, shots,
                 "original_hamiltonian": original_hamiltonian,
                 "processed_hamiltonian": processed.reference,
                 "pool_name": method.pool if isinstance(method.pool, str) else "explicit",
-                "max_selections": min(method.max_iterations, len(generators)),
+                "max_selections": selections,
                 "num_qubits": q,
                 "hamiltonian_action_work": work,
                 "hamiltonian_dropped_l1": dropped,
@@ -959,7 +965,6 @@ def prepare_adapt_inputs(hamiltonian, reference, method, *, execution, shots,
     # pool size and selection count while tables are added, so each record
     # check below reserves the cache the finished Plan can build.
     energy_count = sum(t.label != "I" * q for t in terms)
-    selections = min(method.max_iterations, len(generators))
 
     def cache_bytes(rows):
         return label_cache_bytes(q, rows, len(generators), energy_count, selections,
@@ -974,26 +979,29 @@ def prepare_adapt_inputs(hamiltonian, reference, method, *, execution, shots,
             "ADAPT reconstruction records and decoded label cache",
         )
 
-    for member, generator in zip(members, generators, strict=True):
-        a = pauli_table(generator.pauli_terms, num_qubits=q, max_bytes=method.max_bytes)
-        # d/dtheta <exp(theta A)psi|H|exp(theta A)psi> at theta = 0 is
-        # <psi|H A - A H|psi> = <[H,A]>, because A^dagger = -A.
-        commutator, removed = _commutator_arrays(
-            table, a, cutoff=method.pauli_coefficient_cutoff, ledger=ledger,
-            held=fixed + records * share + sum(8 * rows * (q + 1) for rows in kept_rows),
-            max_bytes=method.max_bytes, max_products=method.max_products,
-            admit_rows=lambda rows: admit_tables([*kept_rows, rows]),
-        )
-        kept_rows.append(len(commutator.coefficients.array))
-        updated.append(
-            member.revise(
-                commutator=commutator,
-                commutator_dropped_l1=removed,
+    if growth is None:
+        for member, generator in zip(members, generators, strict=True):
+            a = pauli_table(generator.pauli_terms, num_qubits=q, max_bytes=method.max_bytes)
+            # d/dtheta <exp(theta A)psi|H|exp(theta A)psi> at theta = 0 is
+            # <psi|H A - A H|psi> = <[H,A]>, because A^dagger = -A.
+            commutator, removed = _commutator_arrays(
+                table, a, cutoff=method.pauli_coefficient_cutoff, ledger=ledger,
+                held=fixed + records * share + sum(8 * rows * (q + 1) for rows in kept_rows),
+                max_bytes=method.max_bytes, max_products=method.max_products,
+                admit_rows=lambda rows: admit_tables([*kept_rows, rows]),
             )
-        )
-    if not generators:
+            kept_rows.append(len(commutator.coefficients.array))
+            updated.append(
+                member.revise(
+                    commutator=commutator,
+                    commutator_dropped_l1=removed,
+                )
+            )
+        members = tuple(updated)
+    else:
+        # Bounded growth screens no gradient, so the pool members keep no
+        # commutator, and only the records and the label cache are charged.
         admit_tables(kept_rows)
-    members = tuple(updated)
     if shots is None:
         return AdaptInputs(
             processed,
@@ -1022,7 +1030,8 @@ def prepare_adapt_inputs(hamiltonian, reference, method, *, execution, shots,
         )
         return tuple(tuple(group) for group in grouped.groups)
 
-    screen = tuple(sorted({p for member in members for p, _ in member.commutator.rows()}))
+    screen = tuple(sorted({p for member in members if member.commutator is not None
+                           for p, _ in member.commutator.rows()}))
     energy = tuple(sorted(t.label for t in terms if t.label != "I" * q))
     screen_groups, energy_groups = groups(screen), groups(energy)
     raw, headers, tables = _commutator_array_charges(kept_rows, q)

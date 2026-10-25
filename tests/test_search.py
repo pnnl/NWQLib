@@ -85,8 +85,10 @@ def test_selected_row_keeps_original_forecast_through_repeated_runs_and_archive(
 
 
 def test_unknown_provider_and_controller_populations_are_not_zero_or_one_query():
-    from nwqlib import Eigenproblem
+    from nwqlib import Eigenproblem, estimate
     from nwqlib.algorithms import ADAPT, Lanczos
+    from nwqlib.resources import estimate as fold
+    from nwqlib.resources.records import GATES
 
     exact = plan(Eigenproblem(A=ingest_pauli((("Z", 1.0),), num_qubits=1)),
                  method=Lanczos(initial_state=[1., 1.], krylov_dimension=2), seed=7)
@@ -108,8 +110,9 @@ def test_unknown_provider_and_controller_populations_are_not_zero_or_one_query()
     assert "provider-managed" in compared.selection.values[1][0].reason
     assert compared.selection.nondominated == (0,) and compared.selection.incomparable == (1,)
 
-    # ADAPT declares reusable query laws. Two declarations at eight shots
-    # each do not mean its data-dependent trajectory consumes sixteen shots.
+    # ADAPT declares reusable query laws. Its four query templates (screen,
+    # energy, pair, diagonal) at eight shots each do not mean that its
+    # data-dependent trajectory takes four settings or 32 shots.
     adaptive = plan(
         Eigenproblem(A=ingest_pauli((("Z", 1.0),), num_qubits=1)),
         method=ADAPT(
@@ -124,6 +127,63 @@ def test_unknown_provider_and_controller_populations_are_not_zero_or_one_query()
     assert ranked.selection.values[0][0].value is None
     assert "query templates" in ranked.selection.values[0][0].reason
     assert ranked.selection.nondominated == () and ranked.selection.incomparable == (0,)
+    assert estimate(adaptive).quantity("settings").fact.value is None
+
+    # The estimate of the whole Plan (Method.query_catalog_reason) gives a
+    # count as zero only when no ADAPT query can contribute to it: exact
+    # evaluations of sampled counts, shots of exact statistics, and every
+    # quantum count of the classical route, which runs host computations only.
+    # Every other count is unavailable with ADAPT's reason. Each width and
+    # byte peak keeps the value, evidence and schedule condition of the
+    # construction's own estimate as a footprint of the templates, and the
+    # quantum widths stay symbolic in the register-width parameters. A forecast
+    # with a profile and a scan row hold this same estimate of the whole Plan.
+    problem, method = adaptive.problem, adaptive.method
+    reason = method.query_catalog_reason()
+    routes = {
+        "sampled": (adaptive, {"exact_evaluations"}),
+        "exact": (plan(problem, method=method, seed=7), {"shots"}),
+        "classical": (plan(problem, method=method, execution="classical", seed=7),
+                      {*GATES, "calls", "measurements", "resets", "settings", "unique_settings",
+                       "preparation_components", "shots", "exact_evaluations"}),
+    }
+    for route, (selected_plan, zeros) in routes.items():
+        workload, own = estimate(selected_plan), fold(selected_plan.construction)
+        assert reason in workload.assumptions and reason not in own.assumptions
+        for quantity in workload.quantities:
+            fact = quantity.fact
+            if quantity.location is not None:
+                twin = own.quantity(quantity.metric, location=quantity.location)
+                assert quantity.population == fact.scope.domain
+                assert "declared footprint" in quantity.population and "whole-workload" not in quantity.population
+                assert (fact.availability, fact.value, fact.symbol, fact.evidence, quantity.interpretation,
+                        quantity.required_schedule) == (twin.fact.availability, twin.fact.value, twin.fact.symbol,
+                                                        twin.fact.evidence, twin.interpretation,
+                                                        twin.required_schedule)
+            elif quantity.metric in zeros:
+                assert fact.value == Rational(numerator=0, denominator=1) and quantity.interpretation == "exact"
+            else:
+                assert fact.availability == "unknown" and fact.reason == reason
+        forecast, _ = original_forecast(selected_plan, model=False)
+        assert forecast.resources == workload and forecast.assessments == ()
+        width_ranked = scan((Candidate(selected_plan),), objectives=(Objective(kind="logical_width"),))
+        assert width_ranked.comparison.rows[0].estimate == workload
+        assert width_ranked.selection.values[0][0].value is None
+        if route == "classical":
+            continue
+        width = workload.quantity("logical_width", location="logical_device")
+        assert width.fact.availability == "symbolic"
+        assert width.required_schedule == ("serial_acquisitions" if route == "sampled" else None)
+        # One prepared query is a fully bound point. Its own construction
+        # requests one setting of eight shots, or one exact evaluation, and
+        # keeps the gate counts that no law gives unavailable.
+        with prepare(selected_plan, progress=False).run as run:
+            (receipt,) = run.data.receipts
+        point = fold(receipt.realization.selected_construction(selected_plan))
+        metric, requested = ("shots", 8) if route == "sampled" else ("exact_evaluations", 1)
+        assert point.quantity("settings").fact.value == Rational(numerator=1, denominator=1)
+        assert point.quantity(metric).fact.value == Rational(numerator=requested, denominator=1)
+        assert point.quantity("cx").fact.availability == "unknown" and reason not in point.assumptions
 
 
 def test_cached_folds_and_supplied_prior_occurrences_survive_rescoring(monkeypatch):
@@ -254,8 +314,10 @@ def test_two_objective_front_keeps_both_sides_of_a_shots_width_trade_off():
 
     The counts follow the documented sampled workloads at n shots per setting.
     Lanczos with m = 2 measures the moment degrees 1 to 2m-1, three settings.
-    FixedGCIM measures b**2 G settings, here b = 3 basis states and G = 2
-    qubit-wise commuting groups {XI, IX} and {ZZ}. The widths, 4 for Lanczos
+    FixedGCIM measures b(b+1)G/2 settings, here b = 3 real basis vectors and
+    G = 2 qubit-wise commuting groups {XI, IX} and {ZZ}: the words have no Y
+    and every coefficient and stored amplitude is real, so H and S are real
+    and only the real parts are measured. The widths, 4 for Lanczos
     and 3 for FixedGCIM (two system qubits and the pair ancilla), are those
     docs/scientist.md reports for these Methods. The width of a Plan with
     several measurement runs holds only when the runs execute one after
@@ -274,7 +336,7 @@ def test_two_objective_front_keeps_both_sides_of_a_shots_width_trade_off():
     objectives = (Objective(kind="requested_shots"), Objective(kind="logical_width"))
     ranked = scan(tuple(Candidate(p) for p in plans), objectives=objectives,
                   context=ResourceContext(batch_schedule="serial"))
-    expected = [[3 * n, 4], [2 * 9 * n, 3], [2 * 9 * 2 * n, 3]]
+    expected = [[3 * n, 4], [3 * 4 // 2 * 2 * n, 3], [3 * 4 // 2 * 2 * 2 * n, 3]]
     assert [[number(v) for v in row] for row in ranked.selection.values] == expected
     # Row 0 has the fewest shots and row 1 the smallest width, so neither dominates
     # the other. Row 2 ties row 1 on width and needs more shots.

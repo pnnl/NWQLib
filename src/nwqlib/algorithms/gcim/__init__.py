@@ -8,11 +8,12 @@ from importlib import import_module
 
 _EXPORTS = {
     **dict.fromkeys(
-        ("FixedGCIM", "FixedGCIMBasis", "FixedGCIMResult", "ProjectedPencil", "ScalarEstimate"),
+        ("FixedGCIM", "FixedGCIMBasis", "FixedGCIMResult", "PencilAcquisition", "PencilSampling",
+         "ProjectedPencil", "ScalarEstimate"),
         "fixed_basis",
     ),
-    "ADAPT": "adapt",
-    **dict.fromkeys(("ADAPTResult", "AdaptRound"), "adapt_records"),
+    **dict.fromkeys(("ADAPT", "BoundedRitzGrowth"), "adapt"),
+    **dict.fromkeys(("ADAPTResult", "AdaptRound", "BoundedCandidate"), "adapt_records"),
     "AdaptVerificationOptions": "adapt_verification",
     **dict.fromkeys(
         (

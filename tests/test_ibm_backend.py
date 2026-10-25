@@ -723,6 +723,230 @@ def test_public_cloud_run_reopens_original_job_without_planning(tmp_path, monkey
     assert len(runtime_api.requests) == 1
 
 
+def cx_path_depth(circuit):
+    """Largest number of CX gates on one dependency path, and the CX count.
+
+    Every operation, barriers and measurements included, orders the qubits and
+    classical bits it touches. CX is the only two-qubit gate of FakeManilaV2.
+    """
+    depth, gates = {}, 0
+    for item in circuit.data:
+        wires = (*item.qubits, *item.clbits)
+        weight = int(item.operation.name == "cx")
+        level = max((depth.get(wire, 0) for wire in wires), default=0) + weight
+        depth.update(dict.fromkeys(wires, level))
+        gates += weight
+    return max(depth.values(), default=0), gates
+
+
+def test_isa_native_depth_is_saved_with_its_preparation_and_decides_a_requested_limit(
+    runtime_api, tmp_path, monkeypatch
+):
+    """The recorded depth is that of the ISA circuit that executes, qualified only for counts
+    whose effective options, saved and sent, keep the provider's dynamical decoupling and
+    twirling off, and only under qiskit-ibm-runtime 0.49.0. It survives reopening without
+    compiling again, and a limit refuses before the submission is recorded when the depth is
+    missing or unqualified, or when the Run is reopened where another version of a recorded
+    package is installed or one cannot be read. Without a limit, nothing is looked up. A
+    reopened Run sends the saved effective options, which the installed SDK checks before the
+    submission is recorded, and retrieves the submitted job without these checks.
+    """
+    import importlib.metadata
+    from qiskit import QuantumCircuit
+    from qiskit.primitives.containers import BitArray, DataBin, PrimitiveResult, SamplerPubResult
+    import qiskit_ibm_runtime.options as sdk_options
+    from qiskit_ibm_runtime.options.utils import Unset
+    from nwqlib._prepared_execution import PreparedHandle, restore_prepared
+    from nwqlib.backends.inspection import NativeDepthCapRefusal, check_native_depth_cap
+    from nwqlib.execution import NativeDepth
+    from nwqlib.operators import ingest_pauli
+    from nwqlib.problems import Expectation
+
+    # qiskit-ibm-runtime 0.49.0 documents False as the Sampler default of the
+    # three transformation options. An unset one must be sent and saved as that
+    # explicit False, and an explicit True must stay. Only that version was
+    # checked, so under another installed version no depth is qualified.
+    frozen = {"dynamical_decoupling": {"enable": False}, "twirling": {"enable_gates": False, "enable_measure": False}}
+    twirled_options = {**frozen, "twirling": {"enable_gates": True, "enable_measure": False}}
+    installed = importlib.metadata.version("qiskit-ibm-runtime")
+    checked = installed == "0.49.0"
+
+    # Three CX on the linear chain 0-1-2-3, two of them parallel.
+    state = QuantumCircuit(4)
+    state.h(0)
+    state.cx(0, 1)
+    state.h(2)
+    state.cx(2, 3)
+    state.cx(1, 2)
+    plan = nwqlib.plan(Expectation(state=state, observable=ingest_pauli((("ZZZZ", 1.0),), num_qubits=4)),
+                       method=ExpectationMethod(), shots=4, seed=7)
+    point = plan.resolve(plan.experiments[0].name)
+    connection = runtime_api.connection.revise(initial_layout=(0, 1, 2, 3))
+    path = tmp_path / "depth"
+    with Run(plan, backend=connection, directory=path) as run:
+        handle = prepare(point, run=run)
+        circuit = handle.inspect_circuit()
+        assert {item.operation.name for item in circuit.data} <= {*runtime_api.backend.target.operation_names, "barrier"}
+        depth, gates = cx_path_depth(circuit)
+        assert gates > depth >= 1
+        recorded = handle.record.native_depth
+        assert recorded.width == circuit.num_qubits
+        assert connection.options_json == "{}" and json.loads(handle.record.provider_options_json) == frozen
+        check_native_depth_cap((handle,), None)
+        if checked:
+            assert recorded.qualified
+            assert (recorded.native_two_qubit_depth, recorded.native_two_qubit_gates) == (depth, gates)
+            check_native_depth_cap((handle,), depth)
+            with pytest.raises(NativeDepthCapRefusal) as refused:
+                check_native_depth_cap((handle,), depth - 1)
+            assert (refused.value.experiment, refused.value.prepared_id) == (point.experiment, handle.record.content_id)
+            assert (refused.value.depth, refused.value.cap, refused.value.reason) == (depth, depth - 1, None)
+        else:
+            # The three options parse and are all false, but this version was not checked.
+            assert not recorded.qualified
+            assert f"qiskit-ibm-runtime {installed} is installed" in recorded.reason
+            assert "only with qiskit-ibm-runtime 0.49.0" in recorded.reason
+            with pytest.raises(NativeDepthCapRefusal) as refused:
+                check_native_depth_cap((handle,), depth)
+            assert (refused.value.depth, refused.value.reason) == (None, recorded.reason)
+        # The same circuit with an unqualified depth: no limit admits an unknown depth.
+        unknown = NativeDepth(qualified=False, reason="supplied unqualified depth", width=circuit.num_qubits)
+        rebuilt = PreparedHandle._make(handle.record.revise(native_depth=unknown), handle.realization,
+                                       handle._native, handle._items, handle._setting, handle._bindings)
+        with pytest.raises(NativeDepthCapRefusal) as refused:
+            check_native_depth_cap((rebuilt,), depth)
+        assert (refused.value.depth, refused.value.reason) == (None, "supplied unqualified depth")
+        assert run.trace.jobs == 0
+    with monkeypatch.context() as patch, load_run(path, backend=connection) as run:
+        patch.setattr(IBMRuntimeBackend, "prepare", lambda *a, **k: pytest.fail("reopening compiled again"))
+        restored = restore_prepared(handle.record.content_id, run=run, for_submission=True)
+        assert restored.record.native_depth == recorded
+        assert restored.record.provider_options_json == handle.record.provider_options_json
+        if checked:
+            check_native_depth_cap((restored,), depth)
+            with pytest.raises(NativeDepthCapRefusal):
+                check_native_depth_cap((restored,), depth - 1)
+
+    # The saved Run reopened where qiskit-ibm-runtime 0.50.0 is installed, whose
+    # Sampler turns gate twirling on unless the request sets it. Only the
+    # installed-version lookup and the SDK's options class are replaced.
+    lookup, looked_up, replaced = importlib.metadata.version, [], {"qiskit-ibm-runtime": "0.50.0"}
+
+    def reopened_version(name):
+        looked_up.append(name)
+        value = replaced[name] if name in replaced else lookup(name)
+        if isinstance(value, Exception):
+            raise value
+        return value
+
+    sampler_options = sdk_options.SamplerOptions
+
+    def twirling_by_default(**values):
+        options = sampler_options(**values)
+        if options.twirling.enable_gates is Unset:
+            options.twirling.enable_gates = True
+        return options
+
+    def rejecting(**values):
+        raise ValueError("this SDK does not accept the saved Sampler options")
+
+    def all_zero(result):
+        """Every classical bit 0 in each shot of each submitted PUB."""
+        return PrimitiveResult([SamplerPubResult(
+            DataBin(**{register.name: BitArray.from_samples(["0" * register.size] * pub.shots, num_bits=register.size)
+                       for register in pub.circuit.cregs}),
+            metadata={"circuit_metadata": pub.circuit.metadata, "shots": pub.shots}) for pub in runtime_api.api.pubs],
+            metadata=result.metadata)
+
+    sent = len(runtime_api.requests)
+    with monkeypatch.context() as patch, load_run(path, backend=connection) as run:
+        patch.setattr(IBMRuntimeBackend, "prepare", lambda *a, **k: pytest.fail("reopening compiled again"))
+        patch.setattr(importlib.metadata, "version", reopened_version)
+        patch.setattr(sdk_options, "SamplerOptions", twirling_by_default)
+        restored = restore_prepared(handle.record.content_id, run=run, for_submission=True)
+        looked_up.clear()
+        check_native_depth_cap((restored,), None)
+        assert looked_up == []
+        with monkeypatch.context() as limited:
+            limited.setattr(ExpectationMethod, "before_submit",
+                            lambda self, plan, prepared, *, run: check_native_depth_cap(prepared, depth))
+            with pytest.raises(NativeDepthCapRefusal) as refused:
+                submit_detached((restored,), run=run)
+        assert refused.value.depth is None and refused.value.native_depth == recorded
+        if checked:
+            assert "qiskit-ibm-runtime 0.49.0" in refused.value.reason
+            assert "qiskit-ibm-runtime 0.50.0 is installed" in refused.value.reason
+            # With qiskit-ibm-runtime as recorded, an installed Qiskit whose
+            # version cannot be read refuses on its own.
+            replaced.update({"qiskit-ibm-runtime": installed, "qiskit": importlib.metadata.PackageNotFoundError("qiskit")})
+            with pytest.raises(NativeDepthCapRefusal) as unreadable:
+                check_native_depth_cap((restored,), depth)
+            assert unreadable.value.depth is None
+            assert "installed version of qiskit cannot be read" in unreadable.value.reason
+            replaced.update({"qiskit-ibm-runtime": "0.50.0"})
+            del replaced["qiskit"]
+        else:
+            assert refused.value.reason == recorded.reason
+        assert not run.trace.submissions and len(runtime_api.requests) == sent
+        # The installed SDK checks the saved options before the submission is recorded.
+        patch.setattr(sdk_options, "SamplerOptions", rejecting)
+        with pytest.raises(ValueError, match="does not accept the saved"):
+            submit_detached((restored,), run=run)
+        assert not run.trace.submissions and len(runtime_api.requests) == sent
+        # Without a limit the job carries the saved effective options, although
+        # this SDK would turn gate twirling on for the configuration's "{}".
+        patch.setattr(sdk_options, "SamplerOptions", twirling_by_default)
+        submitted = submit_detached((restored,), run=run)
+        assert len(runtime_api.requests) == sent + 1 and runtime_api.requests[-1]["params"]["options"] == frozen
+    # The job submitted there is retrieved there.
+    runtime_api.api.status, runtime_api.api.transform_result = "COMPLETED", all_zero
+    with monkeypatch.context() as patch, load_run(path, backend=connection) as run:
+        patch.setattr(importlib.metadata, "version", reopened_version)
+        patch.setattr(sdk_options, "SamplerOptions", twirling_by_default)
+        (chunk,) = refresh_submissions(run=run)
+        assert (chunk.job, chunk.prepared_id) == (submitted.locator.job_id, handle.record.content_id)
+        assert dict(zip(chunk.histogram().index_list(), chunk.histogram().weights.tolist())) == {0: 4}
+        assert len(runtime_api.requests) == sent + 1
+    # Gate twirling requested: it is sent as requested, and the depth of the
+    # same ISA circuit is unqualified, so a limit refuses it before the
+    # submission is recorded while execution without a limit proceeds.
+    twirled = connection.revise(options_json='{"twirling":{"enable_gates":true}}')
+    sent = len(runtime_api.requests)
+    with Run(plan, backend=twirled, directory=tmp_path / "twirled") as run:
+        handle = prepare(point, run=run)
+        unqualified = handle.record.native_depth
+        assert (unqualified.qualified, unqualified.width) == (False, runtime_api.backend.num_qubits)
+        assert "twirling.enable_gates=True" in unqualified.reason
+        assert json.loads(handle.record.provider_options_json) == twirled_options
+        with monkeypatch.context() as patch:
+            patch.setattr(ExpectationMethod, "before_submit",
+                          lambda self, plan, prepared, *, run: check_native_depth_cap(prepared, depth))
+            with pytest.raises(NativeDepthCapRefusal) as refused:
+                submit_detached((handle,), run=run)
+        assert (refused.value.depth, refused.value.reason) == (None, unqualified.reason)
+        assert not run.trace.submissions and len(runtime_api.requests) == sent
+        submit_detached((handle,), run=run)
+        assert len(runtime_api.requests) == sent + 1 and runtime_api.requests[-1]["params"]["options"] == twirled_options
+    # A provider estimate, at the default resilience level 0, is unqualified.
+    estimate = estimate_selection()
+    with Run(estimate, backend=runtime_api.connection, directory=tmp_path / "estimate") as run:
+        handle = prepare(estimate.resolve(estimate.experiments[0].name), run=run)
+        unqualified = handle.record.native_depth
+        assert (unqualified.qualified, unqualified.width) == (False, runtime_api.backend.num_qubits)
+        assert "Estimator" in unqualified.reason
+        assert json.loads(handle.record.provider_options_json) == {"resilience_level": 0}
+        check_native_depth_cap((handle,), None)
+        with pytest.raises(NativeDepthCapRefusal):
+            check_native_depth_cap((handle,), depth)
+    with Run(plan) as run:
+        aer = prepare(point, run=run)
+        assert aer.record.native_depth is None
+        check_native_depth_cap((aer,), None)
+        with pytest.raises(NativeDepthCapRefusal) as refused:
+            check_native_depth_cap((aer,), depth)
+        assert refused.value.native_depth is refused.value.depth is None and refused.value.reason
+
+
 def test_isa_preparation_uses_exact_dense_synthesis_below_level_two(runtime_api, tmp_path):
     # Qiskit's own synthesis of this near-identity unitary errs by about 7e-7
     # per entry. The default level 1 receives the exact synthesis. The

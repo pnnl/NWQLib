@@ -51,6 +51,7 @@ Subclass `Method`, give it a `descriptor`, and implement `plan` and `analyze`. T
         - analyze
         - prepare
         - prepare_all_refusal
+        - query_catalog_reason
         - execute
         - error_model
         - verify

@@ -116,7 +116,7 @@ def save(plan, files):
     writes this archive before any selection, so the plans it builds later
     are saved with its checkpoints (``save_context``).
 
-    The archive format is ``adapt/7``. Its saved reconstruction carries the
+    The archive format is ``adapt/8``. Its saved reconstruction carries the
     Hamiltonian action allowance (``hamiltonian_action_work``) computed at
     planning under this format's work formula, and loading reuses it without
     recomputing it, so an archive of an earlier format, whose query and
@@ -137,7 +137,7 @@ def save(plan, files):
         ]
     )
     return dict(
-        format="adapt/7",
+        format="adapt/8",
         plan=plan.to_record(),
         problem=files.write_problem(plan.problem),
         output=files.write_output(plan.output),
@@ -161,8 +161,8 @@ def load(saved, files):
     """Reopen saved generator data and bind the saved query construction without rerunning selection."""
     from .adapt import ADAPT, CompilerPlans
 
-    if saved.get("format") != "adapt/7":
-        raise unsupported_archive_format("ADAPT archive", saved.get("format"), "adapt/7")
+    if saved.get("format") != "adapt/8":
+        raise unsupported_archive_format("ADAPT archive", saved.get("format"), "adapt/8")
     fields = dict(saved["method"])
     original = saved["original_pool"]
     fields["pool"] = (
@@ -232,7 +232,8 @@ def load(saved, files):
         tuple(
             SelectedBlock.bind(
                 record,
-                payload=(record.signature.name, inputs, reference, compilers, method),
+                payload=(record.signature.name, inputs, reference, compilers, method,
+                         rec.acquisition.pair_preparation),
                 constructor=construct_adapt,
             )
             for record in plan.construction.selections
@@ -251,7 +252,9 @@ def load(saved, files):
 def save_context(context, files):
     """Save the current state and action caches, compiled gates and the compiler plans built so far.
 
-    The Run's Plan archive is written before any selection, so the compiler
+    Under ``BoundedRitzGrowth`` the context also holds the explicit basis
+    chains that the caches keep and the CX count bound of each examined
+    generator (``AdaptContext.depth_weights``). The Run's Plan archive is written before any selection, so the compiler
     plans of generators selected later are saved with the context
     (``_write_compilers``). ``ArchiveFiles`` writes each array or gate object once and later
     checkpoints of the same Run refer to its file, so a checkpoint writes
@@ -289,6 +292,9 @@ def save_context(context, files):
         rules=rules,
         compilers=_write_compilers(context.compiler_plans, files),
         accepted=context.accepted,
+        basis=context.basis,
+        depth_weights=[[index, theta, weight, reason]
+                       for (index, theta), (weight, reason) in context.depth_weights.items()],
         pencil=None
         if context.pencil is None
         else context.pencil.model_dump(mode="json", exclude_computed_fields=True),
@@ -328,6 +334,8 @@ def load_context(data, files):
     context.rules = dict(data["rules"])
     context.compiler_plans = _read_compilers(data["compilers"], files)
     context.accepted = chain(data["accepted"])
+    context.basis = None if data["basis"] is None else tuple(chain(item) for item in data["basis"])
+    context.depth_weights = {(index, theta): (weight, reason) for index, theta, weight, reason in data["depth_weights"]}
     context.pencil = (
         None if data["pencil"] is None else ProjectedPencil.model_validate(data["pencil"])
     )

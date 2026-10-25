@@ -480,14 +480,22 @@ def test_qls_shortcut_admits_the_supplied_rhs_syntheses_it_controls(monkeypatch,
 
 
 def test_adapt_admits_the_controlled_synthesis_of_a_supplied_reference(monkeypatch):
-    # ADAPT's Hadamard-test and joint-state queries control the reference preparation, and
+    # With pair_preparation="controlled", ADAPT's Hadamard-test and joint-state
+    # queries control the reference preparation, and
     # the Run's method context builds that controlled gate once. For a
     # supplied reference with a two-qubit unitary that is one exact
     # synthesis and one control step, which planning charges to
-    # max_products. Explicit verification synthesizes the uncontrolled
+    # max_products. The default "prefix" construction runs the reference,
+    # common to every chain, without control, so planning charges no
+    # controlled synthesis, and neither does a Plan that measures nothing,
+    # as for a scalar Hamiltonian. Both vacuum constructions control the reference
+    # instead of the generators, so with the pool i(XX + YY), whose flips of
+    # |00> cancel (1 - 1 = 0), they plan only when max_products covers the
+    # same charge. Explicit verification synthesizes the uncontrolled
     # reference again and charges it to its own max_products before the
     # synthesis starts.
     from nwqlib._prepared_execution import Run
+    from nwqlib.algorithms import PencilAcquisition
     from nwqlib.algorithms.gcim import AdaptVerificationOptions
     from nwqlib.operators import ingest_pauli
     from test_adapt_primary import plan_for
@@ -496,10 +504,23 @@ def test_adapt_admits_the_controlled_synthesis_of_a_supplied_reference(monkeypat
     reference = QuantumCircuit(2)
     reference.append(UnitaryGate(random_unitary(4, seed=50).data), [0, 1])
     options = dict(A=ingest_pauli((("ZI", 1.0), ("IZ", 0.5)), num_qubits=2), initial_state=reference,
-                   pool_rows=((("YI", 1j),),))
+                   pool_rows=((("YI", 1j),),), acquisition=PencilAcquisition(pair_preparation="controlled"))
     need = _dense_synthesis_work(2) + _gatewise_control_work(2, 1)
     with pytest.raises(ValueError, match="ADAPT controlled reference synthesis exceeds max_work"):
         plan_for(max_products=need - 1, **options)
+    plan_for(max_products=need - 1, **{**options, "acquisition": PencilAcquisition()})
+    # A scalar Hamiltonian measures nothing, so its Plan resolves no pair construction, controls no
+    # reference and plans under the same max_products, and its Run returns 0.75 without a query.
+    scalar = plan_for(max_products=need - 1, **{**options, "A": ingest_pauli((("II", .75),), num_qubits=2)})
+    assert scalar.reconstruction.acquisition.pair_preparation is None
+    scalar_result = Run(scalar).wait(timeout=60, poll_interval=0)
+    assert scalar_result.eigenvalue == .75 and not scalar_result.data.trace.events
+    for rule in ("vacuum_reference", "vacuum_restore"):
+        vacuum = {**options, "pool_rows": ((("XX", 1j), ("YY", 1j)),),
+                  "acquisition": PencilAcquisition(pair_preparation=rule)}
+        with pytest.raises(ValueError, match="ADAPT controlled reference synthesis exceeds max_work"):
+            plan_for(max_products=need - 1, **vacuum)
+        assert plan_for(max_products=need, **vacuum).reconstruction.acquisition.pair_preparation == rule
     selected = plan_for(max_products=need, **options)
     calls = _counted_syntheses(monkeypatch)
     result = Run(selected).wait(timeout=60, poll_interval=0)

@@ -75,7 +75,7 @@ from uuid import uuid4
 from pydantic import PrivateAttr
 
 from nwqlib.core.records import Record, Source, Text
-from nwqlib.execution import CountsSampling, RegisterMap, SubmissionItem
+from nwqlib.execution import CountsSampling, NativeDepth, RegisterMap, SubmissionItem
 
 
 @dataclass(frozen=True)
@@ -116,6 +116,10 @@ class NativePreparation:
             represented factor ``(1.0, ±0.0)`` under the arithmetic model of
             the classical computation. ``None`` means the classical correction
             was not assessed.
+        native_depth: The native two-qubit depth of ``native`` on the
+            backend's target (``NativeDepth``), or None when the backend does
+            not compute it. It is qualified only when the backend also
+            establishes that the provider executes ``native`` unchanged.
     """
 
     native: object
@@ -135,6 +139,7 @@ class NativePreparation:
     provider_options_json: str | None = None
     probability_window_exclusions: tuple[str, ...] | None = None
     statevector_roundoff: tuple[float, float] | None = None
+    native_depth: NativeDepth | None = None
 
 
 @dataclass(frozen=True)
@@ -171,7 +176,10 @@ def environment(packages):
 
     Preparation records carry these Sources so a result can be traced to the SDK
     versions that produced its prepared input, not to whatever is installed when it
-    is reopened.
+    is reopened. The package Sources (``reference="importlib.metadata"``) also
+    decide whether a requested native-depth limit can use the saved depth for a
+    new submission (``inspection.check_native_depth_cap``). The Python Source
+    is provenance only.
     """
     return tuple(Source(name=name, version=version(name), domain="actual preparation process package",
                         reference="importlib.metadata") for name in packages) + (

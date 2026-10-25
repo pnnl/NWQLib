@@ -310,6 +310,7 @@ The `Method` base class and its hooks, `PreparedHandle`, and the Plan, Result an
 - <a id="nwqlib.algorithms.protocol.Method.plan"></a>[`Method.plan`][nwqlib.algorithms.protocol.Method.plan]
 - <a id="nwqlib.algorithms.protocol.Method.prepare"></a>[`Method.prepare`][nwqlib.algorithms.protocol.Method.prepare]
 - <a id="nwqlib.algorithms.protocol.Method.prepare_all_refusal"></a>[`Method.prepare_all_refusal`][nwqlib.algorithms.protocol.Method.prepare_all_refusal]
+- <a id="nwqlib.algorithms.protocol.Method.query_catalog_reason"></a>[`Method.query_catalog_reason`][nwqlib.algorithms.protocol.Method.query_catalog_reason]
 - <a id="nwqlib.algorithms.protocol.Method.recover_analysis"></a>[`Method.recover_analysis`][nwqlib.algorithms.protocol.Method.recover_analysis]
 - <a id="nwqlib.algorithms.protocol.Method.verify"></a>[`Method.verify`][nwqlib.algorithms.protocol.Method.verify]
 - <a id="nwqlib.core.planning.Plan.resolve"></a>[`Plan.resolve`][nwqlib.core.planning.Plan.resolve]

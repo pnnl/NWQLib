@@ -5,8 +5,8 @@ NWQLib applies quantum algorithms to scientific problems. You state the problem 
 | Your scientific problem | Methods and first example |
 | --- | --- |
 | Linear dynamics, `du/dt = -A u` | [LCHS](algorithms/lchs.md), [first result](quickstart.md) |
-| Eigenvalues or phases of an operator | [Lanczos](algorithms/lanczos.md), [GCiM / ADAPT](algorithms/gcim.md), [QPE](algorithms/qpe.md) |
-| Ground-state energy estimate of a molecule | [GCiM / ADAPT chemistry inputs](algorithms/gcim.md#chemistry-inputs-and-reference-energies) |
+| Eigenvalues or phases of an operator | [Lanczos](algorithms/lanczos.md), [GCiM / ADAPT](algorithms/gcim.md), [QFD](algorithms/qfd.md), [QPE](algorithms/qpe.md) |
+| Ground-state energy estimate of a molecule | [GCiM / ADAPT chemistry inputs](algorithms/gcim.md#chemistry-inputs-and-reference-energies), [QFD with fermionic blocks](algorithms/qfd.md#evolve-with-fermionic-blocks-from-chemistry-integrals) |
 | A linear system, `Ax=b` | [QLS](algorithms/qls.md) |
 | Optimization over a box | [QHD](algorithms/qhd.md) |
 | Optimization over a box with equality or inequality constraints | [QHD augmented Lagrangian](algorithms/qhd.md#constrained-problems) |

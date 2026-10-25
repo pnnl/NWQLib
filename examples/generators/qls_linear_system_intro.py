@@ -281,7 +281,7 @@ limits = result.data.trace.limits
 host_plan = plan(problem, method=QLS(epsilon_inv=EPSILON), seed=7, execution="classical")  # nothing runs yet
 show_table([
     ("Qubits the local simulator accepts", limits.max_simulation_qubits, f"Default. This plate uses {rec.width}"),
-    ("Simulator memory cap", f"{limits.simulator_memory_mb:,} MB", "Default simulator_memory_mb"),
+    ("Simulator memory cap", f"{limits.simulator_memory_mb:,} MiB", "Default simulator_memory_mb"),
     ("Polynomial degree cap", selected.method.max_degree, f"Default max_degree. This plate needs {rec.degree}"),
     ("Classical evaluation: peak memory", format_bytes(host_plan.reconstruction.work.workspace_bytes),
      "Stated by plan before it runs"),

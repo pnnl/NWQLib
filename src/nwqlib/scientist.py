@@ -531,7 +531,11 @@ def solve(
     the circuits or the classical model, waits for completion and returns
     the Method's Result. It does not run a reference check of the answer.
     Use `plan`, `prepare` and `submit` to control each step, or to save a
-    run and continue it after an interruption.
+    run and continue it after an interruption. If preparing or running
+    fails, the Run is closed and the error names its saved folder, if any,
+    which [`load_run`][nwqlib.scientist.load_run] reopens, for example to
+    analyze the counts of IBM jobs that ran before a native-depth limit
+    refused a circuit.
 
     Args:
         problem_or_plan (object): A Problem such as `Eigenproblem`, a `Plan`
@@ -623,8 +627,15 @@ def solve(
             seed=seed,
         )
     prepared = prepare(selected, backend=backend, limits=limits, progress=progress)
-    with prepared.run:
-        return submit(prepared).wait()
+    with prepared.run as run:
+        try:
+            return submit(prepared).wait()
+        except BaseException as error:
+            # The caller never receives this Run, so the error names the
+            # folder that keeps its saved data.
+            if run.directory is not None:
+                error.add_note(f"Original execution data is saved at {run.directory}")
+            raise
 
 
 def estimate(plan, *, context=None, profile=None, allocation=None, assessed_at=None,
@@ -634,7 +645,17 @@ def estimate(plan, *, context=None, profile=None, allocation=None, assessed_at=N
     Without a device profile or Allocation, `estimate` adds up the counting
     formulas of the Plan's construction (qubits, operations, shots and the
     other metrics) and returns a `WorkloadEstimate`. A metric without a
-    formula is reported as unavailable, never as zero. With a profile, it
+    formula is reported as unavailable, never as zero. When the Method
+    returns a reason from
+    [`Method.query_catalog_reason`][nwqlib.algorithms.protocol.Method.query_catalog_reason],
+    as ADAPT does, the Plan's experiments are templates of queries whose
+    parameter values its iteration chooses from earlier outcomes. The
+    estimate then reports a count as zero only when no query can contribute
+    to it and reports the widths and byte peaks of the templates. It leaves
+    the other counts unavailable with that reason, except
+    `root_setting_declarations` and `root_repetitions`, the setting
+    declarations and body repetitions of a `MeasurementBatch` at the root of
+    the Program, which keep their values. With a profile, it
     also evaluates the profile's device models at each planned execution
     whose parameters are already fixed, and returns a `PlanEstimate`. With
     an Allocation and no profile, the `PlanEstimate` keeps the Allocation and
@@ -706,7 +727,7 @@ def estimate(plan, *, context=None, profile=None, allocation=None, assessed_at=N
             raise ValueError("assessment time/evidence require a profile or allocation; logical folding has no assessment")
         from nwqlib.resources import estimate as fold
 
-        return fold(plan.construction, context=context)
+        return fold(plan.construction, context=context, catalog=plan.method.query_catalog_reason())
     from nwqlib.backends.assessment import estimate_plan
 
     return estimate_plan(plan, context=context, profile=profile, allocation=allocation,

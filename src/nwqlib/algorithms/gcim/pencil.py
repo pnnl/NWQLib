@@ -53,55 +53,64 @@ class MatrixElement:
         return f"{self.matrix}_{left}_{right}_{self.pauli_label}_{self.quadrature}"
 
 
-def matrix_element_count(pair_count, diagonal_pair_count, nonidentity_terms):
+def matrix_element_count(pair_count, diagonal_pair_count, nonidentity_terms, quadratures="complex"):
     """Count scalar observations before any pair or setting expansion.
 
     An off-diagonal pair needs real and imaginary parts of ``S_ij`` and of
     every nonidentity Pauli term. A diagonal pair needs only the real part of
     each Pauli term, because normalized columns give ``S_ii = 1`` and
-    Hermiticity makes ``H_ii`` real. The count must equal the number of
-    observations that ``matrix_elements`` yields, because planning checks it
-    against the limits before expansion.
+    Hermiticity makes ``H_ii`` real. Under ``quadratures="real"`` every
+    word of a structurally real Hamiltonian has ``P* = P`` and every state is
+    real, so each transition is real and an off-diagonal pair needs only the
+    real parts, ``(M - D)(1 + L) + DL`` (``bL + b(b-1)(L+1)/2`` for the
+    complete pencil). The independent overlap query remains. The
+    count must equal the number of observations that ``matrix_elements``
+    yields, because planning checks it against the limits before expansion.
     """
+    if quadratures == "real":
+        return (pair_count - diagonal_pair_count) * (1 + nonidentity_terms) + diagonal_pair_count * nonidentity_terms
     return (
         2 * (pair_count - diagonal_pair_count) * (1 + nonidentity_terms)
         + diagonal_pair_count * nonidentity_terms
     )
 
 
-def matrix_elements(basis_size, terms, num_qubits):
+def matrix_elements(basis_size, terms, num_qubits, quadratures="complex"):
     """Yield every scalar Hadamard observation of one ``basis_size`` pencil.
 
     ``terms`` holds the nonidentity ``(label, real coefficient)`` Pauli terms
     of the operator. Pairs ``(i, j)`` with ``i <= j`` run row by row. An
     off-diagonal pair yields the real and imaginary overlap, then both parts
-    of each term. A diagonal pair yields only the real part of each term.
-    ``S_ii = 1`` for normalized columns, and each ``<phi_i|P|phi_i>`` is real
-    because every Pauli word is Hermitian, so those scalars carry no new
-    information. The identity term is
-    never measured (``assemble_pencil``). ``matrix_element_count`` gives
-    their number.
+    of each term, or only the real parts under ``quadratures="real"``. A
+    diagonal pair yields only the real part of each term. ``S_ii = 1`` for
+    normalized columns, and each ``<phi_i|P|phi_i>`` is real because every
+    Pauli word is Hermitian, so those scalars carry no new information. The
+    identity term is never measured (``assemble_pencil``).
+    ``matrix_element_count`` gives their number.
     """
     identity = "I" * num_qubits
+    parts = ("real",) if quadratures == "real" else ("real", "imag")
     pairs = ((left, right) for left in range(basis_size) for right in range(left, basis_size))
     for left, right in pairs:
         if left != right:
-            for quadrature in ("real", "imag"):
+            for quadrature in parts:
                 yield MatrixElement("overlap", (left, right), identity, 1.0, quadrature)
         for label, coefficient in terms:
-            for quadrature in ("real",) if left == right else ("real", "imag"):
+            for quadrature in ("real",) if left == right else parts:
                 yield MatrixElement(
                     "hamiltonian", (left, right), label, float(coefficient), quadrature
                 )
 
 
-def assemble_pencil(basis_size, terms, num_qubits, values):
+def assemble_pencil(basis_size, terms, num_qubits, values, quadratures="complex"):
     """Return ``(H0, S)`` from every upper-triangle pair, without the identity term.
 
     Callers pass all the observations of ``matrix_elements``. FixedGCIM
     analysis returns a partial result without calling this routine, and ADAPT
     obtains each query or raises for missing data before assembly. A missing scalar
-    still raises here instead of becoming a plausible zero.
+    still raises here instead of becoming a plausible zero. Under
+    ``quadratures="real"`` the imaginary parts are the exact zeros of a
+    structurally real pencil, not observations.
 
     For ``A = cI + sum_k c_k P_k`` the identity term contributes
     ``<phi_i|cI|phi_j> = c S_ij``, so the projected matrix ``H = H0 + c S``
@@ -115,18 +124,19 @@ def assemble_pencil(basis_size, terms, num_qubits, values):
     h0 = np.full((basis_size, basis_size), complex(np.nan, np.nan))
     overlap = np.full_like(h0, complex(np.nan, np.nan))
     identity = "I" * num_qubits
+    measured_imag = quadratures != "real"
     pairs = ((left, right) for left in range(basis_size) for right in range(left, basis_size))
     for left, right in pairs:
         if left == right:
             s = 1.0 + 0.0j
         else:
             name = f"overlap_{left}_{right}_{identity}"
-            s = complex(values[f"{name}_real"], values[f"{name}_imag"])
+            s = complex(values[f"{name}_real"], values[f"{name}_imag"] if measured_imag else 0.0)
         real, imag = [], []
         for label, coefficient in terms:
             name = f"hamiltonian_{left}_{right}_{label}"
             real.append(coefficient * values[f"{name}_real"])
-            if left != right:
+            if left != right and measured_imag:
                 imag.append(coefficient * values[f"{name}_imag"])
         h = complex(fsum(real), fsum(imag))
         h0[left, right], h0[right, left] = h, h.conjugate()

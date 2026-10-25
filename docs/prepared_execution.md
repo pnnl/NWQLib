@@ -73,7 +73,7 @@ The [IBM](ibm.md), [IonQ](ionq.md), [Nexus](nexus.md), [Slurm](slurm.md) and [NW
 | `max_data_bytes` | 10 GB | Saved Run data and numerical arrays: saved arrays, serialized backend circuits and run-log output. Not process memory |
 | `max_completion_metadata_bytes` | 65,536 bytes | Extra JSON metadata per completed attempt, beyond its declared values, arrays and records, for example variable provider annotations |
 | `max_simulation_qubits` | 20 | Circuit width accepted before local simulation on Aer or local NWQ-Sim |
-| `simulator_memory_mb` | 1024 | Simulator memory allowance in MiB, which Aer receives as its cap on quantum-state storage |
+| `simulator_memory_mb` | 8192 | Simulator memory allowance in MiB, which Aer receives as its cap on quantum-state storage |
 | `max_direct_amplitudes` | 65,536 | Amplitude count of each declared direct state preparation that the Run synthesizes, checked for the whole `Plan` before the first preparation |
 | `max_synthesis_work` | 1,000,000,000 | Total work of the exact dense-unitary syntheses that the Run makes over all its circuit preparations. When no other synthesis has used it, the default budget allows the synthesis of one uncontrolled dense unitary on 8 qubits but refuses one on 9 qubits |
 
@@ -86,6 +86,12 @@ These limits count the work and data that the Run records. They are not provider
 ### Raise a limit during a run
 
 `run.extend_limits(max_total_shots=128)` sets a new cumulative cap of 128. It does not add 128 shots, reset usage or change scientific settings. Each increase appends one `LimitAmendment` record to `run.limit_amendments`, with the old and new limits, a timestamp and the counters immediately before the change. Equal values change nothing. The new cap and its record are saved together, and a failed limit check or write saves neither. Recording an increase adds saved data, so later writes can need a larger `max_data_bytes`. A Result keeps the limits and their history as they were when the Result was created, so increasing the Run's limits later does not alter an earlier Result. [Execution accounting](development/execution.md#execution-accounting) lists the recorded counters.
+
+### Checks just before submission {#checks-just-before-submission}
+
+The limits above are checked for the whole fixed workload before preparation. A Method can also check each prepared circuit just before its submission. FixedGCIM, ADAPT and QFD check their `max_native_two_qubit_depth` there, because the native two-qubit depth, the two-qubit gate depth of the circuit compiled for the device, is known only after the backend has compiled the circuit ([IBM Runtime](ibm.md#native-two-qubit-depth)). A refused circuit has been prepared, and its preparation stays counted, but the Run records no submission and spends no shots on it. When one submission sends several prepared circuits, a single refused circuit refuses all of them.
+
+Only IBM Runtime computes this depth, and on IBM Runtime `prepare(plan, settings="all")` is refused ([Prepare every setting before measuring](#prepare-every-setting-before-measuring)). `prepare` therefore builds the first setting and `submit` each later setting when it reaches it, so a deeper setting is found and refused only after the earlier settings have run. Their counts and shots stay in the Run. For FixedGCIM and QFD, `plan.method.analyze(plan, run.data, settings={})` then returns a Result that lists the settings without data in `missing` and has no projected matrices.
 
 ## Cancel, close and handle failures
 

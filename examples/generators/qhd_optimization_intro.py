@@ -367,7 +367,7 @@ host_main = plan(problem, method=method, seed=7, execution="classical")  # nothi
 show_table([
     ("Qubits the local simulator accepts", limits.max_simulation_qubits,
      f"Default. This grid uses {selected.reconstruction.width}"),
-    ("Simulator memory cap", f"{limits.simulator_memory_mb:,} MB", "Default simulator_memory_mb"),
+    ("Simulator memory cap", f"{limits.simulator_memory_mb:,} MiB", "Default simulator_memory_mb"),
     ("QHD work cap", method.max_work, "Default max_work, for objective tables, products and classical evolution"),
     ("QHD memory cap", format_bytes(method.max_bytes), "Default max_bytes, for tables, state and workspace"),
     ("Classical evaluation of this grid: workspace", format_bytes(host_main.reconstruction.workspace_bytes),

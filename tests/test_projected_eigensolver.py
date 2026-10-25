@@ -30,6 +30,7 @@ def test_sampled_unnormalized_gram_keeps_positive_mode_and_enclosure_diagnostic(
     assert result.kept_overlap_rank == 1
     # These powers-of-two operations are exact in binary arithmetic.
     np.testing.assert_array_equal(result.eigenvalues, [2.0])
+    assert result.offset_free_eigenvalues == (2.0,)
     np.testing.assert_array_equal(np.abs(result.ground_state_coefficients), [0.0, 0.5])
     assert result.residual_norm == 0.0
     assert result.overlap_normalization_error == 0.0
@@ -59,6 +60,7 @@ def test_identity_shift_reports_the_pencil_that_contains_it():
     result, _, failure, _ = _solve_projected_pencil(h0, s, identity_shift=16.)
     assert failure is None
     np.testing.assert_array_equal(result.eigenvalues, [15., 18.])
+    assert result.offset_free_eigenvalues == (-1., 2.)
     assert result.residual_norm == 0.0
     # A perturbed Hamiltonian gives a nonzero residual, the same with and
     # without the shift, and a backward error scaled by ||H0 + cS||_F and E0 + c.
@@ -74,6 +76,21 @@ def test_identity_shift_reports_the_pencil_that_contains_it():
     assert shifted.generalized_eigenpair_backward_error == pytest.approx(expected, rel=1e-14, abs=0)
     with pytest.raises(ValueError, match="identity_shift"):
         _solve_projected_pencil(h0, s, identity_shift=math.inf)
+
+    # With c = 2**53 the Ritz values 1/4 and 1/2 of H0 = diag(1/4, 1/2),
+    # S = I both round to 2**53, a tie of the physical values, while the
+    # offset-free values keep 1/4, 1/2 and their gap 1/4. solve_pencil
+    # carries them into the ProjectedPencil, which checks only their number.
+    from nwqlib.algorithms.gcim.fixed_basis import solve_pencil
+
+    tie = np.diag([.25, .5])
+    witness, _, failure, _ = _solve_projected_pencil(tie, np.eye(2), identity_shift=2.**53)
+    assert failure is None and witness.offset_free_eigenvalues == (.25, .5)
+    np.testing.assert_array_equal(witness.eigenvalues, [2.**53, 2.**53])
+    pencil = solve_pencil(tie, np.eye(2), cutoff=1e-12, sampled=False, identity_shift=2.**53)
+    assert pencil.eigenvalues == (2.**53, 2.**53) and pencil.offset_free_eigenvalues == (.25, .5)
+    with pytest.raises(ValueError, match="offset_free_eigenvalues"):
+        pencil.revise(offset_free_eigenvalues=(.25,))
 
 
 def test_gram_formation_allowance_admits_roundoff_and_still_refuses_a_non_gram_matrix():

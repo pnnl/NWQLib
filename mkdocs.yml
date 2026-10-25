@@ -112,6 +112,7 @@ nav:
       - QPE: algorithms/qpe.md
       - QLS: algorithms/qls.md
       - GCiM: algorithms/gcim.md
+      - QFD: algorithms/qfd.md
       - QHD: algorithms/qhd.md
   - Backends:
       - Choose a backend: backends.md
@@ -136,6 +137,7 @@ nav:
           - QPE: api/algorithms/qpe.md
           - QLS: api/algorithms/qls.md
           - GCiM and ADAPT: api/algorithms/gcim.md
+          - QFD: api/algorithms/qfd.md
           - QHD: api/algorithms/qhd.md
           - QHD constrained problems and box refinement: api/algorithms/qhd_constrained.md
       - Subroutines:
@@ -164,6 +166,7 @@ nav:
       - Contribution policy: FRAMEWORK.md
       - Maintenance: MAINTENANCE.md
       - Design rationale: development/design_rationale.md
+      - GCiM options: development/gcim_options.md
       - Record contracts: records/README.md
       - Input cost controls: development/input_contracts.md
       - Program checks: development/program_checks.md

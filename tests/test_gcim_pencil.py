@@ -38,6 +38,25 @@ def test_projected_generalized_eigensolver_handles_rank_deficient_overlap() -> N
         np.sum(np.abs(physical_columns) ** 2, axis=0), [1.0, 1.0], rtol=0.0, atol=1.0e-10
     )
 
+    # A = diag(-2, 3) in the states (sqrt(3)/2, 1/2) and (sqrt(3)/2, -1/2)
+    # has S = [[1, 1/2], [1/2, 1]] and H = [[-3/4, -9/4], [-9/4, -3/4]]. The
+    # overlap spectrum is 3/2 and 1/2. Both kept, the inverse-square-root
+    # whitening gives the eigenvalues -2 and 3 of A, and the cutoff 3/4
+    # keeps only (1, 1)/sqrt(2), whose Rayleigh quotient is -2. The cutoff 2
+    # keeps nothing, and the cutoff is strict, so S = [1] with cutoff 1
+    # keeps nothing either. As for the Fourier pencils below, whose kept
+    # condition numbers reach 64, 1e-12 covers the eigensolve and
+    # contraction error at this condition number of 3.
+    s, h = np.array([[1.0, .5], [.5, 1.0]]), np.array([[-.75, -2.25], [-2.25, -.75]])
+    both = _solve_projected_pencil(h, s, symmetrize_matrices=False)[0]
+    np.testing.assert_allclose(both.eigenvalues, [-2.0, 3.0], rtol=0.0, atol=1.0e-12)
+    kept = _solve_projected_pencil(h, s, overlap_eigenvalue_cutoff=.75, symmetrize_matrices=False)[0]
+    assert kept.kept_overlap_rank == 1
+    np.testing.assert_allclose(kept.eigenvalues, [-2.0], rtol=0.0, atol=1.0e-12)
+    for matrices, cutoff in (((h, s), 2.0), (([[1.0]], [[1.0]]), 1.0)):
+        rejected, _, reason, _ = _solve_projected_pencil(*matrices, overlap_eigenvalue_cutoff=cutoff)
+        assert rejected is None and reason == "no_usable_overlap_subspace"
+
     rng = np.random.default_rng(15)
     basis = rng.normal(size=(1, 3)) + 1j * rng.normal(size=(1, 3))
     basis /= np.linalg.norm(basis, axis=0)
@@ -192,8 +211,11 @@ def test_ancilla_population_normalization_and_incremental_pricing():
     from nwqlib.execution import ObservationChunk, RegisterMap
     from nwqlib.algorithms.gcim.adapt_acquisition import _point, _read_values, _PartialData
     from nwqlib.algorithms.gcim.pencil import matrix_element_count
+    from nwqlib.algorithms import PencilAcquisition
 
-    plan = plan_for(shots=4)
+    # The termwise comparison construction reads one ancilla bit per Pauli term.
+    plan = plan_for(shots=4, acquisition=PencilAcquisition(matrix_measurement="termwise",
+                                                           pair_preparation="controlled"))
     point = _point(plan, "pair", term=0)
     identity = "sha256:" + "1" * 64
     fields = dict(run_id="r", plan_id=identity, realization_id=point.content_id, prepared_id=identity,

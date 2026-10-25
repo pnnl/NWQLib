@@ -72,7 +72,7 @@ Each count is a `ResourceQuantity`. It holds the metric, its value with unit, co
 | `conditional` | Holds only under a stated assumption, such as shots run one after another. |
 | `unavailable` | The count cannot be determined from the construction's declared costs. `fact.reason` names what is missing. |
 
-An unavailable count is never replaced by zero, because a zero would present an incomplete estimate as a cheap and complete one. A missing gate, synthesis, workspace or probability rule each keeps its own reason.
+An unavailable count is never replaced by zero, because a zero would present an incomplete estimate as a cheap and complete one. A missing gate, synthesis, workspace or probability rule each keeps its own reason, except in the estimate of a Plan whose experiments are query templates, described in the last case below, where every unavailable count gives the reason of the templates instead.
 
 `print(quantity)` shows the value, unit, label, basis, what is counted and the conditions the value depends on, and `print(workload)` shows every count. Neither recomputes anything:
 
@@ -97,6 +97,7 @@ Labels arise in these common cases:
 - An adaptive method's per-round cost stays unavailable unless an explicit `resource_envelope` of its adaptive loop (`nwqlib.ir.AdaptiveLoop`) asserts a uniform bound per round over the history. The work and workspace of its decision rule stay separate missing costs.
 - `expected_operations` needs a probability model and stays unavailable without one.
 - In a batch with a parameter range, a cost that changes along the range stays unavailable, and a cost that does not change is multiplied by the number of points. NWQLib does not enumerate the range.
+- The experiments of an ADAPT Plan, or of a FixedGCIM or QFD Plan with `sampling=PencilSampling(...)`, are query templates. ADAPT chooses the number of queries and their generators and angles from earlier outcomes, while [PencilSampling](algorithms/gcim.md#pilot-and-main-shot-allocation) chooses its main-stage shots from its pilot, so the experiments alone are not the workload of a Run. For a Plan of query templates, `nwqlib.estimate(plan)` reports a count as zero only when no query can contribute to it. Every other count is unavailable with the one reason that `plan.method.query_catalog_reason()` returns, which replaces the reason the count would otherwise have, except that the setting declarations and repetitions of a measurement batch at the root of the planned construction keep their values. Width and memory peaks describe the templates at their declared parameter values. [ADAPT queries](algorithms/gcim.md#adapt-queries) shows how to estimate one query from its preparation record.
 
 ## Choose the location of a count {#choose-the-location-of-a-count}
 

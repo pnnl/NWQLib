@@ -807,7 +807,7 @@ def _prepare_aer_execution(
     views: dict | None = None,
     preparation: _AerPreparation | None = None,
     noise_model=None,
-    simulator_memory_mb: int = 1024,
+    simulator_memory_mb: int,
     state_threads: int | None = None,
     exact_synthesis=None,
 ) -> _PreparedAerExecution:
@@ -841,6 +841,9 @@ def _prepare_aer_execution(
     ``preparation`` may share bound definitions that its caller keeps immutable.
     A caller that keeps a prepared circuit holds its own copies of those source
     definitions and of the fresh logical container. This function creates its execution circuit.
+    ``simulator_memory_mb`` is the Run's ``ExecutionLimits.simulator_memory_mb``,
+    passed to Aer as ``max_memory_mb``. It has no default here, so the Run's
+    limit is its only source.
     ``state_threads`` is the positive state-update thread cap of the
     statevector target, passed to Aer as ``max_parallel_threads`` and used by
     the trajectory memory check (``_admit_aer_saved_buffers``). None

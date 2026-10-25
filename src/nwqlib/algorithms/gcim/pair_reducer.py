@@ -26,7 +26,11 @@ ancilla is bit 0 of the saved state, so the two branches are the strided views
 <phi_i|P|phi_j>`` with the preparation phases included. For
 ``U_k = exp(i theta_k) V_k`` the target is
 ``exp(i(theta_j - theta_i)) <0|V_i^dagger P V_j|0>``. The saved state's one
-common global phase cancels in both returned values.
+common global phase cancels in both returned values. When the two
+preparations begin with the same blocks, ``U_i = W_i C`` and ``U_j = W_j C``,
+the common-prefix construction runs C once on the system before the
+Hadamard and controls only ``W_i`` and ``W_j``. It prepares the same joint
+state, because C acts on both branches, and the reducer reads it unchanged.
 
 Declaration. The reduction parameters name the layout (ancilla at bit 0 with
 strided branches, or the diagonal system state with the ancilla in ``|0>``,

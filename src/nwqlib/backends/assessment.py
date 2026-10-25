@@ -344,9 +344,11 @@ def _select_workload(plan, realization, context, memo=None):
 
     ``memo`` is the caller's cache of resource estimates
     (``resources.estimate``). Points of one ``estimate_plan`` call that choose
-    an equal construction under the same context share one estimate,
-    including the estimate of the Plan's own construction when a point
-    chooses it.
+    an equal construction under the same context share one estimate. A point
+    estimates its construction without a ``catalog`` reason, because it is
+    one query, so it shares the estimate of the Plan's own construction only
+    when it chooses that construction and the Method returns no
+    ``query_catalog_reason``.
 
     The construction is the one that circuit preparation would use for this
     Realization, so the forecast and a later preparation record describe the
@@ -2160,9 +2162,11 @@ def estimate_plan(
     bounds").
 
     One cache of resource estimates (``resources.estimate``) lives for this
-    call. The Plan's own construction is estimated first, and every point
-    whose chosen construction and context equal an already estimated pair
-    reuses that estimate, so each distinct pair is estimated once.
+    call. The Plan's own construction is estimated first, with the Method's
+    ``query_catalog_reason`` as ``catalog``, and each point's construction
+    without one. Every point whose chosen construction, context and catalog
+    reason equal an already estimated triple reuses that estimate, so each
+    distinct triple is estimated once.
     ``profile_points`` is the ``(points, unpredicted)`` pair that
     ``_profile_points(plan)`` returned to a caller that already needed it
     (``scientist.compare``). None evaluates it here.
@@ -2193,7 +2197,8 @@ def estimate_plan(
             "no device profile supplied; Allocation is kept without invented device predictions",
         )
     memo = {}
-    resources = estimate(plan.construction, context=context, memo=memo)
+    resources = estimate(plan.construction, context=context, memo=memo,
+                         catalog=plan.method.query_catalog_reason())
     # validate_plan below validates each assessment once.
     assessments = tuple(
         _assess(

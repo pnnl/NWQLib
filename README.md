@@ -41,7 +41,7 @@ print(result.solution)
 
 With its default settings, LCHS returns an approximation of the physical solution using nine qubits in total. [Install and first result](https://pnnl.github.io/NWQLib/quickstart/) compares it with an independent reference and shows how to change the approximation. Each method accepts its own input forms and conversions, which its algorithm guide describes.
 
-The [example notebooks](https://github.com/pnnl/NWQLib/tree/main/examples) solve complete scientific problems from input to result, error and circuit cost: molecular ground-state energy, a linear system, linear dynamics and optimization. One more notebook estimates the resources of a linear system, heat flow, two spin chains and a GCiM trial basis at 80 to 100 system qubits, where the largest circuit, LCHS for heat flow, has 109 qubits in total. It also estimates one QHD step on a three-variable grid of 32 points per variable, which takes 96 qubits in the one-hot encoding. The [examples guide](https://pnnl.github.io/NWQLib/examples/) points you to the notebook that matches your problem. The [mathematics page](https://pnnl.github.io/NWQLib/mathematics/) states the bounds, resource formulas and error budgets that NWQLib uses, each with its proof or source and the code that implements it.
+The [example notebooks](https://github.com/pnnl/NWQLib/tree/main/examples) solve complete scientific problems from input to result, error and circuit cost: molecular ground-state energy, a linear system, linear dynamics and optimization. Another compares, on small molecules, the GCiM and QFD inputs that change only the measurement with those that change the basis. One more notebook estimates the resources of a linear system, heat flow, two spin chains and a GCiM trial basis at 80 to 100 system qubits, where the largest circuit, LCHS for heat flow, has 109 qubits in total. It also estimates one QHD step on a three-variable grid of 32 points per variable, which takes 96 qubits in the one-hot encoding. The [examples guide](https://pnnl.github.io/NWQLib/examples/) points you to the notebook that matches your problem. The [mathematics page](https://pnnl.github.io/NWQLib/mathematics/) states the bounds, resource formulas and error budgets that NWQLib uses, each with its proof or source and the code that implements it.
 
 ## Choose a task
 
@@ -72,7 +72,7 @@ Each method's tests are in `tests/`, in files named after the method, such as `t
 | Scientific task | Methods |
 | --- | --- |
 | Normalized expectation of a finite real Pauli sum | [Expectation](https://pnnl.github.io/NWQLib/algorithms/expectation/) |
-| Energy estimates from moments or a chosen subspace | [Chebyshev Lanczos](https://pnnl.github.io/NWQLib/algorithms/lanczos/) (arXiv:2208.00567v4), [fixed and adaptive GCiM](https://pnnl.github.io/NWQLib/algorithms/gcim/) (fixed arXiv:2212.09205v1, adaptive arXiv:2312.07691v3) |
+| Energy estimates from moments or a chosen subspace | [Chebyshev Lanczos](https://pnnl.github.io/NWQLib/algorithms/lanczos/) (arXiv:2208.00567v4), [fixed and adaptive GCiM](https://pnnl.github.io/NWQLib/algorithms/gcim/) (fixed arXiv:2212.09205v1, adaptive arXiv:2312.07691v3), [QFD in a basis of time-evolved states](https://pnnl.github.io/NWQLib/algorithms/qfd/) (arXiv:1909.08925v1) |
 | Phase or energy estimation | [QPE: QCELS, RWPE, SPE and RFE](https://pnnl.github.io/NWQLib/algorithms/qpe/) (QCELS arXiv:2211.11973v2, RWPE arXiv:2208.04526v1, SPE arXiv:2110.12071v2, RFE arXiv:2209.11322v3) |
 | Time-independent linear dynamics | [LCHS](https://pnnl.github.io/NWQLib/algorithms/lchs/) (arXiv:2312.03916v2) |
 | Linear systems | [QLS: QSVT inverse polynomial (`qsvt_inverse`, the default) and the Dalzell kernel shortcut (`shortcut_native_svp`, `shortcut_dilation`)](https://pnnl.github.io/NWQLib/algorithms/qls/) (QSVT arXiv:1806.01838v1, Dalzell arXiv:2406.12086v2) |
@@ -103,7 +103,7 @@ If you use NWQLib in your work, please cite it through its Zenodo record, which 
   author  = {Zheng, Muqing and Liu, Chenxu and Song, Zhixin and Wu, Zeguan and Li, Xiangyu and Li, Mingze and Bauman, Nicholas P. and Stein, Samuel A. and M{\"u}lmenst{\"a}dt, Johannes and Chen, Yousu and Wiebe, Nathan and Li, Ang and Kowalski, Karol},
   title   = {NWQLib},
   year    = {2026},
-  version = {1.0.3.post1},
+  version = {1.0.3.post2},
   doi     = {10.5281/zenodo.23074265},
   url     = {https://github.com/pnnl/NWQLib}
 }

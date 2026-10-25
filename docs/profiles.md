@@ -28,7 +28,7 @@ An 8 GiB grant therefore holds the state of at most 29 qubits in complex128 and 
 
 This rule is NWQLib's and uses the stored representation and precision. The notebook [`examples/resource_estimation_at_scale.ipynb`](https://github.com/pnnl/NWQLib/blob/main/examples/resource_estimation_at_scale.ipynb) applies the check in "Before committing" and Appendix C, where the state vectors of its QLS, LCHS and QPE plans at 100 system qubits are proved not to fit a declared one-pebibyte (`2**50` bytes) allocation.
 
-NWQLib runs Aer's statevector target (`AER_STATEVECTOR_TARGET`) in double precision, complex128 ([Local Aer](aer.md#shots-seeds-and-limits)). Local execution also checks `ExecutionLimits`, whose defaults accept circuits of at most 20 qubits and allow the simulator 1024 MiB. A local run beyond either default needs `limits=ExecutionLimits(max_simulation_qubits=..., simulator_memory_mb=...)`.
+NWQLib runs Aer's statevector target (`AER_STATEVECTOR_TARGET`) in double precision, complex128 ([Local Aer](aer.md#shots-seeds-and-limits)). Local execution also checks `ExecutionLimits`, whose defaults accept circuits of at most 20 qubits and allow the simulator 8192 MiB (8 GiB). A local run beyond either default needs `limits=ExecutionLimits(max_simulation_qubits=..., simulator_memory_mb=...)`.
 
 ## Assess a plan against a device {#assess-a-plan-against-a-device}
 
